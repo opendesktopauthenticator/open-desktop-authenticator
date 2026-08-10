@@ -118,6 +118,22 @@ body {
 	flex-wrap: wrap;
 }
 
+/*
+ * Breathing room between a form control and the buttons under it.
+ *
+ * The header row is the exception — there `.controls` sits beside a heading, not
+ * beneath a field, and the extra space reads as a misaligned toolbar. So this is
+ * scoped to controls that actually follow something, which is where the buttons
+ * were landing hard against the input above them.
+ */
+input + .controls,
+select + .controls,
+p + .controls,
+.checkbox + .controls,
+form > .controls {
+	margin-top: 20px;
+}
+
 /* ------------------------------------------------------------------ type -- */
 
 h1 {
@@ -439,7 +455,10 @@ form {
 
 label {
 	display: block;
-	margin-bottom: 6px;
+	/* Above its field, and clear of whatever preceded it. A label with no space
+	   above it reads as belonging to the paragraph before rather than the input
+	   after — which is exactly backwards. */
+	margin: 18px 0 6px;
 	font-size: 0.82rem;
 	font-weight: 600;
 	letter-spacing: 0.05em;
@@ -452,6 +471,9 @@ input[type='password'],
 input[type='number'],
 select {
 	width: 100%;
+	/* A field is a block with its own space, not a line of text. Without this the
+	   hint under it and the buttons after it both sat flush against the border. */
+	margin-bottom: 4px;
 	padding: 10px 13px;
 	font: inherit;
 	color: var(--text);

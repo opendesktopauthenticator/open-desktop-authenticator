@@ -271,13 +271,38 @@ export function AddAuthenticator({
 
 					<form onSubmit={submitActivation}>
 						<h2>Finish activating</h2>
-						<p className="hint">
-							Steam has texted a code to the phone on the account
-							{enrolled.phoneNumberHint === undefined ? '' : ` ending ${enrolled.phoneNumberHint}`}.
-							Entering it proves the secrets arrived intact.
-						</p>
+						{/* Where the code came from is decided by whether Steam returned a
+						    phone hint — never assumed. An account with no phone enrols
+						    perfectly well and Steam emails the code instead (F-10, settled
+						    by live run). Telling somebody to check a phone they do not have
+						    is how a working flow reads as broken. */}
+						{resume ? (
+							// Resumed from the account list: the delivery method was not
+							// carried across. Naming both beats confidently naming the wrong one.
+							<p className="hint">
+								Enter the activation code Steam sent when this authenticator was added — by email if
+								the account has no phone number, by text if it has one.
+							</p>
+						) : enrolled.phoneNumberHint === undefined ? (
+							<p className="hint">
+								There is no phone number on this account, so Steam sent the code to its{' '}
+								<strong>email address</strong> — nothing was texted. Entering it proves the secrets
+								arrived intact.
+							</p>
+						) : (
+							<p className="hint">
+								Steam has texted a code to the phone ending {enrolled.phoneNumberHint}. Entering it
+								proves the secrets arrived intact.
+							</p>
+						)}
 
-						<label htmlFor="enroll-sms-code">Code from the text message</label>
+						<label htmlFor="enroll-sms-code">
+							{resume
+								? 'Activation code'
+								: enrolled.phoneNumberHint === undefined
+									? 'Code from your email'
+									: 'Code from the text message'}
+						</label>
 						<input
 							id="enroll-sms-code"
 							type="text"
