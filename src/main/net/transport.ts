@@ -1,9 +1,11 @@
 import {
+	BROWSER_ONLY_HEADERS,
 	describeNetworkError,
 	describesDirectRoute,
 	EgressError,
 	isSteamEndpoint,
 	planProxy,
+	STEAM_MOBILE_CLIENT_COOKIE,
 	STEAM_USER_AGENT,
 	type ProxyPlan
 } from './egress';
@@ -69,6 +71,23 @@ export interface ProxyCapableSession {
 	 * before every request rather than once at construction.
 	 */
 	resolveProxy(url: string): Promise<string>;
+	/**
+	 * Chromium's own headers, before they go out.
+	 *
+	 * Optional because a fake need not implement it — but the real Session does,
+	 * and it is the only place browser-only headers can be removed. Setting a
+	 * User-Agent does not stop Electron adding client hints and fetch metadata
+	 * beside it, and those beside an `okhttp` User-Agent are a contradiction no
+	 * genuine client produces.
+	 */
+	webRequest?: {
+		onBeforeSendHeaders(
+			listener: (
+				details: { requestHeaders: Record<string, string> },
+				callback: (response: { requestHeaders: Record<string, string> }) => void
+			) => void
+		): void;
+	};
 	/**
 	 * Empties this session's cookie jar and everything else it accumulated.
 	 *
@@ -366,6 +385,18 @@ export class SteamTransportFactory {
 		});
 		session.setUserAgent?.(STEAM_USER_AGENT);
 
+		// Stripped at the session, not per request: Electron adds these itself
+		// after our own headers are set, so the request handle never sees them.
+		session.webRequest?.onBeforeSendHeaders((details, callback) => {
+			const headers = { ...details.requestHeaders };
+			for (const name of Object.keys(headers)) {
+				if (BROWSER_ONLY_HEADERS.includes(name.toLowerCase() as never)) {
+					delete headers[name];
+				}
+			}
+			callback({ requestHeaders: headers });
+		});
+
 		let plan: ProxyPlan | undefined;
 		if (account.proxyUrl !== undefined && account.proxyUrl !== '') {
 			// Validated here rather than left to Chromium. A scheme it does not know
@@ -472,9 +503,20 @@ export class SteamTransportFactory {
 			// Only when there is one. Minting an access token happens *before* any
 			// session exists, and an empty header value is not something to hand a
 			// networking stack and hope about.
-			if (request.cookie !== '') {
-				handle.setHeader('Cookie', request.cookie);
-			}
+			// The mobile-client cookie goes on every request, with or without a
+			// session. It is half of the identity the User-Agent claims — Steam's own
+			// `WebApiTransport` keys off `mobileClientVersion=` to decide a request
+			// came from the app — and sending one without the other is half a
+			// disguise, which is worse than none.
+			const cookie =
+				request.cookie === ''
+					? STEAM_MOBILE_CLIENT_COOKIE
+					: `${STEAM_MOBILE_CLIENT_COOKIE}; ${request.cookie}`;
+			handle.setHeader('Cookie', cookie);
+
+			// Matches what `steam-session` sends, so both halves of a session agree
+			// about what kind of client this is.
+			handle.setHeader('Accept', 'application/json, text/plain, */*');
 			if (request.body) {
 				handle.setHeader('Content-Type', 'application/x-www-form-urlencoded');
 			}

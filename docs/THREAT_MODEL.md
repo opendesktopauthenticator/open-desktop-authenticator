@@ -116,6 +116,55 @@ The users most likely to want this feature are the most likely to buy cheap
 residential proxies of unknown ownership. The warning belongs next to the
 setting, not only here.
 
+### 2.7 Steam correlating your accounts with each other
+
+Routing gives each account its own exit address. That is necessary and it is not
+sufficient — several other signals survive it, and this section says which,
+including the ones we cannot fix.
+
+**What is addressed.**
+
+- **One client identity, consistently.** Every request — sign-in, confirmations,
+  enrollment — presents as the real Steam Android app: `okhttp/4.9.2` with the
+  `mobileClient=android; mobileClientVersion=…` cookie, which is exactly what
+  `steam-session` sends and what the app itself sends. Previously the two halves
+  disagreed: an account signed in as the Android app and then fetched its
+  confirmations as a Chrome browser. No genuine client does that, and an
+  inconsistency inside one session is a stronger signal than any single header.
+- **No browser-only headers.** Electron adds client hints (`sec-ch-ua`) and fetch
+  metadata (`sec-fetch-*`) of its own accord. Beside an `okhttp` User-Agent those
+  are a contradiction, so they are stripped at the session.
+- **Accounts do not tick in lockstep.** Auto-confirm gives each account a stable
+  offset within its interval. Without it, every account on the same interval
+  reached Steam within milliseconds of the others, repeatedly — synchronised
+  arrival times across a set of proxies is itself evidence of one operator, and
+  it is a signal separate exit addresses do nothing about.
+
+**Why the identity is not randomised per account.** The intuition is that a
+unique fingerprint per account makes them unlinkable. It does the opposite.
+Anti-fraud systems flag **rare** fingerprints, not common ones, so a distinct
+string per account makes each individually anomalous instead of collectively
+invisible. It also cannot be made coherent: the TLS fingerprint underneath does
+not change, so an exotic User-Agent over a Chromium handshake is a mismatch —
+precisely what fingerprinting detects. Matching the largest real population is
+the stronger position.
+
+**Accepted, and not defended: TLS and HTTP/2 fingerprinting.**
+
+The confirmation path uses Chromium's TLS stack and the sign-in path uses
+Node's. Neither matches what `okhttp` on Android actually negotiates, and
+neither can be changed without replacing the network stack. So:
+
+- Steam **can** distinguish this application's traffic from the real mobile
+  app's, if it chooses to look at JA3/JA4 or HTTP/2 settings frames.
+- Every installation of this application shares that fingerprint, so it also
+  identifies traffic as coming from _this app_ rather than from a browser.
+
+This is a real limit and we do not claim otherwise. What the measures above buy
+is that **your accounts do not stand out from one another** beyond what routing
+already separates. They do not make the application invisible to Valve, and any
+tool telling you it does is lying.
+
 ---
 
 ## 3. Auto-confirm — the honest section

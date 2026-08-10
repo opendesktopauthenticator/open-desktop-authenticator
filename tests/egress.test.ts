@@ -133,6 +133,15 @@ function fakeElectron(
 	}[];
 	/** How many in-flight requests were cancelled. */
 	aborted: () => number;
+	/**
+	 * Applies whatever the transport registered with `onBeforeSendHeaders`.
+	 *
+	 * Exposed so the stripping can be tested against a realistic header set.
+	 * Electron adds client hints *after* our own headers are set, so a test that
+	 * only inspects `setHeader` calls would never see them and would pass no
+	 * matter what the filter did.
+	 */
+	headerFilter: () => (headers: Record<string, string>) => Record<string, string>;
 	failSetProxy?: Error;
 } {
 	const sessions: {
@@ -150,6 +159,12 @@ function fakeElectron(
 		redirect?: string;
 	}[] = [];
 	let aborts = 0;
+	let onHeaders:
+		| ((
+				details: { requestHeaders: Record<string, string> },
+				callback: (response: { requestHeaders: Record<string, string> }) => void
+		  ) => void)
+		| undefined;
 	const state: { failSetProxy?: Error } = {};
 
 	/**
@@ -190,6 +205,11 @@ function fakeElectron(
 				},
 				setUserAgent(userAgent) {
 					record.userAgent = userAgent;
+				},
+				webRequest: {
+					onBeforeSendHeaders(listener) {
+						onHeaders = listener;
+					}
 				},
 				clearStorageData() {
 					record.cleared = (record.cleared ?? 0) + 1;
@@ -304,7 +324,23 @@ function fakeElectron(
 		}
 	};
 
-	return { electron, sessions, requests, aborted: () => aborts, ...state };
+	return {
+		electron,
+		sessions,
+		requests,
+		aborted: () => aborts,
+		headerFilter: () => (headers) => {
+			if (!onHeaders) {
+				throw new Error('the transport never registered a header filter');
+			}
+			let result = headers;
+			onHeaders({ requestHeaders: headers }, (response) => {
+				result = response.requestHeaders;
+			});
+			return result;
+		},
+		...state
+	};
 }
 
 describe('the transport', () => {
@@ -401,7 +437,12 @@ describe('the transport', () => {
 			cookie: 'steamLoginSecure=abc'
 		});
 
-		expect(requests[0]?.headers.Cookie).toBe('steamLoginSecure=abc');
+		// The session cookie rides alongside the mobile-client identity, not instead
+		// of it: Steam's own transport keys off `mobileClientVersion=` to decide a
+		// request came from the app, so sending one without the other is half a
+		// disguise.
+		expect(requests[0]?.headers.Cookie).toContain('steamLoginSecure=abc');
+		expect(requests[0]?.headers.Cookie).toContain('mobileClientVersion=');
 		expect(requests[0]?.headers['User-Agent']).toBe(STEAM_USER_AGENT);
 		expect(requests[0]?.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
 		expect(requests[0]?.body).toBe('op=allow');
@@ -598,9 +639,11 @@ describe('proxy authentication', () => {
 });
 
 describe('the cookie header', () => {
-	it('is omitted entirely when there is no session yet', async () => {
-		// Minting an access token happens before any session exists. An empty header
-		// value is not something to hand a networking stack and hope about.
+	it('still carries the mobile-client identity when there is no session yet', async () => {
+		// Minting an access token happens before any session exists. There is no
+		// session cookie to send — but the client identity is not a session, and a
+		// request that drops it mid-flow announces that this client is not what the
+		// other requests claimed it was.
 		const { electron, requests } = fakeElectron();
 		const transport = await new SteamTransportFactory(electron).forAccount({
 			steamId64: '76561198000000001'
@@ -613,7 +656,38 @@ describe('the cookie header', () => {
 			cookie: ''
 		});
 
-		expect(requests[0]?.headers.Cookie).toBeUndefined();
+		expect(requests[0]?.headers.Cookie).toBe(
+			'mobileClient=android; mobileClientVersion=777777 3.10.3'
+		);
+		// And nothing that looks like an empty session.
+		expect(requests[0]?.headers.Cookie).not.toContain('steamLoginSecure');
+	});
+
+	it('presents as the Steam mobile app, not as a browser', () => {
+		// `okhttp/4.9.2` is what the real Android app sends, and what steam-session
+		// hardcodes for MobileApp logins. Matching it exactly is the strategy: the
+		// crowd to hide in is the millions of ordinary mobile users, not a unique
+		// string per account that makes each one individually rare.
+		expect(STEAM_USER_AGENT).toBe('okhttp/4.9.2');
+		expect(STEAM_USER_AGENT).not.toMatch(/mozilla|chrome|safari/i);
+	});
+
+	it('strips the browser-only headers Chromium adds', async () => {
+		// Setting a User-Agent does not stop Electron adding client hints and fetch
+		// metadata beside it. Those next to an okhttp User-Agent are a contradiction
+		// no genuine client produces — which is more identifying than either alone.
+		const { electron, headerFilter } = fakeElectron();
+		await new SteamTransportFactory(electron).forAccount({ steamId64: '76561198000000001' });
+
+		const filtered = headerFilter()({
+			'User-Agent': 'okhttp/4.9.2',
+			'sec-ch-ua': '"Chromium";v="120"',
+			'sec-fetch-site': 'none',
+			'Accept-Language': 'en-GB,en;q=0.9',
+			Cookie: 'mobileClient=android'
+		});
+
+		expect(filtered).toEqual({ 'User-Agent': 'okhttp/4.9.2', Cookie: 'mobileClient=android' });
 	});
 });
 

@@ -264,16 +264,69 @@ function percentDecode(value: string): string {
 }
 
 /**
- * The User-Agent every Steam request carries.
+ * How this application presents itself to Steam.
  *
- * Not cosmetic. Left alone, Electron sends `… Electron/43.3.0 …`, which
- * identifies this application to Steam and to the proxy operator — the two
- * parties the routing feature exists to keep at arm's length (THREAT_MODEL
- * §2.6). Every install sending the same ordinary mobile string is the point:
- * being distinguishable is the thing to avoid.
+ * ## Why `okhttp` and not a browser string
+ *
+ * This is what the real Steam Android app sends, and it is what `steam-session`
+ * hardcodes for `MobileApp` logins. Matching it exactly is the whole strategy:
+ * millions of ordinary users send this, so it is the largest crowd available to
+ * stand in.
+ *
+ * The previous value was a Chrome-on-Android browser string. That created a
+ * contradiction nobody real produces — the same account signed in as the
+ * Android app and then fetched its confirmations as a mobile browser. An
+ * inconsistency between two halves of one session is a stronger signal than any
+ * single header, because no genuine client behaves that way.
+ *
+ * ## Why this is NOT randomised per account
+ *
+ * The instinct is to give every account its own identity so they cannot be
+ * linked. It backfires. Anti-fraud systems flag **rare** fingerprints, not
+ * common ones, so a unique string per account makes each one individually
+ * anomalous rather than collectively invisible. It also cannot be made
+ * consistent: the TLS fingerprint underneath is Chromium's and does not change,
+ * so an exotic User-Agent over a Chromium handshake is a mismatch — exactly what
+ * fingerprinting looks for.
+ *
+ * What actually keeps accounts unlinkable is a separate exit address per
+ * account, which routing already provides, plus not ticking in lockstep, which
+ * the auto-confirm jitter handles.
+ *
+ * **This does not defeat TLS fingerprinting**, and THREAT_MODEL says so. Steam
+ * can distinguish this application's traffic from the real mobile app's if it
+ * looks. What this buys is that the accounts do not stand out from one another.
  */
-export const STEAM_USER_AGENT =
-	'Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+export const STEAM_USER_AGENT = 'okhttp/4.9.2';
+
+/**
+ * The cookie the Steam mobile app sends alongside that User-Agent.
+ *
+ * `steam-session` sends exactly this for MobileApp logins, and `WebApiTransport`
+ * keys off `mobileClientVersion=` to decide a request is from the mobile app.
+ * Sending the User-Agent without it would be half a disguise.
+ */
+export const STEAM_MOBILE_CLIENT_COOKIE = 'mobileClient=android; mobileClientVersion=777777 3.10.3';
+
+/**
+ * Headers Chromium adds that an `okhttp` client would never send.
+ *
+ * Client hints and fetch metadata are browser concepts. Arriving beside an
+ * okhttp User-Agent they are a contradiction, and a contradiction is more
+ * identifying than any one header — so they are stripped at the session level
+ * rather than merely left unset, because Electron adds them itself.
+ */
+export const BROWSER_ONLY_HEADERS = [
+	'sec-ch-ua',
+	'sec-ch-ua-mobile',
+	'sec-ch-ua-platform',
+	'sec-fetch-site',
+	'sec-fetch-mode',
+	'sec-fetch-dest',
+	'sec-fetch-user',
+	'upgrade-insecure-requests',
+	'accept-language'
+] as const;
 
 /**
  * The only hosts this application will ever send a Steam session to.

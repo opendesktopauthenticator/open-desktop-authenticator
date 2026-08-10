@@ -178,14 +178,42 @@ export class AutoConfirmEngine {
 		return due;
 	}
 
+	/**
+	 * A stable offset, unique per account, within its own poll interval.
+	 *
+	 * **Accounts used to tick in lockstep.** Every account on the same interval
+	 * fired in the same pass, so their requests arrived at Steam within
+	 * milliseconds of each other — repeatedly, forever. Separate exit addresses do
+	 * not hide that: synchronised arrival times across a set of proxies is itself
+	 * a signal that one operator is behind them, and it is one the routing feature
+	 * cannot touch.
+	 *
+	 * Derived from the SteamID rather than random so it survives a restart. An
+	 * offset that reshuffles on every launch would produce a *different* kind of
+	 * correlation — a whole set of accounts changing phase at the same moment.
+	 *
+	 * Cheap and non-cryptographic on purpose: this decides when to poll, not
+	 * anything a secret depends on.
+	 */
+	private jitterFor(steamId64: string, intervalMs: number): number {
+		let hash = 0;
+		for (let i = 0; i < steamId64.length; i += 1) {
+			hash = (hash * 31 + steamId64.charCodeAt(i)) % 1_000_003;
+		}
+		// Up to a quarter of the interval. Enough to break simultaneity without
+		// meaningfully delaying a confirmation anyone is waiting on.
+		return hash % Math.max(1, Math.floor(intervalMs / 4));
+	}
+
 	private async runOne(steamId64: string, pollIntervalSeconds: number): Promise<void> {
 		const interval = Math.max(MIN_INTERVAL_MS, pollIntervalSeconds * 1000);
+		const jitter = this.jitterFor(steamId64, interval);
 
 		try {
 			const outcome = await this.confirmations.runAutoConfirm(steamId64);
 
 			// No `backoffMs` and no `failures`: a success clears both penalties.
-			this.state.set(steamId64, { nextDueAt: this.now() + interval });
+			this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
 			this.onOutcome(steamId64, outcome);
 		} catch (err) {
 			const previous = this.state.get(steamId64);

@@ -44,6 +44,8 @@ function harness(options: {
 	outcomes: { steamId64: string; outcome: AutoConfirmOutcome }[];
 	failures: { steamId64: string; reason: string }[];
 	advance: (ms: number) => void;
+	/** When each account is next scheduled to run. Reaches into engine state. */
+	dueTimes: () => number[];
 } {
 	let clock = NOW;
 	const outcomes: { steamId64: string; outcome: AutoConfirmOutcome }[] = [];
@@ -76,6 +78,12 @@ function harness(options: {
 		runAutoConfirm,
 		outcomes,
 		failures,
+		// Read rather than inferred from timing: the schedule is the thing under
+		// test, and reconstructing it from tick behaviour would test the harness.
+		dueTimes: () =>
+			[...(engine as unknown as { state: Map<string, { nextDueAt: number }> }).state.values()].map(
+				(entry) => entry.nextDueAt
+			),
 		advance: (ms: number) => {
 			clock += ms;
 		}
@@ -130,9 +138,50 @@ describe('pacing', () => {
 		await engine.tick();
 		expect(runAutoConfirm).toHaveBeenCalledTimes(1);
 
-		advance(15_000);
+		// Interval plus the account's jitter, which is up to a quarter of it. The
+		// jitter is why this advances past the bare interval rather than to it.
+		advance(15_000 + 15_000 / 4);
 		await engine.tick();
 		expect(runAutoConfirm).toHaveBeenCalledTimes(2);
+	});
+
+	/**
+	 * Accounts used to tick in lockstep: every account on the same interval fired
+	 * in the same pass, so their requests reached Steam within milliseconds of
+	 * each other, repeatedly. Separate exit addresses do not hide that —
+	 * synchronised arrival times across a set of proxies is itself a signal that
+	 * one operator is behind them, and routing cannot touch it.
+	 */
+	it('staggers accounts rather than polling them in lockstep', async () => {
+		const a = account({ trades: true });
+		const b = account({ trades: true });
+		b.steamId64 = '76561198000000002';
+		const c = account({ trades: true });
+		c.steamId64 = '76561198000000003';
+
+		const { engine, dueTimes, advance } = harness({ accounts: [a, b, c] });
+
+		await engine.tick();
+		// Everything is due at once on the first pass; the spread appears in when
+		// each is scheduled to run *next*.
+		advance(1);
+		await engine.tick();
+
+		const scheduled = dueTimes();
+		expect(new Set(scheduled).size, 'accounts share a next-due time').toBeGreaterThan(1);
+	});
+
+	it('gives each account the same offset every time, so a restart does not reshuffle', async () => {
+		// A jitter that changed on every launch would produce a different kind of
+		// correlation: a whole set of accounts changing phase at the same moment.
+		const first = harness({ accounts: [account({ trades: true })] });
+		await first.engine.tick();
+		const before = first.dueTimes()[0];
+
+		const second = harness({ accounts: [account({ trades: true })] });
+		await second.engine.tick();
+
+		expect(second.dueTimes()[0]).toBe(before);
 	});
 
 	it('never polls faster than the floor, whatever the account asks for', async () => {
