@@ -17,7 +17,7 @@
   "dependencies": {
     "@doctormckay/stdlib": "^2.10.0",
     "request": "^2.88.2",
-    "socks-proxy-agent": "^7.0.0",
+    "socks-proxy-agent": "^10.1.0",
     "steam-session": "^1.9.4",
     "steam-totp": "^2.1.2",
     "steamcommunity": "^3.50.3",
