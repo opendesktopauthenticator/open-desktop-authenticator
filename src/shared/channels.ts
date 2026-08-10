@@ -146,7 +146,17 @@ export const CHANNELS = {
 	 * gated. This only clears a warning the user is looking at, and demanding the
 	 * passphrase twice in one flow teaches people to type it reflexively.
 	 */
-	revocationConfirmBackup: 'revocation:confirmBackup'
+	revocationConfirmBackup: 'revocation:confirmBackup',
+
+	/**
+	 * Ask whether a newer release has been published (§11 S11).
+	 *
+	 * Answers with a version and a link, and **never** a download. The renderer
+	 * cannot fetch a binary and the main process does not offer to: an
+	 * application that replaces its own executable is the mechanism the clone
+	 * sites use, and the last step of the verification chain belongs to the user.
+	 */
+	updateCheck: 'update:check'
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

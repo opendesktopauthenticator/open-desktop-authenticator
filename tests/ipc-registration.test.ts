@@ -6,6 +6,7 @@ import { registerVaultHandlers } from '../src/main/vault/ipc';
 import { registerImportHandlers } from '../src/main/import/ipc';
 import { registerCodeHandlers } from '../src/main/codes/ipc';
 import { registerConfirmationHandlers } from '../src/main/confirmations/ipc';
+import { registerUpdateHandlers } from '../src/main/update/ipc';
 import type { ConfirmationsService } from '../src/main/confirmations/service';
 import { ActivityLog } from '../src/main/confirmations/activity';
 import type { VaultService } from '../src/main/vault/service';
@@ -63,6 +64,11 @@ function registerEverything(): void {
 	registerImportHandlers(imports);
 	registerCodeHandlers(codes, vault, clipboard);
 	registerConfirmationHandlers(confirmations, vault, activity);
+	registerUpdateHandlers({
+		isEnabled: () => false,
+		currentVersion: '0.0.0',
+		fetchText: () => Promise.reject(new Error('no network in tests'))
+	});
 }
 
 beforeEach(() => {
@@ -108,7 +114,8 @@ describe('IPC registration', () => {
 			CHANNELS.activityList,
 			CHANNELS.confirmationsList,
 			CHANNELS.confirmationsAct,
-			CHANNELS.steamSignIn
+			CHANNELS.steamSignIn,
+			CHANNELS.updateCheck
 		]);
 	});
 

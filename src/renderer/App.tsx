@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AccountSummary, CodesList, RendererApi, VaultStatus } from '../shared/ipc';
+import type {
+	AccountSummary,
+	CodesList,
+	RendererApi,
+	UpdateCheckResult,
+	VaultStatus
+} from '../shared/ipc';
 import { CreateVault } from './screens/CreateVault';
 import { AccountRouting } from './screens/AccountRouting';
 import { Activity } from './screens/Activity';
@@ -75,6 +81,8 @@ export function App(): React.JSX.Element {
 	 * live UI instead, and it disappears on the next tick that works.
 	 */
 	const [pollError, setPollError] = useState<string | undefined>();
+	/** Latest answer from the update check. Only `updateAvailable` is ever shown. */
+	const [update, setUpdate] = useState<UpdateCheckResult | undefined>();
 
 	const refresh = useCallback(async (): Promise<void> => {
 		if (!api) {
@@ -169,6 +177,26 @@ export function App(): React.JSX.Element {
 		return () => events.forEach((name) => window.removeEventListener(name, onActivity));
 	}, [api, status?.unlocked]);
 
+	/**
+	 * Ask once per unlock, not on a timer.
+	 *
+	 * The main process caches the answer for hours, so this is cheap — but asking
+	 * on a schedule would make the app chatty for no benefit. An update that
+	 * lands while somebody is mid-session can wait until the next unlock.
+	 */
+	useEffect(() => {
+		if (!api || !status?.unlocked) {
+			return;
+		}
+		// Never `.catch(setFatal)`. A failed update check is background work the
+		// user did not ask for, and it must not be able to replace the screen they
+		// are using — the handler already reports failure as a value.
+		api
+			.checkForUpdate()
+			.then((result) => setUpdate(result))
+			.catch(() => undefined);
+	}, [api, status?.unlocked]);
+
 	if (fatal || !api) {
 		return (
 			<main className="shell">
@@ -184,6 +212,19 @@ export function App(): React.JSX.Element {
 			{pollError && (
 				<p className="banner error" role="status">
 					{pollError}
+				</p>
+			)}
+			{/* Only when there is genuinely something newer. "Up to date" and "could
+			    not check" are both answers nobody needs a banner about — and a
+			    permanent green tick is exactly the reassurance that stops being
+			    read. The link opens in the OS browser; the app never fetches it. */}
+			{update?.state === 'updateAvailable' && (
+				<p className="banner" role="status">
+					<strong>{update.version} is available.</strong> Get it from the signed release on GitHub —
+					never from a link anywhere else.{' '}
+					<a href={update.url} target="_blank" rel="noreferrer noopener">
+						Open the release
+					</a>
 				</p>
 			)}
 			{screen()}

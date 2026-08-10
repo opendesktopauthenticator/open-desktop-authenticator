@@ -13,6 +13,7 @@ import type {
 	ImportReport,
 	ImportSelection,
 	RendererApi,
+	UpdateCheckResult,
 	VaultSettingsView,
 	VaultStatus
 } from '../shared/ipc';
@@ -63,6 +64,7 @@ const api: RendererApi = {
 	getSettings: () => ipcRenderer.invoke(CHANNELS.settingsGet, {}) as Promise<VaultSettingsView>,
 	updateSettings: (settings: VaultSettingsView) =>
 		ipcRenderer.invoke(CHANNELS.settingsUpdate, settings) as Promise<{ ok: true }>,
+	checkForUpdate: () => ipcRenderer.invoke(CHANNELS.updateCheck, {}) as Promise<UpdateCheckResult>,
 
 	removeAccount: (steamId64: string, passphrase: string) =>
 		ipcRenderer.invoke(CHANNELS.accountRemove, {

@@ -127,6 +127,30 @@ export function Settings({
 						since is left alone.
 					</p>
 
+					<h2>Update checks</h2>
+					<label className="checkbox">
+						<input
+							type="checkbox"
+							checked={settings.updateCheck}
+							onChange={(event) => change({ updateCheck: event.target.checked })}
+						/>
+						<span>
+							Tell me when a new version is released
+							{/* Stated exactly, because this is the only request this app makes
+							    that is not to Steam, and the README promises no telemetry. The
+							    honest description is what makes that promise checkable. */}
+							<p className="hint">
+								Asks GitHub once every few hours whether a newer release exists. It sends nothing
+								about you or your accounts — it is the same question any visitor to the releases
+								page asks. GitHub will see your IP address and that this application is running.
+							</p>
+							<p className="hint">
+								It never downloads or installs anything. When there is a new version you get a link,
+								and you go and get it yourself — that is the point.
+							</p>
+						</span>
+					</label>
+
 					<div className="controls">
 						<button type="submit" disabled={busy}>
 							{busy ? 'Saving…' : 'Save'}

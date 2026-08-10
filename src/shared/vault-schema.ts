@@ -105,7 +105,18 @@ export const VAULT_SETTINGS_DEFAULTS = {
 	clipboardClearSeconds: 30,
 	convenienceUnlock: false,
 	launchAtStartup: false,
-	startMinimised: false
+	startMinimised: false,
+	/**
+	 * Ask GitHub whether a newer release exists. On by default (§11 S11).
+	 *
+	 * **Defaulting this to off would be the wrong kind of caution.** It is the one
+	 * request this application makes that is not to Steam, and it does reveal an
+	 * IP and that this app is running — so it is disclosed and switchable. But an
+	 * authenticator running a version with a known Valve-side break, whose user
+	 * never finds out, is a worse outcome than GitHub learning somebody asked a
+	 * question every anonymous visitor may ask. Nothing about the user is sent.
+	 */
+	updateCheck: true
 } as const;
 
 export const vaultSettingsSchema = z.object({
@@ -124,7 +135,8 @@ export const vaultSettingsSchema = z.object({
 	/** Off by default; refused entirely on Linux without a real keyring (§10.3). */
 	convenienceUnlock: z.boolean().default(VAULT_SETTINGS_DEFAULTS.convenienceUnlock),
 	launchAtStartup: z.boolean().default(VAULT_SETTINGS_DEFAULTS.launchAtStartup),
-	startMinimised: z.boolean().default(VAULT_SETTINGS_DEFAULTS.startMinimised)
+	startMinimised: z.boolean().default(VAULT_SETTINGS_DEFAULTS.startMinimised),
+	updateCheck: z.boolean().default(VAULT_SETTINGS_DEFAULTS.updateCheck)
 });
 
 export const vaultContentsSchema = z.object({

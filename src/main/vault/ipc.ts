@@ -114,27 +114,32 @@ export function registerVaultHandlers(
 		const settings = vault.settings();
 		return {
 			autoLockMinutes: settings.autoLockMinutes,
-			clipboardClearSeconds: settings.clipboardClearSeconds
+			clipboardClearSeconds: settings.clipboardClearSeconds,
+			updateCheck: settings.updateCheck
 		};
 	});
 
-	registerHandler(CHANNELS.settingsUpdate, async ({ autoLockMinutes, clipboardClearSeconds }) => {
-		await vault.mutate((draft) => {
-			// Assigned field by field, not spread. Spreading the request would let a
-			// future field arrive here without anyone deciding it should be writable,
-			// and `convenienceUnlock` is exactly the sort of thing that must not be
-			// settable by accident.
-			draft.settings.autoLockMinutes = autoLockMinutes;
-			draft.settings.clipboardClearSeconds = clipboardClearSeconds;
-		});
+	registerHandler(
+		CHANNELS.settingsUpdate,
+		async ({ autoLockMinutes, clipboardClearSeconds, updateCheck }) => {
+			await vault.mutate((draft) => {
+				// Assigned field by field, not spread. Spreading the request would let a
+				// future field arrive here without anyone deciding it should be writable,
+				// and `convenienceUnlock` is exactly the sort of thing that must not be
+				// settable by accident.
+				draft.settings.autoLockMinutes = autoLockMinutes;
+				draft.settings.clipboardClearSeconds = clipboardClearSeconds;
+				draft.settings.updateCheck = updateCheck;
+			});
 
-		// Lengthening the timeout should take effect now, not after the current one
-		// expires. The auto-lock poll reads the setting each tick, so this only has
-		// to survive the write — but touching also stops a save from counting as
-		// idle time.
-		vault.touch();
-		return { ok: true as const };
-	});
+			// Lengthening the timeout should take effect now, not after the current
+			// one expires. The auto-lock poll reads the setting each tick, so this
+			// only has to survive the write — but touching also stops a save from
+			// counting as idle time.
+			vault.touch();
+			return { ok: true as const };
+		}
+	);
 
 	registerHandler(CHANNELS.accountRemove, async ({ steamId64, passphrase }) => {
 		// Gated exactly as the revocation reveal is, and for a heavier reason: that

@@ -21,6 +21,7 @@ import { registerImportHandlers } from './import/ipc';
 import { CodeService } from './codes/service';
 import { ClipboardCourier } from './codes/clipboard';
 import { registerCodeHandlers } from './codes/ipc';
+import { registerUpdateHandlers } from './update/ipc';
 import { SteamTransportFactory, type ElectronNetworking } from './net/transport';
 import { ConfirmationsService } from './confirmations/service';
 import { AutoConfirmEngine } from './confirmations/auto';
@@ -260,6 +261,25 @@ function start(): void {
 		);
 		registerImportHandlers(imports);
 		registerCodeHandlers(codes, vault, clipboard, clock);
+		registerUpdateHandlers({
+			// Read at call time, not captured: a vault that is locked has no settings
+			// to consult, and "locked" is not consent to make a network request.
+			isEnabled: () => vault.isUnlocked() && vault.settings().updateCheck,
+			currentVersion: app.getVersion(),
+			// Electron's own stack rather than `fetch`, so this obeys the same
+			// proxy/network configuration as the rest of the process — and so the one
+			// non-Steam request the app makes is not made by a different client than
+			// everything else.
+			fetchText: async (url) => {
+				const response = await net.fetch(url, {
+					headers: { Accept: 'application/vnd.github+json', 'User-Agent': branding.binaryName }
+				});
+				if (!response.ok) {
+					throw new Error(`GitHub answered ${response.status}`);
+				}
+				return response.text();
+			}
+		});
 		registerConfirmationHandlers(confirmations, vault, activity, clock);
 
 		// Polled rather than scheduled: a setTimeout would keep firing on the old

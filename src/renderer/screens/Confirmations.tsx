@@ -116,6 +116,17 @@ export function Confirmations({
 	const critical = confirmations?.filter((entry) => entry.securityCritical) ?? [];
 	const ordinary = confirmations?.filter((entry) => !entry.securityCritical) ?? [];
 
+	// Kept in state and ticked slowly, rather than read during render — reading
+	// the clock while rendering is impure, and React is right to object. Half a
+	// minute is ample: this drives "12 minutes ago", which does not need
+	// per-second resolution, and a frozen value would age into a lie while the
+	// screen sits open.
+	const [now, setNow] = useState(() => Date.now());
+	useEffect(() => {
+		const timer = setInterval(() => setNow(Date.now()), 30_000);
+		return () => clearInterval(timer);
+	}, []);
+
 	return (
 		<main className="shell">
 			<header className="row">
@@ -167,6 +178,7 @@ export function Confirmations({
 							{line}
 						</p>
 					))}
+					<ConfirmationDetail entry={entry} now={now} />
 					<div className="controls">
 						<button type="button" onClick={() => act('cancel', [entry.id])} disabled={busy}>
 							Deny — this was not me
@@ -208,6 +220,7 @@ export function Confirmations({
 												{line}
 											</p>
 										))}
+										<ConfirmationDetail entry={entry} now={now} />
 									</div>
 									<div className="controls">
 										<button
@@ -256,4 +269,103 @@ export function Confirmations({
 			)}
 		</main>
 	);
+}
+
+/**
+ * Everything Steam told us about a confirmation, laid out as facts.
+ *
+ * The protocol carries more than a headline and a summary, and hiding the rest
+ * costs the user the two things most likely to reveal a confirmation they did
+ * not create: **when it appeared**, and **who it is from**. A trade that showed
+ * up at 04:00 while you were asleep is the shape of an account takeover, and no
+ * amount of item detail says that as clearly as a timestamp.
+ *
+ * Two deliberate omissions:
+ *
+ * - **Steam's own type label is shown, but never as the title.** A name the
+ *   server chooses is a name an attacker can choose. Ours comes from the
+ *   numeric type via S16's table and is what the heading says; Steam's is
+ *   reported beside it, attributed, so a mismatch is visible rather than
+ *   authoritative.
+ * - **The item image is not rendered.** Steam sends a CDN URL, and an `<img>`
+ *   is a request the renderer makes itself — outside the per-account transport,
+ *   so from the user's real address for a routed account, telling Valve's CDN
+ *   which confirmations were being looked at. The main process therefore sends
+ *   only whether an image exists.
+ */
+function ConfirmationDetail({
+	entry,
+	now
+}: {
+	entry: ConfirmationSummary;
+	now: number;
+}): React.JSX.Element {
+	const facts: { label: string; value: string; title?: string }[] = [];
+
+	if (entry.createdAtMs !== undefined) {
+		facts.push({
+			label: 'Requested',
+			value: describeAge(entry.createdAtMs, now),
+			title: new Date(entry.createdAtMs).toLocaleString()
+		});
+	}
+	if (entry.creatorId !== undefined) {
+		facts.push({ label: 'From', value: entry.creatorId });
+	}
+	if (entry.multi === true) {
+		facts.push({ label: 'Covers', value: 'several items' });
+	}
+	if (entry.steamTypeName !== undefined && entry.steamTypeName !== entry.typeName) {
+		facts.push({
+			label: 'Steam calls this',
+			value: entry.steamTypeName,
+			title:
+				'Steam’s own label for this confirmation. We classify it ourselves from the ' +
+				'numeric type, because a name the server chooses is a name an attacker can choose.'
+		});
+	}
+	facts.push({ label: 'Type', value: String(entry.type) });
+	facts.push({ label: 'ID', value: entry.id });
+
+	return (
+		<dl className="facts">
+			{facts.map((fact) => (
+				<div key={fact.label}>
+					<dt>{fact.label}</dt>
+					<dd title={fact.title}>{fact.value}</dd>
+				</div>
+			))}
+			{entry.hasIcon && (
+				<div>
+					<dt>Image</dt>
+					<dd title="Loading it would send a request to Steam's CDN from this machine, outside this account's routing.">
+						not loaded, on purpose
+					</dd>
+				</div>
+			)}
+		</dl>
+	);
+}
+
+/**
+ * "3 hours ago", from a timestamp.
+ *
+ * Relative rather than absolute because the question a user is actually asking
+ * is "was I awake when this happened", and an exact time makes them do that
+ * subtraction themselves. The exact time is on the `title` for when it matters.
+ */
+function describeAge(atMs: number, now: number): string {
+	const seconds = Math.max(0, Math.round((now - atMs) / 1000));
+	if (seconds < 60) {
+		return 'just now';
+	}
+	const minutes = Math.round(seconds / 60);
+	if (minutes < 60) {
+		return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+	}
+	const hours = Math.round(minutes / 60);
+	if (hours < 48) {
+		return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+	}
+	return `${Math.round(hours / 24)} days ago`;
 }

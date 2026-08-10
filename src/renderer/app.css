@@ -604,6 +604,48 @@ button.flag.bad:hover:not(:disabled) {
 	background: rgba(231, 76, 60, 0.2);
 }
 
+/* --------------------------------------------- confirmation detail facts -- */
+
+/*
+ * What Steam actually said about a confirmation, as label/value pairs.
+ *
+ * Set quietly and in the data face: these are things to *check* — a timestamp,
+ * a counterparty, an id — not things to read. The one a user scans for is
+ * "Requested", so it comes first and everything else is deliberately duller.
+ */
+.facts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 18px;
+	margin: 10px 0 0;
+	padding: 10px 0 0;
+	border-top: 1px solid var(--line);
+}
+
+.facts > div {
+	display: flex;
+	align-items: baseline;
+	gap: 6px;
+	min-width: 0;
+}
+
+.facts dt {
+	font-size: 0.7rem;
+	font-weight: 650;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--faint);
+	white-space: nowrap;
+}
+
+.facts dd {
+	margin: 0;
+	font-family: var(--font-mono);
+	font-size: 0.78rem;
+	color: var(--muted);
+	overflow-wrap: anywhere;
+}
+
 /* ------------------------------------------------------------ revocation -- */
 
 /*

@@ -136,10 +136,42 @@ export const vaultSettingsView = z.object({
 	/** 1–240. How long the vault stays unlocked with no interaction. */
 	autoLockMinutes: z.number().int().min(1).max(240),
 	/** 5–300. How long a copied Steam Guard code stays on the clipboard. */
-	clipboardClearSeconds: z.number().int().min(5).max(300)
+	clipboardClearSeconds: z.number().int().min(5).max(300),
+	/**
+	 * Whether to ask GitHub about newer releases.
+	 *
+	 * Surfaced as a real switch rather than left implicit, because it is the only
+	 * request this application makes that is not to Steam. The Settings screen
+	 * says what it does and does not send.
+	 */
+	updateCheck: z.boolean()
 });
 
 export const settingsUpdateRequest = vaultSettingsView.strict();
+
+/**
+ * The answer to "is there a newer version".
+ *
+ * Carries a version and a **link to a release page** — never a download URL, and
+ * never an asset. The renderer cannot be handed something it could fetch, so a
+ * future change that tried to auto-install would have to widen this schema
+ * first, in a file §24.3 requires sign-off to change.
+ *
+ * `unknown` is a first-class state rather than being folded into `upToDate`.
+ * "We could not ask" and "you are current" are different facts, and conflating
+ * them hides a version with a known break behind a reassuring tick.
+ */
+export const updateCheckResponse = z.discriminatedUnion('state', [
+	z.object({ state: z.literal('disabled') }),
+	z.object({ state: z.literal('upToDate') }),
+	z.object({
+		state: z.literal('updateAvailable'),
+		version: z.string(),
+		url: z.string(),
+		publishedAt: z.string().optional()
+	}),
+	z.object({ state: z.literal('unknown'), reason: z.string() })
+]);
 
 /**
  * §11 S2 exception (a): the forced revocation-code backup ceremony.
@@ -396,6 +428,7 @@ export const IPC_CONTRACT = {
 
 	[CHANNELS.settingsGet]: { request: emptyRequest, response: vaultSettingsView },
 	[CHANNELS.settingsUpdate]: { request: settingsUpdateRequest, response: okResponse },
+	[CHANNELS.updateCheck]: { request: emptyRequest, response: updateCheckResponse },
 
 	[CHANNELS.accountRemove]: {
 		request: z
@@ -499,6 +532,7 @@ export type ConfirmationsList = z.infer<typeof confirmationsListResponse>;
 export type ActivityEntryView = z.infer<typeof activityEntry>;
 export type ActivityList = z.infer<typeof activityListResponse>;
 export type VaultSettingsView = z.infer<typeof vaultSettingsView>;
+export type UpdateCheckResult = z.infer<typeof updateCheckResponse>;
 
 /** The typed surface preload puts on `window`. Renderer sees exactly this. */
 export interface RendererApi {
@@ -516,6 +550,14 @@ export interface RendererApi {
 	/** The timings the user can change. No secrets. */
 	getSettings(): Promise<VaultSettingsView>;
 	updateSettings(settings: VaultSettingsView): Promise<{ ok: true }>;
+	/**
+	 * Whether a newer release exists. Returns a link, never a download.
+	 *
+	 * Resolves rather than rejects on failure — an update check is background
+	 * work the user did not ask for, and it must not be able to take down the
+	 * screen they are actually using.
+	 */
+	checkForUpdate(): Promise<UpdateCheckResult>;
 	/** Set routing for one account, or pass `null` to remove it. */
 	setAccountProxy(steamId64: string, proxyUrl: string | null): Promise<{ ok: true }>;
 	/** Enable or disable automatic confirmation for one account, per type. */

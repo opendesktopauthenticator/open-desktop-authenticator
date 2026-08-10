@@ -35,40 +35,81 @@ export interface TrayHost {
 }
 
 /**
- * The icon, generated rather than shipped as a binary.
+ * The tray mark, drawn in code rather than shipped as a binary.
  *
- * A placeholder, and deliberately a legible one: a filled rounded square in a
- * neutral grey, which reads on both light and dark trays. It is drawn here
- * instead of committed as a PNG so that nothing in this repository is a binary
- * blob a reader has to take on trust — which is the same argument the rest of
- * the project makes about its build.
+ * **The shape is the countdown ring**, which is the one element the interface is
+ * built around: a Steam Guard code is a secret with a thirty-second life, and
+ * the account list renders that as a ring draining beneath the code. The tray
+ * icon is that ring with a quarter gone — the same idea at 32 pixels, so the
+ * thing in the system tray and the thing on screen are recognisably one product.
  *
- * **A designed icon is a founder task before release.** This one is honest about
- * being a placeholder rather than pretending to be branding.
+ * Mint (`#42f29a`) is MASTERPANEL LLC's accent, and it holds up against both a
+ * light and a dark taskbar, which a mid-grey does not.
+ *
+ * It is drawn here instead of committed as a PNG so that nothing in this
+ * repository is a binary blob a reader has to take on trust — the same argument
+ * the rest of the project makes about its build. Supersampled 4×4 per pixel,
+ * because an aliased ring at this size reads as a smudge.
+ *
+ * **Installer and window icons are still outstanding**: those need a real `.ico`
+ * and multi-resolution PNGs in `build/`, which is a packaging task (§10.2).
  */
 function trayIcon(): NativeImage {
-	const size = 16;
+	// Drawn at 2× and tagged as such, so it stays crisp on a HiDPI taskbar and
+	// Electron downsamples for standard DPI rather than the reverse.
+	const size = 32;
 	const channels = 4;
+	const samples = 4;
 	const pixels = Buffer.alloc(size * size * channels);
+
+	const centre = (size - 1) / 2;
+	const outer = size / 2 - 2.5;
+	const inner = outer - size / 8;
+
+	// Mint, as BGRA — the byte order `createFromBuffer` expects.
+	const [b, g, r] = [0x9a, 0xf2, 0x42];
 
 	for (let y = 0; y < size; y++) {
 		for (let x = 0; x < size; x++) {
-			const offset = (y * size + x) * channels;
-			// A rounded square: inset by two, with the corners knocked off.
-			const inset = x >= 2 && x <= 13 && y >= 2 && y <= 13;
-			const corner =
-				(x <= 3 && y <= 3) || (x >= 12 && y <= 3) || (x <= 3 && y >= 12) || (x >= 12 && y >= 12);
-			const on = inset && !corner;
+			let covered = 0;
 
-			// BGRA is what `createFromBuffer` expects.
-			pixels[offset] = 0x9a;
-			pixels[offset + 1] = 0x9a;
-			pixels[offset + 2] = 0x9a;
-			pixels[offset + 3] = on ? 0xff : 0x00;
+			for (let sy = 0; sy < samples; sy++) {
+				for (let sx = 0; sx < samples; sx++) {
+					const px = x + (sx + 0.5) / samples - 0.5;
+					const py = y + (sy + 0.5) / samples - 0.5;
+					const dx = px - centre;
+					const dy = py - centre;
+					const distance = Math.hypot(dx, dy);
+
+					if (distance > outer || distance < inner) {
+						continue;
+					}
+
+					// The gap: a quarter of the ring removed, starting at twelve
+					// o'clock and running clockwise. `atan2` puts 0 at three o'clock,
+					// so this rotates a quarter turn back to the top.
+					const angle = (Math.atan2(dy, dx) + Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
+					if (angle < Math.PI / 2) {
+						continue;
+					}
+
+					covered += 1;
+				}
+			}
+
+			const offset = (y * size + x) * channels;
+			pixels[offset] = b;
+			pixels[offset + 1] = g;
+			pixels[offset + 2] = r;
+			pixels[offset + 3] = Math.round((covered / (samples * samples)) * 255);
 		}
 	}
 
-	return nativeImage.createFromBuffer(pixels, { width: size, height: size });
+	return nativeImage.createFromBuffer(pixels, {
+		width: size,
+		height: size,
+		scaleFactor: 2
+	});
 }
 
 export function createTray(host: TrayHost): Tray {

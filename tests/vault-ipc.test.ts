@@ -352,9 +352,10 @@ describe('the settings contract', () => {
 	const { response } = IPC_CONTRACT[CHANNELS.settingsGet];
 
 	it('accepts values inside the schema bounds', () => {
-		expect(request.safeParse({ autoLockMinutes: 30, clipboardClearSeconds: 45 }).success).toBe(
-			true
-		);
+		expect(
+			request.safeParse({ autoLockMinutes: 30, clipboardClearSeconds: 45, updateCheck: true })
+				.success
+		).toBe(true);
 	});
 
 	it('refuses an auto-lock outside 1–240', () => {
@@ -363,7 +364,8 @@ describe('the settings contract', () => {
 		// the outcome the setting exists to make unnecessary.
 		for (const autoLockMinutes of [0, -5, 241, 1.5, Number.NaN]) {
 			expect(
-				request.safeParse({ autoLockMinutes, clipboardClearSeconds: 30 }).success,
+				request.safeParse({ autoLockMinutes, clipboardClearSeconds: 30, updateCheck: true })
+					.success,
 				`${autoLockMinutes}`
 			).toBe(false);
 		}
@@ -372,7 +374,8 @@ describe('the settings contract', () => {
 	it('refuses a clipboard delay outside 5–300', () => {
 		for (const clipboardClearSeconds of [0, 4, 301, -1]) {
 			expect(
-				request.safeParse({ autoLockMinutes: 10, clipboardClearSeconds }).success,
+				request.safeParse({ autoLockMinutes: 10, clipboardClearSeconds, updateCheck: true })
+					.success,
 				`${clipboardClearSeconds}`
 			).toBe(false);
 		}
@@ -385,20 +388,29 @@ describe('the settings contract', () => {
 			request.safeParse({
 				autoLockMinutes: 10,
 				clipboardClearSeconds: 30,
+				updateCheck: true,
 				convenienceUnlock: true
 			}).success
 		).toBe(false);
 	});
 
-	it('returns only the two timings, never a secret', () => {
+	it('returns only the settings a user can change, never a secret', () => {
+		// The list is exhaustive on purpose. A new field arriving in the vault
+		// schema must not reach the renderer just because someone added it there —
+		// `convenienceUnlock` is the standing example, and it stays out.
 		const parsed = response.parse({
 			autoLockMinutes: 10,
 			clipboardClearSeconds: 30,
+			updateCheck: true,
 			sharedSecret: 'LEAKED',
 			convenienceUnlock: true
 		});
 
-		expect(Object.keys(parsed)).toEqual(['autoLockMinutes', 'clipboardClearSeconds']);
+		expect(Object.keys(parsed)).toEqual([
+			'autoLockMinutes',
+			'clipboardClearSeconds',
+			'updateCheck'
+		]);
 		expect(JSON.stringify(parsed)).not.toContain('LEAKED');
 	});
 });
