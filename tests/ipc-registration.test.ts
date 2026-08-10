@@ -7,6 +7,8 @@ import { registerImportHandlers } from '../src/main/import/ipc';
 import { registerCodeHandlers } from '../src/main/codes/ipc';
 import { registerConfirmationHandlers } from '../src/main/confirmations/ipc';
 import { registerUpdateHandlers } from '../src/main/update/ipc';
+import { registerEnrollmentHandlers } from '../src/main/steam/enrollment-ipc';
+import type { EnrollmentService } from '../src/main/steam/enrollment';
 import type { ConfirmationsService } from '../src/main/confirmations/service';
 import { ActivityLog } from '../src/main/confirmations/activity';
 import type { VaultService } from '../src/main/vault/service';
@@ -57,6 +59,7 @@ const clipboard = {} as ClipboardCourier;
 
 const confirmations = {} as ConfirmationsService;
 const activity = new ActivityLog();
+const enrollment = {} as EnrollmentService;
 
 function registerEverything(): void {
 	registerAppInfoHandler();
@@ -68,6 +71,9 @@ function registerEverything(): void {
 		isEnabled: () => false,
 		currentVersion: '0.0.0',
 		fetchText: () => Promise.reject(new Error('no network in tests'))
+	});
+	registerEnrollmentHandlers(enrollment, vault, {
+		show: () => Promise.resolve(undefined)
 	});
 }
 
@@ -115,7 +121,11 @@ describe('IPC registration', () => {
 			CHANNELS.confirmationsList,
 			CHANNELS.confirmationsAct,
 			CHANNELS.steamSignIn,
-			CHANNELS.updateCheck
+			CHANNELS.updateCheck,
+			CHANNELS.enrollBegin,
+			CHANNELS.enrollEmailCode,
+			CHANNELS.enrollActivate,
+			CHANNELS.accountExport
 		]);
 	});
 

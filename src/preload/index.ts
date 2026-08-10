@@ -13,6 +13,8 @@ import type {
 	ImportReport,
 	ImportSelection,
 	RendererApi,
+	EnrollBegin,
+	ExportResult,
 	UpdateCheckResult,
 	VaultSettingsView,
 	VaultStatus
@@ -65,6 +67,22 @@ const api: RendererApi = {
 	updateSettings: (settings: VaultSettingsView) =>
 		ipcRenderer.invoke(CHANNELS.settingsUpdate, settings) as Promise<{ ok: true }>,
 	checkForUpdate: () => ipcRenderer.invoke(CHANNELS.updateCheck, {}) as Promise<UpdateCheckResult>,
+
+	// Enrollment. The password travels inbound only, exactly as a vault
+	// passphrase does, and is never held in renderer state beyond the input.
+	beginEnrollment: (accountName: string, password: string) =>
+		ipcRenderer.invoke(CHANNELS.enrollBegin, { accountName, password }) as Promise<EnrollBegin>,
+	submitEnrollmentEmailCode: (code: string) =>
+		ipcRenderer.invoke(CHANNELS.enrollEmailCode, { code }) as Promise<EnrollBegin>,
+	activateAuthenticator: (steamId64: string, code: string) =>
+		ipcRenderer.invoke(CHANNELS.enrollActivate, { steamId64, code }) as Promise<{
+			state: 'activated' | 'wantMore';
+		}>,
+
+	// Takes no path and returns none: the OS dialog is the only thing that names
+	// a location, and the main process is the only thing that writes one.
+	exportAccount: (steamId64: string) =>
+		ipcRenderer.invoke(CHANNELS.accountExport, { steamId64 }) as Promise<ExportResult>,
 
 	removeAccount: (steamId64: string, passphrase: string) =>
 		ipcRenderer.invoke(CHANNELS.accountRemove, {

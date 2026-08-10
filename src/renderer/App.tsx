@@ -14,6 +14,7 @@ import { Confirmations } from './screens/Confirmations';
 import { RemoveAccount } from './screens/RemoveAccount';
 import { Settings } from './screens/Settings';
 import { ImportAccounts } from './screens/ImportAccounts';
+import { AddAuthenticator } from './screens/AddAuthenticator';
 import { RevocationBackup } from './screens/RevocationBackup';
 import { UnlockVault } from './screens/UnlockVault';
 import { VaultHome } from './screens/VaultHome';
@@ -49,7 +50,9 @@ export function App(): React.JSX.Element {
 	 * reloads this window whenever the vault locks, so an unlock always lands back
 	 * on the account list rather than resuming a half-finished import.
 	 */
-	const [view, setView] = useState<'accounts' | 'import' | 'settings' | 'activity'>('accounts');
+	const [view, setView] = useState<'accounts' | 'import' | 'settings' | 'activity' | 'enroll'>(
+		'accounts'
+	);
 	/** The account whose backup ceremony is open, if any. */
 	const [backupFor, setBackupFor] = useState<AccountSummary | undefined>();
 	/** The account whose routing is being changed, if any. */
@@ -359,6 +362,27 @@ export function App(): React.JSX.Element {
 			);
 		}
 
+		if (view === 'enroll') {
+			return (
+				<AddAuthenticator
+					onBegin={(accountName, password) => api.beginEnrollment(accountName, password)}
+					onEmailCode={(code) => api.submitEnrollmentEmailCode(code)}
+					onActivate={(steamId64, code) => api.activateAuthenticator(steamId64, code)}
+					onBackup={(steamId64) => {
+						// Straight into the S12 ceremony for the account just created. The
+						// revocation code is the one thing a new enrollment must not leave
+						// the user without, and making them go and find it invites skipping.
+						const account = accounts.find((entry) => entry.steamId64 === steamId64);
+						if (account) {
+							setView('accounts');
+							setBackupFor(account);
+						}
+					}}
+					onClose={() => setView('accounts')}
+				/>
+			);
+		}
+
 		if (view === 'import') {
 			return (
 				<ImportAccounts
@@ -382,6 +406,10 @@ export function App(): React.JSX.Element {
 				onRemoveAccount={setRemovingFor}
 				onChangeAutoConfirm={setAutoConfirmFor}
 				onImport={() => setView('import')}
+				onEnrol={() => setView('enroll')}
+				onExport={(account) => {
+					void api.exportAccount(account.steamId64);
+				}}
 				onSettings={() => setView('settings')}
 				onActivity={() => setView('activity')}
 				activityUrgent={activityUrgent}

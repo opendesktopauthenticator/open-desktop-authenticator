@@ -201,6 +201,41 @@ export const updateCheckResponse = z.discriminatedUnion('state', [
 ]);
 
 /**
+ * Where an enrollment got to.
+ *
+ * `enrolled` means the Steam account has already been changed and the secrets
+ * are already in the vault — it is not "about to happen", it is "has happened".
+ * The screen must treat it as a point of no return and send the user straight to
+ * the revocation-code ceremony.
+ *
+ * No secret is carried. The revocation code reaches the user through the
+ * existing S2-sanctioned reveal, gated on the passphrase, rather than being
+ * handed out as a side effect of enrolling.
+ */
+export const enrollBeginResponse = z.discriminatedUnion('state', [
+	z.object({ state: z.literal('needsEmailCode'), emailDomain: z.string().optional() }),
+	z.object({
+		state: z.literal('enrolled'),
+		steamId64: z.string(),
+		accountName: z.string(),
+		/** Masked digits of the phone Steam is texting, when it says. */
+		phoneNumberHint: z.string().optional()
+	})
+]);
+
+/**
+ * The result of writing a maFile.
+ *
+ * Reports the **file name** and never the path. A full path names the user's
+ * machine and their folder layout, which the renderer has no use for — the same
+ * reasoning that keeps import from ever handing one over.
+ */
+export const exportResponse = z.discriminatedUnion('state', [
+	z.object({ state: z.literal('saved'), fileName: z.string() }),
+	z.object({ state: z.literal('cancelled') })
+]);
+
+/**
  * §11 S2 exception (a): the forced revocation-code backup ceremony.
  *
  * One of exactly two sanctioned paths for a long-term secret to reach the
@@ -457,6 +492,28 @@ export const IPC_CONTRACT = {
 	[CHANNELS.settingsUpdate]: { request: settingsUpdateRequest, response: okResponse },
 	[CHANNELS.updateCheck]: { request: emptyRequest, response: updateCheckResponse },
 
+	[CHANNELS.enrollBegin]: {
+		// The password travels inbound exactly as a vault passphrase does, and is
+		// dropped as soon as Steam has answered.
+		request: z
+			.object({ accountName: z.string().min(1).max(64), password: z.string().min(1).max(1024) })
+			.strict(),
+		response: enrollBeginResponse
+	},
+	[CHANNELS.enrollEmailCode]: {
+		request: z.object({ code: z.string().min(1).max(16) }).strict(),
+		response: enrollBeginResponse
+	},
+	[CHANNELS.enrollActivate]: {
+		request: z.object({ steamId64: z.string(), code: z.string().min(1).max(16) }).strict(),
+		response: z.object({ state: z.enum(['activated', 'wantMore']) })
+	},
+
+	[CHANNELS.accountExport]: {
+		request: z.object({ steamId64: z.string() }).strict(),
+		response: exportResponse
+	},
+
 	[CHANNELS.accountRemove]: {
 		request: z
 			.object({
@@ -578,6 +635,8 @@ export type ActivityEntryView = z.infer<typeof activityEntry>;
 export type ActivityList = z.infer<typeof activityListResponse>;
 export type VaultSettingsView = z.infer<typeof vaultSettingsView>;
 export type UpdateCheckResult = z.infer<typeof updateCheckResponse>;
+export type EnrollBegin = z.infer<typeof enrollBeginResponse>;
+export type ExportResult = z.infer<typeof exportResponse>;
 
 /** The typed surface preload puts on `window`. Renderer sees exactly this. */
 export interface RendererApi {
@@ -603,6 +662,25 @@ export interface RendererApi {
 	 * screen they are actually using.
 	 */
 	checkForUpdate(): Promise<UpdateCheckResult>;
+
+	/**
+	 * Add an authenticator to an account that has none.
+	 *
+	 * `begin` is the call that changes the Steam account: once it answers
+	 * `enrolled`, the secrets are already in the vault and there is no undoing it
+	 * from here. The screen treats that as a point of no return.
+	 */
+	beginEnrollment(accountName: string, password: string): Promise<EnrollBegin>;
+	submitEnrollmentEmailCode(code: string): Promise<EnrollBegin>;
+	activateAuthenticator(
+		steamId64: string,
+		code: string
+	): Promise<{
+		state: 'activated' | 'wantMore';
+	}>;
+
+	/** Write an account out as a maFile. Opens the OS save dialog; returns a name. */
+	exportAccount(steamId64: string): Promise<ExportResult>;
 	/** Set routing for one account, or pass `null` to remove it. */
 	setAccountProxy(steamId64: string, proxyUrl: string | null): Promise<{ ok: true }>;
 	/** Enable or disable automatic confirmation for one account, per type. */

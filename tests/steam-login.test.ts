@@ -120,6 +120,12 @@ function fakeSession(scenario: Scenario = {}): {
 		cancelLoginAttempt() {
 			cancels += 1;
 		},
+		submitSteamGuardCode() {
+			// Not exercised here — enrollment covers it. Present because the real
+			// LoginSession has it, and a fake that is less capable than the object it
+			// stands in for hides the same class of bug as one that is more capable.
+			return Promise.resolve();
+		},
 		get refreshToken() {
 			return scenario.refreshToken ?? MOBILE_REFRESH;
 		},

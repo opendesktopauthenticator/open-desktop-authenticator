@@ -112,7 +112,21 @@ export interface LoginSessionLike {
 		password: string;
 		persistence?: number;
 		steamGuardCode?: string;
-	}): Promise<{ actionRequired: boolean; validActions?: { type: number }[] }>;
+	}): Promise<{
+		actionRequired: boolean;
+		/** `detail` carries the email domain for an EmailCode challenge. */
+		validActions?: { type: number; detail?: string }[];
+	}>;
+	/**
+	 * Answer a Guard challenge on the session that raised it.
+	 *
+	 * Used by enrollment, where the account has no authenticator yet and Steam
+	 * therefore asks for an emailed code. The library's own guidance is to keep
+	 * the session that triggered the email alive and submit into it, rather than
+	 * starting a new one — a new session sends a second email and invalidates the
+	 * code the user is looking at.
+	 */
+	submitSteamGuardCode(code: string): Promise<void>;
 	on(event: 'authenticated', listener: () => void): void;
 	on(event: 'timeout', listener: () => void): void;
 	on(event: 'error', listener: (err: unknown) => void): void;

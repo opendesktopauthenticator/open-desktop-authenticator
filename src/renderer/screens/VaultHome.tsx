@@ -21,6 +21,8 @@ export function VaultHome({
 	onRemoveAccount,
 	onChangeAutoConfirm,
 	onImport,
+	onEnrol,
+	onExport,
 	onSettings,
 	onActivity,
 	activityUrgent,
@@ -36,6 +38,10 @@ export function VaultHome({
 	onRemoveAccount: (account: AccountSummary) => void;
 	onChangeAutoConfirm: (account: AccountSummary) => void;
 	onImport: () => void;
+	/** Add an authenticator to an account that has none. */
+	onEnrol: () => void;
+	/** Write one account out as a maFile. */
+	onExport: (account: AccountSummary) => void;
 	onSettings: () => void;
 	onActivity: () => void;
 	/** Something automatic confirmation did needs a person to look at it. */
@@ -66,6 +72,9 @@ export function VaultHome({
 			<header className="row">
 				<h1>Accounts</h1>
 				<div className="controls">
+					<button type="button" className="secondary" onClick={onEnrol}>
+						Add authenticator
+					</button>
 					<button type="button" className="secondary" onClick={onImport}>
 						Import maFiles
 					</button>
@@ -119,7 +128,10 @@ export function VaultHome({
 						Import the <code>.maFile</code> files from your existing Steam Desktop Authenticator
 						install. Nothing is stored until you add something.
 					</p>
-					<button type="button" onClick={onImport}>
+					<button type="button" onClick={onEnrol}>
+						Add an authenticator
+					</button>
+					<button type="button" className="secondary" onClick={onImport}>
 						Import maFiles
 					</button>
 				</div>
@@ -209,6 +221,14 @@ export function VaultHome({
 									</button>
 									{/* Last, and visually quietest of the three. It is the only one
 									    here that destroys something. */}
+									<button
+										type="button"
+										className="secondary"
+										onClick={() => onExport(account)}
+										title="Save this account as a .maFile, readable by SDA and anything else in the ecosystem."
+									>
+										Export
+									</button>
 									<button
 										type="button"
 										className="secondary danger"

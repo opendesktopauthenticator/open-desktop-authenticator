@@ -3,6 +3,7 @@ import {
 	BrowserWindow,
 	type Tray,
 	clipboard as electronClipboard,
+	dialog,
 	Menu,
 	net,
 	powerMonitor,
@@ -22,6 +23,8 @@ import { CodeService } from './codes/service';
 import { ClipboardCourier } from './codes/clipboard';
 import { registerCodeHandlers } from './codes/ipc';
 import { registerUpdateHandlers } from './update/ipc';
+import { EnrollmentService } from './steam/enrollment';
+import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
 import { SteamTransportFactory, type ElectronNetworking } from './net/transport';
 import { ConfirmationsService } from './confirmations/service';
 import { AutoConfirmEngine } from './confirmations/auto';
@@ -222,6 +225,9 @@ function start(): void {
 	// Constructed after the network pieces so a commit that changes routing can
 	// drop the stale session through the same seam the settings path uses.
 	const imports = new ImportService(vault, { onRoutingChanged: dropAccountRouting });
+	const enrollment = new EnrollmentService(vault, transports, {
+		timeOffsetSeconds: () => codes.timeOffsetSeconds()
+	});
 
 	const activity = new ActivityLog();
 	// The engine used to report into callbacks nobody supplied, so a held-back
@@ -265,6 +271,22 @@ function start(): void {
 			(steamId64) => transports.routingStatus(steamId64)
 		);
 		registerImportHandlers(imports);
+		registerEnrollmentHandlers(enrollment, vault, {
+			// The OS dialog is the only thing that names a location. The renderer
+			// asks for a file; it never says, and is never told, where it went.
+			show: async (suggestedName) => {
+				const parent = BrowserWindow.getFocusedWindow();
+				const options = {
+					title: 'Save maFile',
+					defaultPath: suggestedName,
+					filters: [{ name: 'maFile', extensions: ['maFile'] }]
+				};
+				const result = await (parent
+					? dialog.showSaveDialog(parent, options)
+					: dialog.showSaveDialog(options));
+				return result.canceled ? undefined : result.filePath;
+			}
+		});
 		registerCodeHandlers(codes, vault, clipboard, clock);
 		registerUpdateHandlers({
 			// Read at call time, not captured: a vault that is locked has no settings

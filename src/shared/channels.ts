@@ -156,7 +156,29 @@ export const CHANNELS = {
 	 * application that replaces its own executable is the mechanism the clone
 	 * sites use, and the last step of the verification chain belongs to the user.
 	 */
-	updateCheck: 'update:check'
+	updateCheck: 'update:check',
+
+	/**
+	 * Adding an authenticator to an account that has none (§12 F3).
+	 *
+	 * Three channels because the flow has two unavoidable human pauses: a code
+	 * emailed at sign-in (the account has no authenticator yet, so Steam cannot
+	 * ask for one) and a code texted at activation.
+	 *
+	 * `begin` is the one that changes the Steam account. By the time it answers,
+	 * the secrets are already in the vault — see `EnrollmentService`.
+	 */
+	enrollBegin: 'enroll:begin',
+	enrollEmailCode: 'enroll:emailCode',
+	enrollActivate: 'enroll:activate',
+
+	/**
+	 * Write an account back out as a maFile (§12 F2).
+	 *
+	 * The user picks the destination through the OS dialog, so no path crosses
+	 * IPC in either direction — the same rule import follows.
+	 */
+	accountExport: 'account:export'
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];
