@@ -108,7 +108,11 @@ jobs:
 
       # §9.4.4. Covers advisories npm's own database misses.
       - name: osv-scanner (shipping dependencies)
-        uses: google/osv-scanner-action/osv-scanner-action@v2
+        # Pinned to a released tag, not a floating major: this action publishes
+        # no `v2` alias, so `@v2` is unresolvable and fails the job at setup —
+        # before any step runs, which is why it reads as an infrastructure error
+        # rather than an audit finding.
+        uses: google/osv-scanner-action/osv-scanner-action@v2.5.0
         with:
           scan-args: |-
             --lockfile=package-lock.json
