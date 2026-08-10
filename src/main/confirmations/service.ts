@@ -3,7 +3,7 @@ import { describeType, isAutoConfirmable, isSecurityCritical } from './policy';
 import type { Confirmation, ConfirmationAction } from './protocol';
 import { AccessTokenError, mintAccessToken } from '../steam/access-token';
 import { signIn, SteamLoginError } from '../steam/login';
-import { jwtExpiry } from '../steam-jwt';
+import { isUsableMobileToken, jwtExpiry } from '../steam-jwt';
 import type { VaultService } from '../vault/service';
 import type { SteamTransportFactory } from '../net/transport';
 import type { ConfirmationSummary } from '../../shared/ipc';
@@ -43,6 +43,15 @@ export interface ConfirmationsServiceOptions {
 	now?: () => number;
 	/** Shared with the codes, so both sign against one notion of Steam's time. */
 	timeOffsetSeconds?: () => number;
+	/**
+	 * Performs the password sign-in. Injected purely so it can be tested.
+	 *
+	 * Without this the whole sign-in path — including what is done with the token
+	 * it returns — was reachable only by talking to Steam with a real password,
+	 * which means it was not covered at all. A caching rule nobody can exercise is
+	 * a caching rule nobody can prove.
+	 */
+	signIn?: typeof signIn;
 }
 
 /** Re-mint this long before expiry rather than discovering it mid-request. */
@@ -75,6 +84,7 @@ export class ConfirmationsService {
 	private readonly transports: SteamTransportFactory;
 	private readonly now: () => number;
 	private readonly offset: () => number;
+	private readonly performSignIn: typeof signIn;
 
 	private readonly sessions = new Map<string, SessionState>();
 	/**
@@ -118,6 +128,7 @@ export class ConfirmationsService {
 		this.transports = transports;
 		this.now = options.now ?? (() => Date.now());
 		this.offset = options.timeOffsetSeconds ?? ((): number => 0);
+		this.performSignIn = options.signIn ?? signIn;
 	}
 
 	/** Pending confirmations for one account, as the renderer may see them. */
@@ -267,7 +278,7 @@ export class ConfirmationsService {
 			// are still ours.
 			let result;
 			try {
-				result = await signIn(
+				result = await this.performSignIn(
 					{
 						accountName: stored.accountName,
 						password,
@@ -290,7 +301,13 @@ export class ConfirmationsService {
 				account.refreshToken = result.refreshToken;
 			});
 
-			if (result.accessToken) {
+			// Checked the same way the mint path checks it, which this path was not
+			// doing. A truthy string is not a usable session: a web-scoped or
+			// already-expired access token caches perfectly and then fails every
+			// confirmation, which reads as the app being broken rather than as the
+			// token being wrong (F-13). Caching nothing is strictly better — the
+			// next call mints a fresh one through the path that does validate.
+			if (result.accessToken && isUsableMobileToken(result.accessToken, this.now())) {
 				this.sessions.set(steamId64, {
 					accessToken: result.accessToken,
 					expiresAtMs: jwtExpiry(result.accessToken)?.getTime() ?? this.now() + 15 * 60_000
@@ -307,6 +324,16 @@ export class ConfirmationsService {
 	 * leaving it would let the old session keep working over the new route.
 	 */
 	forgetAccount(steamId64: string): void {
+		// Bumped for the same reason `forget` bumps it, and it was missing here:
+		// clearing the maps does nothing to a mint or a list already awaiting the
+		// network, which happily writes its result back afterwards — repopulating
+		// `sessions` with a session established over the *previous* route, which is
+		// exactly the linkage a routing change exists to break.
+		//
+		// Global rather than per-account. The counter is one number for the whole
+		// service, so a routing change costs every in-flight call; that is a few
+		// re-fetches against silently reviving a session that was meant to be gone.
+		this.generation++;
 		this.sessions.delete(steamId64);
 		this.pending.delete(steamId64);
 	}

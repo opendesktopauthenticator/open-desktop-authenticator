@@ -43,9 +43,21 @@ function account(overrides: Partial<Account> = {}): Account {
 	};
 }
 
-/** A vault that holds exactly what the test put in it. */
+/**
+ * A vault that holds exactly what the test put in it.
+ *
+ * `mutate` is real enough to matter: the sign-in path writes the refresh token
+ * back through it, so a stub that only reads makes that whole path untestable —
+ * which is how the token-caching rule went uncovered.
+ */
 function fakeVault(accounts: Account[]): VaultService {
-	return { read: () => ({ accounts }) } as unknown as VaultService;
+	return {
+		read: () => ({ accounts }),
+		mutate: async (apply: (draft: { accounts: Account[] }) => void) => {
+			apply({ accounts });
+			return Promise.resolve();
+		}
+	} as unknown as VaultService;
 }
 
 const TRADE = { id: '11', nonce: 'n-trade', type: 2 };
@@ -357,5 +369,101 @@ describe('operations on one account do not interleave', () => {
 
 		// One operation reached Steam, not two racing ones.
 		expect(sent.filter((request) => request.url.includes('multiajaxop'))).toHaveLength(1);
+	});
+});
+
+/**
+ * Regressions found in the round-7 audit.
+ *
+ * Both are about state surviving something that was supposed to end it: an
+ * in-flight call writing back after a routing change, and a token cached without
+ * the check that decides whether it can work at all.
+ */
+describe('what a routing change invalidates', () => {
+	it('refuses an in-flight call that finishes after forgetAccount', async () => {
+		// `forget` (lock) bumped the generation; `forgetAccount` (routing change)
+		// only cleared the maps. So a mint or a list already awaiting the network
+		// happily wrote its result back afterwards — repopulating a session
+		// established over the *previous* route, which is the exact linkage the
+		// routing change exists to break.
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		const transport = async (request: SteamRequest): Promise<SteamResponse> => {
+			if (request.url.includes('getlist')) {
+				await gate;
+				return { status: 200, text: JSON.stringify({ success: true, conf: [TRADE] }) };
+			}
+			return {
+				status: 200,
+				text: JSON.stringify({ response: { access_token: ACCESS } })
+			};
+		};
+		const transports = {
+			forAccount: () => Promise.resolve(transport)
+		} as unknown as SteamTransportFactory;
+
+		const confirmations = service(fakeVault([account()]), transports);
+		const pending = confirmations.list('76561198000000001');
+
+		confirmations.forgetAccount('76561198000000001');
+		release();
+
+		await expect(pending).rejects.toThrow();
+	});
+});
+
+describe('the access token a sign-in returns', () => {
+	const signInReturning = (accessToken: string) => () =>
+		Promise.resolve({ refreshToken: REFRESH, accessToken });
+
+	it('is cached when it is mobile-scoped and usable', async () => {
+		const { transports, sent } = fakeNetwork();
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: signInReturning(ACCESS)
+		});
+
+		await confirmations.signIn('76561198000000001', 'a-password');
+		await confirmations.list('76561198000000001');
+
+		// Cached, so listing did not have to mint one.
+		expect(sent.some((request) => request.url.includes('GenerateAccessTokenForApp'))).toBe(false);
+	});
+
+	it('is NOT cached when it is web-scoped', async () => {
+		// The mint path checks this; the login path did not. A web-scoped token
+		// caches perfectly and then fails every confirmation, which reads as the
+		// app being broken rather than as the token being wrong (F-13). Caching
+		// nothing is strictly better: the next call mints through the path that
+		// does validate.
+		const webScoped = jwt({ aud: ['web'], exp: Math.floor(NOW / 1000) + 3600 });
+		const { transports, sent } = fakeNetwork();
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: signInReturning(webScoped)
+		});
+
+		await confirmations.signIn('76561198000000001', 'a-password');
+		await confirmations.list('76561198000000001');
+
+		expect(sent.some((request) => request.url.includes('GenerateAccessTokenForApp'))).toBe(true);
+		expect(sent.some((request) => request.cookie?.includes(webScoped))).toBe(false);
+	});
+
+	it('is NOT cached when it has already expired', async () => {
+		const expired = jwt({ aud: ['mobile'], exp: Math.floor(NOW / 1000) - 60 });
+		const { transports, sent } = fakeNetwork();
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: signInReturning(expired)
+		});
+
+		await confirmations.signIn('76561198000000001', 'a-password');
+		await confirmations.list('76561198000000001');
+
+		expect(sent.some((request) => request.url.includes('GenerateAccessTokenForApp'))).toBe(true);
 	});
 });

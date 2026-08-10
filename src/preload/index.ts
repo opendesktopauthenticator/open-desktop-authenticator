@@ -76,7 +76,13 @@ const api: RendererApi = {
 		}) as Promise<{ ok: true }>,
 	setAccountAutoConfirm: (
 		steamId64: string,
-		settings: { marketListings: boolean; trades: boolean; pollIntervalSeconds: number }
+		settings: {
+			marketListings: boolean;
+			trades: boolean;
+			pollIntervalSeconds: number;
+			/** Forwarded, never synthesised here — see `acknowledged` on removeAccount. */
+			tradesAcknowledgement?: string;
+		}
 	) =>
 		ipcRenderer.invoke(CHANNELS.accountSetAutoConfirm, { steamId64, ...settings }) as Promise<{
 			ok: true;

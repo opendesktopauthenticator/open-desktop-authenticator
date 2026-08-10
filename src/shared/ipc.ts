@@ -26,6 +26,15 @@ import { CHANNELS, type ChannelName } from './channels';
 /** No arguments. Declared explicitly rather than omitted, so every channel has a schema. */
 const emptyRequest = z.object({}).strict();
 
+/**
+ * The words a user must type to switch automatic trade confirmation on.
+ *
+ * Declared here, in the contract, because the main process is what enforces it.
+ * The screen imports this same constant so the two cannot drift — a gate whose
+ * wording differs between the field and the check is a gate that silently opens.
+ */
+export const TRADES_ACK = 'APPROVE TRADES';
+
 export const appInfoResponse = z.object({
 	productName: z.string(),
 	version: z.string(),
@@ -465,9 +474,30 @@ export const IPC_CONTRACT = {
 				 * here: a tighter loop is rate-limit bait, and the point of automatic
 				 * confirmation is not to be fast.
 				 */
-				pollIntervalSeconds: z.number().int().min(10).max(3600)
+				pollIntervalSeconds: z.number().int().min(10).max(3600),
+				/**
+				 * The literal words the user had to type to switch trades on.
+				 *
+				 * Required **only when enabling trades**, and enforced in the main
+				 * process rather than by the screen that collects it. The typing gate
+				 * was renderer-only, which makes it a UI convention rather than a
+				 * control: anything reaching this channel could turn on automatic
+				 * approval of trades without it.
+				 *
+				 * Trades are the setting that spends money while nobody is watching,
+				 * so the acknowledgement lives at the boundary that actually decides.
+				 */
+				tradesAcknowledgement: z.string().optional()
 			})
-			.strict(),
+			.strict()
+			.refine(
+				(value) =>
+					!value.trades || value.tradesAcknowledgement?.trim().toUpperCase() === TRADES_ACK,
+				{
+					message: 'enabling automatic trade confirmation requires the typed acknowledgement',
+					path: ['tradesAcknowledgement']
+				}
+			),
 		response: okResponse
 	},
 
@@ -563,7 +593,13 @@ export interface RendererApi {
 	/** Enable or disable automatic confirmation for one account, per type. */
 	setAccountAutoConfirm(
 		steamId64: string,
-		settings: { marketListings: boolean; trades: boolean; pollIntervalSeconds: number }
+		settings: {
+			marketListings: boolean;
+			trades: boolean;
+			pollIntervalSeconds: number;
+			/** Required by the contract when switching `trades` on. See `TRADES_ACK`. */
+			tradesAcknowledgement?: string;
+		}
 	): Promise<{ ok: true }>;
 	/**
 	 * Remove an account and its secrets from this vault.

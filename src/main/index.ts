@@ -193,8 +193,13 @@ function start(): void {
 		// instead of being told to accept it. If a future edit needs the cast back,
 		// that is the signal the interface has drifted from Electron again.
 		sessionFromPartition: (partition, options) => session.fromPartition(partition, options),
-		request: ({ url, method, session: accountSession }) =>
-			net.request({ url, method, session: accountSession as unknown as Electron.Session })
+		request: ({ url, method, session: accountSession, redirect }) =>
+			net.request({
+				url,
+				method,
+				session: accountSession as unknown as Electron.Session,
+				...(redirect === undefined ? {} : { redirect })
+			})
 	};
 	const transports = new SteamTransportFactory(networking);
 	const ceremony = new RevocationCeremony();
@@ -272,7 +277,12 @@ function start(): void {
 			// everything else.
 			fetchText: async (url) => {
 				const response = await net.fetch(url, {
-					headers: { Accept: 'application/vnd.github+json', 'User-Agent': branding.binaryName }
+					headers: { Accept: 'application/vnd.github+json', 'User-Agent': branding.binaryName },
+					// The URL is derived from `branding.repository` and pinned to
+					// api.github.com. Following a redirect would let whatever answers
+					// that name send us somewhere else, and the only thing checked
+					// afterwards is the shape of the JSON that comes back.
+					redirect: 'error'
 				});
 				if (!response.ok) {
 					throw new Error(`GitHub answered ${response.status}`);

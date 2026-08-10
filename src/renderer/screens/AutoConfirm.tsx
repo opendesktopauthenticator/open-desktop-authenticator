@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { AccountSummary } from '../../shared/ipc';
+import { TRADES_ACK, type AccountSummary } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -30,6 +30,7 @@ export function AutoConfirm({
 		marketListings: boolean;
 		trades: boolean;
 		pollIntervalSeconds: number;
+		tradesAcknowledgement?: string;
 	}) => Promise<unknown>;
 	onClose: () => void;
 }): React.JSX.Element {
@@ -62,7 +63,14 @@ export function AutoConfirm({
 		}
 		setBusy(true);
 		setError(undefined);
-		onSave({ marketListings, trades, pollIntervalSeconds })
+		// The acknowledgement travels with the change. Main enforces it — the
+		// typing gate here is the prompt, not the control.
+		onSave({
+			marketListings,
+			trades,
+			pollIntervalSeconds,
+			...(turningTradesOn ? { tradesAcknowledgement: acknowledgement } : {})
+		})
 			.then(() => onClose())
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => setBusy(false));
@@ -118,7 +126,7 @@ export function AutoConfirm({
 				{turningTradesOn && (
 					<>
 						<label htmlFor="trade-acknowledgement">
-							Type <code>APPROVE TRADES</code> to switch this on
+							Type <code>{TRADES_ACK}</code> to switch this on
 						</label>
 						<input
 							id="trade-acknowledgement"

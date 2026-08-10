@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	checkForUpdate,
+	compareVersions,
 	isNewer,
 	releasesApiUrl,
 	verifiedInstallAvailable
@@ -164,5 +165,39 @@ describe('what the updater must not do', () => {
 		expect(gh.asked[0]).toBe(releasesApiUrl(branding.repository));
 		// No asset, no archive, no installer.
 		expect(gh.asked.join(' ')).not.toMatch(/\.exe|\.zip|\.AppImage|\.msi|releases\/download/);
+	});
+});
+
+/**
+ * Regression: an unreadable version was reported as `upToDate`.
+ *
+ * `isNewer` returns false both for "older" and for "cannot tell", and the caller
+ * mapped false to up-to-date. So a pre-release tag on the repository, or a build
+ * whose own version string was malformed, pinned every user behind a reassuring
+ * tick — the one answer this must never guess at.
+ */
+describe('a version it cannot read', () => {
+	it('reports unknown rather than up to date for a pre-release tag', async () => {
+		const gh = github({ tag_name: 'v2.0.0-rc.1', html_url: RELEASE_URL });
+
+		const result = await checkForUpdate({ ...gh, currentVersion: '0.1.0' });
+
+		expect(result.state).toBe('unknown');
+		expect(result.state).not.toBe('upToDate');
+	});
+
+	it('reports unknown when this build has no readable version', async () => {
+		const gh = github({ tag_name: 'v0.1.0', html_url: RELEASE_URL });
+
+		const result = await checkForUpdate({ ...gh, currentVersion: 'dev' });
+
+		expect(result.state).toBe('unknown');
+	});
+
+	it('still reports up to date when both versions are readable and equal', () => {
+		expect(compareVersions('v1.2.3', 'v1.2.3')).toBe('notNewer');
+		expect(compareVersions('v1.2.2', 'v1.2.3')).toBe('notNewer');
+		expect(compareVersions('v1.2.4', 'v1.2.3')).toBe('newer');
+		expect(compareVersions('v1.2.4-rc.1', 'v1.2.3')).toBe('unknown');
 	});
 });

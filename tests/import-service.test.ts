@@ -536,3 +536,59 @@ function existingAccount(): Account {
 		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
 	};
 }
+
+/**
+ * Regression: a re-import that adopted a different proxy kept the refresh token.
+ *
+ * `applyProxyChange` in Settings already deletes it when routing changes — an
+ * import adopting a new proxy is the same event through a different door, and it
+ * was keeping the session. Steam can link the old exit address to the new one
+ * through that one long-lived token, which is exactly what per-account routing
+ * exists to prevent.
+ */
+describe('a session across a routing change', () => {
+	it('discards the stored refresh token when an import adopts a different proxy', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push({
+				...existingAccount(),
+				proxyUrl: 'socks5://old:secret@127.0.0.1:1080',
+				refreshToken: 'token-minted-over-the-old-route'
+			});
+		});
+
+		const id = stageOne(file({ Session: { proxy: 'socks5://new:secret@10.0.0.1:1080' } }));
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: true }]);
+
+		const stored = vault.read().accounts[0];
+		expect(stored?.proxyUrl).toBe('socks5://new:secret@10.0.0.1:1080');
+		expect(stored?.refreshToken).toBeUndefined();
+	});
+
+	it('keeps the token when the route is unchanged', async () => {
+		// Re-importing the same account over the same route is not a routing event,
+		// and forcing a password re-entry for it would be friction for nothing.
+		await vault.mutate((draft) => {
+			draft.accounts.push({
+				...existingAccount(),
+				proxyUrl: 'socks5://same:secret@127.0.0.1:1080',
+				refreshToken: 'still-valid'
+			});
+		});
+
+		const id = stageOne(file({ Session: { proxy: 'socks5://same:secret@127.0.0.1:1080' } }));
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: true }]);
+
+		expect(vault.read().accounts[0]?.refreshToken).toBe('still-valid');
+	});
+
+	it('keeps the token when the file brings no proxy and none is adopted', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push({ ...existingAccount(), refreshToken: 'unrouted-and-fine' });
+		});
+
+		const id = stageOne(file());
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+		expect(vault.read().accounts[0]?.refreshToken).toBe('unrouted-and-fine');
+	});
+});

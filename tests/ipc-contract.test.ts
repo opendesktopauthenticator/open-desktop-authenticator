@@ -6,7 +6,8 @@ import {
 	appInfoResponse,
 	codesListResponse,
 	confirmationsListResponse,
-	importReportResponse
+	importReportResponse,
+	TRADES_ACK
 } from '../src/shared/ipc';
 
 /**
@@ -382,3 +383,51 @@ function sampleResponse(channel: string): Record<string, unknown> {
 			return { ok: true };
 	}
 }
+
+/**
+ * The typed acknowledgement for automatic trade confirmation.
+ *
+ * It was a renderer convention: the screen made you type the words, and the
+ * channel accepted `trades: true` from anything that reached it. Trades are the
+ * one setting that lets items leave an account with nobody watching, so the gate
+ * belongs at the boundary that actually decides — not on the form that collects it.
+ */
+describe('enabling automatic trade confirmation', () => {
+	const { request } = IPC_CONTRACT[CHANNELS.accountSetAutoConfirm];
+	const base = {
+		steamId64: '76561198000000001',
+		marketListings: false,
+		pollIntervalSeconds: 15
+	};
+
+	it('refuses trades:true with no acknowledgement', () => {
+		expect(request.safeParse({ ...base, trades: true }).success).toBe(false);
+	});
+
+	it('refuses trades:true with the wrong words', () => {
+		for (const wrong of ['approve', 'yes', 'APPROVE', 'APPROVE TRADE', '']) {
+			expect(
+				request.safeParse({ ...base, trades: true, tradesAcknowledgement: wrong }).success,
+				wrong
+			).toBe(false);
+		}
+	});
+
+	it('accepts trades:true with the exact words, however cased or padded', () => {
+		for (const right of [TRADES_ACK, '  approve trades  ', 'Approve Trades']) {
+			expect(
+				request.safeParse({ ...base, trades: true, tradesAcknowledgement: right }).success,
+				right
+			).toBe(true);
+		}
+	});
+
+	it('needs no acknowledgement to switch trades OFF', () => {
+		// Turning a dangerous thing off is never something to make harder.
+		expect(request.safeParse({ ...base, trades: false }).success).toBe(true);
+	});
+
+	it('needs no acknowledgement for market listings alone', () => {
+		expect(request.safeParse({ ...base, marketListings: true, trades: false }).success).toBe(true);
+	});
+});

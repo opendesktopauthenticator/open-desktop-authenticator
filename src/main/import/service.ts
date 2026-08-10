@@ -485,15 +485,30 @@ function mergeAccount(
 	const deviceId = parsed.deviceId ?? existing.deviceId;
 	if (deviceId !== undefined) merged.deviceId = deviceId;
 
-	const refreshToken = parsed.refreshToken ?? existing.refreshToken;
-	if (refreshToken !== undefined) merged.refreshToken = refreshToken;
-
 	// Declining the file's proxy leaves whatever routing the user set in the app
 	// alone — it does not clear it. "Do not adopt this file's proxy" and "switch
 	// routing off for this account" are different requests, and the second one has
 	// its own screen. Adopting replaces, because that is what adopting means.
 	const proxyUrl = (adoptProxy ? parsed.proxyUrl : undefined) ?? existing.proxyUrl;
 	if (proxyUrl !== undefined) merged.proxyUrl = proxyUrl;
+
+	const refreshToken = parsed.refreshToken ?? existing.refreshToken;
+
+	// **A session established over one route must not survive onto another.**
+	// `applyProxyChange` already deletes the refresh token when routing changes
+	// in Settings; an import that adopts a different proxy is the same event
+	// arriving by a different door, and it was keeping the token. Steam can link
+	// the two addresses through one long-lived session, which is precisely what
+	// per-account routing exists to prevent.
+	//
+	// Signing in again is the cost, and it is the right one: the alternative is a
+	// silent, permanent link between the user's old exit and their new one.
+	const routeChanged = proxyUrl !== existing.proxyUrl;
+	if (refreshToken !== undefined && !routeChanged) {
+		merged.refreshToken = refreshToken;
+	} else {
+		delete merged.refreshToken;
+	}
 
 	return merged;
 }

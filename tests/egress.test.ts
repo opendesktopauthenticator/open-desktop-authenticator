@@ -110,6 +110,8 @@ function fakeElectron(
 		challengeAsOrigin?: boolean;
 		/** Overrides what `resolveProxy` reports, whatever `setProxy` was given. */
 		resolvesTo?: string;
+		/** Leaves the request hanging, so a lock has something in flight to cancel. */
+		neverSettles?: boolean;
 	} = {}
 ): {
 	electron: ElectronNetworking;
@@ -126,7 +128,11 @@ function fakeElectron(
 		body: string;
 		/** Credentials this request answered the proxy challenge with, if any. */
 		proxyAuth?: { username?: string; password?: string };
+		/** Redirect policy the transport asked for. Must always be `error`. */
+		redirect?: string;
 	}[];
+	/** How many in-flight requests were cancelled. */
+	aborted: () => number;
 	failSetProxy?: Error;
 } {
 	const sessions: {
@@ -141,7 +147,9 @@ function fakeElectron(
 		headers: Record<string, string>;
 		body: string;
 		proxyAuth?: { username?: string; password?: string };
+		redirect?: string;
 	}[] = [];
+	let aborts = 0;
 	const state: { failSetProxy?: Error } = {};
 
 	/**
@@ -213,8 +221,14 @@ function fakeElectron(
 			byPartition.set(partition, session);
 			return session;
 		},
-		request({ url, method }) {
-			const entry: (typeof requests)[number] = { url, method, headers: {}, body: '' };
+		request({ url, method, redirect }) {
+			const entry: (typeof requests)[number] = {
+				url,
+				method,
+				headers: {},
+				body: '',
+				...(redirect === undefined ? {} : { redirect })
+			};
 			requests.push(entry);
 
 			const listeners: Record<string, ((...args: never[]) => void)[]> = {};
@@ -226,6 +240,9 @@ function fakeElectron(
 					entry.body += chunk;
 				},
 				end() {
+					if (reply.neverSettles === true) {
+						return;
+					}
 					queueMicrotask(() => {
 						// The proxy challenges during CONNECT, before the request is sent.
 						// Nothing answering means no credentials reach it, and Chromium
@@ -278,13 +295,16 @@ function fakeElectron(
 				},
 				on(event, listener) {
 					(listeners[event] ??= []).push(listener);
+				},
+				abort() {
+					aborts += 1;
 				}
 			};
 			return handle;
 		}
 	};
 
-	return { electron, sessions, requests, ...state };
+	return { electron, sessions, requests, aborted: () => aborts, ...state };
 }
 
 describe('the transport', () => {
@@ -878,5 +898,100 @@ describe('reading a resolveProxy answer', () => {
 		for (const answer of ['SOCKS5 10.0.0.1:1080', 'PROXY 1.2.3.4:8080', 'PROXY a:1; PROXY b:2']) {
 			expect(describesDirectRoute(answer), answer).toBe(false);
 		}
+	});
+});
+
+/**
+ * Regression: a lock did not stop a request already on the wire.
+ *
+ * `runAutoConfirm` checked the generation counter between calls, which does
+ * nothing to a call in the middle: the approve POST was already sent, so Steam
+ * accepted the trade while the application had reported that locking stops
+ * automatic confirmation. Aborting narrows that to the physical race nobody can
+ * close — a request Steam has already received cannot be recalled.
+ */
+describe('cancelling work when the vault locks', () => {
+	const routed = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.1:1080' };
+
+	it('aborts a request that is still in flight', async () => {
+		const { electron, aborted } = fakeElectron({ neverSettles: true });
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(routed);
+
+		void transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+		// The routing check is awaited before the request is built, so the handle
+		// does not exist synchronously. Letting the microtask queue drain puts the
+		// request genuinely on the wire, which is the state under test.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(aborted()).toBe(0);
+
+		factory.forget(routed.steamId64);
+
+		expect(aborted()).toBe(1);
+	});
+
+	it('aborts every account on forgetAll, which is what a lock calls', async () => {
+		const { electron, aborted } = fakeElectron({ neverSettles: true });
+		const factory = new SteamTransportFactory(electron);
+
+		const a = await factory.forAccount(routed);
+		const b = await factory.forAccount({ steamId64: '76561198000000002' });
+		void a({ url: STEAM_URL, method: 'GET', cookie: '' });
+		void b({ url: STEAM_URL, method: 'GET', cookie: '' });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		factory.forgetAll();
+
+		expect(aborted()).toBe(2);
+	});
+
+	it('does not abort a request that already finished', async () => {
+		const { electron, aborted } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(routed);
+
+		await transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+		factory.forget(routed.steamId64);
+
+		// Settled requests are dropped from tracking, so a lock has nothing to
+		// cancel and cannot spend time on dead handles.
+		expect(aborted()).toBe(0);
+	});
+});
+
+describe('redirects', () => {
+	it('refuses to follow one, so a session cookie cannot leave Steam', async () => {
+		// `isSteamEndpoint` only ever sees the first URL. Electron follows redirects
+		// by default, so a 302 would carry `steamLoginSecure` to whatever host the
+		// Location header named, and nothing would check it.
+		const { electron, requests } = fakeElectron();
+		const transport = await new SteamTransportFactory(electron).forAccount({
+			steamId64: '76561198000000001'
+		});
+
+		await transport({ url: STEAM_URL, method: 'GET', cookie: 'steamLoginSecure=live' });
+
+		expect(requests[0]?.redirect).toBe('error');
+	});
+});
+
+describe('a request committed but not yet sent', () => {
+	it('is refused if the account is forgotten during the routing check', async () => {
+		// The window `abort` cannot reach: `perform` awaits `resolveProxy` before it
+		// builds a handle, so a lock landing inside that await finds nothing to
+		// cancel — and the request would then be sent afterwards, over a session the
+		// lock was supposed to end.
+		const { electron, requests } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount({
+			steamId64: '76561198000000001',
+			proxyUrl: 'socks5://10.0.0.1:1080'
+		});
+
+		const pending = transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+		factory.forget('76561198000000001');
+
+		await expect(pending).rejects.toThrow(/closed before the request was sent/);
+		expect(requests).toHaveLength(0);
 	});
 });

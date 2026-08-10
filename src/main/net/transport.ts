@@ -36,7 +36,24 @@ import type { SteamRequest, SteamResponse, SteamTransport } from '../confirmatio
 /** The slice of Electron this module needs. Injected so tests can supply fakes. */
 export interface ElectronNetworking {
 	sessionFromPartition(partition: string, options?: { cache: boolean }): ProxyCapableSession;
-	request(options: { url: string; method: string; session: ProxyCapableSession }): NetRequestHandle;
+	request(options: {
+		url: string;
+		method: string;
+		session: ProxyCapableSession;
+		/**
+		 * Redirect policy. **Always `'error'` for Steam traffic.**
+		 *
+		 * `isSteamEndpoint` is checked against the URL we are about to request, and
+		 * Electron's default is to follow redirects — so a `302` from Valve's
+		 * infrastructure, or from anything able to answer in its place, would carry
+		 * the `steamLoginSecure` cookie to whatever host the `Location` header
+		 * names. The allowlist would never see that hop.
+		 *
+		 * mobileconf does not redirect in normal operation, so failing on one costs
+		 * nothing and closes a session-exfiltration path that no other check covers.
+		 */
+		redirect?: 'follow' | 'error' | 'manual';
+	}): NetRequestHandle;
 }
 
 /** Chromium's proxy modes, spelled as Electron declares them. */
@@ -78,6 +95,19 @@ export interface NetRequestHandle {
 	setHeader(name: string, value: string): void;
 	write(chunk: string): void;
 	end(): void;
+	/**
+	 * Cancel a request that is already on the wire.
+	 *
+	 * Needed because a generation check between calls does not stop the call in
+	 * the middle. Auto-confirm's approve POST is the case that matters: the vault
+	 * locking after the request is sent leaves Steam approving a trade the app has
+	 * already promised it stopped doing.
+	 *
+	 * This narrows the window rather than abolishing it — a POST Steam has already
+	 * received cannot be recalled by anyone. What it removes is the app continuing
+	 * to *issue* work after a lock, which is the part we control.
+	 */
+	abort?(): void;
 	on(event: 'response', listener: (response: NetResponseHandle) => void): void;
 	on(event: 'error', listener: (error: Error) => void): void;
 	/**
@@ -141,6 +171,25 @@ export class SteamTransportFactory {
 	private readonly electron: ElectronNetworking;
 	private readonly sessions = new Map<string, ProxyCapableSession>();
 	private readonly routing = new Map<string, RoutingStatus>();
+	/**
+	 * Requests currently on the wire, per account, so a lock can cancel them.
+	 *
+	 * Without this, "everything stops while the vault is locked" is only true
+	 * between calls. Auto-confirm's approve POST is the case that made it matter:
+	 * a lock landing after the request was sent left Steam approving a trade the
+	 * application had already reported it would not.
+	 */
+	private readonly inFlight = new Map<string, Set<NetRequestHandle>>();
+	/**
+	 * Bumped whenever an account is forgotten.
+	 *
+	 * Aborting handles only reaches requests that exist. `perform` awaits the
+	 * routing check before it builds one, so a lock landing inside that await
+	 * would find nothing to cancel and the request would then go out anyway —
+	 * after the lock, over a session that was meant to be gone. Comparing this
+	 * across the await closes that window.
+	 */
+	private readonly epoch = new Map<string, number>();
 	private readonly now: () => number;
 
 	constructor(electron: ElectronNetworking, now: () => number = () => Date.now()) {
@@ -254,6 +303,12 @@ export class SteamTransportFactory {
 	 * next time this account connected. The jar has to be emptied explicitly.
 	 */
 	forget(steamId64: string): void {
+		// **Before** the session goes. A request already on the wire is the part a
+		// generation check cannot reach: the caller is inside `await`, so nothing
+		// re-examines whether the vault is still unlocked until the answer arrives —
+		// by which point Steam has acted on it.
+		this.abortInFlight(steamId64);
+
 		const session = this.sessions.get(steamId64);
 		this.sessions.delete(steamId64);
 		// Fire and forget: nothing waits on a cookie jar being empty, and a failure
@@ -269,8 +324,33 @@ export class SteamTransportFactory {
 	 * lock a smaller thing than it claims to be.
 	 */
 	forgetAll(): void {
-		for (const steamId64 of [...this.sessions.keys()]) {
+		// Every account with work in the air, not only those holding a session — an
+		// account can have a request out before its session is cached.
+		for (const steamId64 of new Set([...this.sessions.keys(), ...this.inFlight.keys()])) {
 			this.forget(steamId64);
+		}
+	}
+
+	/**
+	 * Cancel this account's outstanding requests.
+	 *
+	 * Best effort by nature. A POST Steam has already received cannot be recalled
+	 * by anyone, so this narrows the window rather than abolishing it — what it
+	 * removes is the application continuing to issue and await work after a lock,
+	 * which is the part we actually control.
+	 */
+	private abortInFlight(steamId64: string): void {
+		this.epoch.set(steamId64, (this.epoch.get(steamId64) ?? 0) + 1);
+
+		const handles = this.inFlight.get(steamId64);
+		this.inFlight.delete(steamId64);
+		for (const handle of handles ?? []) {
+			try {
+				handle.abort?.();
+			} catch {
+				// Already finished, or a fake without one. Either way there is nothing
+				// left to stop, and a lock must not fail because of it.
+			}
 		}
 	}
 
@@ -330,12 +410,21 @@ export class SteamTransportFactory {
 		steamId64: string
 	): Promise<SteamResponse> {
 		const routedThrough = plan?.redacted;
+		const startedAt = this.epoch.get(steamId64) ?? 0;
 
 		// Before anything is sent, and before the endpoint check below, because a
 		// refusal to route is not a reason to look at the URL — it is a reason to
 		// send nothing at all.
 		if (plan) {
 			await this.assertRouted(session, steamId64, plan, ROUTING_PROBE_URL);
+		}
+
+		// Re-checked after the await. A lock or a routing change landing inside it
+		// had no handle to abort, so without this the request is built and sent
+		// afterwards — which is precisely the "auto-confirm approves after lock"
+		// case, one layer lower than where it was first noticed.
+		if ((this.epoch.get(steamId64) ?? 0) !== startedAt) {
+			throw new EgressError('this account was closed before the request was sent');
 		}
 
 		return new Promise<SteamResponse>((resolve, reject) => {
@@ -352,7 +441,11 @@ export class SteamTransportFactory {
 			const handle = this.electron.request({
 				url: request.url,
 				method: request.method,
-				session
+				session,
+				// See `ElectronNetworking.request`. The allowlist only ever sees the
+				// first URL, so following a redirect would send a live Steam session
+				// somewhere nothing checked.
+				redirect: 'error'
 			});
 
 			// Registered before anything is written, because the challenge arrives
@@ -386,6 +479,13 @@ export class SteamTransportFactory {
 				handle.setHeader('Content-Type', 'application/x-www-form-urlencoded');
 			}
 
+			// Tracked from the moment it exists, so a lock arriving mid-request has
+			// something to cancel. Removed on settle, whatever the outcome —
+			// otherwise a long-lived account accumulates dead handles forever.
+			const outstanding = this.inFlight.get(steamId64) ?? new Set<NetRequestHandle>();
+			outstanding.add(handle);
+			this.inFlight.set(steamId64, outstanding);
+
 			let settled = false;
 			const finish = (run: () => void): void => {
 				if (settled) {
@@ -393,6 +493,10 @@ export class SteamTransportFactory {
 				}
 				settled = true;
 				clearTimeout(timer);
+				outstanding.delete(handle);
+				if (outstanding.size === 0) {
+					this.inFlight.delete(steamId64);
+				}
 				run();
 			};
 

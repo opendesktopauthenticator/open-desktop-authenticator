@@ -83,7 +83,10 @@ export function releasesApiUrl(repositoryUrl: string): string {
  * pre-release suffix is **not** offered as an update — someone running a stable
  * build should not be walked onto a beta by a version comparison.
  */
-export function isNewer(candidate: string, current: string): boolean {
+export function compareVersions(
+	candidate: string,
+	current: string
+): 'newer' | 'notNewer' | 'unknown' {
 	const parse = (value: string): number[] | undefined => {
 		const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(value.trim());
 		return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : undefined;
@@ -91,18 +94,27 @@ export function isNewer(candidate: string, current: string): boolean {
 
 	const a = parse(candidate);
 	const b = parse(current);
-	// An unparseable version on either side is not evidence of an update. Saying
-	// "up to date" would be a lie, so the caller reports `unknown` instead.
+	// **A third answer, not `false`.** An unparseable version on either side is
+	// not evidence that there is no update — it is evidence that we cannot tell.
+	// Collapsing it into "not newer" made the caller report `upToDate`, which is
+	// the one thing it must never say when it does not know: a pre-release tag on
+	// the repository, or a build whose own version is malformed, would silently
+	// pin every user to a reassuring tick.
 	if (!a || !b) {
-		return false;
+		return 'unknown';
 	}
 
 	for (let i = 0; i < 3; i += 1) {
 		if ((a[i] as number) !== (b[i] as number)) {
-			return (a[i] as number) > (b[i] as number);
+			return (a[i] as number) > (b[i] as number) ? 'newer' : 'notNewer';
 		}
 	}
-	return false;
+	return 'notNewer';
+}
+
+/** True only when `candidate` is a readable version strictly newer than `current`. */
+export function isNewer(candidate: string, current: string): boolean {
+	return compareVersions(candidate, current) === 'newer';
 }
 
 const releaseShape = (value: unknown): ReleaseInfo | undefined => {
@@ -165,7 +177,17 @@ export async function checkForUpdate(deps: UpdateCheckDeps): Promise<UpdateCheck
 		return { state: 'unknown', reason: 'GitHub sent something that was not a release' };
 	}
 
-	return isNewer(release.version, deps.currentVersion)
-		? { state: 'updateAvailable', release }
-		: { state: 'upToDate' };
+	switch (compareVersions(release.version, deps.currentVersion)) {
+		case 'newer':
+			return { state: 'updateAvailable', release };
+		case 'notNewer':
+			return { state: 'upToDate' };
+		default:
+			// Neither "there is an update" nor "you are current" is true here, and
+			// the second is the dangerous one to guess at.
+			return {
+				state: 'unknown',
+				reason: `could not compare ${release.version} against this build (${deps.currentVersion})`
+			};
+	}
 }
