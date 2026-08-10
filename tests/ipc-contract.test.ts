@@ -7,6 +7,7 @@ import {
 	codesListResponse,
 	confirmationsListResponse,
 	importReportResponse,
+	matchesTradesAck,
 	TRADES_ACK
 } from '../src/shared/ipc';
 
@@ -387,12 +388,16 @@ function sampleResponse(channel: string): Record<string, unknown> {
 /**
  * The typed acknowledgement for automatic trade confirmation.
  *
- * It was a renderer convention: the screen made you type the words, and the
- * channel accepted `trades: true` from anything that reached it. Trades are the
- * one setting that lets items leave an account with nobody watching, so the gate
- * belongs at the boundary that actually decides — not on the form that collects it.
+ * The *contract* only carries the field. Whether it is required depends on
+ * whether trades are being turned on, which needs the account's current
+ * setting — so the gate lives in the handler, and `vault-ipc` covers it.
+ *
+ * A first attempt enforced it here on `trades === true` alone, which made every
+ * later edit impossible: once trades were on, the screen correctly stopped
+ * asking for an acknowledgement, and the contract then refused the save. These
+ * tests exist so that shape cannot come back.
  */
-describe('enabling automatic trade confirmation', () => {
+describe('the trades acknowledgement field', () => {
 	const { request } = IPC_CONTRACT[CHANNELS.accountSetAutoConfirm];
 	const base = {
 		steamId64: '76561198000000001',
@@ -400,34 +405,31 @@ describe('enabling automatic trade confirmation', () => {
 		pollIntervalSeconds: 15
 	};
 
-	it('refuses trades:true with no acknowledgement', () => {
-		expect(request.safeParse({ ...base, trades: true }).success).toBe(false);
-	});
-
-	it('refuses trades:true with the wrong words', () => {
-		for (const wrong of ['approve', 'yes', 'APPROVE', 'APPROVE TRADE', '']) {
-			expect(
-				request.safeParse({ ...base, trades: true, tradesAcknowledgement: wrong }).success,
-				wrong
-			).toBe(false);
-		}
-	});
-
-	it('accepts trades:true with the exact words, however cased or padded', () => {
-		for (const right of [TRADES_ACK, '  approve trades  ', 'Approve Trades']) {
-			expect(
-				request.safeParse({ ...base, trades: true, tradesAcknowledgement: right }).success,
-				right
-			).toBe(true);
-		}
-	});
-
-	it('needs no acknowledgement to switch trades OFF', () => {
-		// Turning a dangerous thing off is never something to make harder.
+	it('is optional, because only the handler knows if this is a transition', () => {
+		expect(request.safeParse({ ...base, trades: true }).success).toBe(true);
 		expect(request.safeParse({ ...base, trades: false }).success).toBe(true);
 	});
 
-	it('needs no acknowledgement for market listings alone', () => {
-		expect(request.safeParse({ ...base, marketListings: true, trades: false }).success).toBe(true);
+	it('is carried through when supplied', () => {
+		const parsed = request.safeParse({
+			...base,
+			trades: true,
+			tradesAcknowledgement: TRADES_ACK
+		});
+		expect(parsed.success && parsed.data.tradesAcknowledgement).toBe(TRADES_ACK);
+	});
+
+	it('matches the phrase however it is cased, padded or spaced', () => {
+		// A person typing two words is not deciding how many spaces go between
+		// them. Refusing that reads as the feature being broken.
+		for (const typed of [TRADES_ACK, 'approve trades', '  Approve  Trades  ', 'APPROVE	TRADES']) {
+			expect(matchesTradesAck(typed), typed).toBe(true);
+		}
+	});
+
+	it('does not match anything else', () => {
+		for (const typed of [undefined, '', 'approve', 'APPROVETRADES', 'approve trade', 'yes']) {
+			expect(matchesTradesAck(typed), String(typed)).toBe(false);
+		}
 	});
 });

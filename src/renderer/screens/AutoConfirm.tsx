@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { TRADES_ACK, type AccountSummary } from '../../shared/ipc';
+import { matchesTradesAck, TRADES_ACK, type AccountSummary } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -53,8 +53,7 @@ export function AutoConfirm({
 	 * one click.
 	 */
 	const turningTradesOn = trades && !account.autoConfirm.trades;
-	const acknowledged =
-		!turningTradesOn || acknowledgement.trim().toUpperCase() === 'APPROVE TRADES';
+	const acknowledged = !turningTradesOn || matchesTradesAck(acknowledgement);
 
 	const submit = (event: React.FormEvent): void => {
 		event.preventDefault();

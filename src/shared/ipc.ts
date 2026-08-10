@@ -35,6 +35,24 @@ const emptyRequest = z.object({}).strict();
  */
 export const TRADES_ACK = 'APPROVE TRADES';
 
+/**
+ * Whether what the user typed counts as the acknowledgement.
+ *
+ * Shared by the screen that collects it and the handler that enforces it, so the
+ * two cannot disagree — a gate that accepts in one place and rejects in the
+ * other is worse than no gate, because it reads as the application being broken.
+ *
+ * Internal whitespace is collapsed. The first version compared after `trim()`
+ * only, so `APPROVE  TRADES` was refused: a person typing two words is not
+ * making a security decision about how many spaces sit between them, and
+ * refusing that teaches them the feature is flaky rather than that the phrase
+ * matters. Case and surrounding space were already forgiven; this is the same
+ * judgement applied consistently.
+ */
+export function matchesTradesAck(typed: string | undefined): boolean {
+	return typed !== undefined && typed.trim().replace(/\s+/g, ' ').toUpperCase() === TRADES_ACK;
+}
+
 export const appInfoResponse = z.object({
 	productName: z.string(),
 	version: z.string(),
@@ -478,26 +496,23 @@ export const IPC_CONTRACT = {
 				/**
 				 * The literal words the user had to type to switch trades on.
 				 *
-				 * Required **only when enabling trades**, and enforced in the main
-				 * process rather than by the screen that collects it. The typing gate
-				 * was renderer-only, which makes it a UI convention rather than a
-				 * control: anything reaching this channel could turn on automatic
-				 * approval of trades without it.
+				 * Required only when trades are being **turned on**, and checked in the
+				 * handler rather than here. The schema cannot do it: whether this is a
+				 * transition depends on what the account's setting already is, and the
+				 * contract has no access to the vault.
 				 *
-				 * Trades are the setting that spends money while nobody is watching,
-				 * so the acknowledgement lives at the boundary that actually decides.
+				 * A first attempt did enforce it here, on `trades === true` alone. That
+				 * demanded the phrase again for every later edit — so once trades were
+				 * on, changing the poll interval was impossible, because the screen
+				 * correctly stops asking for an acknowledgement it does not need.
+				 *
+				 * Trades are the setting that spends money while nobody is watching, so
+				 * the gate belongs at the boundary that decides — but on the transition,
+				 * not on the value.
 				 */
 				tradesAcknowledgement: z.string().optional()
 			})
-			.strict()
-			.refine(
-				(value) =>
-					!value.trades || value.tradesAcknowledgement?.trim().toUpperCase() === TRADES_ACK,
-				{
-					message: 'enabling automatic trade confirmation requires the typed acknowledgement',
-					path: ['tradesAcknowledgement']
-				}
-			),
+			.strict(),
 		response: okResponse
 	},
 

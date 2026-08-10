@@ -3,7 +3,7 @@ import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { planProxy } from '../net/egress';
 import type { RoutingStatus } from '../net/transport';
-import type { AccountSummary } from '../../shared/ipc';
+import { matchesTradesAck, TRADES_ACK, type AccountSummary } from '../../shared/ipc';
 
 /**
  * The vault's IPC surface (§11 S6, §24.3).
@@ -162,12 +162,22 @@ export function registerVaultHandlers(
 
 	registerHandler(
 		CHANNELS.accountSetAutoConfirm,
-		async ({ steamId64, marketListings, trades, pollIntervalSeconds }) => {
+		async ({ steamId64, marketListings, trades, pollIntervalSeconds, tradesAcknowledgement }) => {
 			await vault.mutate((draft) => {
 				const account = draft.accounts.find((entry) => entry.steamId64 === steamId64);
 				if (!account) {
 					throw new Error('no such account in this vault');
 				}
+
+				// The gate is on the **transition**, which only this side knows about.
+				// Switching trades on is the one change here that lets items leave an
+				// account with nobody watching; changing the interval afterwards, or
+				// switching it back off, is not, and demanding the phrase for those
+				// would train people to type it without reading it.
+				if (trades && !account.autoConfirm.trades && !matchesTradesAck(tradesAcknowledgement)) {
+					throw new Error(`type "${TRADES_ACK}" to switch automatic trade confirmation on`);
+				}
+
 				// Field by field again. This structure decides what gets approved
 				// without a human present, and it is not one to populate by spread.
 				account.autoConfirm.marketListings = marketListings;
