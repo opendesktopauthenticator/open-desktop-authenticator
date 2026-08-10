@@ -203,3 +203,72 @@ describe('routing an enrollment', () => {
 		expect(accounts[0]?.proxyUrl).toBeUndefined();
 	});
 });
+
+/**
+ * Regression: activation could not be resumed.
+ *
+ * The access token was held only in memory, so a restart or a vault lock left
+ * the account `pendingActivation` forever — with the authenticator already
+ * attached on Steam's side. Recovering meant Steam Support for something the
+ * app should simply be able to finish. The refresh token was already being
+ * stored during enrollment; it just was not being used.
+ */
+describe('resuming an activation', () => {
+	it('mints a fresh access token when the in-memory one is gone', async () => {
+		const { vault, accounts } = fakeVault();
+		accounts.push({
+			steamId64: STEAM_ID,
+			accountName: 'trader',
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345',
+			refreshToken: MOBILE,
+			status: 'pendingActivation',
+			addedAt: '2026-08-01T00:00:00.000Z',
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+
+		const minted = jwt({ aud: ['mobile'], exp: Math.floor(NOW / 1000) + 3600 });
+		const transports = {
+			forAccount: () =>
+				Promise.resolve(() =>
+					Promise.resolve({
+						status: 200,
+						text: JSON.stringify({ response: { access_token: minted } })
+					})
+				)
+		} as unknown as SteamTransportFactory;
+
+		// A brand-new service: nothing cached, exactly as after a restart.
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		expect(await service.activate(STEAM_ID, '55555')).toBe('activated');
+		expect(accounts[0]?.status).not.toBe('pendingActivation');
+	});
+
+	it('says what to do when there is no session to resume from', async () => {
+		const { vault, accounts } = fakeVault();
+		accounts.push({
+			steamId64: STEAM_ID,
+			accountName: 'trader',
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345',
+			status: 'pendingActivation',
+			addedAt: '2026-08-01T00:00:00.000Z',
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, { now: () => NOW });
+
+		// The authenticator exists on Steam either way, so the advice has to be
+		// about the revocation code rather than "try again".
+		await expect(service.activate(STEAM_ID, '55555')).rejects.toThrow(/revocation code/);
+	});
+});

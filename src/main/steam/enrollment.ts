@@ -1,6 +1,7 @@
 import { createLoginSession, type LoginSessionFactory, type LoginSessionLike } from './login';
 import { EnrollmentError, finalizeEnrollment, startEnrollment } from './enroll';
 import { isUsableMobileToken } from '../steam-jwt';
+import { mintAccessToken } from './access-token';
 import { planProxy } from '../net/egress';
 import type { SteamTransportFactory } from '../net/transport';
 import type { VaultService } from '../vault/service';
@@ -224,19 +225,35 @@ export class EnrollmentService {
 			throw new EnrollmentError('that account is not in this vault');
 		}
 
-		const accessToken = this.tokens.get(steamId64);
-		if (!accessToken) {
-			throw new EnrollmentError(
-				'The sign-in for this account has expired. Remove it and enrol again — the ' +
-					'authenticator on Steam is the one you already wrote the revocation code for.',
-				false
-			);
-		}
-
 		const transport = await this.transports.forAccount({
 			steamId64,
 			proxyUrl: account.proxyUrl
 		});
+
+		/**
+		 * Minted from the stored refresh token when the in-memory one has gone.
+		 *
+		 * The first version relied solely on the token cached during `begin`, which
+		 * meant a restart or a vault lock stranded the account: it stayed
+		 * `pendingActivation` forever with no way to finish, and the authenticator
+		 * was already attached on Steam's side. Recovering from that needed Steam
+		 * Support for something the app should simply be able to resume.
+		 *
+		 * The refresh token was saved during enrollment precisely so this is
+		 * possible.
+		 */
+		let accessToken = this.tokens.get(steamId64);
+		if (accessToken === undefined || !isUsableMobileToken(accessToken, this.now())) {
+			if (account.refreshToken === undefined) {
+				throw new EnrollmentError(
+					'This account has no saved session, so activation cannot be resumed. The ' +
+						'authenticator is already attached on Steam — use the revocation code you wrote ' +
+						'down to remove it, then enrol again.'
+				);
+			}
+			accessToken = await mintAccessToken(transport, steamId64, account.refreshToken, this.now());
+			this.tokens.set(steamId64, accessToken);
+		}
 
 		const outcome = await this.finalize(transport, {
 			steamId64,
@@ -244,6 +261,9 @@ export class EnrollmentService {
 			sharedSecret: account.sharedSecret,
 			activationCode: activationCode.trim(),
 			unixSeconds: this.unixSeconds(),
+			// Unknown after a restart. `false` is the safe default: it omits a claim
+			// rather than making a wrong one, and a code that arrived by email is the
+			// case that breaks if we assert SMS.
 			validateSmsCode: this.textedTheCode.get(steamId64) ?? false
 		});
 

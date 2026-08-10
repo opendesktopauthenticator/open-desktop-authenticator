@@ -22,6 +22,7 @@ export function VaultHome({
 	onChangeAutoConfirm,
 	onImport,
 	onEnrol,
+	onFinishActivation,
 	onExport,
 	onSettings,
 	onActivity,
@@ -40,6 +41,8 @@ export function VaultHome({
 	onImport: () => void;
 	/** Add an authenticator to an account that has none. */
 	onEnrol: () => void;
+	/** Resume an enrollment that was never activated. */
+	onFinishActivation: (account: AccountSummary) => void;
 	/** Write one account out as a maFile. */
 	onExport: (account: AccountSummary) => void;
 	onSettings: () => void;
@@ -249,6 +252,21 @@ export function VaultHome({
 											onClick={() => onBackUpRevocationCode(account)}
 										>
 											back up recovery code
+										</button>
+									) : account.status === 'pendingActivation' ? (
+										/* A way back in, not just a label. Enrollment attaches the
+										   authenticator on Steam's side before activation, so an
+										   account stuck here already depends on this app — and the
+										   screen that could finish it used to be unreachable once
+										   left, including by going to write the revocation code down,
+										   which that screen tells you to do. */
+										<button
+											type="button"
+											className="flag warn actionable"
+											onClick={() => onFinishActivation(account)}
+											title="Steam has attached this authenticator but it was never activated. Finish it here."
+										>
+											finish activation
 										</button>
 									) : (
 										account.status !== 'active' && (

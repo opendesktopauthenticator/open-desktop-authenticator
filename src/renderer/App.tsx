@@ -53,6 +53,14 @@ export function App(): React.JSX.Element {
 	const [view, setView] = useState<'accounts' | 'import' | 'settings' | 'activity' | 'enroll'>(
 		'accounts'
 	);
+	/**
+	 * An enrolled-but-unactivated account being resumed, if any.
+	 *
+	 * Kept here rather than inside the enrollment screen so that leaving it — to
+	 * write the revocation code down, which the screen instructs — does not
+	 * destroy the only route back to finishing.
+	 */
+	const [resumeEnrollment, setResumeEnrollment] = useState<AccountSummary | undefined>();
 	/** The account whose backup ceremony is open, if any. */
 	const [backupFor, setBackupFor] = useState<AccountSummary | undefined>();
 	/** The account whose routing is being changed, if any. */
@@ -365,6 +373,14 @@ export function App(): React.JSX.Element {
 		if (view === 'enroll') {
 			return (
 				<AddAuthenticator
+					{...(resumeEnrollment
+						? {
+								resume: {
+									steamId64: resumeEnrollment.steamId64,
+									accountName: resumeEnrollment.accountName
+								}
+							}
+						: {})}
 					onBegin={(accountName, password, proxyUrl) =>
 						api.beginEnrollment(accountName, password, proxyUrl)
 					}
@@ -380,7 +396,10 @@ export function App(): React.JSX.Element {
 							setBackupFor(account);
 						}
 					}}
-					onClose={() => setView('accounts')}
+					onClose={() => {
+						setResumeEnrollment(undefined);
+						setView('accounts');
+					}}
 				/>
 			);
 		}
@@ -408,7 +427,14 @@ export function App(): React.JSX.Element {
 				onRemoveAccount={setRemovingFor}
 				onChangeAutoConfirm={setAutoConfirmFor}
 				onImport={() => setView('import')}
-				onEnrol={() => setView('enroll')}
+				onEnrol={() => {
+					setResumeEnrollment(undefined);
+					setView('enroll');
+				}}
+				onFinishActivation={(account) => {
+					setResumeEnrollment(account);
+					setView('enroll');
+				}}
 				onExport={(account) => {
 					void api.exportAccount(account.steamId64);
 				}}

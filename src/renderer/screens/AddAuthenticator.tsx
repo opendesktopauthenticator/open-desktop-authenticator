@@ -30,7 +30,8 @@ export function AddAuthenticator({
 	onEmailCode,
 	onActivate,
 	onBackup,
-	onClose
+	onClose,
+	resume
 }: {
 	onBegin: (accountName: string, password: string, proxyUrl?: string) => Promise<EnrollBegin>;
 	onEmailCode: (code: string) => Promise<EnrollBegin>;
@@ -38,9 +39,19 @@ export function AddAuthenticator({
 	/** Opens the revocation-code ceremony for the newly enrolled account. */
 	onBackup: (steamId64: string) => void;
 	onClose: () => void;
+	/**
+	 * An account that is already enrolled but not activated, to resume.
+	 *
+	 * Enrollment used to be a one-shot wizard whose state died with the component,
+	 * so leaving the screen — including by going to write the revocation code
+	 * down, which the screen *tells* you to do — stranded the account as
+	 * `ACTIVATION INCOMPLETE` with no way back in. Resuming makes the flow
+	 * survive that, which it has to: the account already has an authenticator.
+	 */
+	resume?: { steamId64: string; accountName: string } | undefined;
 }): React.JSX.Element {
 	const [step, setStep] = useState<'credentials' | 'emailCode' | 'activate' | 'done'>(
-		'credentials'
+		resume ? 'activate' : 'credentials'
 	);
 	const [accountName, setAccountName] = useState('');
 	const [password, setPassword] = useState('');
@@ -51,7 +62,7 @@ export function AddAuthenticator({
 	const [emailDomain, setEmailDomain] = useState<string | undefined>();
 	const [enrolled, setEnrolled] = useState<
 		{ steamId64: string; accountName: string; phoneNumberHint?: string } | undefined
-	>();
+	>(resume);
 
 	/** Both entry points land here, because both can finish the enrollment. */
 	const applyOutcome = (outcome: EnrollBegin): void => {
@@ -241,7 +252,11 @@ export function AddAuthenticator({
 			{step === 'activate' && enrolled && (
 				<>
 					<div className="notice">
-						<strong>The authenticator is attached to {enrolled.accountName}.</strong>
+						<strong>
+							{resume
+								? `${enrolled.accountName} has an authenticator, but it was never activated.`
+								: `The authenticator is attached to ${enrolled.accountName}.`}
+						</strong>
 						<p className="hint">
 							Steam has issued its secrets and this app has saved them.{' '}
 							<strong>Write down the revocation code now</strong> — it is the only way back if you
