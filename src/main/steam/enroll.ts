@@ -252,6 +252,16 @@ export async function finalizeEnrollment(
 		/** The code texted to the phone on the account. */
 		activationCode: string;
 		unixSeconds: number;
+		/**
+		 * Whether Steam sent the code by SMS.
+		 *
+		 * Decided by whether `AddAuthenticator` returned a `phone_number_hint`, not
+		 * assumed. An account with no phone still enrols — F-10 flagged this as
+		 * plausible and a live run confirmed it — and Steam delivers the activation
+		 * code by email instead. Telling Steam to `validate_sms_code` for a code it
+		 * never texted is asking it to check the wrong thing.
+		 */
+		validateSmsCode?: boolean;
 	}
 ): Promise<FinalizeOutcome> {
 	const authenticatorCode = generateGuardCode(options.sharedSecret, options.unixSeconds);
@@ -266,7 +276,8 @@ export async function finalizeEnrollment(
 			authenticator_code: authenticatorCode,
 			authenticator_time: String(options.unixSeconds),
 			activation_code: options.activationCode,
-			validate_sms_code: '1'
+			// Only claimed when there is a phone to have texted.
+			...(options.validateSmsCode === false ? {} : { validate_sms_code: '1' })
 		}),
 		cookie: ''
 	});
@@ -303,7 +314,8 @@ export async function finalizeEnrollment(
 	if (body.status !== undefined && body.status !== ERESULT.ok) {
 		throw new EnrollmentError(
 			`Steam did not accept the activation code (EResult ${body.status}). Check the code and ` +
-				'try again — it expires quickly.',
+				'try again — it expires quickly, and on an account with no phone number it arrives ' +
+				'by email rather than by text.',
 			false
 		);
 	}

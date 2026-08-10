@@ -577,9 +577,32 @@ Two consequences that come with it, both worth deciding deliberately:
 
 ---
 
-## F-10 — Phone number: the library never manages one, and may not need one
+## F-10 — Phone number: the library never manages one, and does not need one
 
-**Partly resolved from source; the decisive part is UNVERIFIED — needs live run.**
+**RESOLVED. Settled by live run, 2026-08-10, against a phoneless account.**
+
+**A phone number is not required.** `AddAuthenticator` succeeded on an account
+with none: Steam attached the authenticator and returned the full set of secrets,
+with `phone_number_hint` **absent**. The activation code is delivered by email
+instead of SMS.
+
+This is the answer the section below said only a live run could give, and it
+decides two things it flagged:
+
+1. §12 F3 needs **no** precondition screen demanding a phone, and no link to
+   Steam's add-phone flow. The enrollment screen now says a phone is optional and
+   explains which way the code will arrive.
+2. `validate_sms_code: 1` must be sent **only when `phone_number_hint` came
+   back** — otherwise Steam is asked to check an SMS it never sent. The first
+   implementation sent it unconditionally, and the screen told a user with no
+   phone to go and read a text message. Both are fixed and covered by tests.
+
+The original analysis is kept below, because it predicted the shape of the answer
+correctly: McKay's own example only mentions SMS `if (response.phone_number_hint)`.
+
+---
+
+**Original analysis — partly resolved from source; the decisive part was UNVERIFIED.**
 
 Two separate claims, with different answers.
 
@@ -1119,16 +1142,16 @@ Coverage: **141 app tests**, **93 spike tests**, stress 12/12, integration 5/5.
 
 ## Open items this raises for §23
 
-| #   | Question                                                                                                                      | Owner                                      |
-| --- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
-| Q9  | How does `/security` present a 120-package production tree? (F-05)                                                            | Founder                                    |
-| Q10 | Does §10.4's `device_id` wording get corrected to match F-02?                                                                 | Claude Code proposes, founder confirms     |
-| Q11 | Proxy support: public framing, and does it get a §1 decision entry? (F-08)                                                    | Founder                                    |
-| Q12 | Do proxy URLs (with credentials) live in the vault? That is a §10.3 schema change.                                            | Founder                                    |
-| Q13 | Approve `socks-proxy-agent`, `request`, `@doctormckay/stdlib` as direct deps per §9.4.2                                       | Founder                                    |
-| Q14 | Per-account proxy concurrency: worker-per-account, or own the last mile? (F-08)                                               | Claude Code proposes (b), founder confirms |
-| Q15 | Does authenticator removal enter v1 scope, and with what re-auth gate? (F-09)                                                 | Founder                                    |
-| Q16 | Does phone-free activation work? Settle by live run on a phoneless account. (F-10)                                            | Founder                                    |
-| Q17 | Adopt proposed invariant S16 (auto-confirm type allowlist) into §11? (F-12)                                                   | Founder — **recommend yes**                |
-| Q18 | Should account-security confirmations (type 6) raise an in-app security alert? (F-12)                                         | Founder                                    |
-| Q19 | **Before 0.1:** how do we ship confirmations without 2 critical + 6 high advisories in the production tree? (F-05 escalation) | Founder                                    |
+| #       | Question                                                                                                                      | Owner                                      |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Q9      | How does `/security` present a 120-package production tree? (F-05)                                                            | Founder                                    |
+| Q10     | Does §10.4's `device_id` wording get corrected to match F-02?                                                                 | Claude Code proposes, founder confirms     |
+| Q11     | Proxy support: public framing, and does it get a §1 decision entry? (F-08)                                                    | Founder                                    |
+| Q12     | Do proxy URLs (with credentials) live in the vault? That is a §10.3 schema change.                                            | Founder                                    |
+| Q13     | Approve `socks-proxy-agent`, `request`, `@doctormckay/stdlib` as direct deps per §9.4.2                                       | Founder                                    |
+| Q14     | Per-account proxy concurrency: worker-per-account, or own the last mile? (F-08)                                               | Claude Code proposes (b), founder confirms |
+| Q15     | Does authenticator removal enter v1 scope, and with what re-auth gate? (F-09)                                                 | Founder                                    |
+| ~~Q16~~ | **Answered 2026-08-10: yes.** Phone-free activation works; the code arrives by email. See F-10.                               | Settled by live run                        |
+| Q17     | Adopt proposed invariant S16 (auto-confirm type allowlist) into §11? (F-12)                                                   | Founder — **recommend yes**                |
+| Q18     | Should account-security confirmations (type 6) raise an in-app security alert? (F-12)                                         | Founder                                    |
+| Q19     | **Before 0.1:** how do we ship confirmations without 2 critical + 6 high advisories in the production tree? (F-05 escalation) | Founder                                    |

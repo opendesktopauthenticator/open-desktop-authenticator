@@ -144,9 +144,12 @@ export function AddAuthenticator({
 					<div className="ceremony">
 						<h2>Before you start</h2>
 						<p className="hint">
-							The account must have a <strong>confirmed phone number</strong> and must not already
-							have an authenticator. If it has one on a phone, remove it there first — this app will
-							not detach it for you.
+							The account must not already have an authenticator. If it has one on a phone, remove
+							it there first — this app will not detach it for you.
+						</p>
+						<p className="hint">
+							A phone number is <strong>not</strong> required. If the account has one, Steam texts
+							the activation code; if it does not, Steam emails it instead.
 						</p>
 					</div>
 

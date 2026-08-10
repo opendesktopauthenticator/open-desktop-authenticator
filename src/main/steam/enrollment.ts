@@ -81,6 +81,16 @@ export class EnrollmentService {
 	/** Access tokens for accounts mid-enrollment, so activation need not sign in again. */
 	private readonly tokens = new Map<string, string>();
 
+	/**
+	 * Whether Steam said it had a phone to text, per account mid-enrollment.
+	 *
+	 * Remembered from `AddAuthenticator` rather than inferred later, because it
+	 * decides how the activation code is delivered — and therefore what to tell
+	 * Steam when checking it. An account with no phone enrols perfectly well and
+	 * gets its code by email (F-10, settled by live run).
+	 */
+	private readonly textedTheCode = new Map<string, boolean>();
+
 	constructor(
 		vault: VaultService,
 		transports: SteamTransportFactory,
@@ -215,7 +225,8 @@ export class EnrollmentService {
 			accessToken,
 			sharedSecret: account.sharedSecret,
 			activationCode: activationCode.trim(),
-			unixSeconds: this.unixSeconds()
+			unixSeconds: this.unixSeconds(),
+			validateSmsCode: this.textedTheCode.get(steamId64) ?? false
 		});
 
 		if (outcome.state === 'wantMore') {
@@ -232,6 +243,7 @@ export class EnrollmentService {
 		});
 
 		this.tokens.delete(steamId64);
+		this.textedTheCode.delete(steamId64);
 		return 'activated';
 	}
 
@@ -239,6 +251,7 @@ export class EnrollmentService {
 	forget(): void {
 		this.discardPending();
 		this.tokens.clear();
+		this.textedTheCode.clear();
 	}
 
 	/**
@@ -298,6 +311,7 @@ export class EnrollmentService {
 		});
 
 		this.tokens.set(steamId64, accessToken);
+		this.textedTheCode.set(steamId64, started.phoneNumberHint !== undefined);
 
 		const outcome: BeginOutcome = {
 			state: 'enrolled',

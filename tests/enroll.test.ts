@@ -327,3 +327,68 @@ describe('exporting a maFile', () => {
 		expect(parsed.revocationCode).toBe('R12345');
 	});
 });
+
+/**
+ * Regression: activation assumed a phone number existed.
+ *
+ * F-10 recorded phone-free enrollment as plausible but **UNVERIFIED — needs live
+ * run**, and flagged that McKay's own example only mentions SMS
+ * `if (response.phone_number_hint)`. A live run against a phoneless account
+ * settled it: Steam attaches the authenticator happily and delivers the
+ * activation code by email instead.
+ *
+ * The code sent `validate_sms_code: 1` unconditionally, which asks Steam to
+ * check something it never texted, and the screen told the user to look at a
+ * phone they do not have.
+ */
+describe('an account with no phone number', () => {
+	const base = {
+		steamId64: STEAM_ID,
+		accessToken: ACCESS,
+		sharedSecret: SHARED,
+		activationCode: '55555',
+		unixSeconds: NOW_SECONDS
+	};
+
+	it('enrols without one, and reports no phone hint', async () => {
+		const withoutPhone = { response: { ...okAdd.response } };
+		delete (withoutPhone.response as Record<string, unknown>).phone_number_hint;
+
+		const { transport } = transportReturning([withoutPhone]);
+		const started = await startEnrollment(transport, {
+			steamId64: STEAM_ID,
+			accessToken: ACCESS,
+			unixSeconds: NOW_SECONDS
+		});
+
+		expect(started.revocationCode).toBe('R12345');
+		expect(started.phoneNumberHint).toBeUndefined();
+	});
+
+	it('does not claim an SMS code when none was sent', async () => {
+		const { transport, sent } = transportReturning([{ response: { success: true } }]);
+
+		await finalizeEnrollment(transport, { ...base, validateSmsCode: false });
+
+		expect(sent[0]?.body?.get('validate_sms_code')).toBeNull();
+		// Everything else is unchanged: the code still has to be proven.
+		expect(sent[0]?.body?.get('activation_code')).toBe('55555');
+		expect(sent[0]?.body?.get('authenticator_code')).toMatch(/^[23456789BCDFGHJKMNPQRTVWXY]{5}$/);
+	});
+
+	it('still claims it when there was a phone to text', async () => {
+		const { transport, sent } = transportReturning([{ response: { success: true } }]);
+
+		await finalizeEnrollment(transport, { ...base, validateSmsCode: true });
+
+		expect(sent[0]?.body?.get('validate_sms_code')).toBe('1');
+	});
+
+	it('mentions email in the refusal, since that is where the code came from', async () => {
+		const { transport } = transportReturning([{ response: { success: false, status: 2 } }]);
+
+		await expect(
+			finalizeEnrollment(transport, { ...base, validateSmsCode: false })
+		).rejects.toThrow(/email/);
+	});
+});
