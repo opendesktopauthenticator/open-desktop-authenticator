@@ -191,7 +191,17 @@ export const CHANNELS = {
 	 * passphrase is verified against the vault file every time — an attacker with
 	 * an unlocked vault must not be able to strip 2FA from everything at once.
 	 */
-	accountDeactivate: 'account:deactivate'
+	accountDeactivate: 'account:deactivate',
+
+	/**
+	 * Put an account back from its recovery file (§12 F2).
+	 *
+	 * Written automatically at enrollment and deliberately **not** deleted when an
+	 * account is removed — recovering from that removal is the whole reason it
+	 * exists. The passphrase inbound is the one the vault had when the file was
+	 * written, which is not necessarily the current one.
+	 */
+	accountRecover: 'account:recover'
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

@@ -10,6 +10,7 @@ import { mintAccessToken } from './access-token';
 import { planProxy } from '../net/egress';
 import type { SteamTransportFactory } from '../net/transport';
 import type { VaultService } from '../vault/service';
+import type { Account } from '../../shared/vault-schema';
 
 /**
  * Adding a brand-new account to the vault, authenticator and all (§12 F3).
@@ -57,6 +58,13 @@ export interface EnrollmentServiceOptions {
 	startEnrollment?: typeof startEnrollment;
 	finalizeEnrollment?: typeof finalizeEnrollment;
 	removeAuthenticator?: typeof removeAuthenticator;
+	/**
+	 * Writes the per-account recovery file. Injected so tests can observe it, and
+	 * so this class never learns where the app's data directory is.
+	 *
+	 * Optional: an enrollment must not fail because a backup could not be written.
+	 */
+	writeRecovery?: (account: Account) => void;
 }
 
 interface PendingLogin {
@@ -78,6 +86,7 @@ export class EnrollmentService {
 	private readonly start: typeof startEnrollment;
 	private readonly finalize: typeof finalizeEnrollment;
 	private readonly detach: typeof removeAuthenticator;
+	private readonly writeRecovery: ((account: Account) => void) | undefined;
 
 	/**
 	 * One at a time, deliberately.
@@ -115,6 +124,7 @@ export class EnrollmentService {
 		this.start = options.startEnrollment ?? startEnrollment;
 		this.finalize = options.finalizeEnrollment ?? finalizeEnrollment;
 		this.detach = options.removeAuthenticator ?? removeAuthenticator;
+		this.writeRecovery = options.writeRecovery;
 	}
 
 	/**
@@ -417,6 +427,30 @@ export class EnrollmentService {
 
 		this.tokens.set(steamId64, accessToken);
 		this.textedTheCode.set(steamId64, started.phoneNumberHint !== undefined);
+
+		/**
+		 * The recovery file, written once and never again.
+		 *
+		 * This is the moment it has to happen: the secrets exist, the vault is
+		 * unlocked, and nothing has yet had a chance to go wrong. It survives the
+		 * account being removed from the vault later — which is the accident it
+		 * exists for, and a safety net the accident also destroyed would be no net
+		 * at all.
+		 *
+		 * **Failing to write it does not fail the enrollment.** Steam has already
+		 * attached the authenticator and the secrets are already in the vault;
+		 * throwing here would report a failure for something that succeeded and
+		 * send the user round again against an account that is now enrolled. The
+		 * screen tells them whether the file was written instead.
+		 */
+		const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+		if (stored && this.writeRecovery) {
+			try {
+				this.writeRecovery(stored);
+			} catch {
+				// Deliberately swallowed. See above.
+			}
+		}
 
 		const outcome: BeginOutcome = {
 			state: 'enrolled',

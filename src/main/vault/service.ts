@@ -334,6 +334,28 @@ export class VaultService {
 	 * accounts the user removed, or roll back one they believe is saved. The user
 	 * is told what happened and chooses.
 	 */
+	/**
+	 * Seal arbitrary content under the vault's current key.
+	 *
+	 * Used for the per-account recovery file written at enrollment. The envelope
+	 * carries its own salt and KDF parameters, so it is **self-contained**:
+	 * anybody with the passphrase can open it on any machine, without this vault.
+	 * That is the whole point — the file has to survive the vault it came from
+	 * being deleted, corrupted, or left on a dead disk.
+	 *
+	 * The key is reused rather than re-derived because the passphrase is not kept
+	 * in memory; only the key and the salt that produced it are. Reuse is safe
+	 * here because `sealWithKey` takes a fresh nonce every time, which is the part
+	 * that must never repeat under one key.
+	 */
+	sealForBackup(plaintext: string): Envelope {
+		const state = this.state;
+		if (!state) {
+			throw new VaultLockedError();
+		}
+		return sealWithKey(plaintext, state.key, state.kdf);
+	}
+
 	backupAvailable(): Envelope | undefined {
 		return readBackupEnvelope(this.file);
 	}

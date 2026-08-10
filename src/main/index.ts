@@ -9,6 +9,7 @@ import {
 	powerMonitor,
 	session
 } from 'electron';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { branding } from '../shared/branding';
@@ -25,6 +26,12 @@ import { registerCodeHandlers } from './codes/ipc';
 import { registerUpdateHandlers } from './update/ipc';
 import { EnrollmentService } from './steam/enrollment';
 import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
+import {
+	RECOVERY_EXTENSION,
+	recoveryContents,
+	recoveryPathFor,
+	writeRecoveryFile
+} from './vault/recovery';
 import { SteamTransportFactory, type ElectronNetworking } from './net/transport';
 import { ConfirmationsService } from './confirmations/service';
 import { AutoConfirmEngine } from './confirmations/auto';
@@ -226,7 +233,16 @@ function start(): void {
 	// drop the stale session through the same seam the settings path uses.
 	const imports = new ImportService(vault, { onRoutingChanged: dropAccountRouting });
 	const enrollment = new EnrollmentService(vault, transports, {
-		timeOffsetSeconds: () => codes.timeOffsetSeconds()
+		timeOffsetSeconds: () => codes.timeOffsetSeconds(),
+		// Written once, at enrollment, into the app's own data directory. Removal
+		// deliberately does not delete it — recovering from that removal is the
+		// whole reason it exists.
+		writeRecovery: (account) => {
+			writeRecoveryFile(
+				recoveryPathFor(app.getPath('userData'), account.steamId64),
+				vault.sealForBackup(recoveryContents(account, new Date().toISOString()))
+			);
+		}
 	});
 
 	const activity = new ActivityLog();
@@ -290,7 +306,24 @@ function start(): void {
 					return result.canceled ? undefined : result.filePath;
 				}
 			},
-			dropAccountRouting
+			dropAccountRouting,
+			{
+				// The picker is the only thing that names a file, exactly as import.
+				// The contents come back, never the path.
+				pick: async () => {
+					const parent = BrowserWindow.getFocusedWindow();
+					const options = {
+						title: 'Open a recovery file',
+						properties: ['openFile' as const],
+						filters: [{ name: 'Recovery file', extensions: [RECOVERY_EXTENSION.replace('.', '')] }]
+					};
+					const result = await (parent
+						? dialog.showOpenDialog(parent, options)
+						: dialog.showOpenDialog(options));
+					const chosen = result.canceled ? undefined : result.filePaths[0];
+					return chosen === undefined ? undefined : readFileSync(chosen, 'utf8');
+				}
+			}
 		);
 		registerCodeHandlers(codes, vault, clipboard, clock);
 		registerUpdateHandlers({

@@ -233,6 +233,20 @@ export const enrollBeginResponse = z.discriminatedUnion('state', [
 ]);
 
 /**
+ * What a recovery attempt produced.
+ *
+ * Carries the account name so the user can see *which* account came back, and
+ * nothing else — the secrets it restored go straight into the vault and never
+ * pass through the renderer.
+ */
+export const recoverResponse = z.discriminatedUnion('state', [
+	z.object({ state: z.literal('cancelled') }),
+	z.object({ state: z.literal('restored'), accountName: z.string(), steamId64: z.string() }),
+	/** The account is already here; recovering it again would do nothing. */
+	z.object({ state: z.literal('alreadyPresent'), accountName: z.string() })
+]);
+
+/**
  * The result of writing a maFile.
  *
  * Reports the **file name** and never the path. A full path names the user's
@@ -535,6 +549,12 @@ export const IPC_CONTRACT = {
 		response: exportResponse
 	},
 
+	[CHANNELS.accountRecover]: {
+		// No path: the OS picker names the file, exactly as import does.
+		request: z.object({ passphrase }).strict(),
+		response: recoverResponse
+	},
+
 	[CHANNELS.accountDeactivate]: {
 		request: z
 			.object({
@@ -679,6 +699,7 @@ export type VaultSettingsView = z.infer<typeof vaultSettingsView>;
 export type UpdateCheckResult = z.infer<typeof updateCheckResponse>;
 export type EnrollBegin = z.infer<typeof enrollBeginResponse>;
 export type ExportResult = z.infer<typeof exportResponse>;
+export type RecoverResult = z.infer<typeof recoverResponse>;
 
 /** The typed surface preload puts on `window`. Renderer sees exactly this. */
 export interface RendererApi {
@@ -723,6 +744,14 @@ export interface RendererApi {
 
 	/** Write an account out as a maFile. Opens the OS save dialog; returns a name. */
 	exportAccount(steamId64: string): Promise<ExportResult>;
+
+	/**
+	 * Restore an account from the recovery file written when it was enrolled.
+	 *
+	 * Opens the OS picker. The passphrase is the one the vault had at the time the
+	 * file was written, which changing the vault passphrase does not update.
+	 */
+	recoverAccount(passphrase: string): Promise<RecoverResult>;
 
 	/**
 	 * Detach the authenticator from Steam, then forget the account.
