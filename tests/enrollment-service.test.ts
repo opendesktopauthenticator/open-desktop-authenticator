@@ -272,3 +272,129 @@ describe('resuming an activation', () => {
 		await expect(service.activate(STEAM_ID, '55555')).rejects.toThrow(/revocation code/);
 	});
 });
+
+/**
+ * Detaching an authenticator from Steam (F-09, Q15).
+ *
+ * The most destructive operation in the application: it removes Steam Guard from
+ * a real account, leaving it with no second factor until the owner adds one
+ * elsewhere. F-09 named the consequence of getting the gating wrong — an
+ * attacker holding an unlocked vault stripping 2FA from every account in one
+ * pass — so most of what is tested here is refusal.
+ */
+describe('deactivating an authenticator', () => {
+	function detachHarness(
+		overrides: Partial<Account> = {},
+		detach: (...args: never[]) => Promise<void> = () => Promise.resolve()
+	): {
+		service: EnrollmentService;
+		accounts: Account[];
+		verified: string[];
+		detachCalls: unknown[];
+	} {
+		const accounts: Account[] = [
+			{
+				steamId64: STEAM_ID,
+				accountName: 'trader',
+				sharedSecret: SHARED,
+				identitySecret: IDENTITY,
+				revocationCode: 'R12345',
+				refreshToken: MOBILE,
+				status: 'active',
+				addedAt: '2026-08-01T00:00:00.000Z',
+				autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
+				...overrides
+			}
+		];
+		const verified: string[] = [];
+		const detachCalls: unknown[] = [];
+
+		const vault = {
+			read: () => ({ accounts }),
+			verifyPassphrase: (passphrase: string) => {
+				verified.push(passphrase);
+				if (passphrase !== 'correct') {
+					return Promise.reject(new Error('that passphrase is not correct'));
+				}
+				return Promise.resolve();
+			},
+			mutate: async (apply: (draft: { accounts: Account[] }) => void) => {
+				apply({ accounts });
+				return Promise.resolve();
+			}
+		} as never;
+
+		// Answers the token mint, which deactivation needs before it can talk to
+		// Steam at all — the same path activation uses after a restart.
+		const transports = {
+			forAccount: () =>
+				Promise.resolve(() =>
+					Promise.resolve({
+						status: 200,
+						text: JSON.stringify({ response: { access_token: MOBILE } })
+					})
+				)
+		} as unknown as SteamTransportFactory;
+
+		const service = new EnrollmentService(vault, transports, {
+			now: () => NOW,
+			removeAuthenticator: ((_t: never, options: unknown) => {
+				detachCalls.push(options);
+				return detach();
+			}) as never
+		});
+
+		return { service, accounts, verified, detachCalls };
+	}
+
+	it('detaches from Steam, then forgets the account', async () => {
+		const { service, accounts, detachCalls } = detachHarness();
+
+		await service.deactivate(STEAM_ID, 'correct');
+
+		expect(detachCalls).toHaveLength(1);
+		expect(detachCalls[0]).toMatchObject({ steamId64: STEAM_ID, revocationCode: 'R12345' });
+		expect(accounts).toHaveLength(0);
+	});
+
+	it('requires the passphrase, verified against the file', async () => {
+		// Being unlocked means the machine was used recently, not that its owner is
+		// at it. F-09's whole mitigation rests on this.
+		const { service, accounts, detachCalls } = detachHarness();
+
+		await expect(service.deactivate(STEAM_ID, 'wrong')).rejects.toThrow();
+		expect(detachCalls).toHaveLength(0);
+		expect(accounts).toHaveLength(1);
+	});
+
+	it('refuses an account with no revocation code, before touching Steam', async () => {
+		// §12 F2 permits importing without one. Steam will not detach without it,
+		// so the user is told why rather than watching Steam refuse.
+		const { service, accounts, detachCalls } = detachHarness();
+		delete accounts[0]?.revocationCode;
+
+		await expect(service.deactivate(STEAM_ID, 'correct')).rejects.toThrow(/revocation code/);
+		expect(detachCalls).toHaveLength(0);
+		expect(accounts).toHaveLength(1);
+	});
+
+	it('keeps the account when Steam refuses', async () => {
+		// Steam first, vault second. Removing locally on a failed detach would leave
+		// an authenticator attached that nobody holds the secrets for — the same
+		// unrecoverable state enrollment works hard to avoid, reached backwards.
+		const { service, accounts } = detachHarness({}, () =>
+			Promise.reject(new Error('Steam did not accept that revocation code'))
+		);
+
+		await expect(service.deactivate(STEAM_ID, 'correct')).rejects.toThrow(/revocation code/);
+		expect(accounts).toHaveLength(1);
+	});
+
+	it('refuses an account that is not in the vault', async () => {
+		const { service } = detachHarness();
+
+		await expect(service.deactivate('76561198000000009', 'correct')).rejects.toThrow(
+			/not in this vault/
+		);
+	});
+});

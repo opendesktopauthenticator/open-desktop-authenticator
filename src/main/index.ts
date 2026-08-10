@@ -271,22 +271,27 @@ function start(): void {
 			(steamId64) => transports.routingStatus(steamId64)
 		);
 		registerImportHandlers(imports);
-		registerEnrollmentHandlers(enrollment, vault, {
-			// The OS dialog is the only thing that names a location. The renderer
-			// asks for a file; it never says, and is never told, where it went.
-			show: async (suggestedName) => {
-				const parent = BrowserWindow.getFocusedWindow();
-				const options = {
-					title: 'Save maFile',
-					defaultPath: suggestedName,
-					filters: [{ name: 'maFile', extensions: ['maFile'] }]
-				};
-				const result = await (parent
-					? dialog.showSaveDialog(parent, options)
-					: dialog.showSaveDialog(options));
-				return result.canceled ? undefined : result.filePath;
-			}
-		});
+		registerEnrollmentHandlers(
+			enrollment,
+			vault,
+			{
+				// The OS dialog is the only thing that names a location. The renderer
+				// asks for a file; it never says, and is never told, where it went.
+				show: async (suggestedName) => {
+					const parent = BrowserWindow.getFocusedWindow();
+					const options = {
+						title: 'Save maFile',
+						defaultPath: suggestedName,
+						filters: [{ name: 'maFile', extensions: ['maFile'] }]
+					};
+					const result = await (parent
+						? dialog.showSaveDialog(parent, options)
+						: dialog.showSaveDialog(options));
+					return result.canceled ? undefined : result.filePath;
+				}
+			},
+			dropAccountRouting
+		);
 		registerCodeHandlers(codes, vault, clipboard, clock);
 		registerUpdateHandlers({
 			// Read at call time, not captured: a vault that is locked has no settings

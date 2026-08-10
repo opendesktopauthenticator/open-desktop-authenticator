@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { AccountSummary } from '../../shared/ipc';
+import { DEACTIVATE_ACK, type AccountSummary } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -22,13 +22,27 @@ import { messageOf } from '../ipc-message';
 export function RemoveAccount({
 	account,
 	onRemove,
+	onDeactivate,
 	onClose
 }: {
 	account: AccountSummary;
 	onRemove: (passphrase: string) => Promise<unknown>;
+	/**
+	 * Detach the authenticator from Steam, then forget the account.
+	 *
+	 * Offered beside plain removal rather than on its own screen, because the two
+	 * are constantly confused and the difference is the whole point: one leaves
+	 * Steam demanding codes nobody can produce, the other leaves the account with
+	 * no second factor at all. Putting them side by side is what makes the choice
+	 * legible.
+	 */
+	onDeactivate: (passphrase: string, acknowledgement: string) => Promise<unknown>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [passphrase, setPassphrase] = useState('');
+	const [acknowledgement, setAcknowledgement] = useState('');
+	/** Whether the user has opened the harder of the two options. */
+	const [detaching, setDetaching] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 
@@ -39,9 +53,10 @@ export function RemoveAccount({
 		}
 		setBusy(true);
 		setError(undefined);
-		onRemove(passphrase)
+		(detaching ? onDeactivate(passphrase, acknowledgement) : onRemove(passphrase))
 			.then(() => {
 				setPassphrase('');
+				setAcknowledgement('');
 				onClose();
 			})
 			.catch((err: unknown) => setError(messageOf(err)))
@@ -86,6 +101,34 @@ export function RemoveAccount({
 				)}
 			</div>
 
+			{/* The other option, and deliberately not the default. Detaching is
+			    strictly more destructive — it changes the Steam account, not just
+			    this vault — so it is something a user opts into after reading, not a
+			    button sitting at equal weight with the ordinary one. */}
+			{account.hasRevocationCode && (
+				<div className="ceremony">
+					<h2>Or remove it from Steam as well</h2>
+					<p>
+						Using your revocation code, this app can tell Steam to drop the authenticator entirely.
+						Steam stops asking this account for codes, and the account is left with{' '}
+						<strong>no second factor</strong> until you add one elsewhere.
+					</p>
+					<p className="hint">
+						This is what you want if you are moving the account to a phone, or retiring it. It is
+						not what you want if you simply no longer wish to manage it here.
+					</p>
+					<label className="checkbox">
+						<input
+							type="checkbox"
+							checked={detaching}
+							onChange={(event) => setDetaching(event.target.checked)}
+							disabled={busy}
+						/>
+						<span>Also remove the authenticator from Steam</span>
+					</label>
+				</div>
+			)}
+
 			<form onSubmit={submit}>
 				<label htmlFor="remove-passphrase">Confirm your vault passphrase</label>
 				<input
@@ -100,9 +143,35 @@ export function RemoveAccount({
 					one at it.
 				</p>
 
+				{detaching && (
+					<>
+						<label htmlFor="remove-ack">
+							Type <code>{DEACTIVATE_ACK}</code> to confirm
+						</label>
+						<input
+							id="remove-ack"
+							type="text"
+							value={acknowledgement}
+							onChange={(event) => setAcknowledgement(event.target.value)}
+							autoComplete="off"
+							spellCheck={false}
+						/>
+						<p className="hint bad">
+							This leaves the Steam account with <strong>no second factor at all</strong> until you
+							add one somewhere else. Do that immediately afterwards.
+						</p>
+					</>
+				)}
+
 				<div className="controls">
 					<button type="submit" disabled={busy || passphrase === ''}>
-						{busy ? 'Removing…' : `Remove ${account.accountName} permanently`}
+						{busy
+							? detaching
+								? 'Removing from Steam…'
+								: 'Removing…'
+							: detaching
+								? `Remove Steam Guard from ${account.accountName}`
+								: `Remove ${account.accountName} from this vault`}
 					</button>
 					<button type="button" className="secondary" onClick={onClose} disabled={busy}>
 						Keep it

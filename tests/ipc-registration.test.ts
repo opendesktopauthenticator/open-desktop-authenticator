@@ -125,7 +125,8 @@ describe('IPC registration', () => {
 			CHANNELS.enrollBegin,
 			CHANNELS.enrollEmailCode,
 			CHANNELS.enrollActivate,
-			CHANNELS.accountExport
+			CHANNELS.accountExport,
+			CHANNELS.accountDeactivate
 		]);
 	});
 

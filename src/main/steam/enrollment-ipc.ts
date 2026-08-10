@@ -2,6 +2,7 @@ import { writeFile } from 'node:fs/promises';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { maFileName, toMaFile } from '../import/export';
+import { DEACTIVATE_ACK } from '../../shared/ipc';
 import type { EnrollmentService } from './enrollment';
 import { VaultLockedError, type VaultService } from '../vault/service';
 
@@ -22,7 +23,9 @@ export interface SaveDialog {
 export function registerEnrollmentHandlers(
 	enrollment: EnrollmentService,
 	vault: VaultService,
-	dialog: SaveDialog
+	dialog: SaveDialog,
+	/** Drops an account's in-memory session, exactly as a local removal does. */
+	onRemoved: (steamId64: string) => void = () => undefined
 ): void {
 	/**
 	 * Checked before a password is sent anywhere, and before a secret is read.
@@ -50,6 +53,28 @@ export function registerEnrollmentHandlers(
 		requireUnlocked();
 		return { state: await enrollment.activate(steamId64, code) };
 	});
+
+	registerHandler(
+		CHANNELS.accountDeactivate,
+		async ({ steamId64, passphrase, acknowledgement }) => {
+			requireUnlocked();
+
+			// Checked here, not by the screen. The auto-confirm gate taught this lesson
+			// the expensive way: a phrase enforced only in the renderer is a convention,
+			// and this is the one operation more destructive than switching trades on.
+			if (acknowledgement.trim().replace(/\s+/g, ' ').toUpperCase() !== DEACTIVATE_ACK) {
+				throw new Error(`type "${DEACTIVATE_ACK}" to remove this authenticator from Steam`);
+			}
+
+			await enrollment.deactivate(steamId64, passphrase);
+
+			// The same cleanup a local removal does: cookie jar, cached session,
+			// pending list. An account whose authenticator is gone must not still have
+			// a live session sitting in memory.
+			onRemoved(steamId64);
+			return { ok: true as const };
+		}
+	);
 
 	registerHandler(CHANNELS.accountExport, async ({ steamId64 }) => {
 		requireUnlocked();

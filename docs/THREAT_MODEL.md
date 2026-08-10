@@ -116,7 +116,39 @@ The users most likely to want this feature are the most likely to buy cheap
 residential proxies of unknown ownership. The warning belongs next to the
 setting, not only here.
 
-### 2.7 Steam correlating your accounts with each other
+### 2.7 An attacker with your unlocked vault, stripping 2FA
+
+**New with authenticator removal (F-09, Q15), and accepted with mitigations.**
+
+The application can now tell Steam to detach an authenticator, using the stored
+revocation code. That turns a vault compromise from bounded into permanent: an
+attacker at an unlocked machine could otherwise remove Steam Guard from every
+account in one pass, leaving each with no second factor at all.
+
+What makes it acceptable to ship:
+
+- **The passphrase is verified against the vault file, per account.** Being
+  unlocked means the machine was used recently, not that its owner is at it.
+- **There is no bulk form.** Not hidden in the UI — there is no method on the
+  service that takes more than one account, so there is nothing for a future
+  caller to reach for.
+- **A typed acknowledgement**, enforced in the handler rather than the screen,
+  naming what actually happens: `REMOVE STEAM GUARD`.
+- **Steam first, vault second.** The local record survives a failed detach.
+  Reversing that order would leave an authenticator attached that nobody holds
+  the secrets for — the same unrecoverable state enrollment avoids, reached from
+  the other direction.
+
+**Residual risk, stated:** an attacker who has both the unlocked vault _and_ the
+passphrase can still do this. That is the same boundary as §2.2 — code execution
+as the user while unlocked is out of scope and cannot be defended from inside the
+process.
+
+An account imported without a revocation code cannot use this at all, because
+Steam will not detach without one. The screen says so instead of offering a
+button that fails.
+
+### 2.8 Steam correlating your accounts with each other
 
 Routing gives each account its own exit address. That is necessary and it is not
 sufficient — several other signals survive it, and this section says which,

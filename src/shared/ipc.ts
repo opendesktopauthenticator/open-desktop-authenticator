@@ -36,6 +36,15 @@ const emptyRequest = z.object({}).strict();
 export const TRADES_ACK = 'APPROVE TRADES';
 
 /**
+ * The words a user must type to detach an authenticator from Steam.
+ *
+ * Names the consequence rather than confirming an intent — "REMOVE STEAM GUARD"
+ * is what actually happens, and somebody typing it cannot later say they thought
+ * it only affected this app.
+ */
+export const DEACTIVATE_ACK = 'REMOVE STEAM GUARD';
+
+/**
  * Whether what the user typed counts as the acknowledgement.
  *
  * Shared by the screen that collects it and the handler that enforces it, so the
@@ -526,6 +535,27 @@ export const IPC_CONTRACT = {
 		response: exportResponse
 	},
 
+	[CHANNELS.accountDeactivate]: {
+		request: z
+			.object({
+				steamId64: z.string(),
+				/**
+				 * Required, and verified against the vault file rather than against the
+				 * session being open. This removes Steam Guard from a real account; an
+				 * unattended unlocked machine must not be able to do it.
+				 */
+				passphrase,
+				/**
+				 * The words the user had to type. Enforced by the handler, not the
+				 * screen — the same lesson as the auto-confirm gate, applied to the one
+				 * operation that is more destructive than switching trades on.
+				 */
+				acknowledgement: z.string()
+			})
+			.strict(),
+		response: okResponse
+	},
+
 	[CHANNELS.accountRemove]: {
 		request: z
 			.object({
@@ -693,6 +723,18 @@ export interface RendererApi {
 
 	/** Write an account out as a maFile. Opens the OS save dialog; returns a name. */
 	exportAccount(steamId64: string): Promise<ExportResult>;
+
+	/**
+	 * Detach the authenticator from Steam, then forget the account.
+	 *
+	 * Not the same as `removeAccount`, which only forgets it here. This one leaves
+	 * the Steam account with no second factor at all.
+	 */
+	deactivateAuthenticator(
+		steamId64: string,
+		passphrase: string,
+		acknowledgement: string
+	): Promise<{ ok: true }>;
 	/** Set routing for one account, or pass `null` to remove it. */
 	setAccountProxy(steamId64: string, proxyUrl: string | null): Promise<{ ok: true }>;
 	/** Enable or disable automatic confirmation for one account, per type. */

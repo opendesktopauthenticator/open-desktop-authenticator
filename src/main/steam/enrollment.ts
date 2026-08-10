@@ -1,5 +1,10 @@
 import { createLoginSession, type LoginSessionFactory, type LoginSessionLike } from './login';
-import { EnrollmentError, finalizeEnrollment, startEnrollment } from './enroll';
+import {
+	EnrollmentError,
+	finalizeEnrollment,
+	removeAuthenticator,
+	startEnrollment
+} from './enroll';
 import { isUsableMobileToken } from '../steam-jwt';
 import { mintAccessToken } from './access-token';
 import { planProxy } from '../net/egress';
@@ -51,6 +56,7 @@ export interface EnrollmentServiceOptions {
 	loginSession?: LoginSessionFactory;
 	startEnrollment?: typeof startEnrollment;
 	finalizeEnrollment?: typeof finalizeEnrollment;
+	removeAuthenticator?: typeof removeAuthenticator;
 }
 
 interface PendingLogin {
@@ -71,6 +77,7 @@ export class EnrollmentService {
 	private readonly loginSession: LoginSessionFactory;
 	private readonly start: typeof startEnrollment;
 	private readonly finalize: typeof finalizeEnrollment;
+	private readonly detach: typeof removeAuthenticator;
 
 	/**
 	 * One at a time, deliberately.
@@ -107,6 +114,7 @@ export class EnrollmentService {
 		this.loginSession = options.loginSession ?? createLoginSession;
 		this.start = options.startEnrollment ?? startEnrollment;
 		this.finalize = options.finalizeEnrollment ?? finalizeEnrollment;
+		this.detach = options.removeAuthenticator ?? removeAuthenticator;
 	}
 
 	/**
@@ -242,18 +250,7 @@ export class EnrollmentService {
 		 * The refresh token was saved during enrollment precisely so this is
 		 * possible.
 		 */
-		let accessToken = this.tokens.get(steamId64);
-		if (accessToken === undefined || !isUsableMobileToken(accessToken, this.now())) {
-			if (account.refreshToken === undefined) {
-				throw new EnrollmentError(
-					'This account has no saved session, so activation cannot be resumed. The ' +
-						'authenticator is already attached on Steam — use the revocation code you wrote ' +
-						'down to remove it, then enrol again.'
-				);
-			}
-			accessToken = await mintAccessToken(transport, steamId64, account.refreshToken, this.now());
-			this.tokens.set(steamId64, accessToken);
-		}
+		const accessToken = await this.accessTokenFor(account, transport);
 
 		const outcome = await this.finalize(transport, {
 			steamId64,
@@ -283,6 +280,69 @@ export class EnrollmentService {
 		this.tokens.delete(steamId64);
 		this.textedTheCode.delete(steamId64);
 		return 'activated';
+	}
+
+	/**
+	 * Detach the authenticator from Steam, then drop the account (F-09, Q15).
+	 *
+	 * **The most destructive operation in the application.** It removes Steam
+	 * Guard from the account entirely — not from this app, from Steam — leaving it
+	 * with no second factor until the owner adds one elsewhere.
+	 *
+	 * F-09 named the consequence: without gating, an attacker holding an unlocked
+	 * vault could strip 2FA from every account in one pass, turning a bounded
+	 * compromise into permanent takeover of all of them. So the passphrase is
+	 * verified against the file for **each** account, and there is deliberately no
+	 * bulk form of this method for a caller to reach for.
+	 *
+	 * Order matters: Steam first, vault second. Removing the local record first
+	 * would leave an account with an authenticator nobody holds if the network
+	 * call then failed — the same unrecoverable state enrollment works so hard to
+	 * avoid, arrived at from the other direction.
+	 */
+	async deactivate(steamId64: string, passphrase: string): Promise<void> {
+		// Verified against the file, not against "the session happens to be open".
+		await this.vault.verifyPassphrase(passphrase);
+
+		const account = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+		if (!account) {
+			throw new EnrollmentError('that account is not in this vault');
+		}
+		if (account.revocationCode === undefined) {
+			// Checked before anything else so the user is told why rather than
+			// watching Steam refuse. An account imported without one — which §12 F2
+			// permits, loudly — simply cannot do this.
+			throw new EnrollmentError(
+				'This account has no revocation code stored, and Steam will not detach an authenticator ' +
+					'without one. Remove it from the Steam mobile app instead.'
+			);
+		}
+
+		const transport = await this.transports.forAccount({
+			steamId64,
+			proxyUrl: account.proxyUrl
+		});
+
+		const accessToken = await this.accessTokenFor(account, transport);
+
+		await this.detach(transport, {
+			steamId64,
+			accessToken,
+			revocationCode: account.revocationCode
+		});
+
+		// Only after Steam has confirmed. Everything this account had in memory goes
+		// with the record — its cookie jar, cached session and pending list are
+		// dropped by the routing hook the caller wires to removal.
+		await this.vault.mutate((draft) => {
+			const index = draft.accounts.findIndex((entry) => entry.steamId64 === steamId64);
+			if (index >= 0) {
+				draft.accounts.splice(index, 1);
+			}
+		});
+
+		this.tokens.delete(steamId64);
+		this.textedTheCode.delete(steamId64);
 	}
 
 	/** Drop any half-finished sign-in. Called when the vault locks. */
@@ -365,6 +425,42 @@ export class EnrollmentService {
 		};
 		if (started.phoneNumberHint !== undefined) outcome.phoneNumberHint = started.phoneNumberHint;
 		return outcome;
+	}
+
+	/**
+	 * A usable MobileApp access token for this account, minting one if needed.
+	 *
+	 * Shared by activation and deactivation because both hit the same wall: the
+	 * cached token lives only in memory, so a restart or a vault lock leaves an
+	 * account that Steam has already changed with no way to finish or undo it.
+	 * The refresh token stored at enrollment exists precisely so neither is a
+	 * dead end.
+	 */
+	private async accessTokenFor(
+		account: { steamId64: string; refreshToken?: string | undefined },
+		transport: Awaited<ReturnType<SteamTransportFactory['forAccount']>>
+	): Promise<string> {
+		const cached = this.tokens.get(account.steamId64);
+		if (cached !== undefined && isUsableMobileToken(cached, this.now())) {
+			return cached;
+		}
+
+		if (account.refreshToken === undefined) {
+			throw new EnrollmentError(
+				'This account has no saved session, so this cannot be done from here. The ' +
+					'authenticator is attached on Steam — use the revocation code you wrote down to ' +
+					'remove it there.'
+			);
+		}
+
+		const minted = await mintAccessToken(
+			transport,
+			account.steamId64,
+			account.refreshToken,
+			this.now()
+		);
+		this.tokens.set(account.steamId64, minted);
+		return minted;
 	}
 
 	private unixSeconds(): number {

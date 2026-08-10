@@ -89,6 +89,18 @@ const addResponseSchema = z.object({
 	})
 });
 
+const removeResponseSchema = z.object({
+	response: z.object({
+		success: z.boolean().optional(),
+		/**
+		 * Steam limits how many times a revocation code may be got wrong before it
+		 * stops accepting it. Surfaced because running out is unrecoverable without
+		 * Steam Support, and a user deserves to know how close they are.
+		 */
+		revocation_attempts_remaining: z.number().int().optional()
+	})
+});
+
 const finalizeResponseSchema = z.object({
 	response: z.object({
 		success: z.boolean().optional(),
@@ -322,6 +334,84 @@ export async function finalizeEnrollment(
 
 	throw new EnrollmentError(
 		'Steam did not accept the activation code. Check it and try again — it expires quickly.',
+		false
+	);
+}
+
+/**
+ * Detach an authenticator from a Steam account (F-09, Q15).
+ *
+ * ## This is the most destructive thing this application can do
+ *
+ * It removes Steam Guard from the account. Not "removes it from this app" —
+ * removes it from Steam. Afterwards the account has no second factor at all
+ * until the owner adds one somewhere else, which is a window an attacker would
+ * very much like to create.
+ *
+ * That is why F-09 flagged it as a **new threat-model entry** rather than a
+ * feature: an attacker holding an unlocked vault could otherwise strip 2FA from
+ * every account in one pass, turning a bounded compromise into permanent
+ * takeover of all of them. The service therefore demands the passphrase per
+ * account and refuses to act on more than one at a time. Those are not UI
+ * politeness; they are what makes this safe to ship.
+ *
+ * ## It needs the revocation code
+ *
+ * Steam will not detach an authenticator without it, which means an account
+ * imported without one — §12 F2 permits this, loudly — cannot use this at all.
+ * The screen says so before offering the button rather than after it fails.
+ */
+export async function removeAuthenticator(
+	transport: SteamTransport,
+	options: {
+		steamId64: string;
+		accessToken: string;
+		revocationCode: string;
+	}
+): Promise<void> {
+	const response = await transport({
+		method: 'POST',
+		url: `${BASE}/RemoveAuthenticator/v1/?access_token=${encodeURIComponent(options.accessToken)}`,
+		body: new URLSearchParams({
+			steamid: options.steamId64,
+			revocation_code: options.revocationCode.trim(),
+			// `1` is "remove the authenticator entirely", which is what this means.
+			// Steam also has a scheme for moving one to another device; that is a
+			// different operation and deliberately not offered here.
+			steamguard_scheme: '1'
+		}),
+		cookie: ''
+	});
+
+	const parsed = removeResponseSchema.safeParse(
+		readJson(
+			response.text,
+			response.status,
+			'Steam answered with something unreadable. Check the Steam mobile app before assuming ' +
+				'the authenticator is still attached.'
+		)
+	);
+	if (!parsed.success) {
+		throw new EnrollmentError(
+			'Steam sent a reply this app could not read. Check the account on Steam before trying again.',
+			false
+		);
+	}
+
+	const body = parsed.data.response;
+	if (body.success === true) {
+		return;
+	}
+
+	// A wrong revocation code is by far the likeliest cause, and it is worth
+	// naming: the alternative is a user concluding the feature is broken and
+	// trying repeatedly with the same wrong code.
+	throw new EnrollmentError(
+		body.revocation_attempts_remaining !== undefined
+			? `Steam did not accept that revocation code. ${body.revocation_attempts_remaining} ` +
+					'attempts remain before Steam stops accepting it at all.'
+			: 'Steam did not accept that revocation code. Check it character by character — it is ' +
+					'the code beginning with R that you were told to write down.',
 		false
 	);
 }

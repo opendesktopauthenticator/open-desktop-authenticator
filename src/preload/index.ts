@@ -87,6 +87,13 @@ const api: RendererApi = {
 	// a location, and the main process is the only thing that writes one.
 	exportAccount: (steamId64: string) =>
 		ipcRenderer.invoke(CHANNELS.accountExport, { steamId64 }) as Promise<ExportResult>,
+	deactivateAuthenticator: (steamId64: string, passphrase: string, acknowledgement: string) =>
+		ipcRenderer.invoke(CHANNELS.accountDeactivate, {
+			steamId64,
+			passphrase,
+			// Forwarded, never synthesised here. The handler is what enforces it.
+			acknowledgement
+		}) as Promise<{ ok: true }>,
 
 	removeAccount: (steamId64: string, passphrase: string) =>
 		ipcRenderer.invoke(CHANNELS.accountRemove, {

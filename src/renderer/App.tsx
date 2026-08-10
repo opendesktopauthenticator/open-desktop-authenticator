@@ -294,6 +294,9 @@ export function App(): React.JSX.Element {
 				<RemoveAccount
 					account={removingFor}
 					onRemove={(passphrase) => api.removeAccount(removingFor.steamId64, passphrase)}
+					onDeactivate={(passphrase, acknowledgement) =>
+						api.deactivateAuthenticator(removingFor.steamId64, passphrase, acknowledgement)
+					}
 					onClose={() => {
 						setRemovingFor(undefined);
 						void refresh();

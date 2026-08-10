@@ -178,7 +178,20 @@ export const CHANNELS = {
 	 * The user picks the destination through the OS dialog, so no path crosses
 	 * IPC in either direction — the same rule import follows.
 	 */
-	accountExport: 'account:export'
+	accountExport: 'account:export',
+
+	/**
+	 * Detach an authenticator from Steam entirely (F-09, Q15).
+	 *
+	 * Distinct from `account:remove`, which only forgets an account locally and
+	 * leaves Steam still demanding codes for it. This one tells Steam to drop the
+	 * authenticator, using the revocation code, and then forgets the account.
+	 *
+	 * The most destructive channel in the contract. One account per call, and the
+	 * passphrase is verified against the vault file every time — an attacker with
+	 * an unlocked vault must not be able to strip 2FA from everything at once.
+	 */
+	accountDeactivate: 'account:deactivate'
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];
