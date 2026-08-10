@@ -54,19 +54,18 @@ export interface TrayHost {
  * **Installer and window icons are still outstanding**: those need a real `.ico`
  * and multi-resolution PNGs in `build/`, which is a packaging task (§10.2).
  */
-function trayIcon(): NativeImage {
-	// Drawn at 2× and tagged as such, so it stays crisp on a HiDPI taskbar and
-	// Electron downsamples for standard DPI rather than the reverse.
-	const size = 32;
+/** One size of the mark, as premultiplied BGRA. */
+function ringPixels(size: number): Buffer {
 	const channels = 4;
 	const samples = 4;
 	const pixels = Buffer.alloc(size * size * channels);
 
 	const centre = (size - 1) / 2;
-	const outer = size / 2 - 2.5;
-	const inner = outer - size / 8;
+	// Proportional rather than fixed, so the 16px version is not a thin scratch.
+	const outer = size / 2 - size * 0.08;
+	const inner = outer - size * 0.24;
 
-	// Mint, as BGRA — the byte order `createFromBuffer` expects.
+	// Mint. Written B, G, R because that is the byte order Electron expects.
 	const [b, g, r] = [0x9a, 0xf2, 0x42];
 
 	for (let y = 0; y < size; y++) {
@@ -97,19 +96,61 @@ function trayIcon(): NativeImage {
 				}
 			}
 
+			const alpha = Math.round((covered / (samples * samples)) * 255);
 			const offset = (y * size + x) * channels;
-			pixels[offset] = b;
-			pixels[offset + 1] = g;
-			pixels[offset + 2] = r;
-			pixels[offset + 3] = Math.round((covered / (samples * samples)) * 255);
+
+			// **Premultiplied.** Skia — and therefore the Windows tray — reads these
+			// buffers as premultiplied BGRA. Writing full-intensity colour alongside
+			// a partial alpha makes the antialiased edge brighter than it should be,
+			// and on some compositors renders as a halo rather than a smooth edge.
+			pixels[offset] = Math.round((b * alpha) / 255);
+			pixels[offset + 1] = Math.round((g * alpha) / 255);
+			pixels[offset + 2] = Math.round((r * alpha) / 255);
+			pixels[offset + 3] = alpha;
 		}
 	}
 
-	return nativeImage.createFromBuffer(pixels, {
-		width: size,
-		height: size,
-		scaleFactor: 2
-	});
+	return pixels;
+}
+
+/**
+ * The tray mark, drawn in code rather than shipped as a binary.
+ *
+ * **The shape is the countdown ring**, which is the one element the interface is
+ * built around: a Steam Guard code is a secret with a thirty-second life, and the
+ * account list renders that as a ring draining beneath the code. The tray icon is
+ * that ring with a quarter gone, so the thing in the system tray and the thing on
+ * screen are recognisably one product.
+ *
+ * Mint (`#42f29a`) is MASTERPANEL LLC's accent, and it holds against both a light
+ * and a dark taskbar, which a mid-grey does not.
+ *
+ * **Two representations, not one buffer tagged `scaleFactor: 2`.** The earlier
+ * version supplied only a 32px image declared as 2×, which leaves a standard-DPI
+ * tray to downsample a ring it was never given at its own size. A real 16px
+ * representation is what Windows actually asks for.
+ *
+ * Drawn here instead of committed as a PNG so that nothing in this repository is
+ * a binary blob a reader has to take on trust — the same argument the rest of the
+ * project makes about its build.
+ *
+ * **Installer and window icons are still outstanding**: those need a real `.ico`
+ * and multi-resolution PNGs in `build/`, which is a packaging task (§10.2).
+ */
+function trayIcon(): NativeImage {
+	const image = nativeImage.createEmpty();
+	for (const [size, scaleFactor] of [
+		[16, 1],
+		[32, 2]
+	] as const) {
+		image.addRepresentation({
+			width: size,
+			height: size,
+			scaleFactor,
+			buffer: ringPixels(size)
+		});
+	}
+	return image;
 }
 
 export function createTray(host: TrayHost): Tray {

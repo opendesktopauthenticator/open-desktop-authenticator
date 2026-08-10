@@ -322,12 +322,36 @@ function start(): void {
 		// stops producing codes and stops answering confirmations, which is not
 		// what anybody means by closing a window — but it must be possible to
 		// really quit, which is what `quitting` and the tray's Quit item are for.
+		/**
+		 * Said once, the first time the window disappears.
+		 *
+		 * Hiding to the tray is only safe if the user can find it again, and on
+		 * Windows 11 a tray icon a machine has not seen before goes straight into
+		 * the hidden overflow behind the chevron. From the user's side the
+		 * application simply vanished — and this one is still holding their
+		 * authenticator, so "did it quit?" is a genuinely alarming question.
+		 *
+		 * Once per run, not once per close: a balloon on every close is nagging.
+		 */
+		let toldAboutTray = false;
+
 		mainWindow.on('close', (event) => {
 			if (quitting) {
 				return;
 			}
 			event.preventDefault();
 			mainWindow.hide();
+
+			if (!toldAboutTray) {
+				toldAboutTray = true;
+				tray?.displayBalloon?.({
+					title: `${branding.shortName} is still running`,
+					content:
+						'Closing the window keeps your codes and confirmations working. Find it in the ' +
+						'system tray — on Windows you may need the arrow next to the clock to show ' +
+						'hidden icons. Quit properly from the tray menu.'
+				});
+			}
 		});
 
 		tray = createTray({

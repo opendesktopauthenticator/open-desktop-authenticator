@@ -79,6 +79,22 @@ export const accountSchema = z
 		deviceId: z.string().optional(),
 
 		/**
+		 * The rest of what Steam issues at enrollment, kept for export fidelity.
+		 *
+		 * None of these is used to talk to Steam — codes come from `sharedSecret`
+		 * and confirmations from `identitySecret`. They are stored because a maFile
+		 * written without them is a lossy copy of the one Steam handed us, and the
+		 * point of export is that the user is not tied to this application.
+		 *
+		 * `uri` is the `otpauth://` form, which is how somebody puts the same
+		 * authenticator into a second tool if they want one.
+		 */
+		serialNumber: z.string().optional(),
+		tokenGid: z.string().optional(),
+		uri: z.string().optional(),
+		secret1: z.string().optional(),
+
+		/**
 		 * A **MobileApp-scoped** refresh token. A web-scoped token looks valid and
 		 * unexpired but cannot drive mobile confirmations (F-13), so the audience is
 		 * validated on load rather than at the first failed confirmation.
