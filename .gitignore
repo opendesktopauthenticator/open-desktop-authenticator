@@ -1,0 +1,53 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Secrets and account material (§11 S15). Nothing in this block may ever be
+# committed, to any branch, including "temporarily".
+# ─────────────────────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.maFile
+# Token write-back keeps `<file>.maFile.bak` and writes `<file>.maFile.tmp`, and
+# both hold the same secrets as the original. `*.maFile` does NOT match either —
+# the pattern requires the name to END with .maFile — so they need naming here.
+*.maFile.*
+*.bak
+*.tmp
+maFiles/
+manifest.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+vault.json
+vault.json.*
+*.session
+
+# Build output.
+# NOTE: /build/ is deliberately NOT ignored — §10.2 puts icons, the
+# electron-builder config and entitlements there, and they must be committed.
+dist/
+out/
+release/
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Logs — these are the most common accidental secret-leak vector, so no
+# exceptions here either (§11 S4).
+*.log
+npm-debug.log*
+logs/
+coverage/
+
+# Test fixtures are the ONE exception: they are synthetic and deliberately
+# tracked so the parser corpus survives. They contain no real account material.
+!spike/fixtures/*.maFile

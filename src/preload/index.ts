@@ -1,0 +1,123 @@
+import { contextBridge, ipcRenderer } from 'electron';
+// Values come from the zod-free module; types are erased at compile time.
+// Importing CHANNELS from '../shared/ipc' would emit require("zod") into this
+// bundle, which a sandboxed preload cannot resolve — see shared/channels.ts.
+import { CHANNELS } from '../shared/channels';
+import type {
+	AccountSummary,
+	ActivityList,
+	AppInfo,
+	CodesList,
+	ConfirmationsList,
+	ImportOutcome,
+	ImportReport,
+	ImportSelection,
+	RendererApi,
+	VaultSettingsView,
+	VaultStatus
+} from '../shared/ipc';
+
+/**
+ * The preload bridge (§11 S6).
+ *
+ * This file is the entire attack surface between the renderer and the main
+ * process, so it is deliberately tiny and deliberately boring.
+ *
+ * What it must never do:
+ *  - expose `ipcRenderer` itself, or any function taking a channel name from the
+ *    caller. That is a generic "invoke anything" bridge wearing a disguise.
+ *  - expose anything from `node:` — the renderer has no Node access and must not
+ *    gain one through here.
+ *  - import anything that pulls in an npm dependency. This bundle runs sandboxed
+ *    and can only require `electron`; anything else throws and silently takes
+ *    the whole bridge down with it.
+ *  - pass through arguments unexamined. Each function below names its channel as
+ *    a literal from the contract.
+ *
+ * Every exposed function corresponds to exactly one channel declared in
+ * `shared/ipc.ts`, which the main process validates on receipt.
+ */
+
+/**
+ * Every function names its channel as a literal from the contract, and takes
+ * only the arguments that channel declares. None of them accept a channel name
+ * from the caller — that would be a generic invoke bridge in disguise.
+ */
+const api: RendererApi = {
+	getAppInfo: () => ipcRenderer.invoke(CHANNELS.appInfo, {}) as Promise<AppInfo>,
+
+	getVaultStatus: () => ipcRenderer.invoke(CHANNELS.vaultStatus, {}) as Promise<VaultStatus>,
+	createVault: (passphrase: string) =>
+		ipcRenderer.invoke(CHANNELS.vaultCreate, { passphrase }) as Promise<{ ok: true }>,
+	unlockVault: (passphrase: string) =>
+		ipcRenderer.invoke(CHANNELS.vaultUnlock, { passphrase }) as Promise<{ ok: true }>,
+	lockVault: () => ipcRenderer.invoke(CHANNELS.vaultLock, {}) as Promise<{ ok: true }>,
+	touchVault: () => ipcRenderer.invoke(CHANNELS.vaultTouch, {}) as Promise<{ ok: true }>,
+	changePassphrase: (current: string, next: string) =>
+		ipcRenderer.invoke(CHANNELS.vaultChangePassphrase, { current, next }) as Promise<{
+			ok: true;
+		}>,
+
+	listAccounts: () =>
+		ipcRenderer.invoke(CHANNELS.accountsList, {}) as Promise<{ accounts: AccountSummary[] }>,
+	getSettings: () => ipcRenderer.invoke(CHANNELS.settingsGet, {}) as Promise<VaultSettingsView>,
+	updateSettings: (settings: VaultSettingsView) =>
+		ipcRenderer.invoke(CHANNELS.settingsUpdate, settings) as Promise<{ ok: true }>,
+
+	removeAccount: (steamId64: string, passphrase: string) =>
+		ipcRenderer.invoke(CHANNELS.accountRemove, {
+			steamId64,
+			passphrase,
+			// The renderer cannot reach this call without having shown the warning
+			// the literal stands for; the contract refuses anything else.
+			acknowledged: true as const
+		}) as Promise<{ ok: true }>,
+	setAccountAutoConfirm: (
+		steamId64: string,
+		settings: { marketListings: boolean; trades: boolean; pollIntervalSeconds: number }
+	) =>
+		ipcRenderer.invoke(CHANNELS.accountSetAutoConfirm, { steamId64, ...settings }) as Promise<{
+			ok: true;
+		}>,
+	setAccountProxy: (steamId64: string, proxyUrl: string | null) =>
+		ipcRenderer.invoke(CHANNELS.accountSetProxy, { steamId64, proxyUrl }) as Promise<{
+			ok: true;
+		}>,
+
+	// Takes no path and returns none: the OS picker is the only thing that names
+	// a file, and the main process is the only thing that reads one.
+	scanMaFiles: () => ipcRenderer.invoke(CHANNELS.importScan, {}) as Promise<ImportReport>,
+	commitImport: (selections: ImportSelection[]) =>
+		ipcRenderer.invoke(CHANNELS.importCommit, { selections }) as Promise<{
+			outcomes: ImportOutcome[];
+		}>,
+	discardImport: () => ipcRenderer.invoke(CHANNELS.importDiscard, {}) as Promise<{ ok: true }>,
+
+	listCodes: () => ipcRenderer.invoke(CHANNELS.codesList, {}) as Promise<CodesList>,
+	copyCode: (steamId64: string) =>
+		ipcRenderer.invoke(CHANNELS.codeCopy, { steamId64 }) as Promise<{
+			code: string;
+			clipboardClearsInSeconds: number;
+		}>,
+
+	listActivity: () => ipcRenderer.invoke(CHANNELS.activityList, {}) as Promise<ActivityList>,
+	listConfirmations: (steamId64: string) =>
+		ipcRenderer.invoke(CHANNELS.confirmationsList, { steamId64 }) as Promise<ConfirmationsList>,
+	actOnConfirmations: (steamId64: string, action: 'allow' | 'cancel', ids: string[]) =>
+		ipcRenderer.invoke(CHANNELS.confirmationsAct, { steamId64, action, ids }) as Promise<{
+			ok: true;
+		}>,
+	signInToSteam: (steamId64: string, password: string) =>
+		ipcRenderer.invoke(CHANNELS.steamSignIn, { steamId64, password }) as Promise<{ ok: true }>,
+
+	// §11 S2 exception (a). The passphrase is required again on purpose.
+	revealRevocationCode: (steamId64: string, passphrase: string) =>
+		ipcRenderer.invoke(CHANNELS.revocationReveal, { steamId64, passphrase }) as Promise<{
+			revocationCode: string;
+		}>,
+	confirmRevocationBackup: (steamId64: string) =>
+		ipcRenderer.invoke(CHANNELS.revocationConfirmBackup, { steamId64 }) as Promise<{ ok: true }>
+};
+
+// contextIsolation is on, so this is the only way anything reaches the renderer.
+contextBridge.exposeInMainWorld('api', api);

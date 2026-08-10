@@ -1,0 +1,152 @@
+/**
+ * Channel names, with no runtime dependencies whatsoever.
+ *
+ * This file is separate from `ipc.ts` for one specific reason: **the preload
+ * script runs sandboxed** (§11 S6), and a sandboxed preload can only `require`
+ * a small allowlist — `electron` and a few polyfilled builtins. Requiring an
+ * ordinary npm module throws, the preload dies, and `window.api` is silently
+ * never exposed.
+ *
+ * `ipc.ts` imports zod to declare the schemas. If preload imported its channel
+ * names from there, the bundler would emit `require("zod")` into the preload and
+ * the whole bridge would fail at runtime — with no error surfaced anywhere
+ * obvious, because the preload failing looks identical to the renderer simply
+ * not having an API.
+ *
+ * So: preload imports values from here only, and types from `ipc.ts` using
+ * `import type`, which the compiler erases.
+ *
+ * `tests/security-posture.test.ts` asserts the built preload requires nothing
+ * but `electron`.
+ */
+
+/** Every legal channel name. Preload allowlists exactly these. */
+export const CHANNELS = {
+	/** Non-secret application metadata for the About screen and window chrome. */
+	appInfo: 'app:info',
+
+	/** Whether a vault exists, whether it is unlocked, when it will auto-lock. */
+	vaultStatus: 'vault:status',
+	/** Create a new vault. Passphrase inbound. */
+	vaultCreate: 'vault:create',
+	/** Unlock an existing vault. Passphrase inbound. */
+	vaultUnlock: 'vault:unlock',
+	/** Lock now. */
+	vaultLock: 'vault:lock',
+	/** Defer the idle auto-lock. */
+	vaultTouch: 'vault:touch',
+	/** Re-seal under a new passphrase. Both passphrases inbound. */
+	vaultChangePassphrase: 'vault:changePassphrase',
+
+	/** Account list WITHOUT any secret. */
+	accountsList: 'accounts:list',
+
+	/**
+	 * Vault settings the user can actually change (§10.3).
+	 *
+	 * Carries no secrets — timings only. Separate from `vault:status`, which is
+	 * polled every second and has no business shipping settings with it.
+	 */
+	settingsGet: 'settings:get',
+	settingsUpdate: 'settings:update',
+
+	/**
+	 * Set or clear one account's network routing (§10.1).
+	 *
+	 * Routing is **optional, per account, and always removable**. An account with
+	 * none connects the way everything else on the machine does. This channel is
+	 * how a proxy that arrived inside an imported maFile — possibly a dead one —
+	 * can be replaced or taken off entirely.
+	 */
+	accountSetProxy: 'account:setProxy',
+
+	/**
+	 * Turn automatic confirmation on or off for one account (§12 F6).
+	 *
+	 * Per account and per type, never global. What the user enables here is the
+	 * *most* that S16 will act on — the allowlist in `confirmations/policy.ts`
+	 * still decides the rest, and no setting reachable from this channel can widen
+	 * it beyond trades and market listings.
+	 */
+	accountSetAutoConfirm: 'account:setAutoConfirm',
+
+	/**
+	 * Remove an account from this vault (§12 F2).
+	 *
+	 * Gated like the revocation reveal, and for a heavier reason: this destroys
+	 * the only copy of a shared secret and a revocation code that most users have.
+	 * It does **not** remove the authenticator from Steam — that is the whole
+	 * danger, and the reason the request carries an explicit acknowledgement
+	 * alongside the passphrase.
+	 */
+	accountRemove: 'account:remove',
+
+	/**
+	 * Import (§12 F2). Three channels, because the secrets stay in the main
+	 * process for the whole flow:
+	 *
+	 *  - `importScan` opens the OS file picker, parses what was chosen, and
+	 *    returns a report describing it. The renderer never names a path and
+	 *    never receives a secret.
+	 *  - `importCommit` writes chosen candidates into the vault by opaque id.
+	 *  - `importDiscard` drops the staged secrets without importing anything.
+	 */
+	importScan: 'import:scan',
+	importCommit: 'import:commit',
+	importDiscard: 'import:discard',
+
+	/**
+	 * Steam Guard codes (§12 F4). Codes DO cross to the renderer — they have to
+	 * be readable — but they are not long-term secrets: each one dies in under
+	 * thirty seconds and cannot be turned back into the shared secret that made
+	 * it. §11 S2 governs the shared secret, which never leaves the main process.
+	 */
+	codesList: 'codes:list',
+	/** Copy one code via the main process, which also owns the auto-clear timer. */
+	codeCopy: 'codes:copy',
+
+	/**
+	 * Mobile confirmations (§12 F5).
+	 *
+	 * The renderer receives an id and enough text to decide; the nonce that makes
+	 * acting on one possible never leaves the main process, so the UI can approve
+	 * only what it was actually shown.
+	 */
+	/**
+	 * What automatic confirmation did while nobody was watching.
+	 *
+	 * Read-only and carries no secret. It exists because the engine was computing
+	 * held-back confirmations — including account recovery — and dropping them,
+	 * which made the loudest warning this app can raise land nowhere.
+	 */
+	activityList: 'activity:list',
+
+	confirmationsList: 'confirmations:list',
+	confirmationsAct: 'confirmations:act',
+
+	/**
+	 * Sign in to Steam once, with a password (§12 F3).
+	 *
+	 * Inbound only, and used inside the handler rather than stored: what is kept
+	 * is the long-lived refresh token it produces. §11 S2 governs what the
+	 * renderer *receives*, and this returns nothing but success.
+	 */
+	steamSignIn: 'steam:signIn',
+
+	/**
+	 * Reveal one revocation code — §11 S2 exception (a), the backup ceremony.
+	 * Requires the passphrase again; being unlocked is not enough.
+	 */
+	revocationReveal: 'revocation:reveal',
+
+	/**
+	 * Record that the user has written their revocation code down (§11 S12).
+	 *
+	 * No passphrase: the dangerous half of the ceremony is the reveal, which is
+	 * gated. This only clears a warning the user is looking at, and demanding the
+	 * passphrase twice in one flow teaches people to type it reflexively.
+	 */
+	revocationConfirmBackup: 'revocation:confirmBackup'
+} as const;
+
+export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

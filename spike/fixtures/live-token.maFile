@@ -1,0 +1,12 @@
+{
+  "shared_secret": "x9sAUXoRNoter5SBvHZj7FE5zsg=",
+  "identity_secret": "/88f1LeYylGYYIO243UNiYbEfM8=",
+  "account_name": "livetoken",
+  "revocation_code": "R55555",
+  "status": 1,
+  "fully_enrolled": true,
+  "Session": {
+    "SteamID": "76561198999999997",
+    "RefreshToken": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9.eyJpc3MiOiJzdGVhbSIsInN1YiI6Ijc2NTYxMTk4OTk5OTk5OTk3IiwiZXhwIjo0MTAyNDQ0ODAwLCJhdWQiOlsid2ViIiwicmVuZXciLCJkZXJpdmUiLCJtb2JpbGUiXX0.bm90LWEtcmVhbC1zaWduYXR1cmU"
+  }
+}

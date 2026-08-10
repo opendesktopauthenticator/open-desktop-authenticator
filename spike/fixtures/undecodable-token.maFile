@@ -1,0 +1,10 @@
+{
+  "shared_secret": "KrbnbF2lShuAa/mL6vPz1rs1ncY=",
+  "identity_secret": "7TslCCxb+eOdtAzs4bMFAN5g+9Q=",
+  "account_name": "undecodabletoken",
+  "revocation_code": "R22222",
+  "Session": {
+    "SteamID": "76561198999999998",
+    "RefreshToken": "this-is-not-a-jwt"
+  }
+}

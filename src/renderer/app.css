@@ -1,0 +1,702 @@
+/**
+ * Open Desktop Authenticator — visual system.
+ *
+ * The palette is MASTERPANEL LLC's, taken from masterspanel.com rather than
+ * approximated: emerald `#2ecc71` and mint `#42f29a` over a near-black that is
+ * very slightly green, with `linear-gradient(135deg, #42f29a, #1abc9c)` as the
+ * signature and a soft emerald glow on anything active. This app is published
+ * under that name, so it reads as part of that family.
+ *
+ * ## The one thing this interface is built around
+ *
+ * A Steam Guard code is a secret with a thirty-second lifespan. That is the
+ * characteristic fact of this product, so the code is the largest thing on the
+ * screen and it **visibly burns down**: a hairline drains beneath the glyphs and
+ * the colour walks mint → amber → red as the seconds go. You should be able to
+ * tell from across the room whether to type it or wait for the next one, without
+ * reading a number.
+ *
+ * Everything else is deliberately quiet so that can be loud. Panels are hairline
+ * and near-flat; the only other saturated colour in the interface is a warning.
+ *
+ * ## Constraints that shaped it
+ *
+ * No web fonts. A packaged build runs under a CSP with no remote origins, and
+ * embedding a face would bloat the bundle for a product whose whole pitch is
+ * that you can audit it. So the type system is built from faces already on the
+ * machine, chosen per platform.
+ */
+
+:root {
+	/* Master Panel's greens. */
+	--mint: #42f29a;
+	--emerald: #2ecc71;
+	--emerald-deep: #27ae60;
+	--teal: #1abc9c;
+	--mint-pale: #9fe7bd;
+
+	/* Surfaces, from the page up. Near-black, faintly green rather than neutral. */
+	--bg: #070a0e;
+	--bg-deep: #04140c;
+	--panel: #0b0f15;
+	--panel-raised: #0d1218;
+
+	--line: rgba(147, 168, 158, 0.16);
+	--line-strong: rgba(147, 168, 158, 0.3);
+
+	--text: #ecf0f1;
+	--muted: #93a89e;
+	--faint: #6b7f74;
+
+	--danger: #e74c3c;
+	--danger-text: #ff8a8a;
+	--warn: #f5c26b;
+
+	--accent-gradient: linear-gradient(135deg, var(--mint), var(--teal));
+	--glass: linear-gradient(160deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0));
+	--glow: 0 0 15px rgba(39, 174, 96, 0.5);
+	--lift: 0 14px 30px rgba(0, 0, 0, 0.4);
+
+	--radius: 14px;
+	--radius-sm: 9px;
+
+	/*
+	 * Local faces only — see the file header. Segoe UI Variable is the modern
+	 * Windows UI face; the rest are fallbacks for Linux, which is the other
+	 * platform we ship.
+	 */
+	--font-ui:
+		'Segoe UI Variable Display', 'Segoe UI', Inter, 'SF Pro Display', system-ui, -apple-system,
+		'Cantarell', 'Noto Sans', sans-serif;
+	/* The instrument face: codes, SteamIDs, proxy addresses, revocation codes. */
+	--font-mono:
+		'Cascadia Mono', 'Cascadia Code', Consolas, 'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono',
+		ui-monospace, monospace;
+
+	color-scheme: dark;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	background:
+		/* Two low, wide emerald washes so the near-black is not flat. Fixed
+		   rather than scrolling: this is the room, not part of the content. */
+		radial-gradient(1200px 600px at 15% -10%, rgba(46, 204, 113, 0.09), transparent 60%),
+		radial-gradient(900px 500px at 110% 10%, rgba(26, 188, 156, 0.07), transparent 55%), var(--bg);
+	background-attachment: fixed;
+	color: var(--text);
+	font-family: var(--font-ui);
+	font-size: 15px;
+	line-height: 1.55;
+	-webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------- layout -- */
+
+.shell {
+	max-width: 940px;
+	margin: 0 auto;
+	padding: 32px 28px 72px;
+}
+
+.row {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 16px;
+	flex-wrap: wrap;
+}
+
+.controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------------ type -- */
+
+h1 {
+	margin: 0 0 4px;
+	font-size: clamp(1.55rem, 1.2rem + 1.2vw, 2.05rem);
+	font-weight: 650;
+	letter-spacing: -0.022em;
+	/* Master Panel's heading treatment: white falling into pale mint. */
+	background: linear-gradient(180deg, #ffffff 32%, var(--mint-pale));
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+}
+
+h2 {
+	margin: 34px 0 12px;
+	font-size: 0.78rem;
+	font-weight: 650;
+	/* Section headings are labels, not titles — they sit above content as an
+	   eyebrow rather than competing with the h1. */
+	text-transform: uppercase;
+	letter-spacing: 0.14em;
+	color: var(--muted);
+}
+
+h2::after {
+	content: '';
+	display: block;
+	height: 1px;
+	margin-top: 10px;
+	background: linear-gradient(90deg, var(--line-strong), transparent 65%);
+}
+
+p {
+	margin: 0 0 10px;
+}
+
+.muted {
+	color: var(--muted);
+}
+
+.hint {
+	margin: 6px 0 0;
+	font-size: 0.855rem;
+	color: var(--muted);
+	line-height: 1.5;
+}
+
+.hint.bad,
+.error {
+	color: var(--danger-text);
+}
+
+.hint.ok {
+	color: var(--mint);
+}
+
+.fineprint {
+	margin-top: 40px;
+	font-size: 0.78rem;
+	color: var(--faint);
+}
+
+.empty {
+	padding: 44px 28px;
+	border: 1px dashed var(--line-strong);
+	border-radius: var(--radius);
+	text-align: center;
+	color: var(--muted);
+	background: var(--glass);
+}
+
+/* --------------------------------------------------------------- notices -- */
+
+.error,
+.notice,
+.banner {
+	margin: 14px 0;
+	padding: 12px 15px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--line);
+	background: var(--panel);
+	font-size: 0.9rem;
+}
+
+/* A coloured spine rather than a coloured field: the message stays readable and
+   the severity is carried structurally. */
+.error,
+.banner.error {
+	border-left: 3px solid var(--danger);
+	color: var(--danger-text);
+	background: rgba(231, 76, 60, 0.07);
+}
+
+.notice {
+	border-left: 3px solid var(--warn);
+	color: var(--text);
+	background: rgba(245, 194, 107, 0.06);
+}
+
+.banner {
+	position: sticky;
+	top: 0;
+	z-index: 10;
+	backdrop-filter: blur(8px);
+}
+
+/* --------------------------------------------------------------- panels --- */
+
+.ceremony,
+.posture {
+	margin: 18px 0;
+	padding: 22px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--glass), var(--panel);
+	box-shadow: var(--lift);
+}
+
+/* ------------------------------------------------------------ account list */
+
+.accounts {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.accounts li {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 18px;
+	flex-wrap: wrap;
+	padding: 16px 18px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--glass), var(--panel);
+	transition:
+		border-color 140ms ease,
+		transform 140ms ease;
+}
+
+.accounts li:hover {
+	border-color: var(--line-strong);
+}
+
+.accounts li > div:first-child {
+	min-width: 0;
+	flex: 1 1 15rem;
+}
+
+.accounts strong {
+	font-weight: 620;
+	letter-spacing: -0.01em;
+}
+
+/* SteamIDs, proxy addresses and ids are data, and read as data. */
+.accounts .muted {
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	letter-spacing: 0.01em;
+}
+
+/* ------------------------------------------- the code, and its countdown -- */
+
+/*
+ * The signature element.
+ *
+ * `--remaining` is set inline by the renderer as a 0–1 fraction of the code's
+ * life. Everything below is driven from it, so the code's appearance is a
+ * continuous read-out rather than a state that flips at a threshold: the drain
+ * beneath the glyphs shortens, and the tint walks mint → amber → red.
+ */
+.code {
+	position: relative;
+	display: inline-block;
+	padding: 2px 2px 9px;
+	font-family: var(--font-mono);
+	font-size: 2.1rem;
+	font-weight: 600;
+	/* Wide tracking: these are five characters to be transcribed one at a time,
+	   not a word to be read. */
+	letter-spacing: 0.16em;
+	text-indent: 0.16em;
+	line-height: 1.1;
+	color: var(--mint);
+	text-shadow: 0 0 18px rgba(66, 242, 154, 0.35);
+	font-variant-ligatures: none;
+	user-select: all;
+}
+
+/* The track the drain runs in. */
+.code::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	height: 2px;
+	border-radius: 2px;
+	background: rgba(147, 168, 158, 0.18);
+}
+
+/* The drain itself — the code burning down. */
+.code::after {
+	content: '';
+	position: absolute;
+	left: 0;
+	bottom: 0;
+	height: 2px;
+	width: calc(var(--remaining, 1) * 100%);
+	border-radius: 2px;
+	background: var(--accent-gradient);
+	box-shadow: var(--glow);
+	transition:
+		width 900ms linear,
+		background 400ms ease;
+}
+
+/* Past two-thirds gone, and then past six seconds. Thresholds are on the
+   *container* so the number and the code shift together. */
+.expiring .code,
+.code.expiring {
+	color: var(--warn);
+	text-shadow: 0 0 18px rgba(245, 194, 107, 0.3);
+}
+
+.expiry {
+	min-width: 3.1ch;
+	font-family: var(--font-mono);
+	font-size: 0.9rem;
+	font-variant-numeric: tabular-nums;
+	color: var(--muted);
+}
+
+.expiry.expiring {
+	color: var(--warn);
+	font-weight: 600;
+}
+
+/* Under five seconds the code is about to be worthless. This is the one place
+   in the interface that moves on its own. */
+.expiry.expiring {
+	animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+	50% {
+		opacity: 0.45;
+	}
+}
+
+/* --------------------------------------------------------------- buttons -- */
+
+button {
+	font: inherit;
+	font-weight: 600;
+	padding: 9px 17px;
+	border-radius: var(--radius-sm);
+	border: 1px solid transparent;
+	background: var(--accent-gradient);
+	color: #04140c;
+	cursor: pointer;
+	letter-spacing: -0.005em;
+	transition:
+		filter 140ms ease,
+		transform 140ms ease,
+		box-shadow 140ms ease;
+}
+
+button:hover:not(:disabled) {
+	filter: brightness(1.08);
+	box-shadow: var(--glow);
+}
+
+button:active:not(:disabled) {
+	transform: translateY(1px);
+}
+
+button:disabled {
+	opacity: 0.42;
+	cursor: not-allowed;
+}
+
+button.secondary {
+	background: rgba(147, 168, 158, 0.09);
+	border-color: var(--line-strong);
+	color: var(--text);
+}
+
+button.secondary:hover:not(:disabled) {
+	background: rgba(66, 242, 154, 0.1);
+	border-color: var(--mint);
+	color: var(--mint);
+	box-shadow: none;
+}
+
+button.danger,
+button.secondary.danger {
+	border-color: rgba(231, 76, 60, 0.5);
+	background: rgba(231, 76, 60, 0.1);
+	color: var(--danger-text);
+}
+
+button.secondary.danger:hover:not(:disabled) {
+	background: rgba(231, 76, 60, 0.18);
+	border-color: var(--danger);
+	color: var(--danger-text);
+}
+
+/* ------------------------------------------------------------- form bits -- */
+
+form {
+	margin: 0;
+}
+
+label {
+	display: block;
+	margin-bottom: 6px;
+	font-size: 0.82rem;
+	font-weight: 600;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+
+input[type='text'],
+input[type='password'],
+input[type='number'],
+select {
+	width: 100%;
+	padding: 10px 13px;
+	font: inherit;
+	color: var(--text);
+	background: var(--bg);
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius-sm);
+	transition:
+		border-color 140ms ease,
+		box-shadow 140ms ease;
+}
+
+/* Anything the user types that is a credential or an address is data. */
+input[type='password'],
+input[type='text'] {
+	font-family: var(--font-mono);
+	letter-spacing: 0.02em;
+}
+
+input:focus,
+select:focus {
+	outline: none;
+	border-color: var(--mint);
+	box-shadow: 0 0 0 3px rgba(66, 242, 154, 0.16);
+}
+
+input::placeholder {
+	color: var(--faint);
+	letter-spacing: 0;
+}
+
+.checkbox {
+	display: flex;
+	align-items: flex-start;
+	gap: 11px;
+	margin: 14px 0;
+	/* A checkbox row is a sentence, not a field label. */
+	font-size: 0.925rem;
+	font-weight: 400;
+	letter-spacing: 0;
+	text-transform: none;
+	color: var(--text);
+	cursor: pointer;
+}
+
+.checkbox input {
+	width: 17px;
+	height: 17px;
+	margin: 2px 0 0;
+	accent-color: var(--emerald);
+	flex: none;
+	cursor: pointer;
+}
+
+/* Import rows: a checkbox and its explanation, not a form field. */
+.accounts .checkbox {
+	margin-top: 0;
+	flex: 1 1 22rem;
+	font-size: inherit;
+}
+
+.accounts .checkbox input {
+	margin-top: 0.3rem;
+}
+
+.accounts .checkbox p,
+.accounts li p {
+	margin: 0.3rem 0 0;
+}
+
+/* A secondary decision about a row that is already ticked — adopting the proxy
+   found inside a maFile. Indented and quieter so it reads as a qualifier on the
+   import rather than a second thing being imported. */
+.accounts .checkbox.nested {
+	flex-basis: 100%;
+	margin-top: 0.6rem;
+	margin-left: 1.6rem;
+	padding-left: 0.8rem;
+	border-left: 2px solid var(--line-strong);
+	font-size: 0.95em;
+}
+
+.accounts + .controls {
+	margin-top: 1.5rem;
+}
+
+/* ----------------------------------------------------------------- flags -- */
+
+.flags {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	flex-wrap: wrap;
+}
+
+.flag {
+	padding: 4px 10px;
+	border-radius: 999px;
+	border: 1px solid var(--line-strong);
+	background: rgba(147, 168, 158, 0.07);
+	font-size: 0.715rem;
+	font-weight: 650;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.flag.good {
+	border-color: rgba(46, 204, 113, 0.45);
+	background: rgba(46, 204, 113, 0.11);
+	color: var(--mint);
+}
+
+.flag.warn {
+	border-color: rgba(245, 194, 107, 0.45);
+	background: rgba(245, 194, 107, 0.1);
+	color: var(--warn);
+}
+
+.flag.bad {
+	border-color: rgba(231, 76, 60, 0.5);
+	background: rgba(231, 76, 60, 0.12);
+	color: var(--danger-text);
+}
+
+/* Some flags are buttons. They must look like the same object and still be
+   obviously pressable. */
+button.flag,
+.flag.actionable {
+	cursor: pointer;
+	font-family: inherit;
+	transition:
+		border-color 140ms ease,
+		color 140ms ease,
+		background 140ms ease;
+}
+
+button.flag:hover:not(:disabled),
+.flag.actionable:hover {
+	border-color: var(--mint);
+	color: var(--mint);
+	background: rgba(66, 242, 154, 0.1);
+	box-shadow: none;
+	filter: none;
+}
+
+button.flag.bad:hover:not(:disabled) {
+	border-color: var(--danger);
+	color: var(--danger-text);
+	background: rgba(231, 76, 60, 0.2);
+}
+
+/* ------------------------------------------------------------ revocation -- */
+
+/*
+ * The one string in this product that cannot be recovered if it is lost.
+ * Presented as an artifact to be copied onto paper: large, monospaced, isolated,
+ * and framed so it is unmistakably the thing being shown.
+ */
+.revocation {
+	display: block;
+	margin: 18px 0;
+	padding: 22px;
+	border: 1px solid rgba(46, 204, 113, 0.35);
+	border-radius: var(--radius);
+	background: var(--bg-deep);
+	font-family: var(--font-mono);
+	font-size: 1.85rem;
+	font-weight: 600;
+	letter-spacing: 0.28em;
+	text-indent: 0.28em;
+	text-align: center;
+	color: var(--mint);
+	text-shadow: 0 0 22px rgba(66, 242, 154, 0.3);
+	user-select: all;
+}
+
+/* --------------------------------------------------------------- footer --- */
+
+footer {
+	max-width: 940px;
+	margin: 0 auto;
+	padding: 22px 28px 40px;
+	border-top: 1px solid var(--line);
+	font-size: 0.78rem;
+	color: var(--faint);
+}
+
+/* ------------------------------------------------------- quality floor --- */
+
+:focus-visible {
+	outline: 2px solid var(--mint);
+	outline-offset: 2px;
+	border-radius: 4px;
+}
+
+::selection {
+	background: rgba(66, 242, 154, 0.28);
+	color: #fff;
+}
+
+::-webkit-scrollbar {
+	width: 11px;
+	height: 11px;
+}
+
+::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	border: 3px solid transparent;
+	border-radius: 999px;
+	background-clip: content-box;
+	background-color: rgba(147, 168, 158, 0.28);
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background-color: rgba(66, 242, 154, 0.45);
+}
+
+@media (max-width: 640px) {
+	.shell {
+		padding: 22px 16px 56px;
+	}
+
+	.accounts li {
+		align-items: flex-start;
+	}
+
+	.code {
+		font-size: 1.8rem;
+	}
+}
+
+/*
+ * Motion is decoration here, never information — the countdown is also a number
+ * and a colour, so removing the movement costs nothing.
+ */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.001ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.001ms !important;
+	}
+}

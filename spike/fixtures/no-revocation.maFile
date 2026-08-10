@@ -1,0 +1,10 @@
+{
+  "shared_secret": "z6PAwqb3GZhtw1fvKJ9CPgvW0C4=",
+  "account_name": "norevocation",
+  "identity_secret": "bC6UREz3t9OseTSVLGq5kVComEc=",
+  "status": 1,
+  "fully_enrolled": true,
+  "Session": {
+    "SteamID": 76561199999999997
+  }
+}

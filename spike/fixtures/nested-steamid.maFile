@@ -1,0 +1,10 @@
+{
+  "shared_secret": "5ZoJVRTjtX99oaKTcTmhw34YO4k=",
+  "identity_secret": "pOCTQqgol60/C9/o2PHBVela1oY=",
+  "account_name": "nestedsteamid",
+  "revocation_code": "R77777",
+  "Session": {
+    "meta": { "SteamID": "76561198000000003" },
+    "SteamID": 76561199999999999
+  }
+}

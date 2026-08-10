@@ -1,0 +1,31 @@
+# Line endings are normalised to LF in the repository and on checkout.
+#
+# Not a style preference. This project builds and tests on Windows *and* Linux
+# in CI, and the default Windows behaviour (checkout as CRLF) means the same file
+# hashes differently on the two platforms. That produces phantom diffs, breaks
+# `format:check` on one runner but not the other, and — the reason it matters
+# here — makes a source file's published hash depend on which machine touched it
+# last. A project whose whole argument is "verify what we published" cannot have
+# that.
+#
+# Set before the first commit deliberately: correcting line endings afterwards
+# rewrites every file in one enormous diff.
+* text=auto eol=lf
+
+# Binary assets, never normalised. Icons live in build/ per §10.2.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+
+# Lockfiles are generated. Collapsing them in reviews keeps a dependency change
+# readable — the diff that matters is package.json, and the lockfile is the
+# consequence.
+package-lock.json linguist-generated=true -diff
+
+# The spike is reference code, not shipped. Excluding it from language stats
+# stops GitHub reporting the repository as being mostly Phase 0 CLI.
+spike/** linguist-vendored=true

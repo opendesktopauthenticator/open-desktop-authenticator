@@ -1,0 +1,234 @@
+import type { ConfirmationsService, AutoConfirmOutcome } from './service';
+import type { VaultService } from '../vault/service';
+
+/**
+ * The automatic confirmation loop (§12 F6, milestone 0.3).
+ *
+ * This is the most dangerous feature in the product and it is deliberately the
+ * dumbest module in it. Every decision about *what* may be approved lives in
+ * `policy.ts` and is enforced in `client.ts`; all this does is decide *when* to
+ * ask. If that separation ever blurs, the thing at risk is somebody's account.
+ *
+ * Four rules shape it:
+ *
+ *  - **It does nothing until a user switches something on.** An account with
+ *    neither type enabled is never polled at all, so the default costs no
+ *    requests and takes no risk.
+ *  - **It stops dead when the vault locks.** A locked vault means the user is
+ *    not present, and approving trades on behalf of somebody who is not there is
+ *    exactly what this must not do unattended.
+ *  - **A failure never speeds anything up.** Errors back off instead of
+ *    retrying, because the common cause is Steam rate-limiting and the common
+ *    reflex — try again immediately — is what turns a slow minute into a blocked
+ *    hour.
+ *  - **What it holds back is reported, not swallowed.** An account-recovery
+ *    confirmation the policy refused is the strongest warning this app can give,
+ *    and a poller that quietly moved on would waste it.
+ */
+
+/** Never poll faster than this, whatever the account says. */
+const MIN_INTERVAL_MS = 10_000;
+
+/** After a failure, wait at least this long before trying that account again. */
+const BACKOFF_START_MS = 30_000;
+const BACKOFF_MAX_MS = 15 * 60_000;
+
+/**
+ * Consecutive failures after which the account stops being polled entirely.
+ *
+ * Backoff alone is not enough. If a session has genuinely died, backing off
+ * means failing forever at fifteen-minute intervals — quietly, while the user
+ * believes automatic confirmation is working. Ten in a row is not a blip; it is
+ * a thing that needs a person, so the engine says so and stops.
+ */
+const HALT_AFTER_FAILURES = 10;
+
+export interface AutoConfirmEngineOptions {
+	vault: VaultService;
+	confirmations: ConfirmationsService;
+	/** Told what happened, so the UI or a notification can surface it. */
+	onOutcome?: (steamId64: string, outcome: AutoConfirmOutcome) => void;
+	/** Told when a pass failed, with the reason already made presentable. */
+	onFailure?: (steamId64: string, reason: string) => void;
+	/** Injected for testability. */
+	now?: () => number;
+	setTimer?: (callback: () => void, ms: number) => NodeJS.Timeout;
+	clearTimer?: (handle: NodeJS.Timeout) => void;
+}
+
+interface AccountState {
+	/** Epoch ms of the next permitted attempt. */
+	nextDueAt: number;
+	/**
+	 * The wait currently being served after a failure, doubling each consecutive
+	 * one. **Absent while healthy** — carrying a value through a success made the
+	 * first failure after it wait twice as long as `BACKOFF_START_MS`, so the
+	 * constant never described any real delay.
+	 */
+	backoffMs?: number;
+	/** Consecutive failures. Reset by a success, or by `reset`. */
+	failures?: number;
+	/** Set once the account has failed too often to keep trying unattended. */
+	halted?: boolean;
+}
+
+export class AutoConfirmEngine {
+	private readonly vault: VaultService;
+	private readonly confirmations: ConfirmationsService;
+	private readonly onOutcome: (steamId64: string, outcome: AutoConfirmOutcome) => void;
+	private readonly onFailure: (steamId64: string, reason: string) => void;
+	private readonly now: () => number;
+	private readonly setTimer: (callback: () => void, ms: number) => NodeJS.Timeout;
+	private readonly clearTimer: (handle: NodeJS.Timeout) => void;
+
+	private readonly state = new Map<string, AccountState>();
+	private ticker: NodeJS.Timeout | undefined;
+	/** Guards against a slow pass overlapping the next tick. */
+	private running = false;
+
+	constructor(options: AutoConfirmEngineOptions) {
+		this.vault = options.vault;
+		this.confirmations = options.confirmations;
+		this.onOutcome = options.onOutcome ?? ((): void => undefined);
+		this.onFailure = options.onFailure ?? ((): void => undefined);
+		this.now = options.now ?? ((): number => Date.now());
+		this.setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
+		this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
+	}
+
+	/** Begin checking. Safe to call when nothing is enabled — it simply idles. */
+	start(): void {
+		if (this.ticker) {
+			return;
+		}
+		this.schedule();
+	}
+
+	/** Stop, and forget every account's schedule. Called on lock and on quit. */
+	stop(): void {
+		if (this.ticker) {
+			this.clearTimer(this.ticker);
+			this.ticker = undefined;
+		}
+		this.state.clear();
+	}
+
+	/**
+	 * Drop one account's backoff and timing.
+	 *
+	 * Called when its settings change: someone who just switched auto-confirm on
+	 * should not wait out a backoff earned before they did.
+	 */
+	reset(steamId64: string): void {
+		this.state.delete(steamId64);
+	}
+
+	/**
+	 * One sweep. Exposed so a test can drive it directly rather than through a
+	 * timer, and so nothing here depends on real time passing.
+	 */
+	async tick(): Promise<void> {
+		if (this.running) {
+			return;
+		}
+		// A locked vault is the clearest possible statement that nobody is present.
+		if (!this.vault.isUnlocked()) {
+			this.state.clear();
+			return;
+		}
+
+		this.running = true;
+		try {
+			for (const account of this.dueAccounts()) {
+				await this.runOne(account.steamId64, account.pollIntervalSeconds);
+			}
+		} finally {
+			this.running = false;
+		}
+	}
+
+	/** Accounts with something enabled, whose next attempt is due. */
+	private dueAccounts(): { steamId64: string; pollIntervalSeconds: number }[] {
+		const now = this.now();
+		const due: { steamId64: string; pollIntervalSeconds: number }[] = [];
+
+		for (const account of this.vault.read().accounts) {
+			// The switch the user set is what decides whether this account is polled
+			// at all. Nothing enabled means no request is ever made for it.
+			if (!account.autoConfirm.marketListings && !account.autoConfirm.trades) {
+				this.state.delete(account.steamId64);
+				continue;
+			}
+			const state = this.state.get(account.steamId64);
+			// A halted account is left alone until something changes — settings, a
+			// lock, or a restart. Continuing to poke a dead session forever, quietly,
+			// is exactly what the halt exists to stop.
+			if (state?.halted) {
+				continue;
+			}
+			if (state && state.nextDueAt > now) {
+				continue;
+			}
+			due.push({
+				steamId64: account.steamId64,
+				pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds
+			});
+		}
+
+		return due;
+	}
+
+	private async runOne(steamId64: string, pollIntervalSeconds: number): Promise<void> {
+		const interval = Math.max(MIN_INTERVAL_MS, pollIntervalSeconds * 1000);
+
+		try {
+			const outcome = await this.confirmations.runAutoConfirm(steamId64);
+
+			// No `backoffMs` and no `failures`: a success clears both penalties.
+			this.state.set(steamId64, { nextDueAt: this.now() + interval });
+			this.onOutcome(steamId64, outcome);
+		} catch (err) {
+			const previous = this.state.get(steamId64);
+			const failures = (previous?.failures ?? 0) + 1;
+			const reason = err instanceof Error ? err.message : String(err);
+
+			if (failures >= HALT_AFTER_FAILURES) {
+				// Ten in a row is not a blip. Stop, and say so — the alternative is
+				// failing forever at fifteen-minute intervals while the user believes
+				// this is working.
+				this.state.set(steamId64, { nextDueAt: Number.POSITIVE_INFINITY, failures, halted: true });
+				this.onFailure(
+					steamId64,
+					`Automatic confirmation stopped for this account after ${failures} failures in a row. ` +
+						`The last one was: ${reason}`
+				);
+				return;
+			}
+
+			// Backoff, never a retry. The likeliest cause is Steam rate-limiting, and
+			// hammering it is how a slow minute becomes a blocked hour.
+			const backoffMs =
+				previous?.backoffMs === undefined
+					? BACKOFF_START_MS
+					: Math.min(BACKOFF_MAX_MS, previous.backoffMs * 2);
+			this.state.set(steamId64, { nextDueAt: this.now() + backoffMs, backoffMs, failures });
+
+			this.onFailure(steamId64, reason);
+		}
+	}
+
+	private schedule(): void {
+		// A fixed short heartbeat rather than one timer per account: per-account
+		// timing is decided by `nextDueAt`, so a settings change takes effect on the
+		// next beat instead of needing timers torn down and rebuilt.
+		const handle = this.setTimer(() => {
+			void this.tick().finally(() => {
+				if (this.ticker) {
+					this.schedule();
+				}
+			});
+		}, MIN_INTERVAL_MS);
+		handle.unref?.();
+		this.ticker = handle;
+	}
+}

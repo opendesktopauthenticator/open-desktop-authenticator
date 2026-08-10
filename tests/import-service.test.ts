@@ -1,0 +1,538 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ImportError, ImportService, type StagedFile } from '../src/main/import/service';
+import { VaultLockedError, VaultService } from '../src/main/vault/service';
+import type { Account } from '../src/shared/vault-schema';
+
+/**
+ * Import staging and commit (§12 F2).
+ *
+ * The rules worth testing here are the destructive ones. Importing a file the
+ * user already has is the operation that can lose a revocation code — the one
+ * secret whose loss cannot be undone — so most of this suite is about what a
+ * replace must *not* throw away.
+ *
+ * Stubbed down to the accepted scrypt floor like the other vault suites; the
+ * shipping parameters are asserted in `vault-crypto.test.ts`.
+ */
+vi.mock('../src/shared/vault-format', async () => {
+	const actual = await vi.importActual<typeof import('../src/shared/vault-format')>(
+		'../src/shared/vault-format'
+	);
+	return {
+		...actual,
+		SCRYPT_DEFAULTS: Object.freeze({ ...actual.MINIMUM_SCRYPT, maxmem: 256 * 1024 * 1024 })
+	};
+});
+
+const PASS = 'a sufficiently long passphrase';
+
+/**
+ * Twenty bytes, base64 — the shape Steam actually issues.
+ *
+ * These fixtures used to carry short placeholder strings and every test passed.
+ * Validating the secret at import time failed the whole suite immediately, which
+ * is the check doing its job: a secret that short could never produce a code.
+ */
+const SECRET = 'ASNFZ4mrze8BI0VniavN7wEjRWc=';
+const REPLACEMENT_SECRET = '/ty6mHZUMhD+3LqYdlQyEP7cupg=';
+/** The same twenty bytes as SECRET, written the way some tools write them. */
+const HEX_SECRET = '0123456789abcdef0123456789abcdef01234567';
+const NOW = Date.UTC(2026, 7, 10, 12, 0, 0);
+
+let dir: string;
+let clock: number;
+let vault: VaultService;
+let imports: ImportService;
+
+beforeEach(async () => {
+	dir = mkdtempSync(join(tmpdir(), 'import-service-'));
+	clock = NOW;
+	vault = new VaultService({ file: join(dir, 'vault.json'), now: () => clock });
+	await vault.create(PASS);
+	imports = new ImportService(vault, { now: () => clock });
+});
+
+afterEach(() => {
+	rmSync(dir, { recursive: true, force: true });
+});
+
+function file(overrides: Record<string, unknown> = {}, name = 'a.maFile'): StagedFile {
+	return {
+		name,
+		text: JSON.stringify({
+			shared_secret: SECRET,
+			identity_secret: 'aWRlbnRpdHk=',
+			account_name: 'trader',
+			revocation_code: 'R12345',
+			steamid: '76561198000000001',
+			...overrides
+		})
+	};
+}
+
+/** Stage one file and return its id. */
+function stageOne(staged: StagedFile): string {
+	const report = imports.stage([staged]);
+	const id = report.candidates[0]?.stagingId;
+	if (!id) {
+		throw new Error(`nothing staged: ${JSON.stringify(report.rejected)}`);
+	}
+	return id;
+}
+
+describe('staging', () => {
+	it('requires an unlocked vault', () => {
+		vault.lock();
+		expect(() => imports.stage([file()])).toThrow(VaultLockedError);
+	});
+
+	it('reports a candidate without exposing any secret', () => {
+		const report = imports.stage([file()]);
+		const candidate = report.candidates[0];
+
+		expect(candidate?.accountName).toBe('trader');
+		expect(candidate?.steamId64).toBe('76561198000000001');
+		expect(candidate?.hasRevocationCode).toBe(true);
+		expect(candidate?.importable).toBe(true);
+
+		// The whole report, serialised, must not contain a single stored secret.
+		const serialised = JSON.stringify(report);
+		expect(serialised).not.toContain(SECRET);
+		expect(serialised).not.toContain('aWRlbnRpdHk=');
+		expect(serialised).not.toContain('R12345');
+	});
+
+	it('rejects an unparseable file by name and reason, and keeps going', () => {
+		const report = imports.stage([
+			{ name: 'broken.maFile', text: 'nonsense' },
+			file({}, 'good.maFile')
+		]);
+
+		expect(report.rejected).toHaveLength(1);
+		expect(report.rejected[0]?.sourceName).toBe('broken.maFile');
+		expect(report.candidates).toHaveLength(1);
+	});
+
+	it('marks a file with no SteamID as not importable rather than inventing one', () => {
+		const report = imports.stage([
+			{
+				name: 'notes.maFile',
+				text: JSON.stringify({ shared_secret: 's', identity_secret: 'i', account_name: 'a' })
+			}
+		]);
+
+		expect(report.candidates[0]?.importable).toBe(false);
+		expect(report.candidates[0]?.steamId64).toBeUndefined();
+	});
+
+	it('refuses a file whose shared secret cannot generate codes', () => {
+		// Otherwise the import succeeds and the account sits on the list forever
+		// as a row that never shows a number, with nothing explaining why.
+		const report = imports.stage([file({ shared_secret: 'obviously not base64 !!' })]);
+
+		expect(report.candidates[0]?.importable).toBe(false);
+		expect(report.candidates[0]?.warnings.some((w) => w.includes('not usable'))).toBe(true);
+	});
+
+	it('accepts a hex shared secret, which some tools write', () => {
+		const report = imports.stage([file({ shared_secret: HEX_SECRET })]);
+
+		expect(report.candidates[0]?.importable).toBe(true);
+	});
+
+	it('marks an account already in the vault as a duplicate', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push(existingAccount());
+		});
+
+		const report = imports.stage([file()]);
+		expect(report.candidates[0]?.duplicate).toBe('vault');
+	});
+
+	it('marks the second copy of the same account within one pick', () => {
+		const report = imports.stage([file({}, 'one.maFile'), file({}, 'two.maFile')]);
+
+		expect(report.candidates[0]?.duplicate).toBeUndefined();
+		expect(report.candidates[1]?.duplicate).toBe('selection');
+	});
+
+	it('prefers the more complete file when one pick has the account twice', () => {
+		// Order used to decide this, so a stripped working copy listed first beat a
+		// backup that still had the revocation code — quietly discarding the one
+		// field whose loss cannot be undone.
+		const report = imports.stage([
+			file({ revocation_code: undefined }, 'stripped.maFile'),
+			file({}, 'backup.maFile')
+		]);
+
+		expect(report.candidates[0]?.sourceName).toBe('stripped.maFile');
+		expect(report.candidates[0]?.duplicate).toBe('selection');
+		expect(report.candidates[1]?.sourceName).toBe('backup.maFile');
+		expect(report.candidates[1]?.duplicate).toBeUndefined();
+		expect(report.candidates[1]?.hasRevocationCode).toBe(true);
+	});
+
+	it('still lists them in the order they were chosen', () => {
+		const report = imports.stage([
+			file({ revocation_code: undefined }, 'first.maFile'),
+			file({}, 'second.maFile')
+		]);
+
+		expect(report.candidates.map((c) => c.sourceName)).toEqual(['first.maFile', 'second.maFile']);
+	});
+
+	it('refuses to stage anything while the vault is locked', () => {
+		vault.lock();
+		// The IPC layer calls this before it reads a single byte off disk: staging
+		// discovers a locked vault only after every chosen file is already in memory,
+		// and discarding the staging afterwards cannot un-read them.
+		expect(() => imports.assertUnlocked()).toThrow(VaultLockedError);
+	});
+
+	it('replaces a previous staging rather than accumulating secrets', () => {
+		imports.stage([file({}, 'one.maFile'), file({ steamid: '76561198000000002' }, 'two.maFile')]);
+		expect(imports.stagedCount()).toBe(2);
+
+		imports.stage([file({}, 'one.maFile')]);
+		expect(imports.stagedCount()).toBe(1);
+	});
+
+	it('reports nothing staged once the staging has expired', () => {
+		imports.stage([file()]);
+		clock += 11 * 60_000;
+		expect(imports.stagedCount()).toBe(0);
+	});
+});
+
+describe('commit', () => {
+	it('writes an account into the vault', async () => {
+		const id = stageOne(file());
+		const outcomes = await imports.commit([
+			{ stagingId: id, replaceExisting: false, adoptProxy: false }
+		]);
+
+		expect(outcomes[0]?.result).toBe('imported');
+
+		const stored = vault.read().accounts[0];
+		expect(stored?.steamId64).toBe('76561198000000001');
+		expect(stored?.sharedSecret).toBe(SECRET);
+		expect(stored?.revocationCode).toBe('R12345');
+		expect(stored?.addedAt).toBe(new Date(NOW).toISOString());
+	});
+
+	it('lands in pendingRevocationBackup so the backup ceremony still happens', async () => {
+		const id = stageOne(file());
+		await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }]);
+
+		expect(vault.read().accounts[0]?.status).toBe('pendingRevocationBackup');
+	});
+
+	it('is active when there is no revocation code to back up', async () => {
+		const id = stageOne(file({ revocation_code: undefined }));
+		await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }]);
+
+		const stored = vault.read().accounts[0];
+		// Nothing to back up, so `pendingRevocationBackup` would be a state it could
+		// never leave. The missing code shows as a permanent flag instead.
+		expect(stored?.status).toBe('active');
+		expect(stored?.revocationCode).toBeUndefined();
+	});
+
+	it('is pendingActivation when the file says enrollment never finished', async () => {
+		const id = stageOne(file({ fully_enrolled: false }));
+		await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }]);
+
+		expect(vault.read().accounts[0]?.status).toBe('pendingActivation');
+	});
+
+	it('clears staging afterwards, so the secrets do not linger', async () => {
+		const id = stageOne(file());
+		await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }]);
+
+		expect(imports.stagedCount()).toBe(0);
+	});
+
+	it('skips a duplicate unless replacement was asked for', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push(existingAccount());
+		});
+
+		const id = stageOne(file());
+		const outcomes = await imports.commit([
+			{ stagingId: id, replaceExisting: false, adoptProxy: false }
+		]);
+
+		expect(outcomes[0]?.result).toBe('skipped');
+		expect(vault.read().accounts).toHaveLength(1);
+		expect(vault.read().accounts[0]?.accountName).toBe('original');
+	});
+
+	it('imports only one of two files describing the same account', async () => {
+		const report = imports.stage([file({}, 'one.maFile'), file({}, 'two.maFile')]);
+		const outcomes = await imports.commit(
+			report.candidates.map((candidate) => ({
+				stagingId: candidate.stagingId,
+				replaceExisting: false,
+				adoptProxy: false
+			}))
+		);
+
+		expect(outcomes.map((outcome) => outcome.result)).toEqual(['imported', 'skipped']);
+		expect(vault.read().accounts).toHaveLength(1);
+	});
+
+	it('refuses the whole commit when an id is stale, rather than importing a subset', async () => {
+		const id = stageOne(file());
+		imports.discard();
+
+		await expect(
+			imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+		).rejects.toThrow(ImportError);
+		expect(vault.read().accounts).toHaveLength(0);
+	});
+
+	it('refuses an expired staging', async () => {
+		const id = stageOne(file());
+		clock += 11 * 60_000;
+
+		await expect(
+			imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+		).rejects.toThrow(/took too long/);
+	});
+
+	it('does not rewrite the vault at all when nothing was selected', async () => {
+		stageOne(file());
+		const before = vault.read().seq;
+		await imports.commit([]);
+
+		// Not merely "no account appeared": no save happened. A pointless save
+		// re-seals the vault and rotates the backup, and the one file that must
+		// never be lost should not be rewritten for nothing.
+		expect(vault.read().accounts).toHaveLength(0);
+		expect(vault.read().seq).toBe(before);
+		expect(imports.stagedCount()).toBe(0);
+	});
+
+	it('refuses a damaged secret even if the renderer asks for it anyway', async () => {
+		// `importable: false` is advice to the UI. The rule that keeps unusable
+		// secrets out of the vault must not depend on the caller respecting it.
+		const report = imports.stage([file({ shared_secret: 'obviously not base64 !!' })]);
+		const id = report.candidates[0]?.stagingId ?? '';
+
+		const outcomes = await imports.commit([
+			{ stagingId: id, replaceExisting: false, adoptProxy: false }
+		]);
+
+		expect(outcomes[0]?.result).toBe('skipped');
+		expect(outcomes[0]?.reason).toMatch(/damaged/);
+		expect(vault.read().accounts).toHaveLength(0);
+	});
+});
+
+describe('replacing an existing account', () => {
+	it('updates the secrets and the name', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push(existingAccount());
+		});
+
+		const id = stageOne(file({ shared_secret: REPLACEMENT_SECRET, account_name: 'renamed' }));
+		const outcomes = await imports.commit([
+			{ stagingId: id, replaceExisting: true, adoptProxy: false }
+		]);
+
+		expect(outcomes[0]?.result).toBe('replaced');
+		const stored = vault.read().accounts[0];
+		expect(stored?.sharedSecret).toBe(REPLACEMENT_SECRET);
+		expect(stored?.accountName).toBe('renamed');
+		expect(vault.read().accounts).toHaveLength(1);
+	});
+
+	it('NEVER drops a stored revocation code the incoming file lacks', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push(existingAccount());
+		});
+
+		// A file written by a tool that strips revocation codes. Overwriting would
+		// destroy the only copy of it in existence.
+		const id = stageOne(file({ revocation_code: undefined }));
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+		expect(vault.read().accounts[0]?.revocationCode).toBe('R99999');
+	});
+
+	it('keeps settings the user chose in the app', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push({
+				...existingAccount(),
+				autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 30 },
+				proxyUrl: 'socks5://kept:secret@127.0.0.1:1080'
+			});
+		});
+
+		const id = stageOne(file());
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+		const stored = vault.read().accounts[0];
+		expect(stored?.autoConfirm).toEqual({
+			marketListings: true,
+			trades: false,
+			pollIntervalSeconds: 30
+		});
+		expect(stored?.proxyUrl).toBe('socks5://kept:secret@127.0.0.1:1080');
+		// The account was added when it was added; re-importing is not adding it.
+		expect(stored?.addedAt).toBe('2026-08-01T00:00:00.000Z');
+	});
+
+	it('keeps unknown fields written by a newer build', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push({ ...existingAccount(), somethingNewer: 'preserve me' });
+		});
+
+		const id = stageOne(file());
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+		expect(vault.read().accounts[0]).toMatchObject({ somethingNewer: 'preserve me' });
+	});
+
+	it('keeps the backup as done when the revocation code is unchanged', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push({
+				...existingAccount(),
+				revocationCode: 'R12345',
+				revocationBackedUpAt: '2026-08-02T00:00:00.000Z',
+				status: 'active'
+			});
+		});
+
+		const id = stageOne(file());
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+		const stored = vault.read().accounts[0];
+		expect(stored?.revocationBackedUpAt).toBe('2026-08-02T00:00:00.000Z');
+		expect(stored?.status).toBe('active');
+	});
+
+	it('demands the ceremony again when the file brings a different revocation code', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push({
+				...existingAccount(),
+				revocationBackedUpAt: '2026-08-02T00:00:00.000Z',
+				status: 'active'
+			});
+		});
+
+		// The code the user wrote down is no longer the code that is stored.
+		const id = stageOne(file({ revocation_code: 'R55555' }));
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+		const stored = vault.read().accounts[0];
+		expect(stored?.revocationCode).toBe('R55555');
+		expect(stored?.revocationBackedUpAt).toBeUndefined();
+		expect(stored?.status).toBe('pendingRevocationBackup');
+	});
+
+	/**
+	 * Regression: a maFile carrying a proxy used to configure routing on import
+	 * with no opt-in. It was found the first time real maFiles were imported — the
+	 * files came from a trading setup and every one of them carried a proxy that
+	 * had long since stopped working. Routing fails closed by design, so the
+	 * result was accounts that could not reach Steam at all, reported as a raw
+	 * `net::ERR_TUNNEL_CONNECTION_FAILED` from a proxy the user never chose.
+	 */
+	describe('a proxy inside a maFile', () => {
+		it('is not adopted unless asked for', async () => {
+			const id = stageOne(file({ Session: { proxy: 'socks5://user:secret@127.0.0.1:1080' } }));
+			await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }]);
+
+			expect(vault.read().accounts[0]?.proxyUrl).toBeUndefined();
+		});
+
+		it('is adopted when asked for', async () => {
+			const id = stageOne(file({ Session: { proxy: 'socks5://user:secret@127.0.0.1:1080' } }));
+			await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: true }]);
+
+			expect(vault.read().accounts[0]?.proxyUrl).toBe('socks5://user:secret@127.0.0.1:1080');
+		});
+
+		it('does not fire the routing hook when it was declined', async () => {
+			const onRoutingChanged = vi.fn();
+			imports = new ImportService(vault, { now: () => clock, onRoutingChanged });
+
+			const id = stageOne(file({ Session: { proxy: 'socks5://user:secret@127.0.0.1:1080' } }));
+			await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }]);
+
+			expect(onRoutingChanged).not.toHaveBeenCalled();
+		});
+
+		it('declining does not clear routing the user set in the app', async () => {
+			// "Do not adopt this file's proxy" is not "switch this account's routing
+			// off". A re-import must not silently undo a setting made elsewhere.
+			await vault.mutate((draft) => {
+				draft.accounts.push({
+					...existingAccount(),
+					proxyUrl: 'socks5://chosen:secret@127.0.0.1:1080'
+				});
+			});
+
+			const id = stageOne(file({ Session: { proxy: 'socks5://from-file@10.0.0.1:1080' } }));
+			await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+			expect(vault.read().accounts[0]?.proxyUrl).toBe('socks5://chosen:secret@127.0.0.1:1080');
+		});
+	});
+
+	it('notifies when a replace changes the stored proxy URL', async () => {
+		const onRoutingChanged = vi.fn();
+		imports = new ImportService(vault, { now: () => clock, onRoutingChanged });
+
+		await vault.mutate((draft) => {
+			draft.accounts.push({
+				...existingAccount(),
+				proxyUrl: 'socks5://old:secret@127.0.0.1:1080'
+			});
+		});
+
+		const id = stageOne(
+			file({
+				Session: { proxy: 'socks5://new:secret@10.0.0.1:1080' }
+			})
+		);
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: true }]);
+
+		expect(onRoutingChanged).toHaveBeenCalledWith('76561198000000001');
+		expect(vault.read().accounts[0]?.proxyUrl).toBe('socks5://new:secret@10.0.0.1:1080');
+	});
+
+	it('does not notify when the stored proxy URL is unchanged', async () => {
+		const onRoutingChanged = vi.fn();
+		imports = new ImportService(vault, { now: () => clock, onRoutingChanged });
+
+		await vault.mutate((draft) => {
+			draft.accounts.push({
+				...existingAccount(),
+				proxyUrl: 'socks5://kept:secret@127.0.0.1:1080'
+			});
+		});
+
+		const id = stageOne(file());
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+		expect(onRoutingChanged).not.toHaveBeenCalled();
+	});
+});
+
+function existingAccount(): Account {
+	return {
+		steamId64: '76561198000000001',
+		accountName: 'original',
+		sharedSecret: 'b2xk',
+		identitySecret: 'b2xkLWlkZW50aXR5',
+		revocationCode: 'R99999',
+		status: 'active',
+		addedAt: '2026-08-01T00:00:00.000Z',
+		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+	};
+}

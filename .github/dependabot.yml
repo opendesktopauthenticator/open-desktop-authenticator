@@ -1,0 +1,54 @@
+version: 2
+
+# §9.4.3: Dependabot enabled, human review, NO auto-merge. Every bump to a
+# dependency of a security product is a supply-chain decision, and the whole
+# trust story (§P3) rests on someone actually having looked.
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    # Grouped so a routine week is one reviewable PR rather than fifteen, which
+    # is how bumps get rubber-stamped.
+    groups:
+      dev-tooling:
+        patterns:
+          - '@types/*'
+          - 'eslint*'
+          - '@eslint/*'
+          - 'typescript-eslint'
+          - 'prettier*'
+          - 'vitest'
+          - '@vitejs/*'
+        update-types:
+          - minor
+          - patch
+    labels:
+      - dependencies
+    commit-message:
+      prefix: 'chore(deps)'
+
+  # The spike is not shipped, but it is the record of how the Steam protocol
+  # actually behaves, so its dependencies still need watching.
+  - package-ecosystem: npm
+    directory: /spike
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - spike
+    commit-message:
+      prefix: 'chore(deps)'
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: 'chore(ci)'

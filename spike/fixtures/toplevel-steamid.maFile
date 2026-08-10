@@ -1,0 +1,11 @@
+{
+  "shared_secret": "5ZoJVRTjtX99oaKTcTmhw34YO4k=",
+  "identity_secret": "pOCTQqgol60/C9/o2PHBVela1oY=",
+  "account_name": "toplevelsteamid",
+  "revocation_code": "R33333",
+  "SteamID": "76561198000000000",
+  "Session": {
+    "SteamID": 76561199999999999,
+    "SessionID": "0123456789abcdef"
+  }
+}

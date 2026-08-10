@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege. No job here needs to write anything.
+permissions:
+  contents: read
+
+# A superseded push should not keep burning runners.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The app is only bundled and unit-tested here; nothing launches Electron, so
+  # downloading its ~100MB binary on every job is pure latency.
+  ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows + Linux only (D11 — macOS deferred; see docs/PLAN_AMENDMENTS.md).
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      # NOTE: third-party actions are pinned to major tags here, which are
+      # mutable. That is acceptable for this job — it holds no secrets and has
+      # read-only permissions. `release.yml` will handle signing material and
+      # MUST pin actions to full commit SHAs instead.
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      # `npm ci` and nothing else (§9.4.3) — it installs exactly the lockfile.
+      - run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Builds all three bundles. The security-posture suite inspects the built
+      # preload, so this must run before the tests.
+      - name: Build
+        run: npx electron-vite build
+
+      - name: Test
+        run: npm test
+
+  spike:
+    name: spike (reference code)
+    runs-on: ubuntu-latest
+    steps:
+      # /spike is not shipped (§10.2) but it is the record of how the protocol
+      # actually behaves. Letting it rot would quietly destroy that record.
+      #
+      # It also now holds a load-bearing test: `tests/totp-parity` checks the
+      # app's own Steam Guard code generator against `steam-totp`, which lives
+      # here and nowhere else. Deleting the spike would delete that proof.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: spike/package-lock.json
+      - run: npm ci
+        working-directory: spike
+      - run: npm run typecheck
+        working-directory: spike
+      - run: npm test
+        working-directory: spike
+
+  security:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+      - run: npm ci
+
+      # Production dependencies are what ships to users, so those gate the build.
+      - name: npm audit (production)
+        run: npm audit --audit-level=high --omit=dev
+
+      # Dev-dependency findings are reported but do not fail CI: they never reach
+      # a user's machine, and a hard gate here would block unrelated work on
+      # someone else's release schedule.
+      - name: npm audit (dev, informational)
+        run: npm audit --audit-level=high || true
+        continue-on-error: true
+
+      # §9.4.4. Covers advisories npm's own database misses.
+      - name: osv-scanner (shipping dependencies)
+        uses: google/osv-scanner-action/osv-scanner-action@v2
+        with:
+          scan-args: |-
+            --lockfile=package-lock.json
+
+  # /spike is reference code and ships to nobody, so its advisories are reported
+  # rather than gated. They are not cosmetic: as of Phase 1 the spike's tree
+  # carries 2 critical and 6 high advisories, ALL of them traceable to
+  # steamcommunity -> request (dead since 2020), and none with a non-breaking fix.
+  #
+  # This becomes a gating problem at milestone 0.1, when steamcommunity enters
+  # the shipping dependency tree for confirmations (F5). See F-05 in
+  # docs/PHASE0_FINDINGS.md — it needs a decision BEFORE 0.1, not after.
+  spike-advisories:
+    name: spike advisories (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+          cache-dependency-path: spike/package-lock.json
+      - run: npm ci
+        working-directory: spike
+      - name: npm audit
+        run: npm audit --omit=dev || true
+        working-directory: spike

@@ -1,0 +1,15 @@
+{
+  "shared_secret": "iRtpAgcheTkBWMh+VXYVbrz1jNA=",
+  "identity_secret": "2lKpwJ/Gj+RaZCvVUe1D/lPAa7o=",
+  "account_name": "quotedsteamid",
+  "revocation_code": "R11111",
+  "device_id": "android:eaaf6e17-69d0-4994-9f5e-d4a148ceae48",
+  "status": 1,
+  "fully_enrolled": true,
+  "Session": {
+    "SteamID": "76561198999999999",
+    "RefreshToken": "eyJ0eXAiOiJKV1QiLCJhbGciOiJFZERTQSJ9.eyJpc3MiOiJzdGVhbSIsInN1YiI6Ijc2NTYxMTk4OTk5OTk5OTk5IiwiZXhwIjoxNzAwMDAwMDAwfQ.bm90LWEtcmVhbC1zaWduYXR1cmU",
+    "proxy": "http://user:pw@127.0.0.1:8080",
+    "proxy_type": "http"
+  }
+}

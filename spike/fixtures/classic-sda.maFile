@@ -1,0 +1,22 @@
+{
+  "shared_secret": "KrbnbF2lShuAa/mL6vPz1rs1ncY=",
+  "serial_number": "1234567890123456789",
+  "revocation_code": "R12345",
+  "uri": "otpauth://totp/Steam:fixtureaccount?secret=FAKEFAKEFAKEFAKEFAKE&issuer=Steam",
+  "server_time": "1754600000",
+  "account_name": "fixtureaccount",
+  "token_gid": "abcdef0123456789",
+  "identity_secret": "7TslCCxb+eOdtAzs4bMFAN5g+9Q=",
+  "secret_1": "aGVsbG93b3JsZGZha2VzZWNyZXQx",
+  "status": 1,
+  "device_id": "android:d6cb3212-d482-7522-9e81-51dd9ebf8558",
+  "fully_enrolled": true,
+  "Session": {
+    "SessionID": "0123456789abcdef01234567",
+    "SteamLogin": "",
+    "SteamLoginSecure": "",
+    "WebCookie": "",
+    "OAuthToken": "",
+    "SteamID": 76561199999999999
+  }
+}

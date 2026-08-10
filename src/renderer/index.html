@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<!--
+      No Content-Security-Policy meta tag here on purpose.
+
+      The authoritative policy is set as a response header by the main process
+      (src/main/security.ts), which is stronger than a meta tag and, critically,
+      can differ between dev and packaged builds. A static meta tag cannot: the
+      production policy needs `connect-src 'none'`, which would break Vite's HMR
+      websocket during development.
+
+      `tests/security-posture.test.ts` asserts the packaged policy is the strict
+      one, so dropping the meta tag does not weaken anything.
+
+      No product name here either — it would override the BrowserWindow title and
+      duplicate branding that lives in src/shared/branding.ts (Q1 unresolved).
+    -->
+		<title>Loading…</title>
+	</head>
+	<body>
+		<div id="root"></div>
+		<script type="module" src="./main.tsx"></script>
+	</body>
+</html>

@@ -1,0 +1,31 @@
+{
+  "name": "spike-cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Phase 0 spike: prove the Steam login/code/confirmation loop. Not shipped.",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "spike": "node dist/cli.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@doctormckay/stdlib": "^2.10.0",
+    "request": "^2.88.2",
+    "socks-proxy-agent": "^7.0.0",
+    "steam-session": "^1.9.4",
+    "steam-totp": "^2.1.2",
+    "steamcommunity": "^3.50.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "shared_secret": "5ZoJVRTjtX99oaKTcTmhw34YO4k=",
+  "identity_secret": "pOCTQqgol60/C9/o2PHBVela1oY=",
+  "account_name": "duplicatesession",
+  "revocation_code": "R44444",
+  "Session": {
+    "SteamID": 76561199999999999,
+    "SessionID": "first"
+  },
+  "Session": {
+    "SteamID": "76561198000000000",
+    "SessionID": "second"
+  }
+}

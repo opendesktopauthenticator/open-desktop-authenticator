@@ -1,0 +1,47 @@
+{
+  "name": "open-desktop-authenticator",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Open Desktop Authenticator — an open-source desktop authenticator for Steam, by MASTERPANEL LLC. A maintained successor to SDA.",
+  "license": "MIT",
+  "author": "MASTERPANEL LLC",
+  "main": "./out/main/index.js",
+  "engines": {
+    "node": ">=24.0.0 <25.0.0"
+  },
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "npm run typecheck && electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "benchmark:kdf": "node scripts/benchmark-kdf.mjs"
+  },
+  "dependencies": {
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "steam-session": "^1.9.4",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.13.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
+    "@vitejs/plugin-react": "5.2.0",
+    "electron": "43.3.0",
+    "electron-vite": "5.0.0",
+    "eslint": "10.8.1",
+    "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-react-hooks": "7.1.1",
+    "globals": "17.9.0",
+    "prettier": "3.9.6",
+    "typescript": "5.7.3",
+    "typescript-eslint": "8.66.0",
+    "vitest": "4.1.10"
+  }
+}

@@ -1,0 +1,116 @@
+import type { ConfirmationSummary } from '../../shared/ipc';
+
+/**
+ * What automatic confirmation did while nobody was watching (§3, THREAT_MODEL).
+ *
+ * The engine was computing all of this and dropping it: outcomes went to a
+ * callback wired to nothing, so a held-back **account-recovery** confirmation —
+ * which the threat model calls the strongest warning this application can give —
+ * was calculated and discarded. That is the hole this closes.
+ *
+ * ## In memory, not on disk
+ *
+ * A persisted log of approved trades is a record of somebody's trading activity
+ * sitting next to their authenticator, and it would need its own answer to
+ * "where is it, who can read it, what happens at backup time". The question this
+ * log exists to answer is *"what happened while I was away"*, and away means
+ * hours, not months — so it lives in memory, survives a lock so it is still
+ * there when the user comes back, and dies with the process.
+ *
+ * Nothing in here is a secret: confirmation summaries are the same shape the
+ * renderer already receives, with no nonce.
+ */
+
+/** Per account. Old entries fall off rather than growing without bound. */
+const MAX_ENTRIES_PER_ACCOUNT = 100;
+
+export type ActivityEntry =
+	| { kind: 'approved'; at: string; confirmations: ConfirmationSummary[] }
+	/** Refused by S16. The reason is the policy's own words. */
+	| { kind: 'held'; at: string; confirmation: ConfirmationSummary; reason: string }
+	| { kind: 'failed'; at: string; reason: string }
+	/** Too many failures in a row; this account is no longer being polled. */
+	| { kind: 'halted'; at: string; reason: string };
+
+export class ActivityLog {
+	private readonly entries = new Map<string, ActivityEntry[]>();
+	private readonly now: () => number;
+
+	constructor(now: () => number = () => Date.now()) {
+		this.now = now;
+	}
+
+	/** Record one automatic pass. Approvals and refusals are separate entries. */
+	recordPass(
+		steamId64: string,
+		approved: ConfirmationSummary[],
+		held: { confirmation: ConfirmationSummary; reason: string }[]
+	): void {
+		const at = new Date(this.now()).toISOString();
+
+		if (approved.length > 0) {
+			this.push(steamId64, { kind: 'approved', at, confirmations: approved });
+		}
+		for (const entry of held) {
+			// One entry each, not a summary count. A held account-recovery
+			// confirmation is not a statistic.
+			this.push(steamId64, {
+				kind: 'held',
+				at,
+				confirmation: entry.confirmation,
+				reason: entry.reason
+			});
+		}
+	}
+
+	recordFailure(steamId64: string, reason: string): void {
+		const at = new Date(this.now()).toISOString();
+		// The engine says "stopped" in its message when it gives up on an account,
+		// and that is a different thing for a user to read than a passing error.
+		const kind = /stopped/i.test(reason) ? 'halted' : 'failed';
+		this.push(steamId64, { kind, at, reason });
+	}
+
+	/** Newest first, because the newest is what someone returning wants. */
+	for(steamId64: string): ActivityEntry[] {
+		return [...(this.entries.get(steamId64) ?? [])].reverse();
+	}
+
+	/** Every account's entries, newest first, tagged with whose they are. */
+	all(): { steamId64: string; entry: ActivityEntry }[] {
+		const combined: { steamId64: string; entry: ActivityEntry }[] = [];
+		for (const [steamId64, list] of this.entries) {
+			for (const entry of list) {
+				combined.push({ steamId64, entry });
+			}
+		}
+		return combined.sort((a, b) => b.entry.at.localeCompare(a.entry.at));
+	}
+
+	/**
+	 * Whether anything is waiting that a person genuinely needs to look at.
+	 *
+	 * Only security-critical holds count. A trade held back because the user has
+	 * not enabled trades is normal and would drown the signal that matters.
+	 */
+	hasUrgent(): boolean {
+		return this.all().some(
+			({ entry }) =>
+				(entry.kind === 'held' && entry.confirmation.securityCritical) || entry.kind === 'halted'
+		);
+	}
+
+	/** Drop everything. Called on quit. */
+	clear(): void {
+		this.entries.clear();
+	}
+
+	private push(steamId64: string, entry: ActivityEntry): void {
+		const list = this.entries.get(steamId64) ?? [];
+		list.push(entry);
+		if (list.length > MAX_ENTRIES_PER_ACCOUNT) {
+			list.splice(0, list.length - MAX_ENTRIES_PER_ACCOUNT);
+		}
+		this.entries.set(steamId64, list);
+	}
+}

@@ -1,0 +1,442 @@
+import {
+	describeNetworkError,
+	describesDirectRoute,
+	EgressError,
+	isSteamEndpoint,
+	planProxy,
+	STEAM_USER_AGENT,
+	type ProxyPlan
+} from './egress';
+import type { SteamRequest, SteamResponse, SteamTransport } from '../confirmations/client';
+
+/**
+ * The one place this application opens a connection to Valve (§10.1).
+ *
+ * Built on Electron's own network stack rather than a proxy-agent dependency,
+ * because Chromium already proxies HTTP, HTTPS and SOCKS5 per session — and,
+ * measured, **fails closed** when the proxy is unreachable rather than quietly
+ * going direct (see `egress.ts`).
+ *
+ * ## One session per account
+ *
+ * Each account gets its own Electron session partition, which gives it its own
+ * proxy *and* its own cookie jar. Two consequences, both deliberate:
+ *
+ *  - **Accounts cannot bleed into each other.** F-08 found that process-global
+ *    agent injection does not survive concurrent pollers; per-session routing is
+ *    not a discipline anyone has to maintain, it is a property of the object.
+ *  - **Sessions are in-memory.** The partition name has no `persist:` prefix, so
+ *    Steam cookies — which are credentials — never reach disk. They die with the
+ *    process, like everything else the vault holds.
+ *
+ * Electron is injected rather than imported so all of this is testable without
+ * launching an app.
+ */
+
+/** The slice of Electron this module needs. Injected so tests can supply fakes. */
+export interface ElectronNetworking {
+	sessionFromPartition(partition: string, options?: { cache: boolean }): ProxyCapableSession;
+	request(options: { url: string; method: string; session: ProxyCapableSession }): NetRequestHandle;
+}
+
+/** Chromium's proxy modes, spelled as Electron declares them. */
+export type ProxyMode = 'direct' | 'auto_detect' | 'pac_script' | 'fixed_servers' | 'system';
+
+export interface ProxyCapableSession {
+	setProxy(config: { mode: ProxyMode; proxyRules?: string }): Promise<void>;
+	setUserAgent?(userAgent: string): void;
+	/**
+	 * What Chromium will actually do with a URL: `DIRECT`, or `SOCKS5 host:port`.
+	 *
+	 * A local lookup with no network cost, which is what makes it affordable
+	 * before every request rather than once at construction.
+	 */
+	resolveProxy(url: string): Promise<string>;
+	/**
+	 * Empties this session's cookie jar and everything else it accumulated.
+	 *
+	 * Load-bearing, not housekeeping. Steam sets cookies on its responses and
+	 * Chromium stores them here; dropping our reference to the session does not
+	 * remove them, because `fromPartition` hands back the *same* session next time
+	 * it is asked. Without this, a Steam web session outlives the vault lock that
+	 * was supposed to end it.
+	 */
+	clearStorageData?(): Promise<void>;
+
+	// Deliberately no `login` event. Electron's `Session` does not emit one —
+	// only `App`, `ClientRequest`, `UtilityProcess` and `WebContents` do. An
+	// earlier version of this interface declared one, the adapter's
+	// `as unknown as ProxyCapableSession` cast waved it through, and the test fake
+	// implemented it. So proxy credentials were handed to an event that never
+	// fired: every authenticating proxy failed its CONNECT with a 407, surfacing
+	// as `ERR_TUNNEL_CONNECTION_FAILED` while looking exactly like wrong
+	// credentials. Leaving it off means a listener cannot be registered here again
+	// without the compiler objecting.
+}
+
+export interface NetRequestHandle {
+	setHeader(name: string, value: string): void;
+	write(chunk: string): void;
+	end(): void;
+	on(event: 'response', listener: (response: NetResponseHandle) => void): void;
+	on(event: 'error', listener: (error: Error) => void): void;
+	/**
+	 * Emitted when an authenticating proxy asks for credentials.
+	 *
+	 * This is the documented channel for `net.request` and the only one that
+	 * actually fires. Answering with empty credentials cancels the request.
+	 */
+	on(
+		event: 'login',
+		listener: (
+			authInfo: { isProxy: boolean },
+			callback: (username?: string, password?: string) => void
+		) => void
+	): void;
+}
+
+export interface NetResponseHandle {
+	statusCode: number;
+	on(event: 'data', listener: (chunk: Buffer | string) => void): void;
+	on(event: 'end', listener: () => void): void;
+	on(event: 'error', listener: (error: Error) => void): void;
+}
+
+export interface EgressAccount {
+	steamId64: string;
+	/** Absent means this account is not routed. */
+	proxyUrl?: string | undefined;
+}
+
+/** How long any single Steam request may take before it is abandoned. */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+/** A response body larger than this is not one of Steam's. */
+const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The URL routing is verified against.
+ *
+ * Chromium resolves proxies per URL, so "is this account routed" is only
+ * meaningful about a specific destination. This is the host confirmations
+ * actually go to, which makes the check about the traffic that matters rather
+ * than about the setting in the abstract.
+ */
+const ROUTING_PROBE_URL = 'https://steamcommunity.com/mobileconf/getlist';
+
+/**
+ * What is actually known about an account's egress — not what was configured.
+ *
+ * The distinction is the whole point. `hasProxy` says a URL is stored; this says
+ * whether Chromium was asked, and what it answered.
+ */
+export type RoutingStatus =
+	| { state: 'off' }
+	/** Checked, and Chromium named a proxy. `via` is redacted. */
+	| { state: 'verified'; via: string; checkedAtMs: number }
+	/** Configured but proven not applied. The account is refused, not degraded. */
+	| { state: 'blocked'; via: string; reason: string };
+
+export class SteamTransportFactory {
+	private readonly electron: ElectronNetworking;
+	private readonly sessions = new Map<string, ProxyCapableSession>();
+	private readonly routing = new Map<string, RoutingStatus>();
+	private readonly now: () => number;
+
+	constructor(electron: ElectronNetworking, now: () => number = () => Date.now()) {
+		this.electron = electron;
+		this.now = now;
+	}
+
+	/**
+	 * What is known about this account's egress right now.
+	 *
+	 * Absent means no request has been attempted since the last lock, so nothing
+	 * is known — which the UI must show as unverified rather than as fine.
+	 */
+	routingStatus(steamId64: string): RoutingStatus | undefined {
+		return this.routing.get(steamId64);
+	}
+
+	/**
+	 * A transport bound to one account's egress.
+	 *
+	 * **Refuses rather than falls back.** If the account is configured to route
+	 * through a proxy and that cannot be applied, no transport is returned at all.
+	 * Returning an unrouted one would send the account's traffic from the user's
+	 * own address — precisely the thing they configured a proxy to prevent, and
+	 * they would have no way to notice.
+	 */
+	async forAccount(account: EgressAccount): Promise<SteamTransport> {
+		const session = await this.sessionFor(account);
+
+		// Planned again rather than remembered from `sessionFor`, which caches
+		// sessions and returns early for one it already has. Safe: it has already
+		// returned, so this URL parsed.
+		//
+		// Both halves are carried into every request. `redacted` so a failure can
+		// name the proxy instead of leaving the user guessing whether one is even
+		// involved; `credentials` because Electron asks the **request**, not the
+		// session, and each request therefore answers for the proxy that this
+		// transport was built for.
+		const plan =
+			account.proxyUrl !== undefined && account.proxyUrl !== ''
+				? planProxy(account.proxyUrl)
+				: undefined;
+
+		if (!plan) {
+			this.routing.set(account.steamId64, { state: 'off' });
+		}
+
+		return (request) => this.perform(session, request, plan, account.steamId64);
+	}
+
+	/**
+	 * Refuse unless Chromium confirms this request will leave through the proxy.
+	 *
+	 * **Run before every request, not once per session.** `setProxy` succeeding
+	 * says a rule was accepted, not that it applies to this URL — Chromium keeps
+	 * an implicit bypass list, a proxy list can end in a `DIRECT` fallback, and a
+	 * session is a long-lived object whose configuration can be changed by a code
+	 * path that forgot to re-verify. Asking per request costs a local lookup and
+	 * removes every one of those gaps.
+	 *
+	 * The applied proxy is compared against the **intended** one, not merely
+	 * checked to be non-direct: a session carrying a stale proxy from a previous
+	 * configuration is routed, and routed to the wrong operator.
+	 */
+	private async assertRouted(
+		session: ProxyCapableSession,
+		steamId64: string,
+		plan: ProxyPlan,
+		url: string
+	): Promise<void> {
+		const block = (reason: string): never => {
+			this.routing.set(steamId64, { state: 'blocked', via: plan.redacted, reason });
+			throw new EgressError(
+				`this account is set to route through ${plan.redacted}, but ${reason}. ` +
+					'Refusing to connect: sending this request anyway would expose the address the ' +
+					'proxy exists to hide.'
+			);
+		};
+
+		let resolved: string;
+		try {
+			resolved = await session.resolveProxy(url);
+		} catch (err) {
+			return block(
+				`the routing could not be checked (${err instanceof Error ? err.message : String(err)})`
+			);
+		}
+
+		if (describesDirectRoute(resolved)) {
+			return block('this connection would be made directly instead');
+		}
+
+		// `resolveProxy` answers `SOCKS5 10.0.0.1:1080`, so the endpoint appears
+		// verbatim. A mismatch means some other proxy is applied to this session.
+		if (!resolved.includes(plan.endpoint)) {
+			return block('a different proxy is applied to it');
+		}
+
+		this.routing.set(steamId64, {
+			state: 'verified',
+			via: plan.redacted,
+			checkedAtMs: this.now()
+		});
+	}
+
+	/**
+	 * Drop an account's session **and empty it**.
+	 *
+	 * Forgetting our reference is not enough: `fromPartition` returns the same
+	 * session for the same name, so the cookies Steam set would still be there the
+	 * next time this account connected. The jar has to be emptied explicitly.
+	 */
+	forget(steamId64: string): void {
+		const session = this.sessions.get(steamId64);
+		this.sessions.delete(steamId64);
+		// Fire and forget: nothing waits on a cookie jar being empty, and a failure
+		// here must not take down a lock or a settings change.
+		void session?.clearStorageData?.();
+	}
+
+	/**
+	 * Forget every account. Called when the vault locks.
+	 *
+	 * A Steam session cookie is a live credential. The vault dropping its keys
+	 * while the network layer quietly keeps a usable web session would make the
+	 * lock a smaller thing than it claims to be.
+	 */
+	forgetAll(): void {
+		for (const steamId64 of [...this.sessions.keys()]) {
+			this.forget(steamId64);
+		}
+	}
+
+	private async sessionFor(account: EgressAccount): Promise<ProxyCapableSession> {
+		const existing = this.sessions.get(account.steamId64);
+		if (existing) {
+			return existing;
+		}
+
+		// No `persist:` prefix: in-memory, so cookies never touch the disk.
+		const session = this.electron.sessionFromPartition(`steam-${account.steamId64}`, {
+			cache: false
+		});
+		session.setUserAgent?.(STEAM_USER_AGENT);
+
+		let plan: ProxyPlan | undefined;
+		if (account.proxyUrl !== undefined && account.proxyUrl !== '') {
+			// Validated here rather than left to Chromium. A scheme it does not know
+			// is accepted by `setProxy` without complaint and only fails much later,
+			// per request, as `ERR_NO_SUPPORTED_PROXIES` — an error the user cannot
+			// connect back to the address they typed.
+			plan = planProxy(account.proxyUrl);
+		}
+
+		try {
+			await session.setProxy(
+				plan
+					? { mode: 'fixed_servers', proxyRules: plan.proxyRules }
+					: // Stated rather than left to Electron's default, so "not routed"
+						// means the machine's own egress and nothing more surprising.
+						{ mode: 'system' }
+			);
+		} catch (err) {
+			throw new EgressError(
+				`could not route this account through ${plan?.redacted ?? 'the network'}: ${
+					err instanceof Error ? err.message : String(err)
+				}`
+			);
+		}
+
+		// Credentials are NOT attached here. They are answered per request, in
+		// `perform` — Electron emits `login` on the ClientRequest, never on the
+		// Session. Attaching them to the session also solved a problem that no
+		// longer exists: `fromPartition` returns the same object every time, so
+		// handlers stacked across proxy changes and an old one could answer the new
+		// proxy's challenge with the previous operator's password. A request built
+		// from the current plan cannot do that.
+
+		this.sessions.set(account.steamId64, session);
+		return session;
+	}
+
+	private async perform(
+		session: ProxyCapableSession,
+		request: SteamRequest,
+		plan: ProxyPlan | undefined,
+		steamId64: string
+	): Promise<SteamResponse> {
+		const routedThrough = plan?.redacted;
+
+		// Before anything is sent, and before the endpoint check below, because a
+		// refusal to route is not a reason to look at the URL — it is a reason to
+		// send nothing at all.
+		if (plan) {
+			await this.assertRouted(session, steamId64, plan, ROUTING_PROBE_URL);
+		}
+
+		return new Promise<SteamResponse>((resolve, reject) => {
+			// Checked on every request, not once at construction. This function
+			// attaches a live Steam session cookie to whatever URL it is given;
+			// nothing currently builds one from anything but our own constants, but
+			// "nothing currently" is not a control, and the cost of being wrong is a
+			// session posted to somebody else's server.
+			if (!isSteamEndpoint(request.url)) {
+				reject(new EgressError('refusing to send a Steam session anywhere but Steam'));
+				return;
+			}
+
+			const handle = this.electron.request({
+				url: request.url,
+				method: request.method,
+				session
+			});
+
+			// Registered before anything is written, because the challenge arrives
+			// during the CONNECT that opens the tunnel — before a single byte of the
+			// request itself is on the wire.
+			if (plan?.credentials) {
+				const { username, password } = plan.credentials;
+				handle.on('login', (authInfo, callback) => {
+					// Only ever answer the proxy. A `login` that is not `isProxy` is the
+					// destination asking for HTTP auth, and answering it would send the
+					// user's proxy password to Valve.
+					if (authInfo.isProxy) {
+						callback(username, password);
+					} else {
+						// Empty cancels the request, which is the right outcome: Steam does
+						// not use HTTP authentication, so being asked for it means this is
+						// not a conversation to continue.
+						callback();
+					}
+				});
+			}
+
+			handle.setHeader('User-Agent', STEAM_USER_AGENT);
+			// Only when there is one. Minting an access token happens *before* any
+			// session exists, and an empty header value is not something to hand a
+			// networking stack and hope about.
+			if (request.cookie !== '') {
+				handle.setHeader('Cookie', request.cookie);
+			}
+			if (request.body) {
+				handle.setHeader('Content-Type', 'application/x-www-form-urlencoded');
+			}
+
+			let settled = false;
+			const finish = (run: () => void): void => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearTimeout(timer);
+				run();
+			};
+
+			// A hung proxy is the common case, not an exotic one, and a request that
+			// never settles would stall the poller behind it forever.
+			const timer = setTimeout(() => {
+				finish(() =>
+					reject(
+						new EgressError('Steam did not answer in time; the connection or proxy may be down.')
+					)
+				);
+			}, REQUEST_TIMEOUT_MS);
+			timer.unref?.();
+
+			handle.on('error', (error) =>
+				finish(() => reject(new EgressError(describeNetworkError(error, routedThrough))))
+			);
+
+			handle.on('response', (response) => {
+				const chunks: string[] = [];
+				let length = 0;
+
+				response.on('data', (chunk) => {
+					length += chunk.length;
+					if (length > MAX_RESPONSE_BYTES) {
+						// Steam's answers are kilobytes. Anything of this size is a captive
+						// portal or a proxy error page, and it is not going to parse.
+						finish(() => reject(new EgressError('Steam sent an implausibly large response.')));
+						return;
+					}
+					chunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+				});
+				response.on('error', (error) =>
+					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough))))
+				);
+				response.on('end', () =>
+					finish(() => resolve({ status: response.statusCode, text: chunks.join('') }))
+				);
+			});
+
+			if (request.body) {
+				handle.write(request.body.toString());
+			}
+			handle.end();
+		});
+	}
+}
