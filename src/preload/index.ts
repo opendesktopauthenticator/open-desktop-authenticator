@@ -70,8 +70,12 @@ const api: RendererApi = {
 
 	// Enrollment. The password travels inbound only, exactly as a vault
 	// passphrase does, and is never held in renderer state beyond the input.
-	beginEnrollment: (accountName: string, password: string) =>
-		ipcRenderer.invoke(CHANNELS.enrollBegin, { accountName, password }) as Promise<EnrollBegin>,
+	beginEnrollment: (accountName: string, password: string, proxyUrl?: string) =>
+		ipcRenderer.invoke(CHANNELS.enrollBegin, {
+			accountName,
+			password,
+			...(proxyUrl === undefined || proxyUrl === '' ? {} : { proxyUrl })
+		}) as Promise<EnrollBegin>,
 	submitEnrollmentEmailCode: (code: string) =>
 		ipcRenderer.invoke(CHANNELS.enrollEmailCode, { code }) as Promise<EnrollBegin>,
 	activateAuthenticator: (steamId64: string, code: string) =>

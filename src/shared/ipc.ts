@@ -496,7 +496,19 @@ export const IPC_CONTRACT = {
 		// The password travels inbound exactly as a vault passphrase does, and is
 		// dropped as soon as Steam has answered.
 		request: z
-			.object({ accountName: z.string().min(1).max(64), password: z.string().min(1).max(1024) })
+			.object({
+				accountName: z.string().min(1).max(64),
+				password: z.string().min(1).max(1024),
+				/**
+				 * Routing for this account, applied from its very first request.
+				 *
+				 * Optional, like all routing. But it must be offered **here** rather
+				 * than only afterwards: enrolling unrouted and adding a proxy later
+				 * lets Steam link the user's real address to the proxy through the
+				 * account, and nothing configured afterwards undoes that.
+				 */
+				proxyUrl: z.string().max(2048).optional()
+			})
 			.strict(),
 		response: enrollBeginResponse
 	},
@@ -670,7 +682,7 @@ export interface RendererApi {
 	 * `enrolled`, the secrets are already in the vault and there is no undoing it
 	 * from here. The screen treats that as a point of no return.
 	 */
-	beginEnrollment(accountName: string, password: string): Promise<EnrollBegin>;
+	beginEnrollment(accountName: string, password: string, proxyUrl?: string): Promise<EnrollBegin>;
 	submitEnrollmentEmailCode(code: string): Promise<EnrollBegin>;
 	activateAuthenticator(
 		steamId64: string,

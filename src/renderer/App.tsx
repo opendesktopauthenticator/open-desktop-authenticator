@@ -365,7 +365,9 @@ export function App(): React.JSX.Element {
 		if (view === 'enroll') {
 			return (
 				<AddAuthenticator
-					onBegin={(accountName, password) => api.beginEnrollment(accountName, password)}
+					onBegin={(accountName, password, proxyUrl) =>
+						api.beginEnrollment(accountName, password, proxyUrl)
+					}
 					onEmailCode={(code) => api.submitEnrollmentEmailCode(code)}
 					onActivate={(steamId64, code) => api.activateAuthenticator(steamId64, code)}
 					onBackup={(steamId64) => {

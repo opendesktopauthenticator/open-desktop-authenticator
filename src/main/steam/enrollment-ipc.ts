@@ -36,9 +36,9 @@ export function registerEnrollmentHandlers(
 		}
 	};
 
-	registerHandler(CHANNELS.enrollBegin, async ({ accountName, password }) => {
+	registerHandler(CHANNELS.enrollBegin, async ({ accountName, password, proxyUrl }) => {
 		requireUnlocked();
-		return enrollment.begin(accountName, password);
+		return enrollment.begin(accountName, password, proxyUrl);
 	});
 
 	registerHandler(CHANNELS.enrollEmailCode, async ({ code }) => {

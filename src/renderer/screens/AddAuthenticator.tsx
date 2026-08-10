@@ -32,7 +32,7 @@ export function AddAuthenticator({
 	onBackup,
 	onClose
 }: {
-	onBegin: (accountName: string, password: string) => Promise<EnrollBegin>;
+	onBegin: (accountName: string, password: string, proxyUrl?: string) => Promise<EnrollBegin>;
 	onEmailCode: (code: string) => Promise<EnrollBegin>;
 	onActivate: (steamId64: string, code: string) => Promise<{ state: 'activated' | 'wantMore' }>;
 	/** Opens the revocation-code ceremony for the newly enrolled account. */
@@ -44,6 +44,7 @@ export function AddAuthenticator({
 	);
 	const [accountName, setAccountName] = useState('');
 	const [password, setPassword] = useState('');
+	const [proxyUrl, setProxyUrl] = useState('');
 	const [code, setCode] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
@@ -84,7 +85,7 @@ export function AddAuthenticator({
 	const submitCredentials = (event: React.FormEvent): void => {
 		event.preventDefault();
 		run(async () => {
-			const outcome = await onBegin(accountName.trim(), password);
+			const outcome = await onBegin(accountName.trim(), password, proxyUrl.trim() || undefined);
 			// Dropped the instant it has been used. It is never needed again — the
 			// refresh token Steam issued is what keeps this account working.
 			setPassword('');
@@ -174,6 +175,26 @@ export function AddAuthenticator({
 						/>
 						<p className="hint">
 							Used once, to sign in, and never stored. What is kept is the session Steam gives back.
+						</p>
+
+						<label htmlFor="enroll-proxy">Route this account through a proxy (optional)</label>
+						<input
+							id="enroll-proxy"
+							type="text"
+							value={proxyUrl}
+							onChange={(event) => setProxyUrl(event.target.value)}
+							placeholder="socks5://user:password@host:1080"
+							autoComplete="off"
+							spellCheck={false}
+						/>
+						{/* Offered here rather than only afterwards, and the reason is worth
+						    stating: an account enrolled from one address and then routed
+						    through another is linked to both, by Steam, through the account
+						    itself. Adding routing later cannot undo the first request. */}
+						<p className="hint">
+							Leave empty to use this machine&rsquo;s own connection. If you intend to route this
+							account at all, <strong>set it now</strong> — Steam sees the address every request
+							comes from, so enrolling here and routing later ties the two together permanently.
 						</p>
 
 						<div className="controls">

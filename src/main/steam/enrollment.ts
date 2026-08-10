@@ -1,6 +1,7 @@
 import { createLoginSession, type LoginSessionFactory, type LoginSessionLike } from './login';
 import { EnrollmentError, finalizeEnrollment, startEnrollment } from './enroll';
 import { isUsableMobileToken } from '../steam-jwt';
+import { planProxy } from '../net/egress';
 import type { SteamTransportFactory } from '../net/transport';
 import type { VaultService } from '../vault/service';
 
@@ -54,6 +55,8 @@ export interface EnrollmentServiceOptions {
 interface PendingLogin {
 	session: LoginSessionLike;
 	accountName: string;
+	/** Carried across the email-code pause so the enrollment finishes on the same route. */
+	proxyUrl: string | undefined;
 	startedAtMs: number;
 	/** Resolves when the library reports the session authenticated. */
 	authenticated: Promise<void>;
@@ -105,14 +108,28 @@ export class EnrollmentService {
 		this.finalize = options.finalizeEnrollment ?? finalizeEnrollment;
 	}
 
-	/** Sign in to an account that has no authenticator yet, then enrol it. */
-	async begin(accountName: string, password: string): Promise<BeginOutcome> {
+	/**
+	 * Sign in to an account that has no authenticator yet, then enrol it.
+	 *
+	 * **`proxyUrl` applies from the very first request, not afterwards.** An
+	 * earlier version enrolled unrouted and left routing to be configured later,
+	 * on the grounds that the account did not exist yet. That is precisely
+	 * backwards: Steam would see the account enrolled from the user's real
+	 * address and every later request from the proxy, which links the two through
+	 * the account permanently. Nothing configured afterwards can undo it.
+	 */
+	async begin(accountName: string, password: string, proxyUrl?: string): Promise<BeginOutcome> {
 		this.discardPending();
 
-		// Unrouted. The account is not in the vault yet, so it has no proxy — and
-		// inventing one here would tie an enrollment to a route the user never
-		// chose for it. Routing is set afterwards, on an account that exists.
-		const session = this.loginSession(undefined);
+		// Validated before a password is sent anywhere. A proxy that cannot work
+		// must fail while nothing has happened yet — discovering it after Steam has
+		// attached an authenticator would mean the enrollment already leaked.
+		const route = proxyUrl !== undefined && proxyUrl.trim() !== '' ? proxyUrl.trim() : undefined;
+		if (route !== undefined) {
+			planProxy(route);
+		}
+
+		const session = this.loginSession(route);
 
 		const authenticated = new Promise<void>((resolve, reject) => {
 			session.on('authenticated', () => resolve());
@@ -157,6 +174,7 @@ export class EnrollmentService {
 			this.pendingLogin = {
 				session,
 				accountName,
+				proxyUrl: route,
 				startedAtMs: this.now(),
 				authenticated
 			};
@@ -166,7 +184,7 @@ export class EnrollmentService {
 		}
 
 		await authenticated;
-		return this.enrol(session, accountName);
+		return this.enrol(session, accountName, route);
 	}
 
 	/** Answer the emailed Steam Guard code, then enrol. */
@@ -190,7 +208,7 @@ export class EnrollmentService {
 
 		await pending.authenticated;
 		this.pendingLogin = undefined;
-		return this.enrol(pending.session, pending.accountName);
+		return this.enrol(pending.session, pending.accountName, pending.proxyUrl);
 	}
 
 	/**
@@ -261,7 +279,11 @@ export class EnrollmentService {
 	 * awaited before this returns, so the caller cannot report success for secrets
 	 * that are still only in memory.
 	 */
-	private async enrol(session: LoginSessionLike, accountName: string): Promise<BeginOutcome> {
+	private async enrol(
+		session: LoginSessionLike,
+		accountName: string,
+		proxyUrl: string | undefined
+	): Promise<BeginOutcome> {
 		const steamId64 = session.steamID?.getSteamID64();
 		const accessToken = session.accessToken;
 
@@ -280,7 +302,9 @@ export class EnrollmentService {
 			);
 		}
 
-		const transport = await this.transports.forAccount({ steamId64 });
+		// Routed from the first request this account ever makes, so `AddAuthenticator`
+		// itself leaves through the proxy rather than from the user's own address.
+		const transport = await this.transports.forAccount({ steamId64, proxyUrl });
 
 		// From here until the vault write completes is the only unrecoverable
 		// window in the application. Nothing is awaited in between that does not
@@ -301,6 +325,7 @@ export class EnrollmentService {
 				revocationCode: started.revocationCode,
 				deviceId: started.deviceId,
 				refreshToken: session.refreshToken,
+				...(proxyUrl !== undefined ? { proxyUrl } : {}),
 				...(started.serialNumber !== undefined ? { serialNumber: started.serialNumber } : {}),
 				...(started.tokenGid !== undefined ? { tokenGid: started.tokenGid } : {}),
 				...(started.uri !== undefined ? { uri: started.uri } : {}),

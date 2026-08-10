@@ -287,6 +287,37 @@ Route two accounts through two different proxies. Use both.
 
 ---
 
+### T27 · Add an authenticator to a new account
+
+**This changes a Steam account and cannot be undone from the app.** Throwaway
+only. The account must not already have an authenticator; a phone number is
+**not** required (F-10, settled by live run — the code arrives by email instead).
+
+1. Account list → **Add authenticator**.
+2. **If you intend to route this account, put the proxy in at this step.** Not
+   afterwards. Steam sees the address every request comes from, so enrolling on
+   your own connection and routing later ties the two together through the
+   account, permanently.
+3. Sign in. Answer the emailed Steam Guard code.
+4. **Write down the revocation code the moment it is offered.**
+5. Enter the activation code — by text if the account has a phone, by email if
+   it does not.
+
+**Pass:** the account appears in the list generating codes, and those codes work
+on Steam. **Fails if** the screen asks for a text on an account with no phone, or
+if the revocation code is not offered before activation is requested.
+
+### T28 · Export a maFile
+
+1. **Export** on any account. Save it.
+2. Open it in a text editor.
+
+**Pass:** the SteamID is exact — check the last digits against the account list,
+not just the first few. A value ending `...200000000` means precision was lost.
+The file must contain no `refreshToken`. Bonus: SDA reads it.
+
+---
+
 ## Stage 5 — The dangerous ones. Do these last.
 
 ### T20 · Reveal a revocation code
