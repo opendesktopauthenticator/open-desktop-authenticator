@@ -179,6 +179,15 @@ export const CHANNELS = {
 	enrollBegin: 'enroll:begin',
 	enrollEmailCode: 'enroll:emailCode',
 	enrollActivate: 'enroll:activate',
+	/**
+	 * Abandon a sign-in that has not attached anything yet.
+	 *
+	 * Needed because the email-code step is a genuine pause with a live
+	 * `LoginSession` behind it. Leaving the screen used to drop the UI and leave
+	 * that session running until its fifteen-minute TTL — so the way out of a
+	 * mistyped account name was to wait, or to quit the application.
+	 */
+	enrollCancel: 'enroll:cancel',
 
 	/**
 	 * Write an account back out as a maFile (§12 F2).

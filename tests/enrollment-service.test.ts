@@ -496,3 +496,94 @@ describe('when the vault write fails after Steam has already attached', () => {
 		expect(message).not.toContain('R12345');
 	});
 });
+
+/**
+ * Getting out of a sign-in that is going nowhere (§12 F3).
+ *
+ * The email-code step is the one genuine pause in the application, and it holds
+ * a live `LoginSession` open across it. Both ways out of that pause were missing:
+ * the screen offered no control, and nothing dropped the session when it was
+ * abandoned.
+ */
+describe('abandoning a sign-in', () => {
+	it('cancels the live session behind an abandoned email-code step', async () => {
+		// The state the screen leaves behind when someone mistypes an account name
+		// and walks away: Steam has emailed a code, a LoginSession is open, and
+		// nothing has been attached. `forget` is what the new Cancel button reaches,
+		// and it has to actually stop that session rather than drop the reference.
+		let cancelled = 0;
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+
+		const service = new EnrollmentService(fakeVault().vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => ({
+				// Pauses for an emailed code, which is what makes this step a pause.
+				startWithCredentials: () =>
+					Promise.resolve({ actionRequired: true, validActions: [{ type: 2 }] }),
+				submitSteamGuardCode: () => Promise.resolve(),
+				on: () => undefined,
+				cancelLoginAttempt: () => {
+					cancelled += 1;
+				},
+				refreshToken: MOBILE,
+				accessToken: MOBILE,
+				steamID: { getSteamID64: () => STEAM_ID }
+			}),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		const outcome = await service.begin('trader', 'password');
+		expect(outcome.state).toBe('needsEmailCode');
+
+		service.forget();
+
+		expect(cancelled).toBe(1);
+		// And the code that was emailed is no longer accepted, because the session
+		// it belonged to is gone.
+		await expect(service.submitEmailCode('12345')).rejects.toThrow();
+	});
+
+	it('gives up on a sign-in Steam never finishes', async () => {
+		// The library's `timeout` event is not guaranteed to fire. `login.ts`
+		// backstops it with a timer of its own for every other sign-in; enrollment
+		// did not, so a hung sign-in left the screen on "Talking to Steam…" with its
+		// Cancel button disabled — no timeout, no error, nothing to press.
+		vi.useFakeTimers();
+		try {
+			const transports = {
+				forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+			} as unknown as SteamTransportFactory;
+
+			const service = new EnrollmentService(fakeVault().vault as never, transports, {
+				now: () => NOW,
+				// Never authenticates, and never emits `timeout` either.
+				loginSession: () => ({
+					startWithCredentials: () => Promise.resolve({ actionRequired: false }),
+					submitSteamGuardCode: () => Promise.resolve(),
+					on: () => undefined,
+					cancelLoginAttempt: () => undefined,
+					refreshToken: MOBILE,
+					accessToken: MOBILE,
+					steamID: { getSteamID64: () => STEAM_ID }
+				}),
+				startEnrollment: () => Promise.resolve(STARTED),
+				finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			});
+
+			const attempt = service.begin('trader', 'password');
+			const settled = attempt.then(
+				() => 'resolved',
+				(err: Error) => err.message
+			);
+
+			await vi.advanceTimersByTimeAsync(91_000);
+
+			await expect(settled).resolves.toMatch(/did not finish the sign-in in time/);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});

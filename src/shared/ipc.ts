@@ -571,6 +571,8 @@ export const IPC_CONTRACT = {
 		response: z.object({ state: z.enum(['activated', 'wantMore']) })
 	},
 
+	[CHANNELS.enrollCancel]: { request: emptyRequest, response: okResponse },
+
 	[CHANNELS.accountExport]: {
 		request: z.object({ steamId64: z.string() }).strict(),
 		response: exportResponse
@@ -770,6 +772,8 @@ export interface RendererApi {
 	 */
 	beginEnrollment(accountName: string, password: string, proxyUrl?: string): Promise<EnrollBegin>;
 	submitEnrollmentEmailCode(code: string): Promise<EnrollBegin>;
+	/** Abandon a sign-in that has not attached an authenticator yet. */
+	cancelEnrollment(): Promise<{ ok: true }>;
 	activateAuthenticator(
 		steamId64: string,
 		code: string

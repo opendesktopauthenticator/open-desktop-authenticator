@@ -79,6 +79,7 @@ const api: RendererApi = {
 		}) as Promise<EnrollBegin>,
 	submitEnrollmentEmailCode: (code: string) =>
 		ipcRenderer.invoke(CHANNELS.enrollEmailCode, { code }) as Promise<EnrollBegin>,
+	cancelEnrollment: () => ipcRenderer.invoke(CHANNELS.enrollCancel, {}) as Promise<{ ok: true }>,
 	activateAuthenticator: (steamId64: string, code: string) =>
 		ipcRenderer.invoke(CHANNELS.enrollActivate, { steamId64, code }) as Promise<{
 			state: 'activated' | 'wantMore';

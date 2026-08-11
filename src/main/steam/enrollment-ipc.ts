@@ -56,6 +56,14 @@ export function registerEnrollmentHandlers(
 		return enrollment.submitEmailCode(code);
 	});
 
+	// No `requireUnlocked` here, and that is deliberate: this only drops state we
+	// are already holding. Refusing to clean up because the vault happened to lock
+	// would leave the live session running for exactly the reason it should not.
+	registerHandler(CHANNELS.enrollCancel, () => {
+		enrollment.forget();
+		return { ok: true as const };
+	});
+
 	registerHandler(CHANNELS.enrollActivate, async ({ steamId64, code }) => {
 		requireUnlocked();
 		return { state: await enrollment.activate(steamId64, code) };

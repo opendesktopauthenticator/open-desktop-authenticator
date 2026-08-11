@@ -59,6 +59,22 @@ export function Confirmations({
 		listRef.current = onList;
 	}, [onList]);
 
+	/**
+	 * Fetch the list. **Does not touch `busy`**, and that separation is the point.
+	 *
+	 * `act` used to finish by calling the busy-guarded `refresh`, which only worked
+	 * because the callback it captured had been created on a render where `busy`
+	 * was still false. Had that closure ever been current, `refresh` would have
+	 * seen `busy === true`, returned immediately, and left the flag set — Back and
+	 * Refresh disabled for as long as the screen stayed open, with no way to clear
+	 * it. Every caller now owns its own busy handling and shares this.
+	 */
+	const load = useCallback(async (): Promise<void> => {
+		const result = await listRef.current();
+		setConfirmations(result.confirmations);
+		setSignInReason(result.signInRequired ? (result.reason ?? '') : undefined);
+	}, []);
+
 	/** Used by the Refresh button, where showing "working" is the whole point. */
 	const refresh = useCallback((): void => {
 		if (busy) {
@@ -66,15 +82,10 @@ export function Confirmations({
 		}
 		setBusy(true);
 		setError(undefined);
-		listRef
-			.current()
-			.then((result) => {
-				setConfirmations(result.confirmations);
-				setSignInReason(result.signInRequired ? (result.reason ?? '') : undefined);
-			})
+		load()
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => setBusy(false));
-	}, [busy]);
+	}, [busy, load]);
 
 	// Fetch once per account. The screen already says "Asking Steam…" while
 	// `confirmations` is undefined, so no busy flag is set synchronously here.
@@ -105,12 +116,14 @@ export function Confirmations({
 		}
 		setBusy(true);
 		setError(undefined);
+		// One `finally`, covering both the action and the reload after it. The
+		// previous shape cleared the flag in the failure branch and relied on
+		// `refresh` to clear it in the success branch, which put the only path out
+		// of "Working…" inside a function that could decline to run.
 		onAct(action, ids)
-			.then(() => refresh())
-			.catch((err: unknown) => {
-				setError(messageOf(err));
-				setBusy(false);
-			});
+			.then(() => load())
+			.catch((err: unknown) => setError(messageOf(err)))
+			.finally(() => setBusy(false));
 	};
 
 	const critical = confirmations?.filter((entry) => entry.securityCritical) ?? [];
@@ -148,7 +161,20 @@ export function Confirmations({
 				{account.accountName} <span className="muted">{account.steamId64}</span>
 			</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && (
+				<>
+					<p className="error">{error}</p>
+					{/* A failed load must offer the way out of itself. The header Refresh
+					    does the same job, but it reads as a routine control rather than
+					    the answer to the red text directly above it — and a screen whose
+					    only visible options are an error and Back reads as broken. */}
+					<div className="controls">
+						<button type="button" className="secondary" onClick={refresh} disabled={busy}>
+							{busy ? 'Working…' : 'Try again'}
+						</button>
+					</div>
+				</>
+			)}
 
 			{signInReason !== undefined && (
 				<SteamSignIn
@@ -195,8 +221,24 @@ export function Confirmations({
 				</div>
 			))}
 
+			{/* Three states, not two, and the third one matters more than it looks.
+
+			    A failed load used to leave `confirmations` undefined, which rendered
+			    "Asking Steam…" underneath the error — a request that had already
+			    finished, shown as still in flight, so the screen read as hung.
+
+			    The obvious repair is to set an empty list on failure, and it is worse:
+			    the empty state says "Nothing pending — this was checked just now", and
+			    an authenticator that reports no pending trades when it does not know is
+			    making a false statement about exactly the thing it exists to report.
+
+			    So the loading line is suppressed when there is an error, and neither
+			    the list nor the empty state is shown. The error and its Try again are
+			    the whole answer. */}
 			{signInReason !== undefined ? null : confirmations === undefined ? (
-				<p className="muted">Asking Steam…</p>
+				error === undefined ? (
+					<p className="muted">Asking Steam…</p>
+				) : null
 			) : confirmations.length === 0 ? (
 				<div className="empty">
 					<h2>Nothing pending</h2>

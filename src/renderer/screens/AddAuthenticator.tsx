@@ -28,6 +28,7 @@ import { messageOf } from '../ipc-message';
 export function AddAuthenticator({
 	onBegin,
 	onEmailCode,
+	onCancel,
 	onActivate,
 	onBackup,
 	onClose,
@@ -35,6 +36,8 @@ export function AddAuthenticator({
 }: {
 	onBegin: (accountName: string, password: string, proxyUrl?: string) => Promise<EnrollBegin>;
 	onEmailCode: (code: string) => Promise<EnrollBegin>;
+	/** Drops the pending sign-in in the main process. Safe only before anything is attached. */
+	onCancel: () => Promise<unknown>;
 	onActivate: (steamId64: string, code: string) => Promise<{ state: 'activated' | 'wantMore' }>;
 	/** Opens the revocation-code ceremony for the newly enrolled account. */
 	onBackup: (steamId64: string, accountName: string) => void;
@@ -131,11 +134,43 @@ export function AddAuthenticator({
 		<main className="shell">
 			<header className="row">
 				<h1>Add an authenticator</h1>
-				{/* Absent once the account has been changed: there is nothing left to
-				    back out of, and offering it would suggest otherwise. */}
+				{/* Three different exits, because at three points in this flow the honest
+				    thing to say is different.
+
+				    Before sign-in: Cancel. Nothing has happened.
+
+				    Waiting on the emailed code: still Cancel — Steam has authenticated
+				    nothing and attached nothing. This step had *no* control at all, so a
+				    mistyped account name left force-quitting or waiting out the idle
+				    lock as the only ways out, with a live LoginSession running behind
+				    the screen the whole time. It now tells the main process to drop it.
+
+				    After the authenticator is attached: not a cancel, because there is
+				    nothing left to cancel. "Finish later" matches what the copy on that
+				    step already promises and what resuming actually does. Its absence
+				    meant the only exits were activating successfully or the revocation
+				    button beside it. */}
 				{step === 'credentials' && (
 					<button type="button" className="secondary" onClick={onClose} disabled={busy}>
 						Cancel
+					</button>
+				)}
+				{step === 'emailCode' && (
+					<button
+						type="button"
+						className="secondary"
+						onClick={() => {
+							void onCancel();
+							onClose();
+						}}
+						disabled={busy}
+					>
+						Cancel
+					</button>
+				)}
+				{step === 'activate' && (
+					<button type="button" className="secondary" onClick={onClose} disabled={busy}>
+						Finish later
 					</button>
 				)}
 			</header>

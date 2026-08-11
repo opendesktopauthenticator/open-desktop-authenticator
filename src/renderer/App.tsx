@@ -397,6 +397,7 @@ export function App(): React.JSX.Element {
 						api.beginEnrollment(accountName, password, proxyUrl)
 					}
 					onEmailCode={(code) => api.submitEnrollmentEmailCode(code)}
+					onCancel={() => api.cancelEnrollment()}
 					onActivate={(steamId64, code) => api.activateAuthenticator(steamId64, code)}
 					onBackup={(steamId64, accountName) => {
 						// Straight into the S12 ceremony for the account just created. The

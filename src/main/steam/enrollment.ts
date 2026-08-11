@@ -45,6 +45,15 @@ import type { Account } from '../../shared/vault-schema';
 /** How long a half-finished enrollment stays resumable before it is dropped. */
 const PENDING_TTL_MS = 15 * 60_000;
 
+/**
+ * How long to wait for Steam to finish a sign-in.
+ *
+ * The same ninety seconds `login.ts` uses, and for the same reason: the
+ * library's `timeout` event is not guaranteed to fire, and a promise that never
+ * settles is a screen that never moves.
+ */
+const SIGN_IN_TIMEOUT_MS = 90_000;
+
 export type BeginOutcome =
 	/** Steam emailed a code. Call `submitEmailCode` with it. */
 	| { state: 'needsEmailCode'; emailDomain?: string }
@@ -152,6 +161,25 @@ export class EnrollmentService {
 
 		const authenticated = new Promise<void>((resolve, reject) => {
 			session.on('authenticated', () => resolve());
+
+			// A timer of our own, not just the library's `timeout` event.
+			//
+			// `login.ts` already backstops that event for every other sign-in in the
+			// application, for the reason its comment gives: if the library never
+			// emits it, the promise never settles. Enrollment trusted the event alone,
+			// so a sign-in that hung left the screen on "Talking to Steam…" with its
+			// Cancel button disabled — no timeout, no error, and nothing to press.
+			const timer = setTimeout(() => {
+				this.cancel(session);
+				reject(new EnrollmentError('Steam did not finish the sign-in in time.', false));
+			}, SIGN_IN_TIMEOUT_MS);
+			// Never hold the process open on a sign-in nobody is waiting for.
+			timer.unref?.();
+			const settle = (): void => clearTimeout(timer);
+			session.on('authenticated', settle);
+			session.on('timeout', settle);
+			session.on('error', settle);
+
 			session.on('timeout', () =>
 				reject(new EnrollmentError('Steam did not finish the sign-in in time.', false))
 			);
