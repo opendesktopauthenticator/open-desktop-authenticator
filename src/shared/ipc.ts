@@ -724,6 +724,7 @@ export const IPC_CONTRACT = {
 	[CHANNELS.codeCopy]: { request: codeCopyRequest, response: codeCopyResponse },
 
 	[CHANNELS.activityList]: { request: emptyRequest, response: activityListResponse },
+	[CHANNELS.activityAcknowledge]: { request: emptyRequest, response: okResponse },
 
 	[CHANNELS.confirmationsList]: {
 		request: z.object({ steamId64: z.string() }).strict(),
@@ -874,6 +875,8 @@ export interface RendererApi {
 
 	/** What automatic confirmation did while nobody was watching. */
 	listActivity(): Promise<ActivityList>;
+	/** Mark the log as seen, so the "needs you" alert can be discharged. */
+	acknowledgeActivity(): Promise<{ ok: true }>;
 	/** Pending confirmations for one account. */
 	listConfirmations(steamId64: string): Promise<ConfirmationsList>;
 	/** Approve or deny by id. The nonce never leaves the main process. */

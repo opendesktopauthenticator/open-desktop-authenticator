@@ -209,6 +209,18 @@ export class EnrollmentService {
 		// has got to. `cancel` removes it again.
 		this.liveSessions.add(session);
 
+		/**
+		 * Stops the sign-in timeout below.
+		 *
+		 * Hoisted out of the promise so the `needsEmailCode` path can reach it. That
+		 * path does not await `authenticated` — it returns and waits for a person —
+		 * and the timer fired ninety seconds later and cancelled the very session the
+		 * user was about to submit their code to. `PENDING_TTL_MS` says that pause
+		 * may last fifteen minutes; in practice it lasted ninety seconds, and the
+		 * failure surfaced as the code being rejected.
+		 */
+		let disarm = (): void => undefined;
+
 		const authenticated = new Promise<void>((resolve, reject) => {
 			session.on('authenticated', () => resolve());
 
@@ -226,6 +238,7 @@ export class EnrollmentService {
 			// Never hold the process open on a sign-in nobody is waiting for.
 			timer.unref?.();
 			const settle = (): void => clearTimeout(timer);
+			disarm = settle;
 			session.on('authenticated', settle);
 			session.on('timeout', settle);
 			session.on('error', settle);
@@ -268,6 +281,11 @@ export class EnrollmentService {
 				);
 			}
 
+			// The sign-in has resolved — into a pause, but resolved. What guards the
+			// pause is `PENDING_TTL_MS`, and `submitEmailCode` arms a fresh timeout
+			// around the wait that follows the code.
+			disarm();
+
 			this.pendingLogin = {
 				session,
 				accountName,
@@ -308,7 +326,21 @@ export class EnrollmentService {
 			);
 		}
 
-		await pending.authenticated;
+		// A fresh timeout around this wait, because the one armed in `begin` was
+		// disarmed when the flow paused for the code. Without it, disarming there
+		// would have swapped one defect for the original: a sign-in that never
+		// completes leaving the screen waiting forever.
+		await Promise.race([
+			pending.authenticated,
+			new Promise<never>((_resolve, reject) => {
+				const timer = setTimeout(() => {
+					this.cancel(pending.session);
+					reject(new EnrollmentError('Steam did not finish the sign-in in time.', false));
+				}, SIGN_IN_TIMEOUT_MS);
+				timer.unref?.();
+				pending.authenticated.finally(() => clearTimeout(timer)).catch(() => undefined);
+			})
+		]);
 		this.pendingLogin = undefined;
 		try {
 			return await this.enrol(pending.session, pending.accountName, pending.proxyUrl);
@@ -396,14 +428,29 @@ export class EnrollmentService {
 			return 'wantMore';
 		}
 
-		await this.vault.mutate((draft) => {
-			const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
-			if (stored) {
-				// Only now. Until Steam confirms, this account's authenticator is
-				// attached but unproven, and `pendingActivation` is what says so.
-				stored.status = stored.revocationBackedUpAt ? 'active' : 'pendingRevocationBackup';
-			}
-		});
+		try {
+			await this.vault.mutate((draft) => {
+				const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
+				if (stored) {
+					// Only now. Until Steam confirms, this account's authenticator is
+					// attached but unproven, and `pendingActivation` is what says so.
+					stored.status = stored.revocationBackedUpAt ? 'active' : 'pendingRevocationBackup';
+				}
+			});
+		} catch {
+			// Steam finalized. The vault did not hear about it, so it still reads
+			// `pendingActivation` and will offer to finish something already finished
+			// — and `finalizeEnrollment` on an activated authenticator fails, which
+			// looks like a wrong code. Saying what actually happened is the only way
+			// the user can make sense of the next screen.
+			throw new EnrollmentError(
+				`Steam activated the authenticator on ${account.accountName}, but this could not be ` +
+					'saved. The account works — codes it generates are valid — and the app will keep ' +
+					'offering to finish activation until it can write. Unlock the vault and try once ' +
+					'more; if it says the account is already activated, that is the truth and nothing ' +
+					'is wrong.'
+			);
+		}
 
 		this.tokens.delete(steamId64);
 		this.textedTheCode.delete(steamId64);
@@ -462,12 +509,26 @@ export class EnrollmentService {
 		// Only after Steam has confirmed. Everything this account had in memory goes
 		// with the record — its cookie jar, cached session and pending list are
 		// dropped by the routing hook the caller wires to removal.
-		await this.vault.mutate((draft) => {
-			const index = draft.accounts.findIndex((entry) => entry.steamId64 === steamId64);
-			if (index >= 0) {
-				draft.accounts.splice(index, 1);
-			}
-		});
+		try {
+			await this.vault.mutate((draft) => {
+				const index = draft.accounts.findIndex((entry) => entry.steamId64 === steamId64);
+				if (index >= 0) {
+					draft.accounts.splice(index, 1);
+				}
+			});
+		} catch {
+			// **The worse direction of the two.** Steam Guard is gone from the account
+			// and the vault still lists it, so the app goes on showing codes for an
+			// authenticator Steam no longer honours — an account the user believes is
+			// protected and is not. Silence here would be the app lying by omission
+			// about a second factor.
+			throw new EnrollmentError(
+				`Steam Guard has been removed from ${account.accountName} on Steam, but the account ` +
+					'could not be removed from this vault. It is no longer protected — add a new ' +
+					'authenticator to it as soon as you can. The codes this app still shows for it are ' +
+					'meaningless now, and removing the account here will not change anything on Steam.'
+			);
+		}
 
 		this.tokens.delete(steamId64);
 		this.textedTheCode.delete(steamId64);
@@ -614,8 +675,8 @@ export class EnrollmentService {
 				`Steam attached the authenticator to ${account.accountName}, but it could not be saved ` +
 					(recovered
 						? 'to the vault. A recovery file was written first, so nothing is lost — unlock the ' +
-							'vault and use Recover from file to finish. Do not remove the authenticator on ' +
-							'Steam before you do.'
+							'vault and use Recover from file to restore it, then sign in to that account to ' +
+							'finish activating. Do not remove the authenticator on Steam before you do.'
 						: 'here, and the recovery file could not be written either. Write this down now, ' +
 							'before you close this window — it is the only way to detach the authenticator ' +
 							`yourself: revocation code ${account.revocationCode ?? '(not issued)'}.`)
@@ -653,10 +714,16 @@ export class EnrollmentService {
 		}
 
 		if (account.refreshToken === undefined) {
+			// Sign-in first, revocation code second. A recovered account arrives here
+			// by design — the recovery file deliberately carries no refresh token, so
+			// it restores an authenticator without also restoring a way in — and the
+			// old wording sent those users straight to detaching an account they were
+			// trying to keep.
 			throw new EnrollmentError(
-				'This account has no saved session, so this cannot be done from here. The ' +
-					'authenticator is attached on Steam — use the revocation code you wrote down to ' +
-					'remove it there.'
+				'This account has no saved session, so this cannot be done yet. Sign in to it first — ' +
+					'the Confirmations screen will ask for the password — and then try again. If you ' +
+					'cannot sign in, the revocation code you wrote down removes the authenticator on ' +
+					'Steam.'
 			);
 		}
 

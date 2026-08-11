@@ -53,7 +53,17 @@ export function toMaFile(account: Account): string {
 		revocation_code: account.revocationCode ?? '',
 		// `status: 1` is what SDA writes for an active authenticator.
 		status: 1,
-		fully_enrolled: account.status === 'active',
+		// **Not `status === 'active'`.** `pendingRevocationBackup` is the ordinary
+		// state of a freshly activated account — it means "activated, and the user
+		// has not yet confirmed writing the revocation code down", which is a fact
+		// about this application and none of Steam's business. Exporting those as
+		// `fully_enrolled: false` told every reader, including our own importer,
+		// that the authenticator had never been activated; re-importing then set the
+		// account back to `pendingActivation` and offered to finalize an
+		// authenticator Steam finalized long ago.
+		//
+		// Only `pendingActivation` genuinely means not finished.
+		fully_enrolled: account.status !== 'pendingActivation',
 		uri: account.uri ?? '',
 		token_gid: account.tokenGid ?? '',
 		secret_1: account.secret1 ?? '',

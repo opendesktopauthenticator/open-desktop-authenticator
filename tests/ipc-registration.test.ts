@@ -118,6 +118,7 @@ describe('IPC registration', () => {
 
 		expect(missing).toEqual([
 			CHANNELS.activityList,
+			CHANNELS.activityAcknowledge,
 			CHANNELS.confirmationsList,
 			CHANNELS.confirmationsAct,
 			CHANNELS.steamSignIn,

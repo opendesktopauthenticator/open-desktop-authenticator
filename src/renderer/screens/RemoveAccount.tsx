@@ -81,12 +81,28 @@ export function RemoveAccount({
 
 			{error && <p className="error">{error}</p>}
 
+			{/* The heading has to follow the action. With detaching on, this screen
+			    does the exact opposite of what it said — and the block further down
+			    already told the user so, leaving two contradictory statements on one
+			    screen about the most destructive operation in the application. */}
 			<div className="ceremony">
-				<h2>This does not remove the authenticator from Steam</h2>
-				<p>
-					Steam will keep asking this account for Steam Guard codes. After this, nothing on this
-					machine can produce them.
-				</p>
+				{detaching ? (
+					<>
+						<h2>This removes Steam Guard from the account itself</h2>
+						<p>
+							Steam stops asking this account for codes at all. It is not just being forgotten here
+							— the account is left with no second factor until you add one somewhere else.
+						</p>
+					</>
+				) : (
+					<>
+						<h2>This does not remove the authenticator from Steam</h2>
+						<p>
+							Steam will keep asking this account for Steam Guard codes. After this, nothing on this
+							machine can produce them.
+						</p>
+					</>
+				)}
 				{account.hasRevocationCode ? (
 					<p>
 						You have a revocation code on file for this account. Make sure you have written it down{' '}

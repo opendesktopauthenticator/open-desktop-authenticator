@@ -50,6 +50,11 @@ export function registerConfirmationHandlers(
 		return { entries, urgent: activity.hasUrgent() };
 	});
 
+	registerHandler(CHANNELS.activityAcknowledge, () => {
+		activity.acknowledge();
+		return { ok: true as const };
+	});
+
 	registerHandler(CHANNELS.confirmationsAct, async ({ steamId64, action, ids }) => {
 		vault.touch();
 		await clock?.ensureSynced();

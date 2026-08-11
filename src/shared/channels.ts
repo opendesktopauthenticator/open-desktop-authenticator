@@ -136,6 +136,15 @@ export const CHANNELS = {
 	 * which made the loudest warning this app can raise land nowhere.
 	 */
 	activityList: 'activity:list',
+	/**
+	 * Mark what is in the log as seen.
+	 *
+	 * Separate from `activity:list` because that one is polled once a second to
+	 * drive the alert badge — acknowledging there would discharge the warning
+	 * without anybody having read it. This is called when the screen is opened,
+	 * which is the only moment that means the user actually looked.
+	 */
+	activityAcknowledge: 'activity:acknowledge',
 
 	confirmationsList: 'confirmations:list',
 	confirmationsAct: 'confirmations:act',

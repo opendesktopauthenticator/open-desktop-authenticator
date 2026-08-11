@@ -261,6 +261,38 @@ describe('exporting a maFile', () => {
 		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
 	};
 
+	it('does not demote a freshly activated account to "never activated"', () => {
+		// `pendingRevocationBackup` is the ordinary state of an account that has just
+		// been activated — it means "activated, and the code has not been confirmed
+		// written down", which is a fact about this application and none of Steam's
+		// business. Exporting it as `fully_enrolled: false` told every reader,
+		// including our own importer, that the authenticator had never been
+		// activated.
+		const justActivated: Account = { ...account, status: 'pendingRevocationBackup' };
+
+		const parsed = JSON.parse(toMaFile(justActivated)) as Record<string, unknown>;
+
+		expect(parsed.fully_enrolled).toBe(true);
+	});
+
+	it('round-trips a freshly activated account without offering to activate it again', () => {
+		// The consequence, end to end: importing the file back must not produce an
+		// account the app will try to finalize on Steam a second time.
+		const justActivated: Account = { ...account, status: 'pendingRevocationBackup' };
+
+		const reparsed = parseMaFile(toMaFile(justActivated), 'x.maFile', Date.now());
+
+		expect(reparsed.fullyEnrolled).toBe(true);
+	});
+
+	it('still marks an account that genuinely never finished', () => {
+		const unfinished: Account = { ...account, status: 'pendingActivation' };
+
+		const parsed = JSON.parse(toMaFile(unfinished)) as Record<string, unknown>;
+
+		expect(parsed.fully_enrolled).toBe(false);
+	});
+
 	it('writes the shape the rest of the ecosystem reads', () => {
 		const parsed = JSON.parse(toMaFile(account)) as Record<string, unknown>;
 

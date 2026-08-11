@@ -719,3 +719,116 @@ describe('one sign-in at a time', () => {
 		await enrolling.catch(() => undefined);
 	});
 });
+
+describe('the pause waiting for an emailed code', () => {
+	/** A session that stops for an email code and records cancellation. */
+	function pausing(): { session: LoginSessionLike; cancels: () => number } {
+		let cancels = 0;
+		const base = fakeSession();
+		return {
+			session: {
+				...base,
+				startWithCredentials: () =>
+					Promise.resolve({ actionRequired: true, validActions: [{ type: 2 }] }),
+				cancelLoginAttempt: () => {
+					cancels += 1;
+				}
+			},
+			cancels: () => cancels
+		};
+	}
+
+	it('survives longer than the sign-in timeout', async () => {
+		// `PENDING_TTL_MS` says this pause may last fifteen minutes. The sign-in
+		// timeout armed in `begin` was never disarmed when the flow paused, so at
+		// ninety seconds it cancelled the very session the user was about to submit
+		// their code to — and the code then failed against a dead session.
+		vi.useFakeTimers();
+		try {
+			const paused = pausing();
+			const transports = {
+				forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+			} as unknown as SteamTransportFactory;
+
+			const service = new EnrollmentService(fakeVault().vault as never, transports, {
+				now: () => NOW,
+				loginSession: () => paused.session,
+				startEnrollment: () => Promise.resolve(STARTED),
+				finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			});
+
+			const outcome = await service.begin('trader', 'password');
+			expect(outcome.state).toBe('needsEmailCode');
+
+			// Well past ninety seconds, well inside the fifteen-minute TTL.
+			await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+			expect(paused.cancels()).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe('when Steam has acted and the vault write fails', () => {
+	function brokenAfter(accounts: Account[]): { read: () => { accounts: Account[] } } {
+		let writes = 0;
+		return {
+			read: () => ({ accounts }),
+			mutate: (apply: (draft: { accounts: Account[] }) => void) => {
+				writes += 1;
+				// The enrollment write succeeds; the one after it does not.
+				if (writes > 1) {
+					return Promise.reject(
+						new Error("EACCES: permission denied, open 'C:/Users/someone/vault.json'")
+					);
+				}
+				apply({ accounts });
+				return Promise.resolve();
+			}
+		} as never;
+	}
+
+	it('says the authenticator is activated even though the vault disagrees', async () => {
+		// Steam finalized. The vault still reads `pendingActivation`, so the app will
+		// keep offering to finish something already finished — and finalizing an
+		// activated authenticator fails in a way that looks like a wrong code.
+		const accounts: Account[] = [];
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+
+		const service = new EnrollmentService(brokenAfter(accounts) as never, transports, {
+			now: () => NOW,
+			loginSession: () => fakeSession(),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		await service.begin('trader', 'password');
+
+		await expect(service.activate(STEAM_ID, '12345')).rejects.toThrow(
+			/Steam activated the authenticator/
+		);
+	});
+
+	it('never forwards the filesystem error, which carries the vault path', async () => {
+		const accounts: Account[] = [];
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+
+		const service = new EnrollmentService(brokenAfter(accounts) as never, transports, {
+			now: () => NOW,
+			loginSession: () => fakeSession(),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+		await service.begin('trader', 'password');
+
+		const message = await service.activate(STEAM_ID, '12345').catch((err: Error) => err.message);
+
+		expect(message).not.toContain('vault.json');
+		expect(message).not.toContain('EACCES');
+	});
+});

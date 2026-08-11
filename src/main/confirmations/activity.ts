@@ -34,6 +34,15 @@ export type ActivityEntry =
 
 export class ActivityLog {
 	private readonly entries = new Map<string, ActivityEntry[]>();
+
+	/**
+	 * When the user last looked. Everything at or before this is no longer urgent.
+	 *
+	 * Zero means never, so a fresh process treats every entry as unseen — which is
+	 * right: the log survives a lock, and an unlock is exactly when an unread
+	 * warning should be shown again.
+	 */
+	private acknowledgedAtMs = 0;
 	private readonly now: () => number;
 
 	constructor(now: () => number = () => Date.now()) {
@@ -104,8 +113,25 @@ export class ActivityLog {
 	hasUrgent(): boolean {
 		return this.all().some(
 			({ entry }) =>
-				(entry.kind === 'held' && entry.confirmation.securityCritical) || entry.kind === 'halted'
+				Date.parse(entry.at) > this.acknowledgedAtMs &&
+				((entry.kind === 'held' && entry.confirmation.securityCritical) || entry.kind === 'halted')
 		);
+	}
+
+	/**
+	 * The user has looked at the log. Stop demanding they look at it.
+	 *
+	 * `hasUrgent` was "is there a critical hold or a halt anywhere in the log",
+	 * with nothing able to answer yes-and-I-dealt-with-it. So the first held
+	 * recovery confirmation lit the alert for the rest of the process: the user
+	 * read it, acted on it, and the button went on saying "needs you" until they
+	 * quit. An alert that cannot be discharged is one people learn to ignore,
+	 * which costs exactly the warning it exists to give.
+	 *
+	 * Entries are kept — this changes what counts as *unseen*, not what happened.
+	 */
+	acknowledge(): void {
+		this.acknowledgedAtMs = this.now();
 	}
 
 	/** Drop everything. Called on quit. */

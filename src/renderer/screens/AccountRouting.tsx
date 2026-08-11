@@ -56,11 +56,28 @@ export function AccountRouting({
 				{account.accountName} <span className="muted">{account.steamId64}</span>
 			</p>
 
+			{/* What is **known**, not what is configured. `hasProxy` only says a URL is
+			    stored; this screen used it to claim the account "currently connects
+			    through a proxy", which is false when routing is blocked — the account
+			    then connects to nothing at all, by design — and unfounded when nothing
+			    has been checked yet. The home screen already draws this distinction,
+			    so the two disagreed about the same account. */}
 			<p className="muted">
-				{account.hasProxy
-					? 'This account currently connects through a proxy.'
-					: 'This account connects directly, like everything else on this machine.'}
+				{!account.hasProxy
+					? 'This account connects directly, like everything else on this machine.'
+					: account.routing === 'verified'
+						? `This account is routed, and that was checked${
+								account.routedVia ? ` — traffic left through ${account.routedVia}` : ''
+							}.`
+						: account.routing === 'blocked'
+							? 'This account is configured to route, and the route was refused, so it is ' +
+								'connecting to nothing. It fails closed rather than falling back.'
+							: 'This account is configured to route. Nothing has connected yet, so whether ' +
+								'the proxy is actually applied is not yet known.'}
 			</p>
+			{account.routing === 'blocked' && account.routingProblem && (
+				<p className="hint bad">{account.routingProblem}</p>
+			)}
 
 			{error && <p className="error">{error}</p>}
 

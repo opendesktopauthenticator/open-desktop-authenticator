@@ -71,7 +71,12 @@ export function Confirmations({
 	 */
 	const load = useCallback(async (): Promise<void> => {
 		const result = await listRef.current();
-		setConfirmations(result.confirmations);
+		// **`undefined`, not the empty array the handler sends.** When Steam wants a
+		// sign-in the response carries `confirmations: []` — not a list, an absence.
+		// Storing it as a list meant that the moment `signInReason` cleared, the
+		// screen rendered "Nothing pending — this was checked just now" about an
+		// account it had not been able to ask.
+		setConfirmations(result.signInRequired ? undefined : result.confirmations);
 		setSignInReason(result.signInRequired ? (result.reason ?? '') : undefined);
 	}, []);
 
@@ -184,6 +189,13 @@ export function Confirmations({
 						await onSignIn(password);
 						// Straight into the list the user came here for, rather than
 						// leaving them on a form that has served its purpose.
+						//
+						// Cleared together. Leaving the old list in place while the reload
+						// runs shows a stale answer under a fresh heading — and when the
+						// old "list" is the empty array the sign-in response carried, that
+						// stale answer is "Nothing pending, checked just now" about an
+						// account this app had not been able to ask.
+						setConfirmations(undefined);
 						setSignInReason(undefined);
 						refresh();
 					}}
@@ -239,7 +251,7 @@ export function Confirmations({
 				error === undefined ? (
 					<p className="muted">Asking Steam…</p>
 				) : null
-			) : confirmations.length === 0 ? (
+			) : confirmations.length === 0 && error === undefined ? (
 				<div className="empty">
 					<h2>Nothing pending</h2>
 					<p>

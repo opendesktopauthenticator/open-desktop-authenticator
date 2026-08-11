@@ -18,11 +18,14 @@ export function Activity({
 	accounts,
 	onLoad,
 	onOpenAccount,
+	onSeen,
 	onClose
 }: {
 	accounts: AccountSummary[];
 	onLoad: () => Promise<ActivityList>;
 	onOpenAccount: (account: AccountSummary) => void;
+	/** Called once when this screen opens, to discharge the "needs you" alert. */
+	onSeen: () => void;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [activity, setActivity] = useState<ActivityList | undefined>();
@@ -46,6 +49,18 @@ export function Activity({
 			.current()
 			.then((loaded) => setActivity(loaded))
 			.catch((err: unknown) => setError(messageOf(err)));
+	}, []);
+
+	// Once, on open. Held in a ref and depended on with an empty array for the
+	// same reason the discard effect in the import screen is: the parent re-renders
+	// every second and hands down a fresh closure, and re-running this on each of
+	// those would be indistinguishable from acknowledging on a timer.
+	const seenRef = useRef(onSeen);
+	useEffect(() => {
+		seenRef.current = onSeen;
+	}, [onSeen]);
+	useEffect(() => {
+		seenRef.current();
 	}, []);
 
 	useEffect(() => {

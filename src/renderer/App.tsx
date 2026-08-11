@@ -138,6 +138,12 @@ export function App(): React.JSX.Element {
 				return;
 			}
 			setAccounts((await api.listAccounts()).accounts);
+			// Before the early return. The activity log is in memory and costs
+			// nothing, and it survives a lock — so skipping it on the unlock path
+			// meant an account that had been held back, or an engine that had given
+			// up, showed no alert until the next poll on the one screen the user is
+			// looking at hardest.
+			setActivityUrgent((await api.listActivity()).urgent);
 			if (!includeCodes) {
 				return;
 			}
@@ -146,9 +152,6 @@ export function App(): React.JSX.Element {
 			// account costs nothing, and it removes an entire class of bug where the
 			// displayed code and its countdown disagree about which window they are in.
 			setCodes(await api.listCodes());
-			// Polled with everything else so the alert appears without the user having
-			// to go looking for it — which is the entire point of an alert.
-			setActivityUrgent((await api.listActivity()).urgent);
 		},
 		[api]
 	);
@@ -415,6 +418,9 @@ export function App(): React.JSX.Element {
 				<Activity
 					accounts={accounts}
 					onLoad={() => api.listActivity()}
+					onSeen={() => {
+						void api.acknowledgeActivity().then(() => setActivityUrgent(false));
+					}}
 					onOpenAccount={(openFor) => {
 						setView('accounts');
 						setConfirmingFor(openFor);
