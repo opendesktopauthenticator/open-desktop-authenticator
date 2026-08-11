@@ -62,6 +62,8 @@ export function AddAuthenticator({
 	const [code, setCode] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
+	/** A normal thing that happened, said in the ordinary voice rather than in red. */
+	const [notice, setNotice] = useState<string | undefined>();
 	const [emailDomain, setEmailDomain] = useState<string | undefined>();
 	const [enrolled, setEnrolled] = useState<
 		{ steamId64: string; accountName: string; phoneNumberHint?: string } | undefined
@@ -91,6 +93,7 @@ export function AddAuthenticator({
 		}
 		setBusy(true);
 		setError(undefined);
+		setNotice(undefined);
 		work()
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => setBusy(false));
@@ -120,10 +123,15 @@ export function AddAuthenticator({
 		run(async () => {
 			const result = await onActivate(enrolled.steamId64, code);
 			if (result.state === 'wantMore') {
-				// Not a failure. Steam accepted that code and wants one from a later
-				// window, which is a normal part of its flow.
+				// Not a failure, and it must not look like one. Steam accepted that code
+				// and wants one from a later window, which is an ordinary part of its
+				// flow — routing it through `setError` painted a working enrollment in
+				// the red error style, at the step where the user is already worried
+				// they have broken something irreversible.
 				setCode('');
-				setError('Steam wants one more code. Wait for the next text and enter it.');
+				setNotice(
+					'Steam accepted that code and wants one more. Wait for the next one and enter it.'
+				);
 				return;
 			}
 			setStep('done');
@@ -176,6 +184,7 @@ export function AddAuthenticator({
 			</header>
 
 			{error && <p className="error">{error}</p>}
+			{notice && <p className="hint">{notice}</p>}
 
 			{step === 'credentials' && (
 				<>

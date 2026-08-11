@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { VaultSettingsView } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
@@ -40,6 +40,15 @@ export function Settings({
 	useEffect(() => {
 		loadRef.current = onLoad;
 	}, [onLoad]);
+
+	/** Shared by the first load and the retry. See the Activity screen for why. */
+	const load = useCallback((): void => {
+		setError(undefined);
+		loadRef
+			.current()
+			.then((loaded) => setSettings(loaded))
+			.catch((err: unknown) => setError(messageOf(err)));
+	}, []);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -91,7 +100,15 @@ export function Settings({
 			{error && <p className="error">{error}</p>}
 
 			{settings === undefined ? (
-				<p className="muted">Loading…</p>
+				error === undefined ? (
+					<p className="muted">Loading…</p>
+				) : (
+					<div className="controls">
+						<button type="button" className="secondary" onClick={load}>
+							Try again
+						</button>
+					</div>
+				)
 			) : (
 				<form onSubmit={submit}>
 					<label htmlFor="auto-lock">Lock the vault after</label>

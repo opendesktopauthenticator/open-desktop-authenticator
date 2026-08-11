@@ -111,14 +111,29 @@ describe('what counts as urgent', () => {
 	it('flags an account that has been given up on', () => {
 		// A halted account is silently no longer being checked, which the user has
 		// to be told or the feature has quietly stopped working.
+		//
+		// The flag is what decides, not the wording. This test used to pass the
+		// sentence alone and rely on `/stopped/i` matching it — so the distinction
+		// between "gave up entirely" and "failed once" hung on a single word in
+		// prose composed in a different file.
 		const activity = log();
 		activity.recordFailure(
 			'76561198000000001',
-			'Automatic confirmation stopped for this account after 10 failures in a row.'
+			'Automatic confirmation stopped for this account after 10 failures in a row.',
+			true
 		);
 
 		expect(activity.for('76561198000000001')[0]?.kind).toBe('halted');
 		expect(activity.hasUrgent()).toBe(true);
+	});
+
+	it('does not treat the word "stopped" in a passing error as giving up', () => {
+		// The old rule would have called this a halt: Steam's own wording is not a
+		// statement about whether this application has given up on the account.
+		const activity = log();
+		activity.recordFailure('76561198000000001', 'The Steam service stopped responding.');
+
+		expect(activity.for('76561198000000001')[0]?.kind).toBe('failed');
 	});
 });
 

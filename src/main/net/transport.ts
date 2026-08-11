@@ -410,8 +410,21 @@ export class SteamTransportFactory {
 			await session.setProxy(
 				plan
 					? { mode: 'fixed_servers', proxyRules: plan.proxyRules }
-					: // Stated rather than left to Electron's default, so "not routed"
-						// means the machine's own egress and nothing more surprising.
+					: // **`system`, and it is worth being precise about what that means.**
+						//
+						// Not "no proxy" — it is whatever the operating system is configured
+						// to use, which on a corporate machine or behind a VPN client may
+						// well be a proxy the user never thinks about. This comment used to
+						// say it meant "the machine's own egress and nothing more
+						// surprising", which reads as a stronger promise than it is.
+						//
+						// It is still the right choice. `direct` would be a lie of a
+						// different kind: it would silently stop working for everyone whose
+						// network requires a proxy, and an authenticator that cannot reach
+						// Steam is worse than one that reaches it the same way the user's
+						// browser does. What matters is that the account card reports the
+						// route that was actually resolved rather than the one configured
+						// here, and `assertRouted` is what makes that true.
 						{ mode: 'system' }
 			);
 		} catch (err) {
@@ -545,6 +558,17 @@ export class SteamTransportFactory {
 			// A hung proxy is the common case, not an exotic one, and a request that
 			// never settles would stall the poller behind it forever.
 			const timer = setTimeout(() => {
+				// **Aborted, not merely abandoned.** Rejecting alone left the request
+				// running: the socket stayed open, and Steam could still act on it —
+				// while `finish` had already removed the handle from `outstanding`, so
+				// the lock-time `abortInFlight` could no longer reach it either. A
+				// timed-out request was therefore the one kind this transport could not
+				// cancel, which is exactly backwards.
+				try {
+					handle.abort?.();
+				} catch {
+					// Already finished or never connected. Nothing to stop.
+				}
 				finish(() =>
 					reject(
 						new EgressError('Steam did not answer in time; the connection or proxy may be down.')

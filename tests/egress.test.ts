@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
 	describeNetworkError,
 	describesDirectRoute,
@@ -1002,6 +1002,35 @@ describe('cancelling work when the vault locks', () => {
 		factory.forget(routed.steamId64);
 
 		expect(aborted()).toBe(1);
+	});
+
+	it('aborts a request it has given up waiting for', async () => {
+		// Timing out used to reject and walk away, leaving the request running: the
+		// socket stayed open and Steam could still act on it. Worse, the reject path
+		// also drops the handle from the in-flight set, so the abort a lock performs
+		// could no longer reach it — a timed-out request was the one kind this
+		// transport could not cancel, which is precisely backwards.
+		vi.useFakeTimers();
+		try {
+			const { electron, aborted } = fakeElectron({ neverSettles: true });
+			const factory = new SteamTransportFactory(electron);
+			const transport = await factory.forAccount(routed);
+
+			const inFlight = transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+			const settled = inFlight.then(
+				() => 'resolved',
+				(err: Error) => err.message
+			);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(aborted()).toBe(0);
+
+			await vi.advanceTimersByTimeAsync(31_000);
+
+			await expect(settled).resolves.toMatch(/did not answer in time/);
+			expect(aborted()).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('aborts every account on forgetAll, which is what a lock calls', async () => {

@@ -263,7 +263,7 @@ function start(): void {
 		confirmations,
 		onOutcome: (steamId64, outcome) =>
 			activity.recordPass(steamId64, outcome.approved, outcome.held),
-		onFailure: (steamId64, reason) => activity.recordFailure(steamId64, reason)
+		onFailure: (steamId64, reason, halted) => activity.recordFailure(steamId64, reason, halted)
 	});
 
 	/** Set only by the tray's Quit item, so `close` knows to stop hiding. */

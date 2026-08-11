@@ -587,3 +587,51 @@ describe('abandoning a sign-in', () => {
 		}
 	});
 });
+
+describe('activating twice', () => {
+	it('refuses an account that is already activated', async () => {
+		// `finalizeEnrollment` changes state on Steam's side. A stale screen or a
+		// double submission could push an already-active account back through it,
+		// for no possible benefit.
+		const { service, accounts } = harness();
+		await service.begin('trader', 'password');
+		const account = accounts[0];
+		if (!account) throw new Error('the enrollment did not store an account');
+		account.status = 'active';
+
+		await expect(service.activate(STEAM_ID, '12345')).rejects.toThrow(/already activated/);
+	});
+
+	it('refuses a second activation while the first is in flight', async () => {
+		// Two `finalizeEnrollment` calls racing on one account send Steam two codes
+		// for the same window, and the loser's failure is indistinguishable from a
+		// wrong code.
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const { vault, accounts } = fakeVault();
+
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => fakeSession(),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: async () => {
+				await gate;
+				return { state: 'activated' as const };
+			}
+		});
+
+		await service.begin('trader', 'password');
+		expect(accounts[0]?.status).toBe('pendingActivation');
+
+		const first = service.activate(STEAM_ID, '12345');
+		await expect(service.activate(STEAM_ID, '67890')).rejects.toThrow(/already being activated/);
+
+		release?.();
+		await first;
+	});
+});

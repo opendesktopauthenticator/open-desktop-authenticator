@@ -315,35 +315,36 @@ describe('removing an account', () => {
 describe('the removal contract', () => {
 	const { request } = IPC_CONTRACT[CHANNELS.accountRemove];
 
-	it('demands the passphrase and the acknowledgement together', () => {
+	it('demands the passphrase', () => {
+		expect(
+			request.safeParse({
+				steamId64: '76561198000000001',
+				passphrase: 'a sufficiently long passphrase'
+			}).success
+		).toBe(true);
+	});
+
+	it('refuses an acknowledgement flag, because it never meant anything', () => {
+		// There used to be an `acknowledged: z.literal(true)` here, and a test
+		// asserting that a caller which skipped the warning could not construct a
+		// valid request. That was never true: the preload wrote the literal itself,
+		// so every call carried it and none could fail to, and the main process
+		// never read it.
+		//
+		// The schema is strict, so the field is now actively refused rather than
+		// quietly ignored — a caller still sending it is working from a contract
+		// that no longer exists, and should be told so.
 		expect(
 			request.safeParse({
 				steamId64: '76561198000000001',
 				passphrase: 'a sufficiently long passphrase',
 				acknowledged: true
 			}).success
-		).toBe(true);
-	});
-
-	it('refuses a request that never acknowledged the consequence', () => {
-		// The literal is the point: a caller that skipped the warning cannot
-		// construct a valid request, so the destructive path is unreachable from a
-		// screen that did not show it.
-		for (const acknowledged of [false, undefined, 'yes', 1]) {
-			expect(
-				request.safeParse({
-					steamId64: '76561198000000001',
-					passphrase: 'a sufficiently long passphrase',
-					acknowledged
-				}).success
-			).toBe(false);
-		}
+		).toBe(false);
 	});
 
 	it('refuses a request with no passphrase', () => {
-		expect(request.safeParse({ steamId64: '76561198000000001', acknowledged: true }).success).toBe(
-			false
-		);
+		expect(request.safeParse({ steamId64: '76561198000000001' }).success).toBe(false);
 	});
 });
 

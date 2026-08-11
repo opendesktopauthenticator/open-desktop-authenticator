@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AccountSummary, ActivityList } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
@@ -35,6 +35,19 @@ export function Activity({
 		loadRef.current = onLoad;
 	}, [onLoad]);
 
+	/**
+	 * Shared by the first load and the retry, because a failed load must offer the
+	 * way out of itself. Without one the screen showed an error over a permanent
+	 * "Loading…" and the only control was Back.
+	 */
+	const load = useCallback((): void => {
+		setError(undefined);
+		loadRef
+			.current()
+			.then((loaded) => setActivity(loaded))
+			.catch((err: unknown) => setError(messageOf(err)));
+	}, []);
+
 	useEffect(() => {
 		let cancelled = false;
 		loadRef
@@ -59,9 +72,19 @@ export function Activity({
 
 	const open = (steamId64: string): void => {
 		const account = accounts.find((entry) => entry.steamId64 === steamId64);
-		if (account) {
-			onOpenAccount(account);
+		if (!account) {
+			// The log outlives the accounts it describes — entries survive an account
+			// being removed, which is often exactly what somebody is here to read
+			// about. The button then pointed at nothing and did nothing at all, with
+			// no way to tell that from the app being broken.
+			setError(
+				`${steamId64} is no longer in this vault, so there is nothing to open. Its entries stay ` +
+					'here so you can still see what happened.'
+			);
+			return;
 		}
+		setError(undefined);
+		onOpenAccount(account);
 	};
 
 	const entries = activity?.entries ?? [];
@@ -119,8 +142,18 @@ export function Activity({
 				</div>
 			))}
 
+			{/* Suppressed when the load failed. A request that has already finished,
+			    shown as still in flight, is what makes a screen read as hung. */}
 			{activity === undefined ? (
-				<p className="muted">Loading…</p>
+				error === undefined ? (
+					<p className="muted">Loading…</p>
+				) : (
+					<div className="controls">
+						<button type="button" className="secondary" onClick={load}>
+							Try again
+						</button>
+					</div>
+				)
 			) : entries.length === 0 ? (
 				<div className="empty">
 					<h2>Nothing yet</h2>

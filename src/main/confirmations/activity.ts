@@ -63,12 +63,20 @@ export class ActivityLog {
 		}
 	}
 
-	recordFailure(steamId64: string, reason: string): void {
+	/**
+	 * @param halted whether the engine has given up on this account, as opposed to
+	 * hitting a passing error. The two read very differently to a user, so they are
+	 * distinct entry kinds.
+	 *
+	 * Passed in rather than inferred. This used to run `/stopped/i` over the
+	 * message text, which meant the classification depended on one word in a
+	 * sentence composed in another file — reword that sentence and every "gave up
+	 * entirely" quietly becomes "something went wrong once", with nothing failing
+	 * to show it had happened.
+	 */
+	recordFailure(steamId64: string, reason: string, halted = false): void {
 		const at = new Date(this.now()).toISOString();
-		// The engine says "stopped" in its message when it gives up on an account,
-		// and that is a different thing for a user to read than a passing error.
-		const kind = /stopped/i.test(reason) ? 'halted' : 'failed';
-		this.push(steamId64, { kind, at, reason });
+		this.push(steamId64, { kind: halted ? 'halted' : 'failed', at, reason });
 	}
 
 	/** Newest first, because the newest is what someone returning wants. */

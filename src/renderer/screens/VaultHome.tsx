@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { AccountSummary, CodesList } from '../../shared/ipc';
+import type { AccountSummary, CodesList, ExportResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -53,7 +53,7 @@ export function VaultHome({
 	/** Resume an enrollment that was never activated. */
 	onFinishActivation: (account: AccountSummary) => void;
 	/** Write one account out as a maFile. */
-	onExport: (account: AccountSummary) => void;
+	onExport: (account: AccountSummary) => Promise<ExportResult>;
 	onSettings: () => void;
 	onActivity: () => void;
 	/** Something automatic confirmation did needs a person to look at it. */
@@ -64,6 +64,11 @@ export function VaultHome({
 	const [copied, setCopied] = useState<{ steamId64: string; seconds: number } | undefined>();
 	/** A copy that failed. Silently doing nothing is the one response a button must never give. */
 	const [copyError, setCopyError] = useState<{ steamId64: string; message: string } | undefined>();
+	/** The account whose code is being copied, if any. */
+	const [copying, setCopying] = useState<string | undefined>();
+	/** The account being exported, and what came of the last one. */
+	const [exporting, setExporting] = useState<string | undefined>();
+	const [exported, setExported] = useState<{ steamId64: string; message: string } | undefined>();
 
 	// Retire the message when the clipboard clear it describes has happened.
 	// Left up, it goes from true to false without changing: the clipboard is
@@ -205,8 +210,13 @@ export function VaultHome({
 											<button
 												type="button"
 												className="secondary"
+												// The first copy after an unlock waits on the Steam clock
+												// sync, which can take seconds. Without this the button
+												// looked inert and invited a second click.
+												disabled={copying === account.steamId64}
 												onClick={() => {
 													setCopyError(undefined);
+													setCopying(account.steamId64);
 													onCopyCode(account.steamId64)
 														.then((result) => {
 															setCopied({
@@ -223,10 +233,11 @@ export function VaultHome({
 																steamId64: account.steamId64,
 																message: messageOf(err)
 															});
-														});
+														})
+														.finally(() => setCopying(undefined));
 												}}
 											>
-												Copy
+												{copying === account.steamId64 ? 'Copying…' : 'Copy'}
 											</button>
 										</>
 									)}
@@ -239,13 +250,37 @@ export function VaultHome({
 									</button>
 									{/* Last, and visually quietest of the three. It is the only one
 									    here that destroys something. */}
+									{/* Reports what happened. Fire-and-forget made a cancelled save
+									    dialog and a real failure look identical — both were silence,
+									    which reads as the button not working. */}
 									<button
 										type="button"
 										className="secondary"
-										onClick={() => onExport(account)}
+										disabled={exporting === account.steamId64}
+										onClick={() => {
+											setExported(undefined);
+											setExporting(account.steamId64);
+											onExport(account)
+												.then((result) => {
+													setExported({
+														steamId64: account.steamId64,
+														message:
+															result.state === 'saved'
+																? `Saved as ${result.fileName}. Treat that file as a key to this account.`
+																: 'Nothing was saved.'
+													});
+												})
+												.catch((err: unknown) => {
+													setExported({
+														steamId64: account.steamId64,
+														message: `It could not be saved: ${messageOf(err)}`
+													});
+												})
+												.finally(() => setExporting(undefined));
+										}}
 										title="Save this account as a .maFile, readable by SDA and anything else in the ecosystem."
 									>
-										Export
+										{exporting === account.steamId64 ? 'Saving…' : 'Export'}
 									</button>
 									<button
 										type="button"
@@ -255,6 +290,9 @@ export function VaultHome({
 									>
 										Remove
 									</button>
+									{exported?.steamId64 === account.steamId64 && (
+										<p className="hint">{exported.message}</p>
+									)}
 								</div>
 
 								<div className="flags">

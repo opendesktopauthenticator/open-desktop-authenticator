@@ -424,7 +424,17 @@ export function App(): React.JSX.Element {
 			return (
 				<Settings
 					onLoad={() => api.getSettings()}
-					onSave={(settings) => api.updateSettings(settings)}
+					onSave={async (settings) => {
+						const result = await api.updateSettings(settings);
+						// Switching the check off must also take down a banner it already
+						// raised. Leaving it up meant the one visible consequence of the
+						// setting — the only thing it does that a user can see — carried on
+						// for the rest of the session as though nothing had changed.
+						if (!settings.updateCheck) {
+							setUpdate(undefined);
+						}
+						return result;
+					}}
 					onClose={() => setView('accounts')}
 				/>
 			);
@@ -516,9 +526,7 @@ export function App(): React.JSX.Element {
 					setResumeEnrollment(account);
 					setView('enroll');
 				}}
-				onExport={(account) => {
-					void api.exportAccount(account.steamId64);
-				}}
+				onExport={(account) => api.exportAccount(account.steamId64)}
 				onSettings={() => setView('settings')}
 				onActivity={() => setView('activity')}
 				activityUrgent={activityUrgent}

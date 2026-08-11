@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,6 +7,7 @@ import {
 	readRecoveryFile,
 	RecoveryError,
 	recoveryContents,
+	recoveryDirectory,
 	recoveryPathFor,
 	writeRecoveryFile
 } from '../src/main/vault/recovery';
@@ -189,6 +190,28 @@ describe('the file on disk', () => {
 		// read it, and to our own importer, which would reject it confusingly.
 		expect(recoveryPathFor(dir, '76561199999999999')).toContain(RECOVERY_EXTENSION);
 		expect(RECOVERY_EXTENSION).not.toContain('maFile');
+	});
+
+	it('never replaces a recovery file that is already there', () => {
+		// This is the one file in the application whose whole purpose is to still be
+		// there later. Enrolling the same account twice aims at the same path, so
+		// overwriting would silently swap a backup of the previous authenticator for
+		// one of the new one — destroying the copy somebody may be about to need.
+		const path = recoveryPathFor(dir, '76561199999999999');
+		writeRecoveryFile(path, vault.sealForBackup(recoveryContents(account(), NOW_ISO)));
+		const first = readFileSync(path, 'utf8');
+
+		writeRecoveryFile(
+			path,
+			vault.sealForBackup(recoveryContents(account({ revocationCode: 'R99999' }), NOW_ISO))
+		);
+
+		// The original is untouched, and the second one landed beside it.
+		expect(readFileSync(path, 'utf8')).toBe(first);
+		const siblings = readdirSync(recoveryDirectory(dir)).filter((name) =>
+			name.endsWith(RECOVERY_EXTENSION)
+		);
+		expect(siblings).toHaveLength(2);
 	});
 
 	it('creates its directory rather than failing when it is missing', () => {

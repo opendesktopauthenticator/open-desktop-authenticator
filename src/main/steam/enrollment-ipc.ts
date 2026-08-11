@@ -2,8 +2,8 @@ import { writeFile } from 'node:fs/promises';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { maFileName, toMaFile } from '../import/export';
-import { DEACTIVATE_ACK } from '../../shared/ipc';
-import { readRecoveryFile } from '../vault/recovery';
+import { DEACTIVATE_ACK, matchesDeactivateAck } from '../../shared/ipc';
+import { readRecoveryFile, RecoveryError } from '../vault/recovery';
 import type { EnrollmentService } from './enrollment';
 import { VaultLockedError, type VaultService } from '../vault/service';
 
@@ -44,6 +44,13 @@ export function registerEnrollmentHandlers(
 		if (!vault.isUnlocked()) {
 			throw new VaultLockedError();
 		}
+		// **And count this as activity.** Enrolling has a pause in the middle while
+		// the user goes to find an emailed code, and typing into another application
+		// is not something the idle timer can see. Without this, the vault could lock
+		// partway through the one flow whose failure costs an authenticator — and it
+		// would look like the app locking for no reason, because from the user's
+		// point of view they had been working the whole time.
+		vault.touch();
 	};
 
 	registerHandler(CHANNELS.enrollBegin, async ({ accountName, password, proxyUrl }) => {
@@ -77,7 +84,7 @@ export function registerEnrollmentHandlers(
 			// Checked here, not by the screen. The auto-confirm gate taught this lesson
 			// the expensive way: a phrase enforced only in the renderer is a convention,
 			// and this is the one operation more destructive than switching trades on.
-			if (acknowledgement.trim().replace(/\s+/g, ' ').toUpperCase() !== DEACTIVATE_ACK) {
+			if (!matchesDeactivateAck(acknowledgement)) {
 				throw new Error(`type "${DEACTIVATE_ACK}" to remove this authenticator from Steam`);
 			}
 
@@ -103,7 +110,23 @@ export function registerEnrollmentHandlers(
 		// learns which account came back and nothing else.
 		const recovered = await readRecoveryFile(text, passphrase);
 
-		const already = vault.read().accounts.some((entry) => entry.steamId64 === recovered.steamId64);
+		// **The account's own SteamID decides, not the file's metadata.**
+		//
+		// A recovery file carries the SteamID twice: once at the top level, where it
+		// is informational so files can be told apart without decrypting them, and
+		// once inside the account itself. The duplicate check read the outer one and
+		// the insert used the inner one, so a file whose two copies disagreed —
+		// corrupt, hand-edited, or built by something else — could pass a check
+		// against one identity and then push an account under another, landing a
+		// second row for an account already present.
+		const identity = recovered.account.steamId64;
+		if (identity !== recovered.steamId64) {
+			throw new RecoveryError(
+				'that recovery file disagrees with itself about which account it is for, so it was not used.'
+			);
+		}
+
+		const already = vault.read().accounts.some((entry) => entry.steamId64 === identity);
 		if (already) {
 			// Not an error. Somebody recovering a file they did not need should be
 			// told that plainly rather than shown a failure.

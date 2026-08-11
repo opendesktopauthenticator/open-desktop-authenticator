@@ -59,7 +59,24 @@ export const DEACTIVATE_ACK = 'REMOVE STEAM GUARD';
  * judgement applied consistently.
  */
 export function matchesTradesAck(typed: string | undefined): boolean {
-	return typed !== undefined && typed.trim().replace(/\s+/g, ' ').toUpperCase() === TRADES_ACK;
+	return matchesAck(typed, TRADES_ACK);
+}
+
+/**
+ * The same rule for the deactivation phrase.
+ *
+ * Shared rather than open-coded. The handler normalised the typed phrase inline
+ * while the trades gate used the helper above, so the two most destructive
+ * confirmations in the application applied the same rule from two places — and
+ * the screen applied neither, offering a submit that the main process would then
+ * refuse.
+ */
+export function matchesDeactivateAck(typed: string | undefined): boolean {
+	return matchesAck(typed, DEACTIVATE_ACK);
+}
+
+function matchesAck(typed: string | undefined, phrase: string): boolean {
+	return typed !== undefined && typed.trim().replace(/\s+/g, ' ').toUpperCase() === phrase;
 }
 
 export const appInfoResponse = z.object({
@@ -615,13 +632,18 @@ export const IPC_CONTRACT = {
 				 * recently, not that its owner is at it — and an unattended machine
 				 * must not be able to destroy the only copy of a shared secret.
 				 */
-				passphrase,
 				/**
-				 * The user has been told that this does not remove the authenticator
-				 * from Steam. Sent as a value rather than assumed, so the destructive
-				 * path cannot be reached by a caller that never showed the warning.
+				 * **The passphrase is the gate, and it is the only one.**
+				 *
+				 * There used to be an `acknowledged: z.literal(true)` here, described as
+				 * proof that the caller had shown the warning about this not removing
+				 * the authenticator from Steam. It proved nothing: the preload wrote the
+				 * literal itself, so every call carried it and no call could fail to.
+				 * The main process never read it. A constant that looks like consent is
+				 * worse than no field at all, because it makes a surface look guarded
+				 * while the only real check is the one below.
 				 */
-				acknowledged: z.literal(true)
+				passphrase
 			})
 			.strict(),
 		response: okResponse

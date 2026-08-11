@@ -110,6 +110,9 @@ export class EnrollmentService {
 	/** Access tokens for accounts mid-enrollment, so activation need not sign in again. */
 	private readonly tokens = new Map<string, string>();
 
+	/** Accounts with an activation in flight. See the guard in `activate`. */
+	private readonly activating = new Set<string>();
+
 	/**
 	 * Whether Steam said it had a phone to text, per account mid-enrollment.
 	 *
@@ -271,6 +274,37 @@ export class EnrollmentService {
 			throw new EnrollmentError('that account is not in this vault');
 		}
 
+		// Only an account actually waiting to be activated. Without this, an already
+		// active account could be pushed back through `finalizeEnrollment` — a call
+		// that changes state on Steam's side — by a stale screen or a double
+		// submission, for no possible benefit.
+		if (account.status !== 'pendingActivation') {
+			throw new EnrollmentError(
+				`${account.accountName} is already activated. There is nothing left to finish.`
+			);
+		}
+
+		// One activation at a time, for the same reason `begin` allows one sign-in:
+		// two `finalizeEnrollment` calls racing on one account send Steam two codes
+		// for the same window, and the loser's failure is indistinguishable from a
+		// wrong code.
+		if (this.activating.has(steamId64)) {
+			throw new EnrollmentError('that account is already being activated.');
+		}
+		this.activating.add(steamId64);
+		try {
+			return await this.finishActivation(account, steamId64, activationCode);
+		} finally {
+			this.activating.delete(steamId64);
+		}
+	}
+
+	/** The body of `activate`, split out so the mutex above is impossible to skip. */
+	private async finishActivation(
+		account: Account,
+		steamId64: string,
+		activationCode: string
+	): Promise<'activated' | 'wantMore'> {
 		const transport = await this.transports.forAccount({
 			steamId64,
 			proxyUrl: account.proxyUrl

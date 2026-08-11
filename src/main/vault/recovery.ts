@@ -97,10 +97,30 @@ export function recoveryContents(account: Account, nowIso: string): string {
  */
 export function writeRecoveryFile(path: string, envelope: unknown): void {
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(envelope, null, 2)}\n`, {
-		encoding: 'utf8',
-		mode: 0o600
-	});
+	const body = `${JSON.stringify(envelope, null, 2)}\n`;
+
+	// `wx` — fail if it is already there.
+	//
+	// A recovery file is keyed on the SteamID, so enrolling the same account twice
+	// aims at the same path. Overwriting would silently replace a backup of the
+	// *previous* authenticator with one for the new one — and this is the single
+	// file in the application whose entire purpose is to still be there later.
+	// Keeping both and leaving the user one file too many is much cheaper than
+	// destroying the one they turn out to need.
+	try {
+		writeFileSync(path, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException | undefined)?.code !== 'EEXIST') {
+			throw err;
+		}
+		writeFileSync(supersededPath(path), body, { encoding: 'utf8', mode: 0o600 });
+	}
+}
+
+/** A sibling path that cannot collide, for a second file about the same account. */
+function supersededPath(path: string): string {
+	const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+	return `${path.slice(0, -RECOVERY_EXTENSION.length)}.${stamp}${RECOVERY_EXTENSION}`;
 }
 
 export class RecoveryError extends Error {

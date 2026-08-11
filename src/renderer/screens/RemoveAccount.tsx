@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { DEACTIVATE_ACK, type AccountSummary } from '../../shared/ipc';
+import { DEACTIVATE_ACK, matchesDeactivateAck, type AccountSummary } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -164,7 +164,16 @@ export function RemoveAccount({
 				)}
 
 				<div className="controls">
-					<button type="submit" disabled={busy || passphrase === ''}>
+					{/* Detaching also needs the typed phrase. The main process enforces
+					    it regardless, but a submit that looks available and then refuses
+					    teaches the user the app is flaky rather than that the phrase
+					    matters. */}
+					<button
+						type="submit"
+						disabled={
+							busy || passphrase === '' || (detaching && !matchesDeactivateAck(acknowledgement))
+						}
+					>
 						{busy
 							? detaching
 								? 'Removing from Steam…'

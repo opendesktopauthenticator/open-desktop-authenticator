@@ -49,7 +49,8 @@ export interface AutoConfirmEngineOptions {
 	/** Told what happened, so the UI or a notification can surface it. */
 	onOutcome?: (steamId64: string, outcome: AutoConfirmOutcome) => void;
 	/** Told when a pass failed, with the reason already made presentable. */
-	onFailure?: (steamId64: string, reason: string) => void;
+	/** @param halted true when the engine has given up on this account entirely. */
+	onFailure?: (steamId64: string, reason: string, halted: boolean) => void;
 	/** Injected for testability. */
 	now?: () => number;
 	setTimer?: (callback: () => void, ms: number) => NodeJS.Timeout;
@@ -76,7 +77,7 @@ export class AutoConfirmEngine {
 	private readonly vault: VaultService;
 	private readonly confirmations: ConfirmationsService;
 	private readonly onOutcome: (steamId64: string, outcome: AutoConfirmOutcome) => void;
-	private readonly onFailure: (steamId64: string, reason: string) => void;
+	private readonly onFailure: (steamId64: string, reason: string, halted: boolean) => void;
 	private readonly now: () => number;
 	private readonly setTimer: (callback: () => void, ms: number) => NodeJS.Timeout;
 	private readonly clearTimer: (handle: NodeJS.Timeout) => void;
@@ -225,10 +226,13 @@ export class AutoConfirmEngine {
 				// failing forever at fifteen-minute intervals while the user believes
 				// this is working.
 				this.state.set(steamId64, { nextDueAt: Number.POSITIVE_INFINITY, failures, halted: true });
+				// The flag, not the wording. The activity log used to decide whether
+				// this was a halt by running `/stopped/i` over the sentence below.
 				this.onFailure(
 					steamId64,
 					`Automatic confirmation stopped for this account after ${failures} failures in a row. ` +
-						`The last one was: ${reason}`
+						`The last one was: ${reason}`,
+					true
 				);
 				return;
 			}
@@ -241,7 +245,7 @@ export class AutoConfirmEngine {
 					: Math.min(BACKOFF_MAX_MS, previous.backoffMs * 2);
 			this.state.set(steamId64, { nextDueAt: this.now() + backoffMs, backoffMs, failures });
 
-			this.onFailure(steamId64, reason);
+			this.onFailure(steamId64, reason, false);
 		}
 	}
 

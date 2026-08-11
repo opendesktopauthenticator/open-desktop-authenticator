@@ -100,20 +100,16 @@ const api: RendererApi = {
 		}) as Promise<{ ok: true }>,
 
 	removeAccount: (steamId64: string, passphrase: string) =>
-		ipcRenderer.invoke(CHANNELS.accountRemove, {
-			steamId64,
-			passphrase,
-			// The renderer cannot reach this call without having shown the warning
-			// the literal stands for; the contract refuses anything else.
-			acknowledged: true as const
-		}) as Promise<{ ok: true }>,
+		ipcRenderer.invoke(CHANNELS.accountRemove, { steamId64, passphrase }) as Promise<{
+			ok: true;
+		}>,
 	setAccountAutoConfirm: (
 		steamId64: string,
 		settings: {
 			marketListings: boolean;
 			trades: boolean;
 			pollIntervalSeconds: number;
-			/** Forwarded, never synthesised here — see `acknowledged` on removeAccount. */
+			/** Forwarded, never synthesised here. The handler is what enforces it. */
 			tradesAcknowledgement?: string;
 		}
 	) =>
