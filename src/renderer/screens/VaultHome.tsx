@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Logo } from '../Logo';
 import type { AccountSummary, CodesList, ExportResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
@@ -82,6 +82,49 @@ export function VaultHome({
 		return () => clearTimeout(timer);
 	}, [copied]);
 
+	/**
+	 * The pointer's position within whichever row it is over, for the light that
+	 * follows it (`--mx` / `--my` in app.css).
+	 *
+	 * One delegated listener on the list rather than one per row, and coalesced
+	 * into an animation frame so a fast sweep across twenty accounts sets two
+	 * custom properties per frame instead of two per pointer event. Passive,
+	 * because it never calls preventDefault and saying so lets the compositor
+	 * stop waiting to find out.
+	 */
+	const list = useRef<HTMLUListElement>(null);
+	useEffect(() => {
+		const element = list.current;
+		if (!element) {
+			return;
+		}
+		let frame = 0;
+		let last: PointerEvent | undefined;
+		const onMove = (event: PointerEvent) => {
+			last = event;
+			if (frame !== 0) {
+				return;
+			}
+			frame = requestAnimationFrame(() => {
+				frame = 0;
+				const target = last?.target;
+				const row = target instanceof Element ? target.closest('li') : null;
+				if (!row || last === undefined) {
+					return;
+				}
+				const box = row.getBoundingClientRect();
+				row.style.setProperty('--mx', `${last.clientX - box.left}px`);
+				row.style.setProperty('--my', `${last.clientY - box.top}px`);
+			});
+		};
+		element.addEventListener('pointermove', onMove, { passive: true });
+		return () => {
+			element.removeEventListener('pointermove', onMove);
+			// A frame still queued after unmount would touch a detached row.
+			cancelAnimationFrame(frame);
+		};
+	}, []);
+
 	const byAccount = new Map(codes?.codes.map((entry) => [entry.steamId64, entry]));
 	const failures = new Map(codes?.failures.map((entry) => [entry.steamId64, entry.reason]));
 
@@ -124,7 +167,22 @@ export function VaultHome({
 				</div>
 			</header>
 
-			<p className="muted">{describeAutoLock(msUntilAutoLock)}</p>
+			{/* Its own bar under the header rule rather than a paragraph pushed up
+			    against the toolbar, where it read as a caption belonging to the last
+			    button rather than as the window's status. */}
+			<p className="statusline">
+				<span className="statusline-dot" aria-hidden="true" />
+				{(() => {
+					const lock = describeAutoLock(msUntilAutoLock);
+					return (
+						<span>
+							{lock.lead}
+							{lock.value !== undefined && <span className="num">{lock.value}</span>}
+							{lock.trail}
+						</span>
+					);
+				})()}
+			</p>
 
 			{activityUrgent && (
 				// A button label alone is missable, and the thing it is reporting may be
@@ -172,14 +230,27 @@ export function VaultHome({
 					</button>
 				</div>
 			) : (
-				<ul className="accounts">
+				<ul className="accounts" ref={list}>
 					{accounts.map((account) => {
 						const code = byAccount.get(account.steamId64);
 						const failure = failures.get(account.steamId64);
 						const justCopied = copied?.steamId64 === account.steamId64;
 
+						/* Steam Guard codes run on a thirty-second window. Set once per row
+						   and inherited, so the drain under the glyphs and the ring around the
+						   seconds can never disagree about how much time is left. */
+						const remaining =
+							code === undefined ? undefined : Math.max(0, Math.min(1, code.secondsRemaining / 30));
+
 						return (
-							<li key={account.steamId64}>
+							<li
+								key={account.steamId64}
+								style={
+									remaining === undefined
+										? undefined
+										: ({ '--remaining': remaining } as React.CSSProperties)
+								}
+							>
 								<div>
 									<strong>{account.accountName}</strong>
 									<span className="muted"> {account.steamId64}</span>
@@ -206,11 +277,6 @@ export function VaultHome({
 											<span
 												className={code.secondsRemaining <= 5 ? 'code expiring' : 'code'}
 												title="Steam Guard code"
-												style={
-													{
-														'--remaining': Math.max(0, Math.min(1, code.secondsRemaining / 30))
-													} as React.CSSProperties
-												}
 											>
 												{/* One element per character, so each can land on its own
 												    beat. Keyed on the code itself: React then rebuilds these
@@ -227,11 +293,16 @@ export function VaultHome({
 													</span>
 												))}
 											</span>
+											{/* A ring rather than a bare number: the count and how much of
+											    the window is left are one glance instead of two. The digits
+											    alone stay in the accessible name, because "9" is the fact and
+											    the ring is only how it is drawn. */}
 											<span
 												className={code.secondsRemaining <= 5 ? 'expiry expiring' : 'expiry'}
+												role="img"
 												aria-label={`expires in ${code.secondsRemaining} seconds`}
 											>
-												{code.secondsRemaining}s
+												<span aria-hidden="true">{code.secondsRemaining}</span>
 											</span>
 											<button
 												type="button"
@@ -239,7 +310,7 @@ export function VaultHome({
 												// below the row already said the copy worked, but it is under
 												// the account name, several inches from the button and easy
 												// to miss — so the click read as having done nothing.
-												className={justCopied ? 'secondary copied' : 'secondary'}
+												className={justCopied ? 'secondary copy copied' : 'secondary copy'}
 												// The first copy after an unlock waits on the Steam clock
 												// sync, which can take seconds. Without this the button
 												// looked inert and invited a second click.
@@ -489,14 +560,23 @@ function describeStatus(status: AccountSummary['status']): string {
 	}
 }
 
-function describeAutoLock(ms: number | null): string {
+/**
+ * The auto-lock countdown, split so the duration can be set apart.
+ *
+ * Returns parts rather than a sentence because the number wants the measuring
+ * face and the words do not — and because a duration rendered in the text face
+ * with proportional figures visibly reflowed the whole line once a second as the
+ * digits changed width.
+ */
+function describeAutoLock(ms: number | null): { lead: string; value?: string; trail?: string } {
 	if (ms === null) {
-		return 'Locked.';
+		return { lead: 'Locked.' };
 	}
 	const minutes = Math.floor(ms / 60_000);
 	const seconds = Math.floor((ms % 60_000) / 1000);
-	if (minutes > 0) {
-		return `Locks automatically in ${minutes}m ${String(seconds).padStart(2, '0')}s of inactivity.`;
-	}
-	return `Locks automatically in ${seconds}s of inactivity.`;
+	return {
+		lead: 'Locks automatically after ',
+		value: minutes > 0 ? `${minutes}m ${String(seconds).padStart(2, '0')}s` : `${seconds}s`,
+		trail: ' of inactivity'
+	};
 }

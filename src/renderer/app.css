@@ -27,6 +27,22 @@
  * machine, chosen per platform.
  */
 
+/**
+ * How much life the current code has left, 0 to 1. Set once per account row and
+ * inherited by everything that draws it.
+ *
+ * **Registered, not merely used.** An unregistered custom property is a string
+ * to the engine, so anything computed from it jumps from value to value — the
+ * ring below would tick round in thirty visible steps. Declaring its syntax
+ * makes it a real number that the engine can interpolate, so a single transition
+ * here makes both the drain and the ring sweep continuously.
+ */
+@property --remaining {
+	syntax: '<number>';
+	inherits: true;
+	initial-value: 1;
+}
+
 :root {
 	/* Master Panel's greens. */
 	--mint: #42f29a;
@@ -78,14 +94,47 @@
 	--slow: 540ms;
 
 	/*
-	 * Local faces only — see the file header. Segoe UI Variable is the modern
-	 * Windows UI face; the rest are fallbacks for Linux, which is the other
-	 * platform we ship.
+	 * Three jobs, three faces. Local only — see the file header.
+	 *
+	 * ## Words: Segoe UI Variable, at the optical size it was cut for
+	 *
+	 * Segoe UI Variable is not one face, it is three, and Windows ships all of
+	 * them. **Display** is drawn for 24px and up: tight spacing, fine strokes,
+	 * high contrast. **Text** is the reading face for 12–24px. **Small** is drawn
+	 * for 12px and under, with wider spacing and sturdier strokes so it holds
+	 * together at caption sizes.
+	 *
+	 * Every one of them used to be Display, including 15px body copy and 11px
+	 * labels — a heading face doing a reading face's job, which is why the
+	 * interface read as slightly thin and slightly cramped everywhere at once
+	 * without any single thing looking wrong. Using the right optical size is the
+	 * single largest legibility change in this stylesheet and it costs nothing.
+	 *
+	 * ## Measurements: Bahnschrift
+	 *
+	 * Countdowns, durations, seconds remaining. Bahnschrift descends from DIN 1451
+	 * — the German road-sign standard — so it is a face designed to be read
+	 * quickly and unambiguously rather than to be read at length. Its numerals are
+	 * open and even-width, and it is visibly not the text face, which is the
+	 * point: a number that is measuring something should not look like prose.
+	 *
+	 * ## Data: Cascadia Mono
+	 *
+	 * Codes, SteamIDs, proxy addresses, revocation codes — anything transcribed
+	 * character by character rather than read.
 	 */
-	--font-ui:
+	--font-display:
 		'Segoe UI Variable Display', 'Segoe UI', Inter, 'SF Pro Display', system-ui, -apple-system,
 		'Cantarell', 'Noto Sans', sans-serif;
-	/* The instrument face: codes, SteamIDs, proxy addresses, revocation codes. */
+	--font-ui:
+		'Segoe UI Variable Text', 'Segoe UI', Inter, 'SF Pro Text', system-ui, -apple-system,
+		'Cantarell', 'Noto Sans', sans-serif;
+	--font-small:
+		'Segoe UI Variable Small', 'Segoe UI', Inter, system-ui, -apple-system, 'Cantarell',
+		'Noto Sans', sans-serif;
+	--font-numeric:
+		Bahnschrift, 'DIN Alternate', 'Roboto Condensed', 'Segoe UI Variable Text', system-ui,
+		sans-serif;
 	--font-mono:
 		'Cascadia Mono', 'Cascadia Code', Consolas, 'SF Mono', 'JetBrains Mono', 'DejaVu Sans Mono',
 		ui-monospace, monospace;
@@ -105,6 +154,24 @@ body {
 	font-size: 15px;
 	line-height: 1.55;
 	-webkit-font-smoothing: antialiased;
+	/* Digits that do not change width as they count. Applied at the root because
+	   almost every number in this interface is either counting down or being
+	   compared to the one above it, and proportional figures make both jitter. */
+	font-variant-numeric: tabular-nums;
+}
+
+/**
+ * A measurement, set apart from the words around it.
+ *
+ * The numeric face plus a slashed zero, which is what stops a zero being read as
+ * a capital O in something like a duration or an id fragment.
+ */
+.num {
+	font-family: var(--font-numeric);
+	font-variant-numeric: tabular-nums slashed-zero;
+	font-weight: 600;
+	letter-spacing: 0.01em;
+	color: var(--text);
 }
 
 /*
@@ -229,6 +296,7 @@ body::after {
 
 .wordmark {
 	margin: 14px 0 0;
+	font-family: var(--font-small);
 	font-size: 0.76rem;
 	font-weight: 650;
 	letter-spacing: 0.19em;
@@ -364,6 +432,54 @@ form > .controls {
 	margin-top: 20px;
 }
 
+/**
+ * The window's status line: what the vault is about to do on its own.
+ *
+ * **Separated deliberately.** This sat as a bare paragraph directly beneath the
+ * toolbar with six pixels of air, so it read as a caption on the last button
+ * rather than as a statement about the window. It now sits below the header's
+ * rule with its own space and a small live dot, which is what it actually is —
+ * a status, continuously true, not a note about the thing above it.
+ */
+.statusline {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	margin: 0 0 26px;
+	padding-top: 14px;
+	border-top: 1px solid var(--line);
+	font-family: var(--font-small);
+	font-size: 0.8rem;
+	color: var(--muted);
+}
+
+/* Small, quiet, and alive — the only thing on this line that moves, and it moves
+   because the thing it reports is a clock that is running. */
+.statusline-dot {
+	flex: none;
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--mint);
+	box-shadow: 0 0 0 0 rgba(66, 242, 154, 0.55);
+	animation: heartbeat 3.4s ease-out infinite;
+}
+
+@keyframes heartbeat {
+	0%,
+	70%,
+	100% {
+		box-shadow: 0 0 0 0 rgba(66, 242, 154, 0.5);
+	}
+	35% {
+		box-shadow: 0 0 0 5px rgba(66, 242, 154, 0);
+	}
+}
+
+.statusline .num {
+	color: var(--mint-pale);
+}
+
 /* ----------------------------------------------------------------- brand -- */
 
 .brand {
@@ -401,6 +517,7 @@ form > .controls {
 
 h1 {
 	margin: 0 0 4px;
+	font-family: var(--font-display);
 	font-size: clamp(1.55rem, 1.2rem + 1.2vw, 2.05rem);
 	font-weight: 650;
 	letter-spacing: -0.022em;
@@ -413,6 +530,7 @@ h1 {
 
 h2 {
 	margin: 34px 0 12px;
+	font-family: var(--font-small);
 	font-size: 0.78rem;
 	font-weight: 650;
 	/* Section headings are labels, not titles — they sit above content as an
@@ -456,6 +574,7 @@ p {
 
 .fineprint {
 	margin-top: 40px;
+	font-family: var(--font-small);
 	font-size: 0.78rem;
 	color: var(--faint);
 }
@@ -637,6 +756,42 @@ p {
 	opacity: 1;
 }
 
+/*
+ * A light that follows the pointer across the row.
+ *
+ * `--mx` and `--my` are set by VaultHome on whichever row the pointer is over.
+ * The effect is what makes a flat dark panel feel like a physical surface rather
+ * than a rectangle — it is doing the same job as the specular highlight on a real
+ * object, which is why it reads as depth rather than as decoration.
+ *
+ * Falls back to the row's centre, so a keyboard user tabbing through gets a
+ * plain, centred glow instead of a light stuck wherever the mouse was last left.
+ */
+.accounts li::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+	pointer-events: none;
+	/* If you go looking at this in devtools: with `--mx` unset the position
+	   resolves to the 50% 50% default, and Chromium drops a default position when
+	   it serialises — so the computed value reads `radial-gradient(260px, …)` and
+	   looks as though the `at …` clause were being rejected. It is not. Hover the
+	   row and the same property reads `radial-gradient(260px at 361px 38px, …)`. */
+	background: radial-gradient(
+		circle 260px at var(--mx, 50%) var(--my, 50%),
+		rgba(66, 242, 154, 0.1),
+		transparent 68%
+	);
+	opacity: 0;
+	transition: opacity var(--medium) var(--ease-out);
+}
+
+.accounts li:hover::after,
+.accounts li:focus-within::after {
+	opacity: 1;
+}
+
 .accounts li > div:first-child {
 	min-width: 0;
 	/*
@@ -793,17 +948,65 @@ p {
 	text-shadow: 0 0 18px rgba(245, 194, 107, 0.3);
 }
 
+/*
+ * The seconds remaining, as a ring around the number.
+ *
+ * The count and the proportion of the window left in one glance rather than two.
+ * The ring is a conic gradient with its middle masked out, which needs no extra
+ * element and no SVG — and because `--remaining` is a registered number, it
+ * sweeps rather than stepping once a second.
+ */
 .expiry {
-	min-width: 3.1ch;
-	font-family: var(--font-mono);
-	font-size: 0.9rem;
+	position: relative;
+	flex: none;
+	display: grid;
+	place-items: center;
+	width: 40px;
+	height: 40px;
+	font-family: var(--font-numeric);
+	font-size: 0.86rem;
+	font-weight: 600;
 	font-variant-numeric: tabular-nums;
 	color: var(--muted);
 }
 
+.expiry::before {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: 50%;
+	background: conic-gradient(
+		from -90deg,
+		var(--mint) calc(var(--remaining, 1) * 360deg),
+		rgba(147, 168, 158, 0.14) 0
+	);
+	/* Hollows the disc out into a ring. Both spellings: the unprefixed property
+	   is the standard one, the prefixed is what Chromium still needs. */
+	-webkit-mask: radial-gradient(circle, transparent 61%, #000 62%);
+	mask: radial-gradient(circle, transparent 61%, #000 62%);
+}
+
+/* The transition lives on the row, because that is the element whose inline
+   style changes; everything below inherits the value already in motion. */
+.accounts li {
+	transition:
+		--remaining 950ms linear,
+		border-color var(--medium) var(--ease-out),
+		transform var(--medium) var(--ease-out),
+		box-shadow var(--medium) var(--ease-out);
+}
+
 .expiry.expiring {
 	color: var(--warn);
-	font-weight: 600;
+	font-weight: 700;
+}
+
+.expiry.expiring::before {
+	background: conic-gradient(
+		from -90deg,
+		var(--warn) calc(var(--remaining, 1) * 360deg),
+		rgba(147, 168, 158, 0.14) 0
+	);
 }
 
 /* Under five seconds the code is about to be worthless. This is the one place
@@ -946,6 +1149,7 @@ form {
 
 label {
 	display: block;
+	font-family: var(--font-small);
 	/* Above its field, and clear of whatever preceded it. A label with no space
 	   above it reads as belonging to the paragraph before rather than the input
 	   after — which is exactly backwards. */
@@ -1050,6 +1254,41 @@ input::placeholder {
 	margin-top: 1.5rem;
 }
 
+/*
+ * The per-row actions.
+ *
+ * Four full-size buttons on every row, repeated down the list, was the loudest
+ * thing on the screen — louder than the codes they sit beside. They keep their
+ * shape and lose their weight: smaller, quieter, and only colouring up under the
+ * pointer. Copy is the one anybody came here to press, so it is the one that
+ * still looks like a button.
+ */
+.accounts .controls button {
+	padding: 7px 13px;
+	font-size: 0.875rem;
+	background: transparent;
+	border-color: var(--line);
+	color: var(--muted);
+}
+
+.accounts .controls button:hover:not(:disabled) {
+	background: rgba(66, 242, 154, 0.08);
+	border-color: rgba(66, 242, 154, 0.5);
+	color: var(--mint);
+}
+
+.accounts .controls button.copy {
+	border-color: rgba(66, 242, 154, 0.34);
+	background: rgba(66, 242, 154, 0.07);
+	color: var(--mint);
+}
+
+.accounts .controls button.danger:hover:not(:disabled) {
+	background: rgba(231, 76, 60, 0.16);
+	border-color: rgba(231, 76, 60, 0.65);
+	color: var(--danger-text);
+}
+
 /* ----------------------------------------------------------------- flags -- */
 
 .flags {
@@ -1061,6 +1300,7 @@ input::placeholder {
 
 .flag {
 	padding: 4px 10px;
+	font-family: var(--font-small);
 	border-radius: 999px;
 	border: 1px solid var(--line-strong);
 	background: rgba(147, 168, 158, 0.07);

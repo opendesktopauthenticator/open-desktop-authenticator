@@ -24,9 +24,16 @@ const create = readFileSync(
 	'utf8'
 );
 
-/** The body of a rule, whitespace-normalised. */
+/**
+ * The body of a top-level rule, whitespace-normalised.
+ *
+ * Anchored to the start of a line, because a plain substring search for `h1 {`
+ * happily finds it inside `.gate h1 {` and then asserts against the wrong rule —
+ * which is how this helper first reported the base heading as unstyled.
+ */
 function rule(selector: string): string {
-	const at = css.indexOf(selector);
+	const escaped = [...selector].map((ch) => (/[a-z0-9 ]/i.test(ch) ? ch : `\\${ch}`)).join('');
+	const at = css.search(new RegExp(`^${escaped}`, 'm'));
 	if (at === -1) {
 		throw new Error(`${selector} is gone from app.css`);
 	}
@@ -71,6 +78,63 @@ describe('the code glyphs', () => {
 		// second on every rotation. Five characters, legibly, is the entire job.
 		const land = css.slice(css.indexOf('@keyframes land'));
 		expect(land.slice(0, land.indexOf('}') + 2)).not.toMatch(/rotate/);
+	});
+});
+
+describe('the type system', () => {
+	/** A custom property's declared value, however many lines it is written over. */
+	const token = (name: string) => {
+		const at = css.indexOf(`--${name}:`);
+		if (at === -1) {
+			throw new Error(`--${name} is gone from app.css`);
+		}
+		return css.slice(at, css.indexOf(';', at)).replace(/\s+/g, ' ');
+	};
+
+	it('uses each optical size of Segoe UI Variable for its own job', () => {
+		// The family is three faces cut for three size ranges, and this stylesheet
+		// used Display — the 24px-and-up cut — for everything, including 15px body
+		// copy and 11px labels. Nothing looked broken; it read thin and tight
+		// everywhere at once. Collapsing these back to one family is the regression.
+		expect(token('font-display')).toContain("'Segoe UI Variable Display'");
+		expect(token('font-ui')).toContain("'Segoe UI Variable Text'");
+		expect(token('font-small')).toContain("'Segoe UI Variable Small'");
+		// The specific mistake being guarded: the body face reverting to Display.
+		expect(token('font-ui')).not.toContain('Display');
+	});
+
+	it('sets body in the reading face, not the heading face', () => {
+		expect(rule('body {')).toContain('font-family: var(--font-ui)');
+		expect(rule('h1 {')).toContain('font-family: var(--font-display)');
+	});
+
+	it('gives measurements their own face and even-width digits', () => {
+		// Durations and counts should not look like prose, and must not change
+		// width as they count — the auto-lock line reflowed once a second.
+		expect(token('font-numeric')).toContain('Bahnschrift');
+		expect(rule('.num {')).toContain('font-family: var(--font-numeric)');
+		expect(rule('.num {')).toContain('tabular-nums');
+		expect(rule('body {')).toContain('tabular-nums');
+	});
+});
+
+describe('the countdown ring', () => {
+	it('registers --remaining so it can be interpolated', () => {
+		// An unregistered custom property is a string to the engine, and a conic
+		// gradient built from a string cannot animate — the ring would step round
+		// in thirty visible jumps rather than sweeping. Declaring its syntax is the
+		// entire reason the motion exists.
+		const at = css.indexOf('@property --remaining');
+		expect(at, '@property --remaining is gone').toBeGreaterThan(-1);
+		const block = css.slice(at, css.indexOf('}', at));
+		expect(block).toContain("syntax: '<number>'");
+		expect(block).toContain('inherits: true');
+	});
+
+	it('drives the ring and the drain from the same value', () => {
+		// Two indicators of one fact must not be able to disagree.
+		expect(rule('.expiry::before {')).toContain('var(--remaining, 1)');
+		expect(rule('.code::after {')).toContain('var(--remaining, 1)');
 	});
 });
 
