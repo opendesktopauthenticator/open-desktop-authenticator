@@ -170,6 +170,15 @@ function start(): void {
 			// is the clearest statement available that they are not.
 			autoConfirm.stop();
 
+			// A half-finished enrollment holds a live `LoginSession` and cached
+			// MobileApp access tokens — credentials every bit as real as the ones
+			// above. `EnrollmentService.forget` was written for this and documented
+			// as "called when the vault locks"; it was never actually wired here, so
+			// a sign-in waiting on an email code, and the tokens behind it, outlived
+			// every lock. Sitting directly under the other teardown calls so the
+			// omission is visible next time something is added.
+			enrollment.forget();
+
 			// Reload the renderer on every lock, so the passphrase is always typed
 			// into a FRESH page.
 			//

@@ -37,7 +37,7 @@ export function AddAuthenticator({
 	onEmailCode: (code: string) => Promise<EnrollBegin>;
 	onActivate: (steamId64: string, code: string) => Promise<{ state: 'activated' | 'wantMore' }>;
 	/** Opens the revocation-code ceremony for the newly enrolled account. */
-	onBackup: (steamId64: string) => void;
+	onBackup: (steamId64: string, accountName: string) => void;
 	onClose: () => void;
 	/**
 	 * An account that is already enrolled but not activated, to resume.
@@ -263,7 +263,11 @@ export function AddAuthenticator({
 							ever lose this vault, and Steam will not show it again.
 						</p>
 						<div className="controls">
-							<button type="button" onClick={() => onBackup(enrolled.steamId64)} disabled={busy}>
+							<button
+								type="button"
+								onClick={() => onBackup(enrolled.steamId64, enrolled.accountName)}
+								disabled={busy}
+							>
 								Show my revocation code
 							</button>
 						</div>
@@ -336,7 +340,10 @@ export function AddAuthenticator({
 						If you have not written the revocation code down yet, do it before you close this.
 					</p>
 					<div className="controls">
-						<button type="button" onClick={() => onBackup(enrolled.steamId64)}>
+						<button
+							type="button"
+							onClick={() => onBackup(enrolled.steamId64, enrolled.accountName)}
+						>
 							Show my revocation code
 						</button>
 						<button type="button" className="secondary" onClick={onClose}>

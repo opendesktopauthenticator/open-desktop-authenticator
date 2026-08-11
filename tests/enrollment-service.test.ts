@@ -398,3 +398,101 @@ describe('deactivating an authenticator', () => {
 		);
 	});
 });
+
+/**
+ * The unrecoverable window (§12 F3).
+ *
+ * Steam attaches the authenticator and issues secrets it will never reissue,
+ * then this machine has to store them. Everything between those two points is
+ * the only place in the application where a failure costs something no one can
+ * put back: the account keeps an authenticator whose shared secret and
+ * revocation code exist nowhere, and only Steam Support can undo it.
+ */
+describe('when the vault write fails after Steam has already attached', () => {
+	/** A vault whose `mutate` always fails, as it would if it locked mid-write. */
+	function brokenVault(): { read: () => { accounts: Account[] } } {
+		return {
+			read: () => ({ accounts: [] }),
+			mutate: () =>
+				Promise.reject(
+					new Error("ENOSPC: no space left on device, open 'C:/Users/someone/AppData/vault.json'")
+				)
+		} as never;
+	}
+
+	function serviceWith(options: { recovery?: (account: Account) => void }): EnrollmentService {
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+
+		return new EnrollmentService(brokenVault() as never, transports, {
+			now: () => NOW,
+			loginSession: () => fakeSession(),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			...(options.recovery ? { writeRecovery: options.recovery } : {})
+		});
+	}
+
+	it('has already written the recovery file before the vault is touched', async () => {
+		// The ordering is the entire fix. Written afterwards, a failed mutate left
+		// the secrets nowhere; written first, they are on disk before anything can
+		// go wrong, in a file the user can import back.
+		const written: Account[] = [];
+		const service = serviceWith({ recovery: (account) => written.push(account) });
+
+		await expect(service.begin('trader', 'password')).rejects.toThrow();
+
+		expect(written).toHaveLength(1);
+		expect(written[0]?.sharedSecret).toBe(SHARED);
+		expect(written[0]?.revocationCode).toBe('R12345');
+	});
+
+	it('says the authenticator is attached and points at the recovery file', async () => {
+		// A generic failure would send the user round again against an account that
+		// now has an authenticator they cannot use.
+		const service = serviceWith({ recovery: () => undefined });
+
+		await expect(service.begin('trader', 'password')).rejects.toThrow(
+			/attached the authenticator.*recovery file was written/s
+		);
+	});
+
+	it('never forwards the underlying error, which carries the vault path', async () => {
+		// Node embeds the absolute path in every filesystem failure, so forwarding
+		// it would put the user's home directory into the renderer — the same leak
+		// the import path already had to fix once.
+		const service = serviceWith({ recovery: () => undefined });
+
+		const message = await service.begin('trader', 'password').catch((err: Error) => err.message);
+
+		expect(message).not.toContain('AppData');
+		expect(message).not.toContain('ENOSPC');
+	});
+
+	it('gives the revocation code when the recovery file failed too', async () => {
+		// The one branch where it is the last copy in existence. The ceremony would
+		// have put it on screen a moment later anyway, and the activity log is in
+		// memory, so nothing of it reaches disk.
+		const service = serviceWith({
+			recovery: () => {
+				throw new Error('disk is gone');
+			}
+		});
+
+		const message = await service.begin('trader', 'password').catch((err: Error) => err.message);
+
+		expect(message).toContain('R12345');
+		expect(message).toMatch(/write this down now/i);
+	});
+
+	it('does not put the revocation code in the message when recovery succeeded', async () => {
+		// It is not needed there, and a code shown in an error banner is a code in
+		// one more place than it has to be.
+		const service = serviceWith({ recovery: () => undefined });
+
+		const message = await service.begin('trader', 'password').catch((err: Error) => err.message);
+
+		expect(message).not.toContain('R12345');
+	});
+});

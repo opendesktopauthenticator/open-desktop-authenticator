@@ -192,3 +192,43 @@ describe('§7.2 / §15 — no Steam trademark in product identity', () => {
 		expect(productLine).not.toMatch(/steam|valve/i);
 	});
 });
+
+/**
+ * Everything holding a credential is dropped when the vault locks.
+ *
+ * A lock means the user has stopped being present. Every service that caches a
+ * live credential has a teardown method for it, and `onLock` is the single place
+ * they are called from — which makes forgetting one of them invisible: the
+ * method still exists, its comment still says it is called on lock, and nothing
+ * fails.
+ *
+ * That is exactly what happened. `EnrollmentService.forget` was written and
+ * documented as "called when the vault locks" and was never wired, so a
+ * half-finished sign-in and its cached MobileApp access tokens outlived every
+ * lock. No unit test could catch it: the omission is in the wiring, and the
+ * wiring is this file.
+ */
+describe('§11 — the lock drops every cached credential', () => {
+	const index = read('src/main/index.ts');
+	/** The body of the `onLock` handler, so a call elsewhere in the file cannot pass for one here. */
+	const onLock = index.slice(index.indexOf('onLock: () => {'), index.indexOf('const codes = '));
+
+	it.each([
+		['staged import secrets', 'imports.discard()'],
+		['the clipboard', 'clipboard.clearIfOurs()'],
+		['confirmation tokens and pending list', 'confirmations.forget()'],
+		['per-account cookie jars', 'transports.forgetAll()'],
+		['the revocation ceremony', 'ceremony.forget()'],
+		['automatic confirmation', 'autoConfirm.stop()'],
+		['half-finished enrollments', 'enrollment.forget()']
+	])('drops %s', (_what, call) => {
+		expect(onLock).toContain(call);
+	});
+
+	it('found the handler it is asserting against', () => {
+		// Guards the slice above: if `onLock` is renamed or moved, every assertion
+		// would trivially pass against an empty string.
+		expect(onLock).toContain('onLock: () => {');
+		expect(onLock.length).toBeGreaterThan(200);
+	});
+});

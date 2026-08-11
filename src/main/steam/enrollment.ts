@@ -365,9 +365,14 @@ export class EnrollmentService {
 	/**
 	 * The dangerous middle: Steam attaches the authenticator, we store it.
 	 *
-	 * Everything between the two is written to survive a crash. The vault write is
-	 * awaited before this returns, so the caller cannot report success for secrets
-	 * that are still only in memory.
+	 * The vault write is awaited before this returns, so the caller cannot report
+	 * success for secrets that are still only in memory — and the recovery file is
+	 * written *before* the vault, so the window between Steam accepting and this
+	 * machine having a durable copy is as small as it can be made.
+	 *
+	 * This comment used to claim everything in that window survived a crash. It
+	 * did not: nothing was written until after the vault mutate, so a failure there
+	 * left Steam holding an authenticator whose secrets existed nowhere.
 	 */
 	private async enrol(
 		session: LoginSessionLike,
@@ -406,51 +411,84 @@ export class EnrollmentService {
 		});
 
 		const iso = new Date(this.now()).toISOString();
-		await this.vault.mutate((draft) => {
-			draft.accounts.push({
-				steamId64,
-				accountName: started.accountName ?? accountName,
-				sharedSecret: started.sharedSecret,
-				identitySecret: started.identitySecret,
-				revocationCode: started.revocationCode,
-				deviceId: started.deviceId,
-				refreshToken: session.refreshToken,
-				...(proxyUrl !== undefined ? { proxyUrl } : {}),
-				...(started.serialNumber !== undefined ? { serialNumber: started.serialNumber } : {}),
-				...(started.tokenGid !== undefined ? { tokenGid: started.tokenGid } : {}),
-				...(started.uri !== undefined ? { uri: started.uri } : {}),
-				status: 'pendingActivation',
-				autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
-				addedAt: iso
+		const account: Account = {
+			steamId64,
+			accountName: started.accountName ?? accountName,
+			sharedSecret: started.sharedSecret,
+			identitySecret: started.identitySecret,
+			revocationCode: started.revocationCode,
+			deviceId: started.deviceId,
+			refreshToken: session.refreshToken,
+			...(proxyUrl !== undefined ? { proxyUrl } : {}),
+			...(started.serialNumber !== undefined ? { serialNumber: started.serialNumber } : {}),
+			...(started.tokenGid !== undefined ? { tokenGid: started.tokenGid } : {}),
+			...(started.uri !== undefined ? { uri: started.uri } : {}),
+			status: 'pendingActivation',
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
+			addedAt: iso
+		};
+
+		/**
+		 * The recovery file goes down **first**, before the vault.
+		 *
+		 * It used to be written afterwards, from the stored account, which read
+		 * naturally and left the worst failure in the application wide open: if
+		 * `mutate` threw — the vault locking mid-write, a full disk — Steam had an
+		 * authenticator attached and this machine had nothing. No shared secret, no
+		 * revocation code, and no way to generate a code or detach it. Only Steam
+		 * Support can undo that, and the comment above this method claimed the
+		 * window was survivable while nothing in it was written anywhere.
+		 *
+		 * Writing here costs an ordering that reads slightly oddly and buys the one
+		 * guarantee worth having: by the time anything can fail, the secrets exist
+		 * on disk in a file the user can import back.
+		 */
+		let recovered = false;
+		if (this.writeRecovery) {
+			try {
+				this.writeRecovery(account);
+				recovered = true;
+			} catch {
+				// Swallowed, as before: a recovery file that cannot be written is not a
+				// reason to fail an enrollment Steam has already accepted. The vault
+				// write below is still the one that matters.
+			}
+		}
+
+		try {
+			await this.vault.mutate((draft) => {
+				draft.accounts.push(account);
 			});
-		});
+		} catch {
+			// Never a bare rethrow. Whatever went wrong, Steam's side of this is
+			// already done, and a generic failure message would send the user round
+			// again against an account that now has an authenticator they cannot use.
+			//
+			// **The underlying error is deliberately not included.** Node embeds the
+			// absolute path in every filesystem failure, so forwarding it would put
+			// the user's home directory into the renderer — the same leak the import
+			// path already had to fix once.
+			//
+			// The revocation code *is* included, but only on the branch where the
+			// recovery file could not be written either. At that point it is the last
+			// copy in existence and the alternative is an account only Steam Support
+			// can recover; the ceremony would have shown it on screen a moment later
+			// anyway, and the activity log is in memory, so nothing of it reaches
+			// disk.
+			throw new EnrollmentError(
+				`Steam attached the authenticator to ${account.accountName}, but it could not be saved ` +
+					(recovered
+						? 'to the vault. A recovery file was written first, so nothing is lost — unlock the ' +
+							'vault and use Recover from file to finish. Do not remove the authenticator on ' +
+							'Steam before you do.'
+						: 'here, and the recovery file could not be written either. Write this down now, ' +
+							'before you close this window — it is the only way to detach the authenticator ' +
+							`yourself: revocation code ${account.revocationCode ?? '(not issued)'}.`)
+			);
+		}
 
 		this.tokens.set(steamId64, accessToken);
 		this.textedTheCode.set(steamId64, started.phoneNumberHint !== undefined);
-
-		/**
-		 * The recovery file, written once and never again.
-		 *
-		 * This is the moment it has to happen: the secrets exist, the vault is
-		 * unlocked, and nothing has yet had a chance to go wrong. It survives the
-		 * account being removed from the vault later — which is the accident it
-		 * exists for, and a safety net the accident also destroyed would be no net
-		 * at all.
-		 *
-		 * **Failing to write it does not fail the enrollment.** Steam has already
-		 * attached the authenticator and the secrets are already in the vault;
-		 * throwing here would report a failure for something that succeeded and
-		 * send the user round again against an account that is now enrolled. The
-		 * screen tells them whether the file was written instead.
-		 */
-		const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
-		if (stored && this.writeRecovery) {
-			try {
-				this.writeRecovery(stored);
-			} catch {
-				// Deliberately swallowed. See above.
-			}
-		}
 
 		const outcome: BeginOutcome = {
 			state: 'enrolled',

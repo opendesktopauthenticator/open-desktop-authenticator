@@ -61,8 +61,17 @@ export function App(): React.JSX.Element {
 	 * destroy the only route back to finishing.
 	 */
 	const [resumeEnrollment, setResumeEnrollment] = useState<AccountSummary | undefined>();
-	/** The account whose backup ceremony is open, if any. */
-	const [backupFor, setBackupFor] = useState<AccountSummary | undefined>();
+	/**
+	 * The account whose backup ceremony is open, if any.
+	 *
+	 * Only the two fields the ceremony actually needs, rather than a full
+	 * `AccountSummary`. Requiring the whole summary is what forced a lookup in the
+	 * polled `accounts` list, and made the post-enrollment hand-off depend on a
+	 * refresh that had not happened yet.
+	 */
+	const [backupFor, setBackupFor] = useState<
+		{ steamId64: string; accountName: string } | undefined
+	>();
 	/** The account whose routing is being changed, if any. */
 	const [routingFor, setRoutingFor] = useState<AccountSummary | undefined>();
 	/** The account whose confirmations are open, if any. */
@@ -389,15 +398,19 @@ export function App(): React.JSX.Element {
 					}
 					onEmailCode={(code) => api.submitEnrollmentEmailCode(code)}
 					onActivate={(steamId64, code) => api.activateAuthenticator(steamId64, code)}
-					onBackup={(steamId64) => {
+					onBackup={(steamId64, accountName) => {
 						// Straight into the S12 ceremony for the account just created. The
 						// revocation code is the one thing a new enrollment must not leave
 						// the user without, and making them go and find it invites skipping.
-						const account = accounts.find((entry) => entry.steamId64 === steamId64);
-						if (account) {
-							setView('accounts');
-							setBackupFor(account);
-						}
+						//
+						// The account is **not** looked up in `accounts` first. That list is
+						// polled, so in the seconds after an enrollment it may not contain
+						// the new SteamID yet — and the lookup failing meant the button did
+						// nothing at all: no navigation, no error, at the exact moment the
+						// screen is telling the user this is the one step not to skip. The
+						// enrollment screen already knows both values, so it passes them.
+						setView('accounts');
+						setBackupFor({ steamId64, accountName });
 					}}
 					onClose={() => {
 						setResumeEnrollment(undefined);
