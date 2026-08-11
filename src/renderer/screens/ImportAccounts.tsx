@@ -115,20 +115,23 @@ export function ImportAccounts({
 			.then((next) => {
 				setReport(next);
 				setSelected((previous) => {
-					const merged = new Set(previous);
+					const merged = new Set<string>();
 					for (const candidate of next.candidates) {
-						if (
-							!previous.has(candidate.stagingId) &&
-							candidate.importable &&
-							candidate.duplicate === undefined
-						) {
+						// A row the user cannot tick is a row that must not stay ticked.
+						// Decrypting a file can *make* an earlier row a duplicate — the
+						// newly readable copy may be the more complete one — and a
+						// selection left over from before then reaches the commit as a
+						// row the screen is simultaneously showing as disabled.
+						const blocked = !candidate.importable || candidate.duplicate === 'selection';
+						if (blocked) {
+							continue;
+						}
+						// Keep what was already chosen; pre-tick only what is new and
+						// unambiguous, on the same terms as a fresh scan.
+						const wasChosen = previous.has(candidate.stagingId);
+						if (wasChosen || candidate.duplicate === undefined) {
 							merged.add(candidate.stagingId);
 						}
-					}
-					// Anything that is no longer in the report cannot be committed.
-					const live = new Set(next.candidates.map((candidate) => candidate.stagingId));
-					for (const id of merged) {
-						if (!live.has(id)) merged.delete(id);
 					}
 					return merged;
 				});
@@ -277,6 +280,18 @@ export function ImportAccounts({
 							<p className="muted">Nothing usable was found in what you chose.</p>
 						)}
 
+					{/* Importing clears the staging, encrypted files included. Without this
+					    line they simply disappear and the only way back is the picker —
+					    said before the button rather than discovered after it. */}
+					{report.locked.length > 0 && selected.size > 0 && (
+						<p className="hint bad">
+							{report.locked.length === 1
+								? '1 file is still encrypted and will not be imported.'
+								: `${report.locked.length} files are still encrypted and will not be imported.`}{' '}
+							Importing now clears them — you would have to choose the files again.
+						</p>
+					)}
+
 					<div className="controls">
 						<button type="button" onClick={commit} disabled={busy || selected.size === 0}>
 							{busy
@@ -354,8 +369,14 @@ function LockedFiles({
 			</ul>
 
 			{decryptable.length > 0 && (
+				// Markup deliberately identical to every other passphrase form in the
+				// app — bare `form`, label, input, hint, then a `.controls` div. The
+				// first version invented a `className="stack"` that exists in no
+				// stylesheet, and put the button outside `.controls`; `form > .controls`
+				// is what supplies the gap between a field and its buttons, so the
+				// button sat flush against the hint. That is the same spacing complaint
+				// the enrollment screens already earned once.
 				<form
-					className="stack"
 					onSubmit={(event) => {
 						event.preventDefault();
 						onUnlock();
@@ -369,17 +390,23 @@ function LockedFiles({
 						type="password"
 						autoComplete="off"
 						spellCheck={false}
+						autoFocus
 						value={passphrase}
 						onChange={(event) => onPassphrase(event.target.value)}
 						disabled={busy}
 					/>
 					<p className="hint">
-						This is SDA’s encryption password, not the passphrase for this app’s vault and not your
-						Steam password. It is used to decrypt the files and is not stored.
+						This is SDA’s encryption password — not the passphrase for this app’s vault, and not
+						your Steam password. It is used to decrypt the files and is not stored.
 					</p>
-					<button type="submit" disabled={busy || passphrase === ''}>
-						{busy ? 'Working…' : `Decrypt ${decryptable.length} file${plural(decryptable.length)}`}
-					</button>
+
+					<div className="controls">
+						<button type="submit" disabled={busy || passphrase === ''}>
+							{busy
+								? 'Working…'
+								: `Decrypt ${decryptable.length} file${plural(decryptable.length)}`}
+						</button>
+					</div>
 				</form>
 			)}
 

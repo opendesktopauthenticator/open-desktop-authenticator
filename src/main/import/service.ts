@@ -129,12 +129,20 @@ export class ImportService {
 	 * Reads the vault to spot duplicates, which is also what makes an unlocked
 	 * vault a precondition: `read()` throws when locked.
 	 */
-	stage(files: StagedFile[]): ImportReport {
+	stage(files: StagedFile[], unreadable: ImportReport['rejected'] = []): ImportReport {
+		// **Before anything is parsed.** This used to happen implicitly, because the
+		// vault read that finds duplicates was the first statement in this method.
+		// Moving that read into `buildReport` — which runs after parsing — quietly
+		// meant every chosen file was decoded into memory *first* and the locked
+		// vault discovered afterwards, which is the ordering this class exists to
+		// avoid. The check is explicit now so it cannot drift again.
+		this.assertUnlocked();
+
 		// Drop the previous staging before parsing, not after: if parsing throws,
 		// the old secrets are already gone rather than left behind.
 		this.discard();
 
-		const rejected: ImportReport['rejected'] = [];
+		const rejected: ImportReport['rejected'] = [...unreadable];
 		const parsedFiles: ParsedEntry[] = [];
 		const encrypted: StagedFile[] = [];
 
@@ -200,6 +208,13 @@ export class ImportService {
 		}
 
 		this.locked = encrypted.map((file) => {
+			// Keyed by base name because that is all the picker gives us. Two files
+			// with the *same* base name chosen from two different SDA folders will
+			// therefore share whichever manifest entry was read last, and one of them
+			// will fail to decrypt under its own correct passphrase. Rare enough to
+			// document rather than solve — solving it would mean carrying paths past
+			// the picker, which this module deliberately never does — and the failure
+			// is a retryable "did not decrypt", not a wrong import.
 			const entry = manifestEntries.get(file.name.toLowerCase());
 			const locked: LockedFile = { name: file.name, ciphertextBase64: file.text };
 			if (entry?.encryption_iv) locked.ivBase64 = entry.encryption_iv;
@@ -208,7 +223,7 @@ export class ImportService {
 		});
 
 		this.rejected = rejected;
-		return this.buildReport(parsedFiles);
+		return this.finish(parsedFiles);
 	}
 
 	/**
@@ -277,7 +292,29 @@ export class ImportService {
 		}
 
 		this.locked = stillLocked;
-		return this.buildReport(parsedFiles, failures);
+		return this.finish(parsedFiles, failures);
+	}
+
+	/**
+	 * Build the report, and drop everything if that fails.
+	 *
+	 * `buildReport` reads the vault, so it throws when the vault locked while the
+	 * user was choosing files or typing a passphrase. Without this, that throw left
+	 * the parsed secrets and the ciphertext sitting in the fields with nobody
+	 * present — the precise condition the staging discipline exists to prevent, and
+	 * one that `lockedCount()` hid, because an unset `stagedAt` made it report the
+	 * material as already expired.
+	 */
+	private finish(
+		parsedFiles: ParsedEntry[],
+		extraRejected: ImportReport['rejected'] = []
+	): ImportReport {
+		try {
+			return this.buildReport(parsedFiles, extraRejected);
+		} catch (err) {
+			this.discard();
+			throw err;
+		}
 	}
 
 	/**

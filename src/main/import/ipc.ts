@@ -76,8 +76,12 @@ export function registerImportHandlers(imports: ImportService): void {
 			});
 		}
 
-		const report = imports.stage(files);
-		return { ...report, rejected: [...rejected, ...report.rejected] };
+		// Handed to the service rather than merged onto its answer here. Merging
+		// meant these rejections existed only in *this* response: the moment the user
+		// typed a passphrase, `import:unlock` built a fresh report from what the
+		// service knew, and the row explaining that a 5 MB file had been skipped
+		// silently vanished from the screen.
+		return imports.stage(files, rejected);
 	});
 
 	registerHandler(CHANNELS.importUnlock, ({ passphrase }): ImportReport => {

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ImportError, ImportService, type StagedFile } from '../src/main/import/service';
-import { VaultService } from '../src/main/vault/service';
+import { VaultLockedError, VaultService } from '../src/main/vault/service';
 
 /**
  * Importing an encrypted SDA install (§12 F2).
@@ -353,6 +353,72 @@ describe('not leaving ciphertext lying about', () => {
 
 		expect(imports.lockedCount()).toBe(0);
 		expect(() => imports.unlock(SDA_PASS)).toThrow(/took too long/);
+	});
+
+	it('never even looks at a file when the vault is locked', () => {
+		// Fail fast, *before parsing*. The vault read that finds duplicates used to
+		// be the first statement of `stage`, so a locked vault threw before a single
+		// file was decoded. Moving that read later meant every chosen file was pulled
+		// into memory first and the lock noticed afterwards.
+		//
+		// Asserting only that it throws proves nothing — it throws either way, from
+		// the vault read at the end. So the file's contents are exposed through a
+		// getter and the test asserts the getter was never called. That is the
+		// ordering, observed rather than assumed.
+		let reads = 0;
+		const watched: StagedFile = {
+			name: 'a.maFile',
+			get text() {
+				reads += 1;
+				return maFileText();
+			}
+		};
+		vault.lock();
+
+		expect(() => imports.stage([watched])).toThrow(VaultLockedError);
+		expect(reads).toBe(0);
+	});
+
+	it('leaves nothing behind when the vault locks while the prompt is up', () => {
+		// The real sequence: files are scanned with the vault open, the user walks
+		// away, the idle auto-lock fires, and they come back and type the passphrase.
+		// The unlock then fails at the vault read — after the ciphertext has been
+		// reassigned and the plaintext decrypted — and both used to survive the
+		// throw, with nobody present.
+		//
+		// Asserted on the fields rather than through `lockedCount()`, because that
+		// accessor answers zero here for the wrong reason: a failed build never sets
+		// `stagedAt`, so everything looks expired while it is still in the array.
+		const one = encryptedPair('a.maFile');
+		const plain: StagedFile = {
+			name: 'plain.maFile',
+			text: maFileText({ steamid: '76561198000000002', account_name: 'other' })
+		};
+		imports.stage([one.file, plain, manifest([one.entry])]);
+
+		vault.lock();
+
+		expect(() => imports.unlock(SDA_PASS)).toThrow();
+
+		const held = imports as unknown as { locked: unknown[]; staged: unknown[] };
+		expect(held.locked).toHaveLength(0);
+		expect(held.staged).toHaveLength(0);
+	});
+
+	it('keeps unreadable-file rejections visible after an unlock', () => {
+		// These come from the IPC layer — a file too large to be a maFile, or one
+		// that could not be opened. They used to be merged onto the scan's response
+		// and nowhere else, so typing a passphrase built a fresh report and the row
+		// explaining the skipped file silently vanished.
+		const one = encryptedPair('a.maFile');
+		const unreadable = [{ sourceName: 'huge.maFile', reason: 'this file is 5000 KB.' }];
+
+		const scan = imports.stage([one.file, manifest([one.entry])], unreadable);
+		expect(scan.rejected).toHaveLength(1);
+
+		const report = imports.unlock(SDA_PASS);
+
+		expect(report.rejected.map((entry) => entry.sourceName)).toContain('huge.maFile');
 	});
 
 	it('replaces the previous scan rather than accumulating locked files', () => {
