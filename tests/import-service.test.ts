@@ -116,6 +116,86 @@ describe('staging', () => {
 		expect(report.candidates).toHaveLength(1);
 	});
 
+	it('writes a recovery file for an account it newly stored', () => {
+		// Only enrollment wrote one, so importing a maFile and later deleting it left
+		// the account with no safety net — and an imported account is the most likely
+		// one to be removed and then wanted back.
+		const stored: Account[] = [];
+		const importing = new ImportService(vault, {
+			now: () => clock,
+			onAccountStored: (a) => stored.push(a)
+		});
+		const report = importing.stage([file()]);
+		const id = report.candidates[0]?.stagingId ?? '';
+
+		return importing
+			.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+			.then(() => {
+				expect(stored).toHaveLength(1);
+				// From the stored account, so the backup holds what the vault holds.
+				expect(stored[0]?.steamId64).toBe('76561198000000001');
+				expect(stored[0]?.sharedSecret).toBe(SECRET);
+				expect(stored[0]?.revocationCode).toBe('R12345');
+			});
+	});
+
+	it('does not write one again when an import replaces an account', () => {
+		// A recovery file already exists for it, `writeRecoveryFile` refuses to
+		// overwrite one, and a copy per re-import would pile up files that make the
+		// real one harder to identify.
+		const stored: Account[] = [];
+		const importing = new ImportService(vault, {
+			now: () => clock,
+			onAccountStored: (a) => stored.push(a)
+		});
+
+		const first = importing.stage([file()]);
+		return importing
+			.commit([
+				{
+					stagingId: first.candidates[0]?.stagingId ?? '',
+					replaceExisting: false,
+					adoptProxy: false
+				}
+			])
+			.then(() => {
+				const again = importing.stage([file()]);
+				return importing.commit([
+					{
+						stagingId: again.candidates[0]?.stagingId ?? '',
+						replaceExisting: true,
+						adoptProxy: false
+					}
+				]);
+			})
+			.then(() => {
+				expect(stored).toHaveLength(1);
+			});
+	});
+
+	it('still imports when the recovery file cannot be written', () => {
+		const importing = new ImportService(vault, {
+			now: () => clock,
+			onAccountStored: () => {
+				throw new Error('disk is gone');
+			}
+		});
+		const report = importing.stage([file()]);
+
+		return importing
+			.commit([
+				{
+					stagingId: report.candidates[0]?.stagingId ?? '',
+					replaceExisting: false,
+					adoptProxy: false
+				}
+			])
+			.then((outcomes) => {
+				expect(outcomes[0]?.result).toBe('imported');
+				expect(vault.read().accounts).toHaveLength(1);
+			});
+	});
+
 	it('carries the fidelity fields Steam issued, so a round trip is not lossy', () => {
 		// The vault stores these for export fidelity — its schema says a maFile
 		// written without them "is a lossy copy of the one Steam handed us". Import

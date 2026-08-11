@@ -406,6 +406,51 @@ describe('changing the passphrase while other things are happening', () => {
 	});
 });
 
+describe('adopting a vault file from elsewhere', () => {
+	it('takes on a vault this machine does not have', async () => {
+		// With no `vault.json` and no `vault.json.bak`, the app offered to create a
+		// vault and nothing else — even to somebody holding a good copy of theirs.
+		// The only route was knowing the data directory and the filename.
+		const source = join(dir, 'elsewhere', 'vault.json');
+		const origin = new VaultService({ file: source, now });
+		await origin.create(PASS);
+		await origin.mutate((d) => d.accounts.push(account));
+
+		const here = service();
+		expect(here.exists()).toBe(false);
+
+		here.adoptFrom(source);
+
+		expect(here.exists()).toBe(true);
+		await here.unlock(PASS);
+		expect(here.read().accounts).toHaveLength(1);
+	});
+
+	it('refuses to replace a vault that already exists', async () => {
+		// "Replace my vault with this file" is a different and far more dangerous
+		// request than "I have no vault, here is one". Only the second is offered.
+		const source = join(dir, 'elsewhere', 'vault.json');
+		const origin = new VaultService({ file: source, now });
+		await origin.create(PASS);
+
+		const here = service();
+		await here.create('a different long passphrase');
+		const before = readFileSync(file, 'utf8');
+
+		expect(() => here.adoptFrom(source)).toThrow(/already a vault/);
+		expect(readFileSync(file, 'utf8')).toBe(before);
+	});
+
+	it('refuses a file that is not a vault, without creating one', () => {
+		const notAVault = join(dir, 'notes.json');
+		writeFileSync(notAVault, '{"hello":"world"}', 'utf8');
+
+		const here = service();
+		expect(() => here.adoptFrom(notAVault)).toThrow(/not a vault/);
+		expect(here.exists()).toBe(false);
+	});
+});
+
 describe('backup recovery', () => {
 	it('offers the previous version after a second write', async () => {
 		const v = service();

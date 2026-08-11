@@ -324,6 +324,14 @@ export function App(): React.JSX.Element {
 						await api.restoreVaultBackup(passphrase);
 						await refresh({ includeCodes: false });
 					}}
+					onAdopt={async () => {
+						const result = await api.adoptVaultFile();
+						// Adopting makes a vault exist, which swaps this screen for the
+						// unlock one. Nothing here can unlock it — the passphrase is the
+						// user's and the next screen is where it belongs.
+						await refresh({ includeCodes: false });
+						return result;
+					}}
 				/>
 			);
 		}

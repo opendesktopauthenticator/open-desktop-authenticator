@@ -383,6 +383,42 @@ export class VaultService {
 		return sealWithKey(plaintext, state.key, state.kdf);
 	}
 
+	/**
+	 * Adopt a vault file the user has somewhere else (§12 F1).
+	 *
+	 * The gap this closes: with no `vault.json` **and** no `vault.json.bak`, the
+	 * app offers to create a vault and nothing else — even to somebody holding a
+	 * perfectly good copy of theirs on a USB stick or from another machine. The
+	 * only route was to know the data directory, know the filename, and put it
+	 * there by hand.
+	 *
+	 * Refuses outright when a vault already exists. This writes to the one path the
+	 * whole application is built around, and "replace my vault with this file" is a
+	 * different and far more dangerous request than "I have no vault, here is one".
+	 * Only the second is offered.
+	 *
+	 * The file is parsed before it is written, so a mistaken pick fails without
+	 * touching anything. It is not decrypted: this says nothing about whether the
+	 * passphrase is right, only that the file is a vault. Unlocking answers the
+	 * rest, which is the screen the user lands on next.
+	 */
+	adoptFrom(path: string): void {
+		if (this.exists()) {
+			throw new VaultServiceError(
+				'there is already a vault on this machine, so this will not replace it'
+			);
+		}
+
+		let envelope: Envelope;
+		try {
+			envelope = readEnvelope(path);
+		} catch {
+			throw new VaultServiceError('that file is not a vault this app can read');
+		}
+
+		writeEnvelope(this.file, envelope);
+	}
+
 	backupAvailable(): Envelope | undefined {
 		return readBackupEnvelope(this.file);
 	}

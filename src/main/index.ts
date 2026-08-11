@@ -238,7 +238,6 @@ function start(): void {
 
 	// Constructed after the network pieces so a commit that changes routing can
 	// drop the stale session through the same seam the settings path uses.
-	const imports = new ImportService(vault, { onRoutingChanged: dropAccountRouting });
 	// The bookkeeping that lets activation correct the file enrollment wrote lives
 	// in `createRecoveryHooks`, not here — the part worth testing is how the two
 	// callbacks relate across a restart, and that could not be reached while it was
@@ -246,6 +245,15 @@ function start(): void {
 	const recovery = createRecoveryHooks({
 		userDataPath: () => app.getPath('userData'),
 		seal: (plaintext) => vault.sealForBackup(plaintext)
+	});
+
+	const imports = new ImportService(vault, {
+		onRoutingChanged: dropAccountRouting,
+		// An imported account gets the same safety net an enrolled one does. Only
+		// enrollment wrote a recovery file, so importing a maFile and later deleting
+		// it left the account with none — and those are the accounts most likely to
+		// be removed and then wanted back.
+		onAccountStored: recovery.writeRecovery
 	});
 
 	const enrollment = new EnrollmentService(vault, transports, {

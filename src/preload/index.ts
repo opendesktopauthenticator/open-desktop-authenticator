@@ -15,6 +15,7 @@ import type {
 	RendererApi,
 	EnrollBegin,
 	ExportResult,
+	AdoptResult,
 	RecoverResult,
 	SignInResult,
 	UpdateCheckResult,
@@ -58,6 +59,7 @@ const api: RendererApi = {
 		ipcRenderer.invoke(CHANNELS.vaultUnlock, { passphrase }) as Promise<{ ok: true }>,
 	restoreVaultBackup: (passphrase: string) =>
 		ipcRenderer.invoke(CHANNELS.vaultRestoreBackup, { passphrase }) as Promise<{ ok: true }>,
+	adoptVaultFile: () => ipcRenderer.invoke(CHANNELS.vaultAdopt, {}) as Promise<AdoptResult>,
 	lockVault: () => ipcRenderer.invoke(CHANNELS.vaultLock, {}) as Promise<{ ok: true }>,
 	touchVault: () => ipcRenderer.invoke(CHANNELS.vaultTouch, {}) as Promise<{ ok: true }>,
 	changePassphrase: (current: string, next: string) =>

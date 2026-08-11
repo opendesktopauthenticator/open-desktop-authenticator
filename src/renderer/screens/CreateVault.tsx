@@ -5,6 +5,7 @@ import {
 	passphraseStrength,
 	STRENGTH_ADVICE
 } from '../../shared/passphrase-policy';
+import type { AdoptResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 import { BackupRestore } from './BackupRestore';
 
@@ -19,18 +20,23 @@ import { BackupRestore } from './BackupRestore';
 export function CreateVault({
 	onCreate,
 	backupAvailable,
-	onRestoreBackup
+	onRestoreBackup,
+	onAdopt
 }: {
 	onCreate: (passphrase: string) => Promise<void>;
 	/** True when a `vault.json.bak` is on disk even though the vault itself is gone. */
 	backupAvailable: boolean;
 	onRestoreBackup: (passphrase: string) => Promise<void>;
+	/** Opens a picker for a vault file the user has elsewhere. */
+	onAdopt: () => Promise<AdoptResult>;
 }): React.JSX.Element {
 	const [passphrase, setPassphrase] = useState('');
 	const [confirmation, setConfirmation] = useState('');
 	const [acknowledged, setAcknowledged] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
+	/** Set when a vault file was offered and the picker was closed without one. */
+	const [adoptNote, setAdoptNote] = useState<string | undefined>();
 
 	const mismatch = confirmation.length > 0 && confirmation !== passphrase;
 	// One shared gate, so the button's disabled state and the submit guard can
@@ -88,6 +94,45 @@ export function CreateVault({
 					/>
 				</div>
 			)}
+
+			{/* **A vault file is not always in the place this app looks.** Somebody
+			    moving machines, restoring from their own copy, or recovering after
+			    both the vault and its backup were lost has the file in hand and no way
+			    to hand it over — the only route was knowing the data directory and the
+			    filename and putting it there by hand. */}
+			<div className="ceremony">
+				<h2>Already have a vault?</h2>
+				<p>
+					If you have used this app before and kept a copy of your <code>vault.json</code>, load it
+					here rather than starting again. It is only offered because this machine has none — it can
+					never replace a vault you already have.
+				</p>
+				{adoptNote && <p className="hint">{adoptNote}</p>}
+				<div className="controls">
+					<button
+						type="button"
+						className="secondary"
+						disabled={busy}
+						onClick={() => {
+							setError(undefined);
+							setAdoptNote(undefined);
+							setBusy(true);
+							onAdopt()
+								.then((result) => {
+									// Cancelling the picker is not a failure and must not read as
+									// one; silence is indistinguishable from a dead button.
+									if (result.state === 'cancelled') {
+										setAdoptNote('No file was chosen. Nothing changed.');
+									}
+								})
+								.catch((err: unknown) => setError(messageOf(err)))
+								.finally(() => setBusy(false));
+						}}
+					>
+						Load a vault file…
+					</button>
+				</div>
+			</div>
 
 			<div className="ceremony">
 				<h2>There is no recovery</h2>

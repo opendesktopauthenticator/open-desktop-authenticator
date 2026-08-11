@@ -274,6 +274,12 @@ export const signInResponse = z.discriminatedUnion('ok', [
 	z.object({ ok: z.literal(false), retryable: z.boolean(), reason: z.string() })
 ]);
 
+/** Whether a vault file was taken on, or the picker was simply closed. */
+export const adoptResponse = z.discriminatedUnion('state', [
+	z.object({ state: z.literal('adopted') }),
+	z.object({ state: z.literal('cancelled') })
+]);
+
 export const recoverResponse = z.discriminatedUnion('state', [
 	z.object({ state: z.literal('cancelled') }),
 	z.object({ state: z.literal('restored'), accountName: z.string(), steamId64: z.string() }),
@@ -719,6 +725,8 @@ export const IPC_CONTRACT = {
 		response: okResponse
 	},
 
+	[CHANNELS.vaultAdopt]: { request: emptyRequest, response: adoptResponse },
+
 	[CHANNELS.vaultRestoreBackup]: {
 		// The passphrase the **backup** was sealed under, which is usually the
 		// current one but need not be if it has been changed since.
@@ -784,6 +792,7 @@ export type VaultSettingsView = z.infer<typeof vaultSettingsView>;
 export type UpdateCheckResult = z.infer<typeof updateCheckResponse>;
 export type EnrollBegin = z.infer<typeof enrollBeginResponse>;
 export type ExportResult = z.infer<typeof exportResponse>;
+export type AdoptResult = z.infer<typeof adoptResponse>;
 export type RecoverResult = z.infer<typeof recoverResponse>;
 export type SignInResult = z.infer<typeof signInResponse>;
 
@@ -796,6 +805,8 @@ export interface RendererApi {
 	unlockVault(passphrase: string): Promise<{ ok: true }>;
 	/** Replace the vault with its backup and unlock it. The way out of a corrupt file. */
 	restoreVaultBackup(passphrase: string): Promise<{ ok: true }>;
+	/** Take on a vault file from elsewhere. Only possible when this machine has none. */
+	adoptVaultFile(): Promise<AdoptResult>;
 	lockVault(): Promise<{ ok: true }>;
 	touchVault(): Promise<{ ok: true }>;
 	changePassphrase(current: string, next: string): Promise<{ ok: true }>;

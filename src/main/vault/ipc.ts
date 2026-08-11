@@ -1,4 +1,5 @@
 import type { VaultService } from './service';
+import { BrowserWindow, dialog } from 'electron';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { planProxy } from '../net/egress';
@@ -82,6 +83,32 @@ export function registerVaultHandlers(
 		await vault.unlock(passphrase);
 		await onUnlocked?.();
 		return { ok: true as const };
+	});
+
+	registerHandler(CHANNELS.vaultAdopt, async () => {
+		const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+		const options = {
+			title: 'Choose a vault file',
+			properties: ['openFile', 'dontAddToRecent'] as const,
+			filters: [
+				{ name: 'Vault file', extensions: ['json'] },
+				{ name: 'All files', extensions: ['*'] }
+			]
+		} satisfies Electron.OpenDialogOptions;
+
+		const picked = await (parent
+			? dialog.showOpenDialog(parent, options)
+			: dialog.showOpenDialog(options));
+
+		const path = picked.canceled ? undefined : picked.filePaths[0];
+		if (path === undefined) {
+			return { state: 'cancelled' as const };
+		}
+
+		// Parsed and written by the service, which refuses outright if a vault
+		// already exists — this must never be a way to replace one.
+		vault.adoptFrom(path);
+		return { state: 'adopted' as const };
 	});
 
 	// Same post-unlock work as a normal unlock: this leaves the vault open, so

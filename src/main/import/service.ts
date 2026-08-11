@@ -100,6 +100,20 @@ export interface ImportServiceOptions {
 	 * call. Import must not be a back door around that.
 	 */
 	onRoutingChanged?: (steamId64: string) => void;
+	/**
+	 * Called for each account this import newly stored.
+	 *
+	 * Exists so an imported account gets the same recovery file an enrolled one
+	 * gets. Only enrollment wrote one, which left every imported account with no
+	 * safety net at all: delete the maFile it came from, then remove the account,
+	 * and its shared secret and revocation code are gone — the exact accident the
+	 * recovery file was built for, on the accounts most likely to hit it.
+	 *
+	 * Not called for a **replace**. A recovery file already exists for that
+	 * account, `writeRecoveryFile` refuses to overwrite one, and a second copy per
+	 * re-import would pile up files that make the real one harder to identify.
+	 */
+	onAccountStored?: (account: Account) => void;
 }
 
 /** Ten minutes. Long enough to read every warning; short enough to not be a store. */
@@ -117,6 +131,7 @@ export class ImportService {
 	private readonly now: () => number;
 	private readonly ttlMs: number;
 	private readonly onRoutingChanged: (steamId64: string) => void;
+	private readonly onAccountStored: (account: Account) => void;
 	private staged: StagedEntry[] = [];
 	private stagedAt = 0;
 	/** Encrypted files from this scan, awaiting a passphrase. */
@@ -129,6 +144,7 @@ export class ImportService {
 		this.now = options.now ?? (() => Date.now());
 		this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
 		this.onRoutingChanged = options.onRoutingChanged ?? (() => undefined);
+		this.onAccountStored = options.onAccountStored ?? ((): void => undefined);
 	}
 
 	/**
@@ -542,6 +558,8 @@ export class ImportService {
 			this.vault.read().accounts.map((account) => [account.steamId64, account.proxyUrl] as const)
 		);
 		const touched = new Set<string>();
+		/** Accounts that did not exist before this commit. See `onAccountStored`. */
+		const freshlyStored = new Set<string>();
 
 		try {
 			await this.vault.mutate((draft) => {
@@ -621,6 +639,9 @@ export class ImportService {
 					}
 					committed.add(steamId64);
 					touched.add(steamId64);
+					if (index < 0) {
+						freshlyStored.add(steamId64);
+					}
 				}
 			});
 		} finally {
@@ -638,6 +659,19 @@ export class ImportService {
 			}
 			if (proxyBefore.get(steamId64) !== after.proxyUrl) {
 				this.onRoutingChanged(steamId64);
+			}
+
+			// From the stored account rather than the parsed file, so the backup holds
+			// exactly what the vault does. Swallowed on failure for the same reason
+			// enrollment swallows it: the account is imported either way, and
+			// reporting a failure for something that worked would send the user round
+			// again.
+			if (freshlyStored.has(steamId64)) {
+				try {
+					this.onAccountStored(after);
+				} catch {
+					// A backup that cannot be written is not a reason to fail an import.
+				}
 			}
 		}
 

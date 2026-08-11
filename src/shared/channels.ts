@@ -39,6 +39,13 @@ export const CHANNELS = {
 	 * they had while a good copy sat beside it — and the unlock screen said so.
 	 */
 	vaultRestoreBackup: 'vault:restoreBackup',
+	/**
+	 * Adopt a vault file the user already has, when this machine has none.
+	 *
+	 * The picker is opened by the main process, as every other file flow here is,
+	 * so no path crosses the bridge in either direction.
+	 */
+	vaultAdopt: 'vault:adopt',
 	/** Lock now. */
 	vaultLock: 'vault:lock',
 	/** Defer the idle auto-lock. */
