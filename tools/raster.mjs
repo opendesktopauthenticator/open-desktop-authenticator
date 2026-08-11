@@ -6,65 +6,20 @@
  * a build-time image library with its own transitive tree to draw one shield is
  * a poor trade. Everything here uses `node:zlib` and nothing else.
  *
+ * PNG is not here: it moved to `src/main/png.ts`, because the application needs
+ * to write one at runtime as well and two encoders would be one too many.
+ *
  * The drawing itself is not here — it lives in `src/shared/logo.ts`, because the
  * running application needs it too for the tray icon. This file is only the
  * three containers Windows wants around it.
  */
 
-import { deflateSync } from 'node:zlib';
+// The same encoder the running application uses to write its notification icon.
+// One PNG writer, so the icon Windows shows in a toast is produced by the code
+// that produced the one on the taskbar.
+import { encodePng } from '../src/main/png.ts';
 
-/* ------------------------------------------------------------------ png -- */
-
-const CRC_TABLE = (() => {
-	const table = new Int32Array(256);
-	for (let n = 0; n < 256; n++) {
-		let c = n;
-		for (let k = 0; k < 8; k++) {
-			c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-		}
-		table[n] = c;
-	}
-	return table;
-})();
-
-function crc32(buffer) {
-	let c = -1;
-	for (const byte of buffer) {
-		c = CRC_TABLE[(c ^ byte) & 0xff] ^ (c >>> 8);
-	}
-	return (c ^ -1) >>> 0;
-}
-
-function chunk(type, body) {
-	const length = Buffer.alloc(4);
-	length.writeUInt32BE(body.length);
-	const tagged = Buffer.concat([Buffer.from(type, 'ascii'), body]);
-	const crc = Buffer.alloc(4);
-	crc.writeUInt32BE(crc32(tagged));
-	return Buffer.concat([length, tagged, crc]);
-}
-
-/** An 8-bit RGBA PNG. Filter 0 throughout — these are flat shapes, and deflate
- *  handles the long transparent runs perfectly well without a filter to help. */
-export function encodePng(size, rgba) {
-	const stride = size * 4;
-	const raw = Buffer.alloc((stride + 1) * size);
-	for (let row = 0; row < size; row++) {
-		raw[row * (stride + 1)] = 0;
-		rgba.copy(raw, row * (stride + 1) + 1, row * stride, (row + 1) * stride);
-	}
-	const ihdr = Buffer.alloc(13);
-	ihdr.writeUInt32BE(size, 0);
-	ihdr.writeUInt32BE(size, 4);
-	ihdr[8] = 8; // bit depth
-	ihdr[9] = 6; // truecolour with alpha
-	return Buffer.concat([
-		Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
-		chunk('IHDR', ihdr),
-		chunk('IDAT', deflateSync(raw, { level: 9 })),
-		chunk('IEND', Buffer.alloc(0))
-	]);
-}
+export { encodePng };
 
 /* ------------------------------------------------------------------ ico -- */
 

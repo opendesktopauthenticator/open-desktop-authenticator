@@ -47,6 +47,16 @@ export function logoImage(base: number, scales: readonly number[]): NativeImage 
 export const trayImage = (): NativeImage => logoImage(16, [1, 1.25, 1.5, 2]);
 
 /**
+ * The image handed to a tray balloon.
+ *
+ * A single large representation on purpose. Windows draws the app logo on a
+ * toast at around 48px, doubled on a 200% display — and given nothing, it takes
+ * the tray icon and scales 16px up to that, which is why the notification looked
+ * soft. One 256px image means it is always scaling down.
+ */
+export const notificationImage = (): NativeImage => logoImage(256, [1]);
+
+/**
  * The window icon: Alt-Tab, the taskbar button, and the window list.
  *
  * Only visible unpackaged on Windows, where a packaged build takes its icon from

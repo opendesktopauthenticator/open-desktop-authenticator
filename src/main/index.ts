@@ -32,8 +32,9 @@ import { SteamTransportFactory, type ElectronNetworking } from './net/transport'
 import { ConfirmationsService } from './confirmations/service';
 import { AutoConfirmEngine } from './confirmations/auto';
 import { ActivityLog } from './confirmations/activity';
-import { windowImage } from './logo-image';
+import { notificationImage, windowImage } from './logo-image';
 import { createTray } from './tray';
+import { registerWindowsIdentity } from './windows-identity';
 import { registerConfirmationHandlers } from './confirmations/ipc';
 import { SteamClock } from './steam/clock';
 import {
@@ -151,6 +152,16 @@ function start(): void {
 	if (process.platform === 'win32') {
 		app.setAppUserModelId(branding.appId);
 	}
+
+	// Tell Windows what to call us above a notification. Deliberately not awaited:
+	// it shells out to `reg`, and nothing about the caption on a toast should hold
+	// up a launch. See the module for what it writes and why it is that and not a
+	// Start Menu shortcut.
+	void registerWindowsIdentity({
+		appId: branding.appId,
+		displayName: branding.productName,
+		userDataPath: app.getPath('userData')
+	});
 
 	// **Also reaches the OS dialogs.** The file pickers this app opens — import,
 	// export, recovery — are drawn by Windows, not by us, and defaulted to light
@@ -537,6 +548,11 @@ function start(): void {
 			if (!toldAboutTray) {
 				toldAboutTray = true;
 				tray?.displayBalloon?.({
+					// **Given explicitly.** Without an icon Windows reuses the tray's, which
+					// exists only at 16 and 32px, and scales it up to the ~48px a toast
+					// draws at. That upscale was the whole reason the notification looked
+					// blurry.
+					icon: notificationImage(),
 					title: `${branding.shortName} is still running`,
 					content:
 						'Closing the window keeps your codes and confirmations working. Find it in the ' +
