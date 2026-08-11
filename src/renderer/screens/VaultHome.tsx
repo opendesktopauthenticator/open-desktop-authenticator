@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Logo } from '../Logo';
 import type { AccountSummary, CodesList, ExportResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
@@ -87,9 +88,18 @@ export function VaultHome({
 	return (
 		<main className="shell">
 			<header className="row">
-				<h1>Accounts</h1>
+				{/* The mark, then the title. A product with no sign of itself anywhere
+				    on its main screen reads as a utility somebody threw together. */}
+				<div className="brand">
+					<Logo size={30} />
+					<h1>Accounts</h1>
+				</div>
 				<div className="controls">
-					<button type="button" className="secondary" onClick={onEnrol}>
+					{/* **The one primary button on this screen.** Six identical secondary
+					    buttons gave the eye nowhere to land; adding an account is the
+					    thing a new user is here to do, so it is the thing that looks
+					    like an action. */}
+					<button type="button" onClick={onEnrol}>
 						Add authenticator
 					</button>
 					<button type="button" className="secondary" onClick={onImport}>
@@ -143,6 +153,9 @@ export function VaultHome({
 
 			{accounts.length === 0 ? (
 				<div className="empty">
+					{/* First run. The one screen with nothing on it, so it is the one
+					    place the mark can be large without competing with anything. */}
+					<Logo size={54} drawIn />
 					<h2>No accounts yet</h2>
 					<p>
 						Import the <code>.maFile</code> files from your existing Steam Desktop Authenticator
@@ -199,7 +212,20 @@ export function VaultHome({
 													} as React.CSSProperties
 												}
 											>
-												{code.code}
+												{/* One element per character, so each can land on its own
+												    beat. Keyed on the code itself: React then rebuilds these
+												    nodes when the code rotates — which replays the animation
+												    exactly once every thirty seconds — and reuses them across
+												    the once-a-second countdown tick, which must not. */}
+												{[...code.code].map((glyph, at) => (
+													<span
+														key={`${code.code}-${at}`}
+														className="glyph"
+														style={{ '--g': at } as React.CSSProperties}
+													>
+														{glyph}
+													</span>
+												))}
 											</span>
 											<span
 												className={code.secondsRemaining <= 5 ? 'expiry expiring' : 'expiry'}
@@ -209,7 +235,11 @@ export function VaultHome({
 											</span>
 											<button
 												type="button"
-												className="secondary"
+												// **Confirms on the control that was pressed.** The sentence
+												// below the row already said the copy worked, but it is under
+												// the account name, several inches from the button and easy
+												// to miss — so the click read as having done nothing.
+												className={justCopied ? 'secondary copied' : 'secondary'}
 												// The first copy after an unlock waits on the Steam clock
 												// sync, which can take seconds. Without this the button
 												// looked inert and invited a second click.
@@ -237,7 +267,11 @@ export function VaultHome({
 														.finally(() => setCopying(undefined));
 												}}
 											>
-												{copying === account.steamId64 ? 'Copying…' : 'Copy'}
+												{copying === account.steamId64
+													? 'Copying…'
+													: justCopied
+														? 'Copied'
+														: 'Copy'}
 											</button>
 										</>
 									)}

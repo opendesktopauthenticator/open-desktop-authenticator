@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { Logo } from '../Logo';
+import { branding } from '../../shared/branding';
 import {
 	canCreateVault,
 	MIN_PASSPHRASE_LENGTH,
@@ -74,7 +76,14 @@ export function CreateVault({
 	const strength = passphraseStrength(passphrase);
 
 	return (
-		<main className="shell">
+		<main className="shell gate">
+			{/* Same gate as the unlock screen: this is the other way in, and the two
+			    should not look like different applications. */}
+			<div className="gate-hero">
+				<Logo size={72} drawIn />
+				<p className="wordmark">{branding.productName}</p>
+			</div>
+
 			<h1>Create your vault</h1>
 			<p className="muted">
 				One passphrase protects every account you add. It never leaves this machine.

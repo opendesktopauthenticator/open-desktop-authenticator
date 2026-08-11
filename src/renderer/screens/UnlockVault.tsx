@@ -1,4 +1,6 @@
 import { useState } from 'react';
+import { Logo } from '../Logo';
+import { branding } from '../../shared/branding';
 import { messageOf } from '../ipc-message';
 import { BackupRestore } from './BackupRestore';
 
@@ -45,7 +47,15 @@ export function UnlockVault({
 	}
 
 	return (
-		<main className="shell">
+		<main className="shell gate solo">
+			{/* The first thing anyone sees, every single time the app is opened. It
+			    was a form in the top-left corner of an otherwise empty window; it is
+			    the one screen that should feel like arriving somewhere. */}
+			<div className="gate-hero">
+				<Logo size={72} drawIn />
+				<p className="wordmark">{branding.productName}</p>
+			</div>
+
 			<h1>Unlock</h1>
 
 			<form
