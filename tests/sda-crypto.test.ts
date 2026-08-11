@@ -106,33 +106,30 @@ describe('decrypting an SDA maFile', () => {
 		expect(() => decryptSdaMaFile({ ...file, passphrase: 'wrong' })).toThrow(SdaDecryptError);
 	});
 
-	it('refuses a wrong passphrase even when the padding happens to be valid', () => {
+	it('refuses a clean decryption that did not produce a maFile', () => {
 		// CBC is unauthenticated, so roughly 1 in 256 wrong passphrases decrypts
-		// without a padding error and yields garbage. The JSON check is what catches
-		// those, and it is the only thing standing between a user and an "imported"
-		// account made of noise. Searched for rather than asserted abstractly,
-		// because the case is real and rare enough to be missed by chance.
-		const file = fixture();
-		let found = false;
+		// without a padding error and yields garbage. Nothing in the cipher catches
+		// that; the JSON check is the only thing standing between a user and an
+		// "imported" account made of noise.
+		//
+		// Reaching that branch by trying wrong passphrases until one collides is how
+		// this was first written, and it timed out on CI — every attempt is a full
+		// 50,000-iteration derivation. So the same state is constructed directly:
+		// ciphertext that decrypts perfectly, with valid padding, to something that
+		// is not a maFile. That is exactly what a lucky wrong passphrase produces,
+		// arrived at in one derivation instead of hundreds.
+		const salt = randomBytes(8);
+		const iv = randomBytes(16);
+		const passphrase = 'right passphrase, wrong contents';
 
-		for (let attempt = 0; attempt < 3000 && !found; attempt += 1) {
-			try {
-				decryptSdaMaFile({ ...file, passphrase: `wrong-${attempt}` });
-				throw new Error('a wrong passphrase produced an accepted result');
-			} catch (err) {
-				if (!(err instanceof SdaDecryptError)) {
-					throw err;
-				}
-				// The message differs between "padding failed" and "decrypted to
-				// something that is not a maFile". The second one is the case being
-				// hunted: padding passed, and only the JSON check refused it.
-				if (/not a maFile/.test(err.message)) {
-					found = true;
-				}
-			}
-		}
+		const file = {
+			ciphertextBase64: sdaEncrypt('not json at all, just bytes', passphrase, salt, iv),
+			ivBase64: iv.toString('base64'),
+			saltBase64: salt.toString('base64'),
+			passphrase
+		};
 
-		expect(found).toBe(true);
+		expect(() => decryptSdaMaFile(file)).toThrow(/not a maFile/);
 	});
 
 	it('explains a mismatched manifest rather than failing obscurely', () => {
