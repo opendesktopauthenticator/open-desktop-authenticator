@@ -19,6 +19,35 @@ import type { Account } from '../src/shared/vault-schema';
  * is stubbed down to the accepted floor. The shipping parameters are asserted in
  * `vault-crypto.test.ts`, which also round-trips at them for real.
  */
+/**
+ * Runs inside `deriveKey`, so a test can land a write in the exact window a
+ * passphrase change is derivating.
+ *
+ * A timing test cannot be written with `setTimeout` here: `mutate` contains no
+ * awaits, so it completes synchronously the moment it is called, and the obvious
+ * "start the change, then mutate" ordering lands the write *before* the
+ * derivation begins — which is the one arrangement the bug survives. Hooking the
+ * derivation puts the write where it actually has to be.
+ */
+let duringDerive: (() => Promise<void>) | undefined;
+
+vi.mock('../src/main/vault/crypto', async () => {
+	const actual = await vi.importActual<typeof import('../src/main/vault/crypto')>(
+		'../src/main/vault/crypto'
+	);
+	return {
+		...actual,
+		deriveKey: async (...args: Parameters<typeof actual.deriveKey>) => {
+			const hook = duringDerive;
+			duringDerive = undefined;
+			if (hook) {
+				await hook();
+			}
+			return actual.deriveKey(...args);
+		}
+	};
+});
+
 vi.mock('../src/shared/vault-format', async () => {
 	const actual = await vi.importActual<typeof import('../src/shared/vault-format')>(
 		'../src/shared/vault-format'
@@ -334,6 +363,46 @@ describe('changing the passphrase', () => {
 		await v.changePassphrase(PASS, 'a brand new long passphrase');
 		await expect(v.mutate((d) => d.accounts.push(account))).resolves.toBeUndefined();
 		expect(v.read().accounts).toHaveLength(1);
+	});
+});
+
+describe('changing the passphrase while other things are happening', () => {
+	it('does not discard a write that landed during the key derivation', async () => {
+		// `deriveKey` is scrypt — the better part of a second at the shipping work
+		// factor — and `mutate` is synchronous once it has the state. So a write
+		// during that second completes in full: an account enrolled, a token stored,
+		// an import committed. Snapshotting the contents *before* the await and
+		// sealing them afterwards silently replaced all of it with the older copy,
+		// under the same `seq`, so nothing downstream could tell.
+		const v = service();
+		await v.create(PASS);
+
+		// Lands inside the derivation, which is the only window that matters.
+		duringDerive = () => v.mutate((d) => d.accounts.push(account));
+		await v.changePassphrase(PASS, 'a different long passphrase');
+
+		expect(v.read().accounts).toHaveLength(1);
+
+		// And it is really on disk under the new passphrase, not just in memory.
+		const reopened = service();
+		await reopened.unlock('a different long passphrase');
+		expect(reopened.read().accounts).toHaveLength(1);
+	});
+
+	it('refuses to rewrite the file if the vault locked during the derivation', async () => {
+		// The idle timer does not pause for a key derivation. A lock partway through
+		// left this holding a detached state object, and it went on to rewrite the
+		// file and install a key into an object nobody could reach.
+		const v = service();
+		await v.create(PASS);
+
+		const changing = v.changePassphrase(PASS, 'a different long passphrase');
+		v.lock();
+
+		await expect(changing).rejects.toThrow();
+		// The old passphrase still opens it, because nothing was rewritten.
+		const reopened = service();
+		await expect(reopened.unlock(PASS)).resolves.toBeUndefined();
 	});
 });
 

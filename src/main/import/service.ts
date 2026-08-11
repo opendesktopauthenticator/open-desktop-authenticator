@@ -474,6 +474,26 @@ export class ImportService {
 					'be generated from it. The file is damaged.'
 			);
 		}
+
+		// **Checked too, and separately.** The shared-secret gate exists so a damaged
+		// file is caught here rather than discovered days later as a row that never
+		// shows a number. The identity secret had no such check — the schema only
+		// asked that it be a non-empty string — so a file with a broken one imported
+		// as a perfectly good account, generated codes correctly, and failed at the
+		// first confirmation with nothing connecting the two.
+		//
+		// A warning rather than a refusal, because the two failures are not the same
+		// size. No shared secret means the account is inert; no identity secret means
+		// codes still work and confirmations do not, which is worth importing and
+		// worth saying out loud.
+		if (!isUsableSharedSecret(parsed.identitySecret)) {
+			parsed.warnings.push(
+				'The identity secret in this file is not usable. Steam Guard codes will work, but ' +
+					'confirmations — approving trades and market listings — will not, until this account ' +
+					'is re-imported from a good file.'
+			);
+		}
+
 		return { id: randomUUID(), name, parsed, usable };
 	}
 
@@ -771,6 +791,12 @@ function newAccount(
 	};
 	if (parsed.revocationCode !== undefined) account.revocationCode = parsed.revocationCode;
 	if (parsed.deviceId !== undefined) account.deviceId = parsed.deviceId;
+	// Carried through so exporting this account again writes the maFile Steam
+	// issued rather than one with these fields blanked.
+	if (parsed.serialNumber !== undefined) account.serialNumber = parsed.serialNumber;
+	if (parsed.tokenGid !== undefined) account.tokenGid = parsed.tokenGid;
+	if (parsed.uri !== undefined) account.uri = parsed.uri;
+	if (parsed.secret1 !== undefined) account.secret1 = parsed.secret1;
 	if (parsed.refreshToken !== undefined) account.refreshToken = parsed.refreshToken;
 	// Only when asked for. A proxy inside a maFile is a fact about the file, not
 	// an instruction — see `adoptProxy` in the IPC schema.
@@ -826,6 +852,17 @@ function mergeAccount(
 
 	const deviceId = parsed.deviceId ?? existing.deviceId;
 	if (deviceId !== undefined) merged.deviceId = deviceId;
+
+	// A replace merges and never subtracts, so a file missing these keeps what the
+	// vault already had.
+	const serialNumber = parsed.serialNumber ?? existing.serialNumber;
+	if (serialNumber !== undefined) merged.serialNumber = serialNumber;
+	const tokenGid = parsed.tokenGid ?? existing.tokenGid;
+	if (tokenGid !== undefined) merged.tokenGid = tokenGid;
+	const uri = parsed.uri ?? existing.uri;
+	if (uri !== undefined) merged.uri = uri;
+	const secret1 = parsed.secret1 ?? existing.secret1;
+	if (secret1 !== undefined) merged.secret1 = secret1;
 
 	// Declining the file's proxy leaves whatever routing the user set in the app
 	// alone — it does not clear it. "Do not adopt this file's proxy" and "switch

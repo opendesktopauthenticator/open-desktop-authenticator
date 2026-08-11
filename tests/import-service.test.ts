@@ -116,6 +116,57 @@ describe('staging', () => {
 		expect(report.candidates).toHaveLength(1);
 	});
 
+	it('carries the fidelity fields Steam issued, so a round trip is not lossy', () => {
+		// The vault stores these for export fidelity — its schema says a maFile
+		// written without them "is a lossy copy of the one Steam handed us". Import
+		// read none of them, so importing a file and exporting it again blanked
+		// exactly the fields the vault was keeping to avoid that.
+		const report = imports.stage([
+			file({ token_gid: 'abc123', uri: 'otpauth://totp/Steam:trader?secret=X', secret_1: 's1' })
+		]);
+		const id = report.candidates[0]?.stagingId ?? '';
+
+		return imports
+			.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+			.then(() => {
+				const stored = vault.read().accounts[0];
+				expect(stored?.tokenGid).toBe('abc123');
+				expect(stored?.uri).toBe('otpauth://totp/Steam:trader?secret=X');
+				expect(stored?.secret1).toBe('s1');
+			});
+	});
+
+	it('reads a nineteen-digit serial number without rounding it', () => {
+		// Steam serials are past `Number.MAX_SAFE_INTEGER` and SDA writes them
+		// unquoted, so `JSON.parse` hands back a rounded number — the F-01 hazard on
+		// a field nobody looks at because, until now, nothing read it.
+		const serial = '4370724135835866880';
+		const text = `{"shared_secret":"${SECRET}","identity_secret":"aWRlbnRpdHk=","account_name":"trader","steamid":"76561198000000001","serial_number":${serial}}`;
+		const report = imports.stage([{ name: 'a.maFile', text }]);
+		const id = report.candidates[0]?.stagingId ?? '';
+
+		return imports
+			.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+			.then(() => {
+				expect(vault.read().accounts[0]?.serialNumber).toBe(serial);
+				// The check that matters: a naive parse produces a different serial.
+				expect(String(Number(serial))).not.toBe(serial);
+			});
+	});
+
+	it('warns when the identity secret is damaged, even though codes will work', () => {
+		// The shared-secret gate exists so a damaged file is caught here rather than
+		// discovered days later. The identity secret had no such check, so a file
+		// with a broken one imported as a good account, generated codes correctly,
+		// and failed at the first confirmation with nothing connecting the two.
+		const report = imports.stage([file({ identity_secret: 'not-a-secret' })]);
+
+		expect(report.candidates[0]?.warnings.join(' ')).toMatch(/confirmations/i);
+		// Still importable: codes work, and an account that can generate them is
+		// worth having. The two failures are not the same size.
+		expect(report.candidates[0]?.importable).toBe(true);
+	});
+
 	it('marks a file with no SteamID as not importable rather than inventing one', () => {
 		const report = imports.stage([
 			{

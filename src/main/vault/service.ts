@@ -287,10 +287,30 @@ export class VaultService {
 			salt: salt.toString('base64')
 		};
 
+		const newKey = await deriveKey(next, salt, kdf);
+
+		// **Everything below reads state only after the derivation, never before.**
+		//
+		// `deriveKey` is scrypt at the shipping work factor — the better part of a
+		// second, deliberately. `mutate` is synchronous once it has the state, so
+		// anything that wrote during that second completed in full: an account
+		// enrolled, a refresh token stored, an import committed. Snapshotting
+		// `contents` before the await and sealing it afterwards silently replaced
+		// all of it with the older copy, under the same `seq`, so nothing downstream
+		// could even tell a write had been lost.
+		//
+		// And the vault may not be open any more. The idle timer does not pause for
+		// a key derivation, so a lock during it left this holding a detached state
+		// object — and it went on to rewrite the file and install a key into an
+		// object nobody could reach.
+		if (this.state !== state) {
+			wipe(newKey);
+			throw new VaultLockedError();
+		}
+
 		const contents = { ...state.contents, seq: state.contents.seq + 1 };
 		contents.updatedAt = new Date(this.now()).toISOString();
 
-		const newKey = await deriveKey(next, salt, kdf);
 		try {
 			writeEnvelope(this.file, sealWithKey(JSON.stringify(contents), newKey, kdf));
 		} catch (err) {

@@ -54,6 +54,7 @@ const maFileSchema = z.object({
 	serial_number: z.union([z.number(), z.string()]).optional(),
 	token_gid: z.string().optional(),
 	uri: z.string().optional(),
+	secret_1: z.string().optional(),
 	status: z.number().optional(),
 	fully_enrolled: z.boolean().optional(),
 	steamid: z.union([z.number(), z.string()]).optional(),
@@ -80,6 +81,20 @@ export interface ParsedMaFile {
 	refreshToken?: string;
 	/** Per-account routing carried by the file itself. */
 	proxyUrl?: string;
+	/**
+	 * The rest of what Steam issued, carried through so a round trip is not lossy.
+	 *
+	 * The vault schema keeps these for export fidelity — its comment says a maFile
+	 * written without them "is a lossy copy of the one Steam handed us, and the
+	 * point of export is that the user is not tied to this application". Enrollment
+	 * populated them and export wrote them, and import read none of them: a file
+	 * imported and exported again came back with these fields blanked, which is
+	 * exactly the lossiness the vault was storing them to avoid.
+	 */
+	serialNumber?: string;
+	tokenGid?: string;
+	uri?: string;
+	secret1?: string;
 	warnings: string[];
 }
 
@@ -275,6 +290,23 @@ export function parseMaFile(text: string, fileName: string, nowMs: number): Pars
 		identitySecret: data.identity_secret,
 		warnings
 	};
+
+	// `serial_number` is read from the raw text, not from the parsed object.
+	// Steam's serials are nineteen digits — comfortably past
+	// `Number.MAX_SAFE_INTEGER` — and SDA writes them unquoted, so `JSON.parse`
+	// hands back a rounded number and exporting it again writes a different serial
+	// than Steam issued. The same hazard as F-01, on a field nobody thinks about
+	// because nothing reads it.
+	const serial = extractTopLevelSteamId(outsideSession(raw), 'serial_number');
+	if (serial) {
+		parsed.serialNumber = serial.value;
+	} else if (typeof data.serial_number === 'string' && data.serial_number !== '') {
+		parsed.serialNumber = data.serial_number;
+	}
+
+	if (data.token_gid !== undefined && data.token_gid !== '') parsed.tokenGid = data.token_gid;
+	if (data.uri !== undefined && data.uri !== '') parsed.uri = data.uri;
+	if (data.secret_1 !== undefined && data.secret_1 !== '') parsed.secret1 = data.secret_1;
 
 	if (data.revocation_code !== undefined) parsed.revocationCode = data.revocation_code;
 	if (data.device_id !== undefined) parsed.deviceId = data.device_id;
