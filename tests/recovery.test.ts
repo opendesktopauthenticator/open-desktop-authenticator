@@ -7,6 +7,7 @@ import {
 	readRecoveryFile,
 	RecoveryError,
 	recoveryContents,
+	createRecoveryHooks,
 	recoveryDirectory,
 	recoveryFilesFor,
 	recoveryPathFor,
@@ -160,6 +161,70 @@ describe('sealing and opening', () => {
 	it('refuses to seal while the vault is locked', () => {
 		vault.lock();
 		expect(() => vault.sealForBackup('{}')).toThrow();
+	});
+});
+
+/**
+ * The correction that has to survive a restart.
+ *
+ * An audit found this broken, and named the reason the suite missed it: every
+ * test drove the two callbacks through one long-lived object, so the map that
+ * remembers where the file went was never empty. The application's own wiring —
+ * where a restart makes it empty — was not reachable from a test at all.
+ *
+ * `createRecoveryHooks` exists so it is. Constructing a second instance is
+ * exactly what a restart does.
+ */
+describe('correcting a recovery file after a restart', () => {
+	const hooks = (): ReturnType<typeof createRecoveryHooks> =>
+		createRecoveryHooks({
+			userDataPath: () => dir,
+			seal: (plaintext) => vault.sealForBackup(plaintext),
+			now: () => Date.parse(NOW_ISO)
+		});
+
+	it('corrects the file written by an earlier run', async () => {
+		// Enrol in one run: the file records `pendingActivation`, because that is
+		// true when it is written.
+		hooks().writeRecovery(account({ status: 'pendingActivation' }));
+
+		// Restart. Nothing is remembered.
+		hooks().updateRecovery(account({ status: 'pendingRevocationBackup' }));
+
+		const path = recoveryPathFor(dir, '76561199999999999');
+		const recovered = await readRecoveryFile(readFileSync(path, 'utf8'), PASS);
+		expect(recovered.account.status).toBe('pendingRevocationBackup');
+	});
+
+	it('still corrects the file within a single run', async () => {
+		// The case that already worked must keep working — the fallback is in
+		// addition to the remembered path, not instead of it.
+		const live = hooks();
+		live.writeRecovery(account({ status: 'pendingActivation' }));
+		live.updateRecovery(account({ status: 'active' }));
+
+		const path = recoveryPathFor(dir, '76561199999999999');
+		const recovered = await readRecoveryFile(readFileSync(path, 'utf8'), PASS);
+		expect(recovered.account.status).toBe('active');
+	});
+
+	it('leaves both alone when an earlier enrollment left a file behind', async () => {
+		// Two files for one SteamID: nothing can say which belongs to the account
+		// being activated, and rewriting the wrong one destroys a backup for an
+		// authenticator that account no longer has.
+		hooks().writeRecovery(account({ status: 'pendingActivation' }));
+		hooks().writeRecovery(account({ status: 'pendingActivation' }));
+
+		hooks().updateRecovery(account({ status: 'active' }));
+
+		const path = recoveryPathFor(dir, '76561199999999999');
+		const primary = await readRecoveryFile(readFileSync(path, 'utf8'), PASS);
+		expect(primary.account.status).toBe('pendingActivation');
+	});
+
+	it('does nothing when no file was ever written', () => {
+		expect(() => hooks().updateRecovery(account())).not.toThrow();
+		expect(recoveryFilesFor(dir, '76561199999999999')).toHaveLength(0);
 	});
 });
 

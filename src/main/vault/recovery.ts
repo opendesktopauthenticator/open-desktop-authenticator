@@ -160,6 +160,74 @@ export function updateRecoveryFile(path: string, envelope: unknown): void {
 }
 
 /**
+ * The pair of callbacks the enrollment service uses to keep a recovery file
+ * honest, with the bookkeeping that connects them.
+ *
+ * A factory rather than two loose functions in `index.ts`, because the thing
+ * worth testing is the **relationship** between them across a restart, and that
+ * relationship lived in application wiring no test could reach. An audit found
+ * the restart case broken precisely there: the correction worked in the run that
+ * wrote the file and silently did nothing afterwards, which is the wrong way
+ * round — a crash between enrolling and activating is what the file is for.
+ *
+ * Constructing a new instance is exactly what a restart does, so a test can
+ * reproduce one by doing the same.
+ */
+export interface RecoveryHooks {
+	writeRecovery: (account: Account) => void;
+	updateRecovery: (account: Account) => void;
+}
+
+export function createRecoveryHooks(options: {
+	/** The app's data directory, read lazily — Electron cannot answer before ready. */
+	userDataPath: () => string;
+	/** Seals with the vault's in-memory key. Throws when the vault is locked. */
+	seal: (plaintext: string) => unknown;
+	now?: () => number;
+}): RecoveryHooks {
+	const now = options.now ?? ((): number => Date.now());
+
+	/**
+	 * Where this run wrote each account's file.
+	 *
+	 * Not always the path asked for: a pre-existing backup for the same SteamID
+	 * sends the write to a sibling, and correcting the primary in that case would
+	 * overwrite an older enrollment's only copy.
+	 */
+	const written = new Map<string, string>();
+
+	const sealed = (account: Account): unknown =>
+		options.seal(recoveryContents(account, new Date(now()).toISOString()));
+
+	return {
+		writeRecovery: (account) => {
+			written.set(
+				account.steamId64,
+				writeRecoveryFile(
+					recoveryPathFor(options.userDataPath(), account.steamId64),
+					sealed(account)
+				)
+			);
+		},
+
+		updateRecovery: (account) => {
+			// The map is empty after a restart, which is the common case rather than
+			// the exotic one. Falling back to the filesystem is safe only when the
+			// answer is unambiguous: exactly one file for this SteamID means one
+			// enrollment, and it is this one. Two means an earlier enrollment left a
+			// file behind and nothing here can say which belongs to this account, so
+			// neither is touched.
+			const found = recoveryFilesFor(options.userDataPath(), account.steamId64);
+			const path = written.get(account.steamId64) ?? (found.length === 1 ? found[0] : undefined);
+			if (path === undefined) {
+				return;
+			}
+			updateRecoveryFile(path, sealed(account));
+		}
+	};
+}
+
+/**
  * Every recovery file on disk for one account, primary and siblings alike.
  *
  * Used to correct a file written by an **earlier run**. Activation records the

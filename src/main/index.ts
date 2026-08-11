@@ -26,14 +26,7 @@ import { registerCodeHandlers } from './codes/ipc';
 import { registerUpdateHandlers } from './update/ipc';
 import { EnrollmentService } from './steam/enrollment';
 import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
-import {
-	RECOVERY_EXTENSION,
-	recoveryContents,
-	recoveryFilesFor,
-	recoveryPathFor,
-	updateRecoveryFile,
-	writeRecoveryFile
-} from './vault/recovery';
+import { createRecoveryHooks, RECOVERY_EXTENSION } from './vault/recovery';
 import { SteamTransportFactory, type ElectronNetworking } from './net/transport';
 import { ConfirmationsService } from './confirmations/service';
 import { AutoConfirmEngine } from './confirmations/auto';
@@ -246,61 +239,23 @@ function start(): void {
 	// Constructed after the network pieces so a commit that changes routing can
 	// drop the stale session through the same seam the settings path uses.
 	const imports = new ImportService(vault, { onRoutingChanged: dropAccountRouting });
-	/**
-	 * Where this run wrote each account's recovery file.
-	 *
-	 * Only paths written during this process, so `updateRecovery` can correct a
-	 * file it created and can never touch one it did not.
-	 */
-	const recoveryFiles = new Map<string, string>();
-
-	/**
-	 * The one recovery file on disk for this account, when there is exactly one.
-	 *
-	 * The map above only knows about files **this run** wrote, and the case the
-	 * recovery file exists for is a crash between enrolling and activating — so the
-	 * correction normally happens in a later run, with nothing remembered and the
-	 * file left claiming `pendingActivation` forever.
-	 *
-	 * Falling back to the filesystem is safe only when the answer is unambiguous. A
-	 * second file means an earlier enrollment for the same SteamID left one behind,
-	 * and rewriting the wrong one would destroy a backup for an authenticator this
-	 * account no longer has. One file means one enrollment, and it is this one.
-	 */
-	const onlyRecoveryFileFor = (steamId64: string): string | undefined => {
-		const found = recoveryFilesFor(app.getPath('userData'), steamId64);
-		return found.length === 1 ? found[0] : undefined;
-	};
+	// The bookkeeping that lets activation correct the file enrollment wrote lives
+	// in `createRecoveryHooks`, not here — the part worth testing is how the two
+	// callbacks relate across a restart, and that could not be reached while it was
+	// application wiring.
+	const recovery = createRecoveryHooks({
+		userDataPath: () => app.getPath('userData'),
+		seal: (plaintext) => vault.sealForBackup(plaintext)
+	});
 
 	const enrollment = new EnrollmentService(vault, transports, {
 		timeOffsetSeconds: () => codes.timeOffsetSeconds(),
 		// Written once, at enrollment, into the app's own data directory. Removal
 		// deliberately does not delete it — recovering from that removal is the
 		// whole reason it exists.
-		writeRecovery: (account) => {
-			const written = writeRecoveryFile(
-				recoveryPathFor(app.getPath('userData'), account.steamId64),
-				vault.sealForBackup(recoveryContents(account, new Date().toISOString()))
-			);
-			// Remembered so activation can correct this same file. The path is not
-			// always the one asked for — a pre-existing backup for this SteamID sends
-			// the write to a sibling — and updating the wrong one would overwrite an
-			// older enrollment's only copy.
-			recoveryFiles.set(account.steamId64, written);
-		},
-		updateRecovery: (account) => {
-			const written =
-				recoveryFiles.get(account.steamId64) ?? onlyRecoveryFileFor(account.steamId64);
-			// Nothing safe to correct. Either no file exists, or more than one does
-			// and none of them can be attributed to this account with certainty.
-			if (written === undefined) {
-				return;
-			}
-			updateRecoveryFile(
-				written,
-				vault.sealForBackup(recoveryContents(account, new Date().toISOString()))
-			);
-		}
+		// Written once, at enrollment; corrected once, at activation.
+		writeRecovery: recovery.writeRecovery,
+		updateRecovery: recovery.updateRecovery
 	});
 
 	const activity = new ActivityLog();
