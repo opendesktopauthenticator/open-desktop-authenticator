@@ -463,10 +463,20 @@ function start(): void {
 		 * The tray balloon does not cover this. It fires once per run, so on the
 		 * second and every later attempt there is no explanation of any kind.
 		 */
-		app.on('second-instance', () => {
-			// Looked up rather than closed over. `activate` can replace the window,
-			// and a handler holding the original would find it destroyed and do
-			// nothing — silently reproducing the very failure it exists to fix.
+		/**
+		 * The one way back to the window, shared by everything that offers one.
+		 *
+		 * The tray click, the tray menu and a second launch all mean "put it back in
+		 * front of me", and they were drifting: this one restores a minimised window
+		 * and the tray's did not, so the same intent behaved differently depending
+		 * on which control the user reached for. Two places that have to agree are
+		 * the shape of bug worth removing rather than keeping in step by hand.
+		 *
+		 * Looked up rather than closed over, because `activate` can replace the
+		 * window and a handler holding a destroyed reference would silently do
+		 * nothing.
+		 */
+		const showMainWindow = (): void => {
 			const window = BrowserWindow.getAllWindows()[0];
 			if (!window) {
 				createMainWindow();
@@ -477,7 +487,9 @@ function start(): void {
 			}
 			window.show();
 			window.focus();
-		});
+		};
+
+		app.on('second-instance', showMainWindow);
 
 		mainWindow.on('close', (event) => {
 			if (quitting) {
@@ -499,10 +511,7 @@ function start(): void {
 		});
 
 		tray = createTray({
-			show: () => {
-				mainWindow.show();
-				mainWindow.focus();
-			},
+			show: showMainWindow,
 			hide: () => mainWindow.hide(),
 			isVisible: () => mainWindow.isVisible(),
 			lock: () => vault.lock('manual'),

@@ -243,6 +243,23 @@ describe('§11 — the lock drops every cached credential', () => {
 		expect(onUnlocked).not.toContain('await clock.ensureSynced()');
 	});
 
+	it('has one way back to the window, not several that can drift', () => {
+		// The tray click, the tray menu and a second launch all mean "put it in
+		// front of me". They were separate implementations and had already drifted:
+		// one restored a minimised window and the other did not, so the same intent
+		// behaved differently depending on which control was used.
+		//
+		// Asserted on the source because the difference is in Electron calls no unit
+		// test can observe without a real window.
+		const index = read('src/main/index.ts');
+
+		expect(index).toContain('const showMainWindow');
+		expect(index).toContain("app.on('second-instance', showMainWindow)");
+		expect(index).toContain('show: showMainWindow');
+		// A second `mainWindow.show()` anywhere would be a second path re-appearing.
+		expect(index.match(/mainWindow\.show\(\)/g) ?? []).toHaveLength(0);
+	});
+
 	it('found the handler it is asserting against', () => {
 		// Guards the slice above: if `onLock` is renamed or moved, every assertion
 		// would trivially pass against an empty string.
