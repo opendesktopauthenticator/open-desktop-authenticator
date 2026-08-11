@@ -241,6 +241,13 @@ export class ImportService {
 	 * be wrong.
 	 */
 	unlock(passphrase: string): ImportReport {
+		// Same reasoning as `stage`, and it was missed here when that one was fixed:
+		// without this the files are decrypted first and the locked vault discovered
+		// afterwards, in `buildReport`. That turns ciphertext into plaintext for a
+		// user who is no longer present — which is the whole thing the check exists
+		// to prevent, arrived at by a different door.
+		this.assertUnlocked();
+
 		if (this.expired()) {
 			this.discard();
 			throw new ImportError(
@@ -568,16 +575,24 @@ export class ImportService {
 	}
 
 	/**
-	 * Throw unless the vault can actually receive an import.
+	 * Throw unless the vault can actually receive an import — **and drop whatever
+	 * is staged if it cannot.**
 	 *
-	 * Exists so the IPC layer can check **before** reading anything off disk.
-	 * `stage()` discovers a locked vault only after the files have already been
-	 * read into memory, and clearing the staging afterwards does not un-read them:
-	 * the plaintext of every chosen maFile would have been loaded and then left for
-	 * the collector, with nobody present to have authorised it.
+	 * Exists so the IPC layer can check before reading anything off disk, and so
+	 * `stage` and `unlock` can check before parsing or decrypting. Reading files
+	 * first and discovering the lock afterwards does not un-read them: the
+	 * plaintext of every chosen maFile would have been loaded and then left for the
+	 * collector, with nobody present to have authorised it.
+	 *
+	 * The discard is not redundant with the vault's `onLock` hook. That hook is
+	 * wiring — one line in `main/index.ts` that a refactor can drop — whereas a
+	 * locked vault seen from in here is proof the user is gone, and anything still
+	 * staged has no owner. Holding the invariant locally means it survives the
+	 * wiring being wrong.
 	 */
 	assertUnlocked(): void {
 		if (!this.vault.isUnlocked()) {
+			this.discard();
 			throw new VaultLockedError();
 		}
 	}

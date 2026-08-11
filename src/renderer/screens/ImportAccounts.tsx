@@ -352,8 +352,11 @@ function LockedFiles({
 		<>
 			<h2>Encrypted</h2>
 			<ul className="accounts">
-				{locked.map((file) => (
-					<li key={file.sourceName}>
+				{/* Indexed for the same reason the rejected list is, ninety lines up:
+				    two files chosen from different folders can share a base name, and
+				    the name alone would be a duplicate key. */}
+				{locked.map((file, index) => (
+					<li key={`${index}-${file.sourceName}`}>
 						<div>
 							<strong>{file.sourceName}</strong>
 							<p className="hint">

@@ -24,6 +24,25 @@ import { VaultLockedError, VaultService } from '../src/main/vault/service';
  *  - a typo throwing away every file, so the whole selection must be made again;
  *  - the manifest itself listed as an account.
  */
+/**
+ * Counts real decryptions, so "did it decrypt before checking the vault?" can be
+ * answered by observation rather than by reading the code and hoping.
+ */
+let decryptions = 0;
+
+vi.mock('../src/main/import/sda-crypto', async () => {
+	const actual = await vi.importActual<typeof import('../src/main/import/sda-crypto')>(
+		'../src/main/import/sda-crypto'
+	);
+	return {
+		...actual,
+		decryptSdaMaFile: (options: Parameters<typeof actual.decryptSdaMaFile>[0]) => {
+			decryptions += 1;
+			return actual.decryptSdaMaFile(options);
+		}
+	};
+});
+
 vi.mock('../src/shared/vault-format', async () => {
 	const actual = await vi.importActual<typeof import('../src/shared/vault-format')>(
 		'../src/shared/vault-format'
@@ -377,6 +396,22 @@ describe('not leaving ciphertext lying about', () => {
 
 		expect(() => imports.stage([watched])).toThrow(VaultLockedError);
 		expect(reads).toBe(0);
+	});
+
+	it('decrypts nothing when the vault locked while the prompt was up', () => {
+		// The sibling of the `stage` ordering rule, and it was missed when that one
+		// was fixed: `unlock` had no check of its own, so every file was turned into
+		// plaintext and the locked vault noticed afterwards, in `buildReport`.
+		//
+		// Counted through the crypto module rather than inferred, because it throws
+		// either way — asserting only that it throws would prove nothing about when.
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+		vault.lock();
+		decryptions = 0;
+
+		expect(() => imports.unlock(SDA_PASS)).toThrow(VaultLockedError);
+		expect(decryptions).toBe(0);
 	});
 
 	it('leaves nothing behind when the vault locks while the prompt is up', () => {

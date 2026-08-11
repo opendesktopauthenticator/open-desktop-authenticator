@@ -316,6 +316,46 @@ if the revocation code is not offered before activation is requested.
 not just the first few. A value ending `...200000000` means precision was lost.
 The file must contain no `refreshToken`. Bonus: SDA reads it.
 
+### T29 · Import an encrypted SDA install
+
+**This is the one test whose outcome is genuinely unknown.** Everything else in
+this document verifies code written against a format we can see. The SDA
+decryption parameters were read out of `Steam Desktop Authenticator.dll` — the
+KDF, 50000 iterations, AES-256-CBC — but nothing here has ever been run against
+a file SDA itself encrypted. If the format guess is wrong, this is where it
+shows, and no amount of unit testing would have caught it.
+
+Set up: in SDA, **Settings → Encrypt maFiles** (or File → Encrypt), and set a
+password. Use a spare account if you have one.
+
+1. **Import** → choose the `.maFile` **and** `manifest.json` from the SDA
+   folder. Both. The manifest holds the decryption settings.
+2. The files should be listed under **Encrypted**, not under "Not imported".
+3. Enter the SDA password.
+
+**Pass:** the accounts appear under **Found** with the right account names and
+SteamIDs, tick and import cleanly, and then produce codes matching T6.
+
+**If it says the passphrase is wrong when you know it is right** — that is the
+format guess being wrong, not you. Say so and it can be narrowed quickly; the
+likely suspects are the hash inside the KDF or the iteration count.
+
+Four more, each about a different way this can go sideways:
+
+- **No manifest.** Choose only the `.maFile`. It must say the manifest was not
+  among the files you chose — not "wrong passphrase". Nothing about a failed
+  decryption would lead you to the actual fix.
+- **Wrong passphrase on purpose.** The file must stay listed under Encrypted so
+  you can try again. It must not vanish and force you back to the picker.
+- **Mixed folder.** One encrypted and one plaintext maFile together: the
+  plaintext one should appear under Found immediately, before you type anything.
+- **Import with one still locked.** Unlock one of two, then press Import. It
+  must warn you that the other will be dropped, before you press it.
+
+**Known:** with a large number of encrypted files the window pauses while they
+decrypt — about 11ms per file, so roughly a second at the 100-file maximum.
+Expected, not a fault.
+
 ---
 
 ## Stage 5 — The dangerous ones. Do these last.
