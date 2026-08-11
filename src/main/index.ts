@@ -5,6 +5,7 @@ import {
 	clipboard as electronClipboard,
 	dialog,
 	Menu,
+	nativeTheme,
 	net,
 	powerMonitor,
 	session
@@ -50,6 +51,16 @@ import {
  * unit rather than read out of scattered BrowserWindow options.
  */
 
+/**
+ * The window frame's colours, taken from the renderer's palette.
+ *
+ * Duplicated here as literals because the main process cannot read the
+ * stylesheet, and Electron needs them before the first paint. `--bg` and
+ * `--muted` in `app.css` are the source of truth; `tests/window-chrome.test.ts`
+ * fails if these two drift apart.
+ */
+const WINDOW_CHROME = { background: '#070a0e', symbol: '#93a89e' } as const;
+
 /** How long to wait on GitHub before giving up on an update check. */
 const UPDATE_CHECK_TIMEOUT_MS = 15_000;
 
@@ -75,6 +86,26 @@ function createMainWindow(): BrowserWindow {
 		show: false,
 		title: branding.productName,
 		autoHideMenuBar: true,
+		// Painted before the renderer has drawn anything, so a resize or a slow
+		// first paint shows the app's own black rather than white.
+		backgroundColor: WINDOW_CHROME.background,
+		// **Windows only, deliberately.** `hidden` removes the OS title bar and
+		// `titleBarOverlay` puts the real minimise/maximise/close buttons back on
+		// top of our content in colours we choose — so the bar matches the app
+		// instead of sitting above it as a white strip.
+		//
+		// Linux gets the ordinary frame. There, `hidden` would remove the title bar
+		// without supplying an overlay, leaving a window with no close button at
+		// all: a far worse outcome than a title bar that does not match.
+		...(process.platform === 'win32'
+			? {
+					titleBarStyle: 'hidden' as const,
+					titleBarOverlay: {
+						color: WINDOW_CHROME.background,
+						symbolColor: WINDOW_CHROME.symbol
+					}
+				}
+			: {}),
 		webPreferences: {
 			...SECURE_WEB_PREFERENCES,
 			// The only deliberate relaxation, and only when not packaged.
@@ -115,6 +146,12 @@ function start(): void {
 	if (process.platform === 'win32') {
 		app.setAppUserModelId(branding.appId);
 	}
+
+	// **Also reaches the OS dialogs.** The file pickers this app opens — import,
+	// export, recovery — are drawn by Windows, not by us, and defaulted to light
+	// against an application that is entirely dark. On Linux, which does not get
+	// the overlay, this is also what keeps the ordinary frame from being white.
+	nativeTheme.themeSource = 'dark';
 
 	// Every WebContents, not just the windows we build ourselves.
 	hardenAllWebContents(rendererTarget);

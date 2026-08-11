@@ -10,6 +10,9 @@ if (!container) {
 
 createRoot(container).render(
 	<StrictMode>
+		{/* Rendered here rather than inside a screen: every screen would need it,
+		    and a window you cannot drag is not a per-screen problem. */}
+		<div className="titlebar-drag" />
 		<App />
 	</StrictMode>
 );

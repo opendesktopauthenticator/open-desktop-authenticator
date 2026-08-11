@@ -100,7 +100,31 @@ body {
 .shell {
 	max-width: 940px;
 	margin: 0 auto;
-	padding: 32px 28px 72px;
+	/* The extra top padding is the Windows Controls Overlay's height, so the
+	   header's own buttons do not sit underneath the minimise and close buttons.
+	   `env()` resolves to the 0px fallback wherever there is no overlay — every
+	   platform keeping its ordinary title bar — so the padding there is the same
+	   32px it always was. The two appear and disappear together, which is what
+	   makes this safe to apply unconditionally. */
+	padding: calc(32px + env(titlebar-area-height, 0px)) 28px 72px;
+}
+
+/**
+ * Somewhere to drag the window by, once the title bar is gone.
+ *
+ * With the overlay, the strip beside the window controls is not draggable unless
+ * the page says so — without this the window could only be moved from the
+ * keyboard. Sized entirely from `env()`, so it collapses to nothing on a
+ * platform that kept its title bar rather than sitting invisibly over content.
+ */
+.titlebar-drag {
+	position: fixed;
+	top: env(titlebar-area-y, 0px);
+	left: env(titlebar-area-x, 0px);
+	width: env(titlebar-area-width, 0px);
+	height: env(titlebar-area-height, 0px);
+	-webkit-app-region: drag;
+	z-index: 100;
 }
 
 .row {
