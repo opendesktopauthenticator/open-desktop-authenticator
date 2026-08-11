@@ -14,6 +14,7 @@ import { Confirmations } from './screens/Confirmations';
 import { RemoveAccount } from './screens/RemoveAccount';
 import { Settings } from './screens/Settings';
 import { ImportAccounts } from './screens/ImportAccounts';
+import { RecoverAccount } from './screens/RecoverAccount';
 import { AddAuthenticator } from './screens/AddAuthenticator';
 import { RevocationBackup } from './screens/RevocationBackup';
 import { UnlockVault } from './screens/UnlockVault';
@@ -50,9 +51,9 @@ export function App(): React.JSX.Element {
 	 * reloads this window whenever the vault locks, so an unlock always lands back
 	 * on the account list rather than resuming a half-finished import.
 	 */
-	const [view, setView] = useState<'accounts' | 'import' | 'settings' | 'activity' | 'enroll'>(
-		'accounts'
-	);
+	const [view, setView] = useState<
+		'accounts' | 'import' | 'settings' | 'activity' | 'enroll' | 'recover'
+	>('accounts');
 	/**
 	 * An enrolled-but-unactivated account being resumed, if any.
 	 *
@@ -104,30 +105,53 @@ export function App(): React.JSX.Element {
 	/** Latest answer from the update check. Only `updateAvailable` is ever shown. */
 	const [update, setUpdate] = useState<UpdateCheckResult | undefined>();
 
-	const refresh = useCallback(async (): Promise<void> => {
-		if (!api) {
-			return;
-		}
-		const next = await api.getVaultStatus();
-		setStatus(next);
-		if (!next.unlocked) {
-			setAccounts([]);
-			// Not merely stale — codes are only meaningful while unlocked, and a
-			// locked window must not still be showing the last ones it had.
-			setCodes(undefined);
-			setActivityUrgent(false);
-			return;
-		}
-		setAccounts((await api.listAccounts()).accounts);
-		// Regenerated on every tick rather than cached until the window rolls over.
-		// A code is an HMAC over twenty bytes; recomputing one per second per
-		// account costs nothing, and it removes an entire class of bug where the
-		// displayed code and its countdown disagree about which window they are in.
-		setCodes(await api.listCodes());
-		// Polled with everything else so the alert appears without the user having
-		// to go looking for it — which is the entire point of an alert.
-		setActivityUrgent((await api.listActivity()).urgent);
-	}, [api]);
+	/**
+	 * @param includeCodes fetch Steam Guard codes as well as status and accounts.
+	 *
+	 * Codes are separable because they are the only slow part: `listCodes` waits on
+	 * the Steam clock sync, which on a first call can take a full transport
+	 * timeout. Everything else here is local and immediate.
+	 *
+	 * That mattered on unlock. The unlock screen only stops saying "Unlocking…"
+	 * when it unmounts, and it only unmounted once this whole call had finished —
+	 * so a slow clock sync read as a stuck unlock for tens of seconds, on the one
+	 * screen where the user is already wondering whether they typed it right.
+	 *
+	 * Accounts are **not** separable in the same way, and that is deliberate:
+	 * swapping to the account list before they arrive would show "No accounts yet"
+	 * to somebody who has accounts. A moment of a wrong empty state is worse than a
+	 * moment of a spinner.
+	 */
+	const refresh = useCallback(
+		async ({ includeCodes = true }: { includeCodes?: boolean } = {}): Promise<void> => {
+			if (!api) {
+				return;
+			}
+			const next = await api.getVaultStatus();
+			setStatus(next);
+			if (!next.unlocked) {
+				setAccounts([]);
+				// Not merely stale — codes are only meaningful while unlocked, and a
+				// locked window must not still be showing the last ones it had.
+				setCodes(undefined);
+				setActivityUrgent(false);
+				return;
+			}
+			setAccounts((await api.listAccounts()).accounts);
+			if (!includeCodes) {
+				return;
+			}
+			// Regenerated on every tick rather than cached until the window rolls over.
+			// A code is an HMAC over twenty bytes; recomputing one per second per
+			// account costs nothing, and it removes an entire class of bug where the
+			// displayed code and its countdown disagree about which window they are in.
+			setCodes(await api.listCodes());
+			// Polled with everything else so the alert appears without the user having
+			// to go looking for it — which is the entire point of an alert.
+			setActivityUrgent((await api.listActivity()).urgent);
+		},
+		[api]
+	);
 
 	// The window title comes from branding, never from HTML — one source of truth
 	// while Q1 is unresolved. It doubles as the end-to-end IPC signal: if the
@@ -155,7 +179,25 @@ export function App(): React.JSX.Element {
 			return;
 		}
 		let cancelled = false;
+		/**
+		 * Whether the previous tick is still running.
+		 *
+		 * The interval fires every second whether or not the last one finished, and
+		 * `refresh` makes four IPC calls in sequence — one of which, `listCodes`,
+		 * waits on the Steam clock sync and can take a full transport timeout. So a
+		 * single slow sync used to start a new chain every second while the old ones
+		 * were still going: dozens of overlapping requests, all racing to `setState`,
+		 * with the oldest and stalest able to land last.
+		 *
+		 * Skipping a tick costs nothing. The next one is a second away, and the state
+		 * it would have fetched is the state the in-flight call is already fetching.
+		 */
+		let inFlight = false;
 		const tick = (): void => {
+			if (inFlight) {
+				return;
+			}
+			inFlight = true;
 			refresh()
 				.then(() => {
 					if (!cancelled) {
@@ -166,6 +208,9 @@ export function App(): React.JSX.Element {
 					if (!cancelled) {
 						setPollError(err instanceof Error ? err.message : String(err));
 					}
+				})
+				.finally(() => {
+					inFlight = false;
 				});
 		};
 		tick();
@@ -265,7 +310,7 @@ export function App(): React.JSX.Element {
 				<CreateVault
 					onCreate={async (passphrase) => {
 						await api.createVault(passphrase);
-						await refresh();
+						await refresh({ includeCodes: false });
 					}}
 				/>
 			);
@@ -277,7 +322,10 @@ export function App(): React.JSX.Element {
 					backupAvailable={status.backupAvailable}
 					onUnlock={async (passphrase) => {
 						await api.unlockVault(passphrase);
-						await refresh();
+						// Without codes, so the screen swaps as soon as the vault is open
+						// rather than when the Steam clock sync finishes. The next poll,
+						// a second later, fills them in.
+						await refresh({ includeCodes: false });
 					}}
 				/>
 			);
@@ -421,6 +469,20 @@ export function App(): React.JSX.Element {
 			);
 		}
 
+		if (view === 'recover') {
+			return (
+				<RecoverAccount
+					onRecover={(passphrase) => api.recoverAccount(passphrase)}
+					onClose={() => {
+						setView('accounts');
+						// A restored account has to appear without waiting on the poll —
+						// the whole point of the screen is seeing it come back.
+						void refresh();
+					}}
+				/>
+			);
+		}
+
 		if (view === 'import') {
 			return (
 				<ImportAccounts
@@ -445,6 +507,7 @@ export function App(): React.JSX.Element {
 				onRemoveAccount={setRemovingFor}
 				onChangeAutoConfirm={setAutoConfirmFor}
 				onImport={() => setView('import')}
+				onRecover={() => setView('recover')}
 				onEnrol={() => {
 					setResumeEnrollment(undefined);
 					setView('enroll');

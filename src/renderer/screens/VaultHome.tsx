@@ -21,6 +21,7 @@ export function VaultHome({
 	onRemoveAccount,
 	onChangeAutoConfirm,
 	onImport,
+	onRecover,
 	onEnrol,
 	onFinishActivation,
 	onExport,
@@ -39,6 +40,14 @@ export function VaultHome({
 	onRemoveAccount: (account: AccountSummary) => void;
 	onChangeAutoConfirm: (account: AccountSummary) => void;
 	onImport: () => void;
+	/**
+	 * Opens the recovery screen.
+	 *
+	 * Present on the header and on the empty state, because the two situations
+	 * that lead here are opposite ones: an established vault that lost an account,
+	 * and a fresh install being rebuilt from files after a machine died.
+	 */
+	onRecover: () => void;
 	/** Add an authenticator to an account that has none. */
 	onEnrol: () => void;
 	/** Resume an enrollment that was never activated. */
@@ -80,6 +89,9 @@ export function VaultHome({
 					</button>
 					<button type="button" className="secondary" onClick={onImport}>
 						Import maFiles
+					</button>
+					<button type="button" className="secondary" onClick={onRecover}>
+						Recover from file
 					</button>
 					<button
 						type="button"
@@ -136,6 +148,9 @@ export function VaultHome({
 					</button>
 					<button type="button" className="secondary" onClick={onImport}>
 						Import maFiles
+					</button>
+					<button type="button" className="secondary" onClick={onRecover}>
+						Recover from file
 					</button>
 				</div>
 			) : (

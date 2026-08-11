@@ -232,3 +232,42 @@ describe('§11 — the lock drops every cached credential', () => {
 		expect(onLock.length).toBeGreaterThan(200);
 	});
 });
+
+/**
+ * Every recovery path the app tells the user about is reachable (§12 F2).
+ *
+ * `account:recover` was written, tested and wired over IPC, and **nothing in the
+ * renderer ever called it**. The main process was complete; the button did not
+ * exist. Worse, the enrollment failure message names it — "unlock the vault and
+ * use Recover from file" — so the one situation the feature exists for pointed
+ * at a control that was not there.
+ *
+ * A unit test cannot catch that: every piece works in isolation, and the missing
+ * piece is the connection between them. So this asserts the connection.
+ */
+describe('§12 F2 — the recovery path is reachable from the interface', () => {
+	it('a screen calls recoverAccount', () => {
+		const screens = read('src/renderer/App.tsx');
+		expect(screens).toContain('recoverAccount');
+	});
+
+	it('and something visible opens it', () => {
+		// The IPC call existing behind a screen nobody can navigate to is the same
+		// bug one level up.
+		const home = read('src/renderer/screens/VaultHome.tsx');
+		expect(home).toContain('onRecover');
+		expect(home).toContain('Recover from file');
+	});
+
+	it('the wording matches what the enrollment failure tells the user to do', () => {
+		// If either side is reworded without the other, the instruction sends the
+		// user looking for a control whose label no longer matches — which is how
+		// this was broken in the first place, only more so.
+		const enrollment = read('src/main/steam/enrollment.ts');
+		const home = read('src/renderer/screens/VaultHome.tsx');
+		const phrase = 'Recover from file';
+
+		expect(enrollment).toContain(phrase);
+		expect(home).toContain(phrase);
+	});
+});
