@@ -19,7 +19,8 @@
     "format:check": "prettier --check .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "benchmark:kdf": "node scripts/benchmark-kdf.mjs"
+    "benchmark:kdf": "node scripts/benchmark-kdf.mjs",
+    "icons": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/make-icons.mjs"
   },
   "dependencies": {
     "react": "19.2.8",

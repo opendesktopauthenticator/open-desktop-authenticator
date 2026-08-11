@@ -1,4 +1,5 @@
-import { Menu, Tray, nativeImage, type NativeImage } from 'electron';
+import { Menu, Tray, type NativeImage } from 'electron';
+import { trayImage } from './logo-image';
 import { branding } from '../shared/branding';
 
 /**
@@ -35,123 +36,26 @@ export interface TrayHost {
 }
 
 /**
- * The tray mark, drawn in code rather than shipped as a binary.
+ * The tray mark.
  *
- * **The shape is the countdown ring**, which is the one element the interface is
- * built around: a Steam Guard code is a secret with a thirty-second life, and
- * the account list renders that as a ring draining beneath the code. The tray
- * icon is that ring with a quarter gone — the same idea at 32 pixels, so the
- * thing in the system tray and the thing on screen are recognisably one product.
+ * The same shield the taskbar, the installer and the window all use — drawn from
+ * `shared/logo.ts` at runtime rather than loaded from a file, so the tray stays
+ * what it has always been here: code, not a binary blob a reader has to take on
+ * trust. See that module for why the mark is a shield you can see through.
  *
- * Mint (`#42f29a`) is MASTERPANEL LLC's accent, and it holds up against both a
- * light and a dark taskbar, which a mid-grey does not.
+ * **This used to be a different drawing.** The tray showed the countdown ring
+ * from the account list, on the reasoning that it tied the tray to the interface.
+ * It tied it to the wrong thing: the tray icon sits beside the taskbar button and
+ * the shortcut, and a ring next to a shield reads as two applications rather than
+ * one. The product now has a mark, and this is it.
  *
- * It is drawn here instead of committed as a PNG so that nothing in this
- * repository is a binary blob a reader has to take on trust — the same argument
- * the rest of the project makes about its build. Supersampled 4×4 per pixel,
- * because an aliased ring at this size reads as a smudge.
- *
- * **Installer and window icons are still outstanding**: those need a real `.ico`
- * and multi-resolution PNGs in `build/`, which is a packaging task (§10.2).
+ * **Two representations, not one buffer tagged `scaleFactor: 2`.** Supplying only
+ * a 32px image declared as 2x leaves a standard-DPI tray downsampling art it was
+ * never given at its own size, and the aperture is exactly the detail that loses.
+ * A real 16px representation is what Windows asks for, and the 16px rendering is
+ * what the aperture's radius was chosen against.
  */
-/** One size of the mark, as premultiplied BGRA. */
-function ringPixels(size: number): Buffer {
-	const channels = 4;
-	const samples = 4;
-	const pixels = Buffer.alloc(size * size * channels);
-
-	const centre = (size - 1) / 2;
-	// Proportional rather than fixed, so the 16px version is not a thin scratch.
-	const outer = size / 2 - size * 0.08;
-	const inner = outer - size * 0.24;
-
-	// Mint. Written B, G, R because that is the byte order Electron expects.
-	const [b, g, r] = [0x9a, 0xf2, 0x42];
-
-	for (let y = 0; y < size; y++) {
-		for (let x = 0; x < size; x++) {
-			let covered = 0;
-
-			for (let sy = 0; sy < samples; sy++) {
-				for (let sx = 0; sx < samples; sx++) {
-					const px = x + (sx + 0.5) / samples - 0.5;
-					const py = y + (sy + 0.5) / samples - 0.5;
-					const dx = px - centre;
-					const dy = py - centre;
-					const distance = Math.hypot(dx, dy);
-
-					if (distance > outer || distance < inner) {
-						continue;
-					}
-
-					// The gap: a quarter of the ring removed, starting at twelve
-					// o'clock and running clockwise. `atan2` puts 0 at three o'clock,
-					// so this rotates a quarter turn back to the top.
-					const angle = (Math.atan2(dy, dx) + Math.PI / 2 + Math.PI * 2) % (Math.PI * 2);
-					if (angle < Math.PI / 2) {
-						continue;
-					}
-
-					covered += 1;
-				}
-			}
-
-			const alpha = Math.round((covered / (samples * samples)) * 255);
-			const offset = (y * size + x) * channels;
-
-			// **Premultiplied.** Skia — and therefore the Windows tray — reads these
-			// buffers as premultiplied BGRA. Writing full-intensity colour alongside
-			// a partial alpha makes the antialiased edge brighter than it should be,
-			// and on some compositors renders as a halo rather than a smooth edge.
-			pixels[offset] = Math.round((b * alpha) / 255);
-			pixels[offset + 1] = Math.round((g * alpha) / 255);
-			pixels[offset + 2] = Math.round((r * alpha) / 255);
-			pixels[offset + 3] = alpha;
-		}
-	}
-
-	return pixels;
-}
-
-/**
- * The tray mark, drawn in code rather than shipped as a binary.
- *
- * **The shape is the countdown ring**, which is the one element the interface is
- * built around: a Steam Guard code is a secret with a thirty-second life, and the
- * account list renders that as a ring draining beneath the code. The tray icon is
- * that ring with a quarter gone, so the thing in the system tray and the thing on
- * screen are recognisably one product.
- *
- * Mint (`#42f29a`) is MASTERPANEL LLC's accent, and it holds against both a light
- * and a dark taskbar, which a mid-grey does not.
- *
- * **Two representations, not one buffer tagged `scaleFactor: 2`.** The earlier
- * version supplied only a 32px image declared as 2×, which leaves a standard-DPI
- * tray to downsample a ring it was never given at its own size. A real 16px
- * representation is what Windows actually asks for.
- *
- * Drawn here instead of committed as a PNG so that nothing in this repository is
- * a binary blob a reader has to take on trust — the same argument the rest of the
- * project makes about its build.
- *
- * **Installer and window icons are still outstanding**: those need a real `.ico`
- * and multi-resolution PNGs in `build/`, which is a packaging task (§10.2).
- */
-function trayIcon(): NativeImage {
-	const image = nativeImage.createEmpty();
-	for (const [size, scaleFactor] of [
-		[16, 1],
-		[32, 2]
-	] as const) {
-		image.addRepresentation({
-			width: size,
-			height: size,
-			scaleFactor,
-			buffer: ringPixels(size)
-		});
-	}
-	return image;
-}
+const trayIcon = (): NativeImage => trayImage();
 
 export function createTray(host: TrayHost): Tray {
 	const tray = new Tray(trayIcon());

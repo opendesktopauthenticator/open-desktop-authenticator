@@ -32,6 +32,7 @@ import { SteamTransportFactory, type ElectronNetworking } from './net/transport'
 import { ConfirmationsService } from './confirmations/service';
 import { AutoConfirmEngine } from './confirmations/auto';
 import { ActivityLog } from './confirmations/activity';
+import { windowImage } from './logo-image';
 import { createTray } from './tray';
 import { registerConfirmationHandlers } from './confirmations/ipc';
 import { SteamClock } from './steam/clock';
@@ -86,6 +87,10 @@ function createMainWindow(): BrowserWindow {
 		show: false,
 		title: branding.productName,
 		autoHideMenuBar: true,
+		// Alt-Tab and the taskbar button. A packaged Windows build takes these from
+		// the executable, so this is the development case — which is the one the
+		// people building it look at all day.
+		icon: windowImage(),
 		// Painted before the renderer has drawn anything, so a resize or a slow
 		// first paint shows the app's own black rather than white.
 		backgroundColor: WINDOW_CHROME.background,
