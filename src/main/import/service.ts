@@ -1,5 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { MaFileParseError, parseMaFile, type ParsedMaFile } from './mafile';
+import {
+	decryptSdaMaFile,
+	looksEncrypted,
+	parseSdaManifest,
+	SdaDecryptError,
+	type SdaManifestEntry
+} from './sda-crypto';
 import { isUsableSharedSecret } from '../codes/totp';
 import { VaultLockedError, type VaultService } from '../vault/service';
 import type { Account } from '../../shared/vault-schema';
@@ -46,6 +53,32 @@ interface StagedEntry {
 	summary: ImportCandidate;
 }
 
+/** A parsed file on its way to becoming a candidate. */
+interface ParsedEntry {
+	id: string;
+	name: string;
+	parsed: ParsedMaFile;
+	usable: boolean;
+}
+
+/**
+ * An encrypted maFile waiting for a passphrase.
+ *
+ * Held rather than rejected so the user gets a passphrase prompt instead of an
+ * error, and held as **ciphertext** — the plaintext never exists until they
+ * supply the key, so this costs nothing in exposure while the prompt is on
+ * screen. It lives under the same TTL and the same clear-on-lock rule as the
+ * staged plaintext regardless, because a half-finished import should not
+ * outlive the user's attention either way.
+ */
+interface LockedFile {
+	name: string;
+	ciphertextBase64: string;
+	/** From the manifest entry. Absent when no manifest covered this file. */
+	ivBase64?: string;
+	saltBase64?: string;
+}
+
 export interface ImportServiceOptions {
 	/** Injected for testability. Defaults to the wall clock. */
 	now?: () => number;
@@ -78,6 +111,10 @@ export class ImportService {
 	private readonly onRoutingChanged: (steamId64: string) => void;
 	private staged: StagedEntry[] = [];
 	private stagedAt = 0;
+	/** Encrypted files from this scan, awaiting a passphrase. */
+	private locked: LockedFile[] = [];
+	/** Files rejected during the scan, carried so `unlock` can re-report them. */
+	private rejected: ImportReport['rejected'] = [];
 
 	constructor(vault: VaultService, options: ImportServiceOptions = {}) {
 		this.vault = vault;
@@ -93,19 +130,57 @@ export class ImportService {
 	 * vault a precondition: `read()` throws when locked.
 	 */
 	stage(files: StagedFile[]): ImportReport {
-		const existing = new Set(this.vault.read().accounts.map((account) => account.steamId64));
-
 		// Drop the previous staging before parsing, not after: if parsing throws,
 		// the old secrets are already gone rather than left behind.
 		this.discard();
 
 		const rejected: ImportReport['rejected'] = [];
-		const parsedFiles: { id: string; name: string; parsed: ParsedMaFile; usable: boolean }[] = [];
+		const parsedFiles: ParsedEntry[] = [];
+		const encrypted: StagedFile[] = [];
+
+		// A manifest chosen alongside the maFiles is not an account — it is where SDA
+		// keeps the per-file IV and salt. Picked out before anything else, because
+		// whether a maFile can be decrypted depends on it. Recognised by its
+		// structure rather than by its name, so a copy saved as `manifest (1).json`
+		// still works.
+		/** Names of the chosen files that turned out to be manifests, not accounts. */
+		const manifests = new Set<string>();
+		/**
+		 * Every manifest's entries, merged and keyed by base name.
+		 *
+		 * Merged rather than "the first manifest wins" because someone consolidating
+		 * two SDA installs will pick both folders' files at once, and the maFiles
+		 * covered by the second manifest would otherwise look undecryptable for no
+		 * visible reason.
+		 */
+		const manifestEntries = new Map<string, SdaManifestEntry>();
+		for (const file of files) {
+			const candidate = parseSdaManifest(file.text);
+			if (!candidate) {
+				continue;
+			}
+			manifests.add(file.name);
+			for (const entry of candidate.entries) {
+				manifestEntries.set(basenameOf(entry.filename).toLowerCase(), entry);
+			}
+		}
 
 		// Pass one: parse everything. Which file "wins" a repeated account cannot be
 		// decided while still reading them, because the answer depends on files not
 		// yet seen.
 		for (const file of files) {
+			if (manifests.has(file.name)) {
+				continue;
+			}
+
+			// Set aside rather than parsed. `parseMaFile` would reject these as "not
+			// JSON", which is true and useless — they are the files of the users who
+			// did the responsible thing and turned SDA's encryption on.
+			if (looksEncrypted(file.text)) {
+				encrypted.push(file);
+				continue;
+			}
+
 			let parsed: ParsedMaFile;
 			try {
 				parsed = parseMaFile(file.text, file.name, this.now());
@@ -121,20 +196,106 @@ export class ImportService {
 				continue;
 			}
 
-			// Checked here rather than at first use. A secret that cannot produce a
-			// code makes the account useless, and discovering that on the account
-			// list — days later, as a row that never shows a number — is far worse
-			// than being told during the import that the file is damaged.
-			const usable = isUsableSharedSecret(parsed.sharedSecret);
-			if (!usable) {
-				parsed.warnings.push(
-					'The shared secret in this file is not usable, so no Steam Guard codes could ever ' +
-						'be generated from it. The file is damaged.'
-				);
+			parsedFiles.push(this.toEntry(file.name, parsed));
+		}
+
+		this.locked = encrypted.map((file) => {
+			const entry = manifestEntries.get(file.name.toLowerCase());
+			const locked: LockedFile = { name: file.name, ciphertextBase64: file.text };
+			if (entry?.encryption_iv) locked.ivBase64 = entry.encryption_iv;
+			if (entry?.encryption_salt) locked.saltBase64 = entry.encryption_salt;
+			return locked;
+		});
+
+		this.rejected = rejected;
+		return this.buildReport(parsedFiles);
+	}
+
+	/**
+	 * Decrypt the encrypted files from this scan and add them to the staging.
+	 *
+	 * Separate from `stage` because the passphrase cannot be asked for until the
+	 * files have been read and found to need one — and re-running the scan to
+	 * collect it would mean reopening the file picker and making the user choose
+	 * everything a second time.
+	 *
+	 * Files that decrypt join the candidates; files that do not stay locked, so a
+	 * mistyped passphrase can simply be retried. Both can happen in one call: an
+	 * SDA folder can hold maFiles encrypted under different passphrases, and
+	 * failing the whole batch because one of them belongs to a different key would
+	 * be wrong.
+	 */
+	unlock(passphrase: string): ImportReport {
+		if (this.expired()) {
+			this.discard();
+			throw new ImportError(
+				'this import took too long and the files were dropped for safety. Choose them again.'
+			);
+		}
+		if (this.locked.length === 0) {
+			throw new ImportError('none of the chosen files are encrypted.');
+		}
+
+		const parsedFiles: ParsedEntry[] = this.staged.map((entry) => ({
+			id: entry.id,
+			name: entry.sourceName,
+			parsed: entry.parsed,
+			usable: isUsableSharedSecret(entry.parsed.sharedSecret)
+		}));
+
+		const stillLocked: LockedFile[] = [];
+		const failures: ImportReport['rejected'] = [];
+
+		for (const file of this.locked) {
+			if (!file.ivBase64 || !file.saltBase64) {
+				stillLocked.push(file);
+				continue;
 			}
 
-			parsedFiles.push({ id: randomUUID(), name: file.name, parsed, usable });
+			try {
+				const plaintext = decryptSdaMaFile({
+					ciphertextBase64: file.ciphertextBase64,
+					passphrase,
+					ivBase64: file.ivBase64,
+					saltBase64: file.saltBase64
+				});
+				const parsed = parseMaFile(plaintext, file.name, this.now());
+				parsed.warnings.push('This file was encrypted by SDA and was decrypted on import.');
+				parsedFiles.push(this.toEntry(file.name, parsed));
+			} catch (err) {
+				// Left locked, not rejected: the passphrase is retryable and throwing the
+				// file away would make the user pick it again to try a second one.
+				stillLocked.push(file);
+				failures.push({
+					sourceName: file.name,
+					reason:
+						err instanceof SdaDecryptError || err instanceof MaFileParseError
+							? err.message
+							: 'this file could not be decrypted.'
+				});
+			}
 		}
+
+		this.locked = stillLocked;
+		return this.buildReport(parsedFiles, failures);
+	}
+
+	/**
+	 * Turn parsed files into candidates and stage them, replacing the previous
+	 * staging.
+	 *
+	 * Reads the vault to spot duplicates, which is also what makes an unlocked
+	 * vault a precondition: `read()` throws when locked.
+	 *
+	 * Ids are carried in rather than minted here so that unlocking does not
+	 * renumber the candidates already on screen — a selection the user made before
+	 * typing the passphrase stays valid.
+	 */
+	private buildReport(
+		parsedFiles: ParsedEntry[],
+		extraRejected: ImportReport['rejected'] = []
+	): ImportReport {
+		const existing = new Set(this.vault.read().accounts.map((account) => account.steamId64));
 
 		// Pass two: for an account described by more than one chosen file, the most
 		// complete one is the candidate — not whichever the OS happened to list
@@ -153,6 +314,7 @@ export class ImportService {
 		}
 
 		const candidates: ImportCandidate[] = [];
+		this.staged = [];
 
 		// Pass three: report them in the order they were chosen.
 		for (const { id, name, parsed, usable } of parsedFiles) {
@@ -187,7 +349,38 @@ export class ImportService {
 		}
 
 		this.stagedAt = this.now();
-		return { cancelled: false, candidates, rejected };
+		return {
+			cancelled: false,
+			candidates,
+			rejected: [...this.rejected, ...extraRejected],
+			locked: this.locked.map((file) => ({
+				sourceName: file.name,
+				// Without an IV and salt there is nothing a passphrase could be applied
+				// to. The screen turns this into "also choose manifest.json", which is
+				// the actual fix and is not guessable from a decryption failure.
+				decryptable: file.ivBase64 !== undefined && file.saltBase64 !== undefined
+			}))
+		};
+	}
+
+	/**
+	 * Wrap a parsed file with the one check that decides whether it is worth
+	 * importing at all.
+	 *
+	 * Checked here rather than at first use. A secret that cannot produce a code
+	 * makes the account useless, and discovering that on the account list — days
+	 * later, as a row that never shows a number — is far worse than being told
+	 * during the import that the file is damaged.
+	 */
+	private toEntry(name: string, parsed: ParsedMaFile): ParsedEntry {
+		const usable = isUsableSharedSecret(parsed.sharedSecret);
+		if (!usable) {
+			parsed.warnings.push(
+				'The shared secret in this file is not usable, so no Steam Guard codes could ever ' +
+					'be generated from it. The file is damaged.'
+			);
+		}
+		return { id: randomUUID(), name, parsed, usable };
 	}
 
 	/**
@@ -355,6 +548,8 @@ export class ImportService {
 	/** Drop every staged secret. */
 	discard(): void {
 		this.staged = [];
+		this.locked = [];
+		this.rejected = [];
 		this.stagedAt = 0;
 	}
 
@@ -363,9 +558,37 @@ export class ImportService {
 		return this.expired() ? 0 : this.staged.length;
 	}
 
-	private expired(): boolean {
-		return this.staged.length > 0 && this.now() - this.stagedAt > this.ttlMs;
+	/** How many encrypted files are waiting for a passphrase. Zero once expired. */
+	lockedCount(): number {
+		return this.expired() ? 0 : this.locked.length;
 	}
+
+	/**
+	 * The TTL covers **locked files too**, not just staged plaintext.
+	 *
+	 * Checking `staged` alone left a scan of nothing but encrypted files with an
+	 * empty staging area, so it never counted as expired — the ciphertext then sat
+	 * in memory until quit, waiting for a passphrase prompt the user had walked
+	 * away from an hour earlier.
+	 */
+	private expired(): boolean {
+		const held = this.staged.length + this.locked.length;
+		return held > 0 && this.now() - this.stagedAt > this.ttlMs;
+	}
+}
+
+/**
+ * The base name of a path recorded in SDA's manifest.
+ *
+ * SDA normally stores a bare file name, but installs that have been moved carry
+ * a full path — and the picker only ever gives us base names, so the two would
+ * never match and every file would look like it had no manifest entry.
+ * Deliberately not `path.basename`: this splits on both separators regardless of
+ * platform, because a manifest written on Windows can be read on Linux.
+ */
+function basenameOf(value: string): string {
+	const parts = value.split(/[\\/]/);
+	return parts[parts.length - 1] ?? value;
 }
 
 /**

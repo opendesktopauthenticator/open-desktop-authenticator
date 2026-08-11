@@ -92,6 +92,14 @@ export const CHANNELS = {
 	 *  - `importDiscard` drops the staged secrets without importing anything.
 	 */
 	importScan: 'import:scan',
+	/**
+	 * Decrypt the encrypted maFiles from the current scan. Passphrase inbound.
+	 *
+	 * Its own channel rather than an argument to `importScan`, because the
+	 * passphrase cannot be asked for until the files have been read and found to
+	 * need one — and re-scanning would reopen the picker.
+	 */
+	importUnlock: 'import:unlock',
 	importCommit: 'import:commit',
 	importDiscard: 'import:discard',
 

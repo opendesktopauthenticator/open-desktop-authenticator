@@ -32,12 +32,12 @@ vi.mock('electron', () => ({
 	}
 }));
 
-const STEAM_ID = '76561198744715021';
+const STEAM_ID = '76561198000000001';
 
 function account(trades: boolean): Account {
 	return {
 		steamId64: STEAM_ID,
-		accountName: 'daneytneetuwej',
+		accountName: 'trader',
 		sharedSecret: 'ASNFZ4mrze8BI0VniavN7wEjRWc=',
 		identitySecret: 'ASNFZ4mrze8BI0VniavN7wEjRWc=',
 		status: 'active',

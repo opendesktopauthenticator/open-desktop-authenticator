@@ -26,11 +26,13 @@ import { messageOf } from '../ipc-message';
  */
 export function ImportAccounts({
 	onScan,
+	onUnlock,
 	onCommit,
 	onDiscard,
 	onClose
 }: {
 	onScan: () => Promise<ImportReport>;
+	onUnlock: (passphrase: string) => Promise<ImportReport>;
 	// The shared type rather than a restatement of it. Spelling the shape out here
 	// is how this drifted from the IPC schema in the first place.
 	onCommit: (selections: ImportSelection[]) => Promise<{ outcomes: ImportOutcome[] }>;
@@ -38,6 +40,8 @@ export function ImportAccounts({
 	onClose: () => void;
 }): React.JSX.Element {
 	const [report, setReport] = useState<ImportReport | undefined>();
+	/** The SDA passphrase, held only while the prompt is on screen. */
+	const [passphrase, setPassphrase] = useState('');
 	const [selected, setSelected] = useState<Set<string>>(new Set());
 	/** Rows whose file-supplied proxy the user has explicitly opted into. Never pre-ticked. */
 	const [adopted, setAdopted] = useState<Set<string>>(new Set());
@@ -86,10 +90,59 @@ export function ImportAccounts({
 				);
 				// A previous scan's opt-ins must not carry over to different files.
 				setAdopted(new Set());
+				setPassphrase('');
 			})
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => setBusy(false));
 	}, [busy, onScan]);
+
+	/**
+	 * Decrypt the encrypted files and merge them into the report.
+	 *
+	 * The selection is deliberately **not** rebuilt from scratch afterwards: the
+	 * staging ids of files already listed survive an unlock, so anything the user
+	 * had ticked before typing the passphrase stays ticked. Newly decrypted rows
+	 * are added on the same terms as a fresh scan — pre-ticked only when
+	 * unambiguous.
+	 */
+	const unlock = useCallback((): void => {
+		if (busy || passphrase === '') {
+			return;
+		}
+		setBusy(true);
+		setError(undefined);
+		onUnlock(passphrase)
+			.then((next) => {
+				setReport(next);
+				setSelected((previous) => {
+					const merged = new Set(previous);
+					for (const candidate of next.candidates) {
+						if (
+							!previous.has(candidate.stagingId) &&
+							candidate.importable &&
+							candidate.duplicate === undefined
+						) {
+							merged.add(candidate.stagingId);
+						}
+					}
+					// Anything that is no longer in the report cannot be committed.
+					const live = new Set(next.candidates.map((candidate) => candidate.stagingId));
+					for (const id of merged) {
+						if (!live.has(id)) merged.delete(id);
+					}
+					return merged;
+				});
+				// Cleared on success and on failure alike. A wrong passphrase left in
+				// the field invites pressing the button again unchanged, and a right one
+				// has no reason to stay in renderer memory once it has been used.
+				setPassphrase('');
+			})
+			.catch((err: unknown) => {
+				setError(messageOf(err));
+				setPassphrase('');
+			})
+			.finally(() => setBusy(false));
+	}, [busy, onUnlock, passphrase]);
 
 	const commit = useCallback((): void => {
 		if (!report || busy) {
@@ -155,6 +208,10 @@ export function ImportAccounts({
 				Choose the <code>.maFile</code> files from your Steam Desktop Authenticator install. They
 				are read, never moved or changed.
 			</p>
+			<p className="hint">
+				If you turned SDA’s encryption on, select <code>manifest.json</code> from the same folder as
+				well — it holds the settings needed to decrypt them, and they cannot be read without it.
+			</p>
 
 			{error && <p className="error">{error}</p>}
 
@@ -168,6 +225,16 @@ export function ImportAccounts({
 
 			{report && (
 				<>
+					{report.locked.length > 0 && (
+						<LockedFiles
+							locked={report.locked}
+							passphrase={passphrase}
+							onPassphrase={setPassphrase}
+							onUnlock={unlock}
+							busy={busy}
+						/>
+					)}
+
 					{report.candidates.length > 0 && (
 						<>
 							<h2>Found</h2>
@@ -204,9 +271,11 @@ export function ImportAccounts({
 						</>
 					)}
 
-					{report.candidates.length === 0 && report.rejected.length === 0 && (
-						<p className="muted">Nothing usable was found in what you chose.</p>
-					)}
+					{report.candidates.length === 0 &&
+						report.rejected.length === 0 &&
+						report.locked.length === 0 && (
+							<p className="muted">Nothing usable was found in what you chose.</p>
+						)}
 
 					<div className="controls">
 						<button type="button" onClick={commit} disabled={busy || selected.size === 0}>
@@ -222,6 +291,7 @@ export function ImportAccounts({
 								setReport(undefined);
 								setSelected(new Set());
 								setAdopted(new Set());
+								setPassphrase('');
 							}}
 							disabled={busy}
 						>
@@ -232,6 +302,98 @@ export function ImportAccounts({
 			)}
 		</main>
 	);
+}
+
+/**
+ * The passphrase prompt for encrypted SDA files.
+ *
+ * Two failures are possible and they have completely different fixes, so they
+ * are never merged into one message:
+ *
+ *  - **wrong passphrase** — retry, which is why the files stay listed here
+ *    rather than moving to "Not imported";
+ *  - **no `manifest.json` chosen** — no passphrase can help, because SDA keeps
+ *    the IV and salt in the manifest rather than in the maFile. Nothing about a
+ *    decryption failure would ever lead a user to that conclusion, so it is said
+ *    outright.
+ */
+function LockedFiles({
+	locked,
+	passphrase,
+	onPassphrase,
+	onUnlock,
+	busy
+}: {
+	locked: ImportReport['locked'];
+	passphrase: string;
+	onPassphrase: (value: string) => void;
+	onUnlock: () => void;
+	busy: boolean;
+}): React.JSX.Element {
+	const decryptable = locked.filter((file) => file.decryptable);
+	const orphaned = locked.filter((file) => !file.decryptable);
+
+	return (
+		<>
+			<h2>Encrypted</h2>
+			<ul className="accounts">
+				{locked.map((file) => (
+					<li key={file.sourceName}>
+						<div>
+							<strong>{file.sourceName}</strong>
+							<p className="hint">
+								{file.decryptable
+									? 'Encrypted by Steam Desktop Authenticator.'
+									: 'Encrypted, but the manifest.json that holds this file’s decryption ' +
+										'settings was not among the files you chose. Choose the files again, ' +
+										'including manifest.json from the same folder.'}
+							</p>
+						</div>
+					</li>
+				))}
+			</ul>
+
+			{decryptable.length > 0 && (
+				<form
+					className="stack"
+					onSubmit={(event) => {
+						event.preventDefault();
+						onUnlock();
+					}}
+				>
+					<label htmlFor="sda-passphrase">
+						The password you set in Steam Desktop Authenticator
+					</label>
+					<input
+						id="sda-passphrase"
+						type="password"
+						autoComplete="off"
+						spellCheck={false}
+						value={passphrase}
+						onChange={(event) => onPassphrase(event.target.value)}
+						disabled={busy}
+					/>
+					<p className="hint">
+						This is SDA’s encryption password, not the passphrase for this app’s vault and not your
+						Steam password. It is used to decrypt the files and is not stored.
+					</p>
+					<button type="submit" disabled={busy || passphrase === ''}>
+						{busy ? 'Working…' : `Decrypt ${decryptable.length} file${plural(decryptable.length)}`}
+					</button>
+				</form>
+			)}
+
+			{decryptable.length === 0 && orphaned.length > 0 && (
+				<p className="hint bad">
+					None of these can be decrypted without <code>manifest.json</code>.
+				</p>
+			)}
+		</>
+	);
+}
+
+function plural(count: number): string {
+	return count === 1 ? '' : 's';
 }
 
 function CandidateRow({

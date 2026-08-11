@@ -212,15 +212,25 @@ must not be deleted, recorded in ARCHITECTURE.md.
 
 ## §24.3 — IPC surface change for F2, awaiting sign-off
 
-Three channels were added to build maFile import. §24.3 requires founder
+Four channels were added to build maFile import. §24.3 requires founder
 sign-off for any change to the IPC surface, so they are listed here in full
 rather than buried in a diff.
 
 | Channel          | Renderer sends                             | Renderer receives                                                                |
 | ---------------- | ------------------------------------------ | -------------------------------------------------------------------------------- |
 | `import:scan`    | nothing                                    | one record per chosen file: name, account name, SteamID, four booleans, warnings |
+| `import:unlock`  | an SDA encryption passphrase               | the same report, with the files that decrypted now listed as candidates          |
 | `import:commit`  | opaque staging ids + a replace flag per id | one outcome per id: imported / replaced / skipped, and why                       |
 | `import:discard` | nothing                                    | `{ ok: true }`                                                                   |
+
+`import:unlock` is the one that carries a secret inbound, and it is worth being
+explicit about why it exists as a separate channel rather than as an argument to
+`import:scan`. The passphrase cannot be collected until the files have been read
+and found to be encrypted; folding it into the scan would mean reopening the OS
+picker to ask for it, making the user select every file a second time. The
+passphrase is used to derive a key, and is not stored, logged, or echoed back —
+`tests/sda-crypto.test.ts` asserts it never appears in an error message, which is
+the path by which it would otherwise reach the renderer and the activity log.
 
 Three properties are worth checking before signing this off, because they are
 what keep the addition from widening the attack surface:
@@ -237,7 +247,10 @@ what keep the addition from widening the attack surface:
 3. **Staged plaintext is bounded.** Between the picker and the commit the parsed
    secrets sit in main-process memory. They are dropped when a new scan replaces
    them, when the commit finishes, when the screen is left, when the vault locks,
-   and after ten minutes regardless.
+   and after ten minutes regardless. Encrypted files awaiting a passphrase are
+   held under the same rules and on the same clock — the ten-minute expiry
+   originally counted staged plaintext only, so a scan of nothing but encrypted
+   files never expired at all and their ciphertext sat in memory until quit.
 
 ## §24.3 — IPC surface change for F4, awaiting sign-off
 

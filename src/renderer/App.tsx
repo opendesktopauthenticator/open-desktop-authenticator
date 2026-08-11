@@ -411,6 +411,7 @@ export function App(): React.JSX.Element {
 			return (
 				<ImportAccounts
 					onScan={() => api.scanMaFiles()}
+					onUnlock={(passphrase) => api.unlockImport(passphrase)}
 					onCommit={(selections) => api.commitImport(selections)}
 					onDiscard={() => api.discardImport()}
 					onClose={() => setView('accounts')}

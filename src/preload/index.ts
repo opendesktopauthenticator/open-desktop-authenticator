@@ -127,6 +127,8 @@ const api: RendererApi = {
 	// Takes no path and returns none: the OS picker is the only thing that names
 	// a file, and the main process is the only thing that reads one.
 	scanMaFiles: () => ipcRenderer.invoke(CHANNELS.importScan, {}) as Promise<ImportReport>,
+	unlockImport: (passphrase: string) =>
+		ipcRenderer.invoke(CHANNELS.importUnlock, { passphrase }) as Promise<ImportReport>,
 	commitImport: (selections: ImportSelection[]) =>
 		ipcRenderer.invoke(CHANNELS.importCommit, { selections }) as Promise<{
 			outcomes: ImportOutcome[];

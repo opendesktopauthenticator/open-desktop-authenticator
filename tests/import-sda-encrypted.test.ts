@@ -1,0 +1,378 @@
+import { createCipheriv, pbkdf2Sync, randomBytes } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ImportError, ImportService, type StagedFile } from '../src/main/import/service';
+import { VaultService } from '../src/main/vault/service';
+
+/**
+ * Importing an encrypted SDA install (§12 F2).
+ *
+ * The flow, not the arithmetic — `sda-crypto.test.ts` covers the cipher, and its
+ * header explains why none of this proves compatibility with a real SDA install.
+ * What is tested here is everything around it, which is where the five
+ * enrollment defects all turned out to live: whether the user is told the right
+ * thing, whether there is a way forward from each state, and whether a mistake
+ * is recoverable without starting the import again.
+ *
+ * The specific failures being guarded against:
+ *
+ *  - an encrypted file reported as "damaged" instead of "needs a passphrase";
+ *  - a missing `manifest.json` reported as a wrong passphrase, sending the user
+ *    to look for a password when the fix is to pick another file;
+ *  - a typo throwing away every file, so the whole selection must be made again;
+ *  - the manifest itself listed as an account.
+ */
+vi.mock('../src/shared/vault-format', async () => {
+	const actual = await vi.importActual<typeof import('../src/shared/vault-format')>(
+		'../src/shared/vault-format'
+	);
+	return {
+		...actual,
+		SCRYPT_DEFAULTS: Object.freeze({ ...actual.MINIMUM_SCRYPT, maxmem: 256 * 1024 * 1024 })
+	};
+});
+
+const PASS = 'a sufficiently long passphrase';
+const SDA_PASS = 'the sda password';
+const SECRET = 'ASNFZ4mrze8BI0VniavN7wEjRWc=';
+const NOW = Date.UTC(2026, 7, 10, 12, 0, 0);
+
+let dir: string;
+let clock: number;
+let vault: VaultService;
+let imports: ImportService;
+
+beforeEach(async () => {
+	dir = mkdtempSync(join(tmpdir(), 'import-sda-'));
+	clock = NOW;
+	vault = new VaultService({ file: join(dir, 'vault.json'), now: () => clock });
+	await vault.create(PASS);
+	imports = new ImportService(vault, { now: () => clock });
+});
+
+afterEach(() => {
+	rmSync(dir, { recursive: true, force: true });
+});
+
+function maFileText(overrides: Record<string, unknown> = {}): string {
+	return JSON.stringify({
+		shared_secret: SECRET,
+		identity_secret: 'aWRlbnRpdHk=',
+		account_name: 'trader',
+		revocation_code: 'R12345',
+		steamid: '76561198000000001',
+		...overrides
+	});
+}
+
+/** One encrypted maFile plus the manifest entry that describes it. */
+function encryptedPair(
+	name: string,
+	passphrase = SDA_PASS,
+	overrides: Record<string, unknown> = {}
+): { file: StagedFile; entry: Record<string, string> } {
+	const salt = randomBytes(8);
+	const iv = randomBytes(16);
+	const key = pbkdf2Sync(passphrase, salt, 50_000, 32, 'sha1');
+	const cipher = createCipheriv('aes-256-cbc', key, iv);
+	const ciphertext = Buffer.concat([
+		cipher.update(maFileText(overrides), 'utf8'),
+		cipher.final()
+	]).toString('base64');
+
+	return {
+		file: { name, text: ciphertext },
+		entry: {
+			filename: name,
+			encryption_iv: iv.toString('base64'),
+			encryption_salt: salt.toString('base64')
+		}
+	};
+}
+
+function manifest(entries: Record<string, string>[], name = 'manifest.json'): StagedFile {
+	return { name, text: JSON.stringify({ encrypted: true, entries }) };
+}
+
+describe('scanning an encrypted install', () => {
+	it('asks for a passphrase rather than calling the file damaged', () => {
+		const one = encryptedPair('76561198000000001.maFile');
+
+		const report = imports.stage([one.file, manifest([one.entry])]);
+
+		expect(report.locked).toHaveLength(1);
+		expect(report.locked[0]?.sourceName).toBe('76561198000000001.maFile');
+		expect(report.locked[0]?.decryptable).toBe(true);
+		// Not rejected. Rejected means "there is nothing you can do about this",
+		// and there very much is.
+		expect(report.rejected).toHaveLength(0);
+		expect(report.candidates).toHaveLength(0);
+	});
+
+	it('does not list the manifest as an account', () => {
+		const one = encryptedPair('a.maFile');
+
+		const report = imports.stage([one.file, manifest([one.entry])]);
+
+		expect(report.candidates).toHaveLength(0);
+		expect(report.rejected).toHaveLength(0);
+		expect(report.locked.map((file) => file.sourceName)).toEqual(['a.maFile']);
+	});
+
+	it('recognises a manifest that has been renamed', () => {
+		// Browsers name a second download `manifest (1).json`, and a user copying
+		// files out of an SDA folder often ends up with one.
+		const one = encryptedPair('a.maFile');
+
+		const report = imports.stage([one.file, manifest([one.entry], 'manifest (1).json')]);
+
+		expect(report.locked[0]?.decryptable).toBe(true);
+	});
+
+	it('marks a file undecryptable when no manifest was chosen', () => {
+		// The distinction that matters most on this screen. No passphrase can help,
+		// so reporting this as a decryption failure would send the user hunting for
+		// a password when the fix is to pick one more file.
+		const one = encryptedPair('a.maFile');
+
+		const report = imports.stage([one.file]);
+
+		expect(report.locked).toHaveLength(1);
+		expect(report.locked[0]?.decryptable).toBe(false);
+	});
+
+	it('matches a manifest that records full paths, not bare names', () => {
+		// An SDA install that has been moved records absolute paths, while the
+		// picker only ever gives base names — so a naive comparison finds nothing
+		// and every file looks undecryptable.
+		const one = encryptedPair('a.maFile');
+		const withPath = { ...one.entry, filename: 'C:\\SDA\\maFiles\\a.maFile' };
+
+		const report = imports.stage([one.file, manifest([withPath])]);
+
+		expect(report.locked[0]?.decryptable).toBe(true);
+	});
+
+	it('merges entries from more than one manifest', () => {
+		// Consolidating two SDA installs in one go. Taking only the first manifest
+		// would leave the second folder's files looking undecryptable.
+		const one = encryptedPair('a.maFile');
+		const two = encryptedPair('b.maFile');
+
+		const report = imports.stage([
+			one.file,
+			two.file,
+			manifest([one.entry], 'manifest.json'),
+			manifest([two.entry], 'other-manifest.json')
+		]);
+
+		expect(report.locked.every((file) => file.decryptable)).toBe(true);
+	});
+
+	it('handles a folder holding both encrypted and plaintext files', () => {
+		const one = encryptedPair('encrypted.maFile');
+		const plain: StagedFile = {
+			name: 'plain.maFile',
+			text: maFileText({ steamid: '76561198000000002', account_name: 'other' })
+		};
+
+		const report = imports.stage([one.file, plain, manifest([one.entry])]);
+
+		expect(report.candidates.map((candidate) => candidate.accountName)).toEqual(['other']);
+		expect(report.locked).toHaveLength(1);
+	});
+});
+
+describe('unlocking', () => {
+	it('turns a locked file into an importable candidate', () => {
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+
+		const report = imports.unlock(SDA_PASS);
+
+		expect(report.locked).toHaveLength(0);
+		expect(report.candidates).toHaveLength(1);
+		expect(report.candidates[0]?.accountName).toBe('trader');
+		expect(report.candidates[0]?.steamId64).toBe('76561198000000001');
+		expect(report.candidates[0]?.hasRevocationCode).toBe(true);
+		expect(report.candidates[0]?.importable).toBe(true);
+	});
+
+	it('commits a decrypted account into the vault', () => {
+		// The end of the road: the point of the whole feature is an account that
+		// works afterwards, not a candidate that looks right on screen.
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+		const report = imports.unlock(SDA_PASS);
+		const id = report.candidates[0]?.stagingId ?? '';
+
+		return imports
+			.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+			.then((outcomes) => {
+				expect(outcomes[0]?.result).toBe('imported');
+
+				const stored = vault.read().accounts[0];
+				expect(stored?.steamId64).toBe('76561198000000001');
+				expect(stored?.sharedSecret).toBe(SECRET);
+				expect(stored?.revocationCode).toBe('R12345');
+			});
+	});
+
+	it('says the file was decrypted, so the user knows which ones were', () => {
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+
+		const report = imports.unlock(SDA_PASS);
+
+		expect(report.candidates[0]?.warnings.join(' ')).toMatch(/decrypted/i);
+	});
+
+	it('keeps a file locked on a wrong passphrase instead of discarding it', () => {
+		// A typo must cost a retry, not the whole selection. Discarding would mean
+		// reopening the picker and choosing every file again.
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+
+		const report = imports.unlock('wrong');
+
+		expect(report.locked).toHaveLength(1);
+		expect(report.candidates).toHaveLength(0);
+		expect(report.rejected[0]?.reason).toMatch(/passphrase/i);
+	});
+
+	it('accepts the right passphrase after a wrong one', () => {
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+		imports.unlock('wrong');
+
+		const report = imports.unlock(SDA_PASS);
+
+		expect(report.candidates).toHaveLength(1);
+		expect(report.locked).toHaveLength(0);
+	});
+
+	it('unlocks what it can and leaves the rest, across mixed passphrases', () => {
+		// One SDA folder can hold files encrypted under different passwords, from an
+		// install whose password was changed. Failing the batch on the first miss
+		// would make those accounts unimportable.
+		const one = encryptedPair('a.maFile');
+		const two = encryptedPair('b.maFile', 'a different password', {
+			steamid: '76561198000000002',
+			account_name: 'other'
+		});
+		imports.stage([one.file, two.file, manifest([one.entry, two.entry])]);
+
+		const report = imports.unlock(SDA_PASS);
+
+		expect(report.candidates.map((candidate) => candidate.accountName)).toEqual(['trader']);
+		expect(report.locked.map((file) => file.sourceName)).toEqual(['b.maFile']);
+	});
+
+	it('keeps candidates found before the unlock, with their ids intact', () => {
+		// The renderer's tick boxes are keyed on staging ids. Renumbering them here
+		// would silently clear a selection the user had already made.
+		const one = encryptedPair('encrypted.maFile');
+		const plain: StagedFile = {
+			name: 'plain.maFile',
+			text: maFileText({ steamid: '76561198000000002', account_name: 'other' })
+		};
+		const first = imports.stage([one.file, plain, manifest([one.entry])]);
+		const plainId = first.candidates[0]?.stagingId;
+
+		const report = imports.unlock(SDA_PASS);
+
+		expect(report.candidates).toHaveLength(2);
+		expect(report.candidates.some((candidate) => candidate.stagingId === plainId)).toBe(true);
+	});
+
+	it('spots that a decrypted file is an account already in the vault', () => {
+		// Duplicate detection runs against the vault as it is now, so it has to be
+		// redone after an unlock rather than carried over from the scan.
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+		const first = imports.unlock(SDA_PASS);
+
+		return imports
+			.commit([
+				{
+					stagingId: first.candidates[0]?.stagingId ?? '',
+					replaceExisting: false,
+					adoptProxy: false
+				}
+			])
+			.then(() => {
+				const two = encryptedPair('a.maFile');
+				imports.stage([two.file, manifest([two.entry])]);
+
+				expect(imports.unlock(SDA_PASS).candidates[0]?.duplicate).toBe('vault');
+			});
+	});
+
+	it('refuses to decrypt a file whose manifest entry is missing', () => {
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file]);
+
+		const report = imports.unlock(SDA_PASS);
+
+		// Still locked, and still reported as undecryptable rather than as a wrong
+		// passphrase — the passphrase was never the problem.
+		expect(report.locked[0]?.decryptable).toBe(false);
+		expect(report.rejected).toHaveLength(0);
+	});
+
+	it('refuses when nothing is encrypted, rather than pretending to work', () => {
+		imports.stage([{ name: 'plain.maFile', text: maFileText() }]);
+
+		expect(() => imports.unlock(SDA_PASS)).toThrow(ImportError);
+	});
+});
+
+describe('not leaving ciphertext lying about', () => {
+	it('drops locked files when the import is discarded', () => {
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+
+		imports.discard();
+
+		expect(imports.lockedCount()).toBe(0);
+		expect(() => imports.unlock(SDA_PASS)).toThrow(ImportError);
+	});
+
+	it('expires locked files on the same clock as staged secrets', () => {
+		// The bug this exists for: `expired()` looked only at the staged plaintext.
+		// A scan of nothing but encrypted files staged nothing, so it never counted
+		// as expired, and the ciphertext sat in memory until quit — waiting for a
+		// prompt the user had walked away from an hour earlier.
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+		expect(imports.lockedCount()).toBe(1);
+
+		clock += 11 * 60_000;
+
+		expect(imports.lockedCount()).toBe(0);
+		expect(() => imports.unlock(SDA_PASS)).toThrow(/took too long/);
+	});
+
+	it('replaces the previous scan rather than accumulating locked files', () => {
+		const one = encryptedPair('a.maFile');
+		const two = encryptedPair('b.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+
+		const report = imports.stage([two.file, manifest([two.entry])]);
+
+		expect(report.locked.map((file) => file.sourceName)).toEqual(['b.maFile']);
+	});
+
+	it('never puts a decrypted secret into the report', () => {
+		const one = encryptedPair('a.maFile');
+		imports.stage([one.file, manifest([one.entry])]);
+
+		const serialised = JSON.stringify(imports.unlock(SDA_PASS));
+
+		expect(serialised).not.toContain(SECRET);
+		expect(serialised).not.toContain('R12345');
+		expect(serialised).not.toContain(SDA_PASS);
+	});
+});

@@ -63,8 +63,15 @@ describe('parseMaFile', () => {
 		expect(() => parseMaFile(text, 'x.maFile', NOW)).toThrow(MaFileParseError);
 	});
 
-	it('rejects an SDA encrypted manifest with an explanation, not a JSON error', () => {
-		expect(() => parseMaFile('BASE64GIBBERISH==', 'x.maFile', NOW)).toThrow(/encrypted manifest/);
+	it('rejects a non-JSON file with an explanation, not a raw parser error', () => {
+		// This used to say the file was probably an encrypted SDA manifest. It no
+		// longer can: encrypted files are now recognised by `looksEncrypted` and
+		// diverted to the passphrase prompt before they ever reach this parser, so
+		// anything arriving here really is just not a maFile — and sending the user
+		// off to find a password that does not exist would be the wrong advice.
+		expect(() => parseMaFile('BASE64GIBBERISH==', 'x.maFile', NOW)).toThrow(
+			/does not contain JSON/
+		);
 	});
 
 	it('tolerates a UTF-8 BOM, which SDA sometimes writes', () => {

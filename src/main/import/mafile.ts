@@ -176,10 +176,11 @@ export function parseMaFile(text: string, fileName: string, nowMs: number): Pars
 	const raw = text.replace(/^\uFEFF/, '').trim();
 
 	if (!raw.startsWith('{')) {
-		throw new MaFileParseError(
-			'this is not a JSON maFile. If it came from an SDA install with encryption ' +
-				'switched on, it is an encrypted manifest — that format is not supported yet.'
-		);
+		// Encrypted SDA files never reach here — the import service sets them aside
+		// before parsing and asks for a passphrase instead. So anything that lands
+		// on this branch is genuinely not a maFile, and saying "it might be
+		// encrypted" would send the user looking for a password that does not exist.
+		throw new MaFileParseError('this is not a maFile — it does not contain JSON.');
 	}
 
 	let json: unknown;

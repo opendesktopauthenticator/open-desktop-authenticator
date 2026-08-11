@@ -38,7 +38,7 @@ export function registerImportHandlers(imports: ImportService): void {
 			: dialog.showOpenDialog(PICKER_OPTIONS));
 
 		if (picked.canceled || picked.filePaths.length === 0) {
-			return { cancelled: true, candidates: [], rejected: [] };
+			return { cancelled: true, candidates: [], rejected: [], locked: [] };
 		}
 
 		// Checked again, and this is the one that matters. The dialog can stay open
@@ -78,6 +78,14 @@ export function registerImportHandlers(imports: ImportService): void {
 
 		const report = imports.stage(files);
 		return { ...report, rejected: [...rejected, ...report.rejected] };
+	});
+
+	registerHandler(CHANNELS.importUnlock, ({ passphrase }): ImportReport => {
+		// The vault has to be open for the same reason `stage` needs it: this puts
+		// decrypted secrets into the staging area, and doing that with nobody
+		// present is exactly what the check exists to stop.
+		imports.assertUnlocked();
+		return imports.unlock(passphrase);
 	});
 
 	registerHandler(CHANNELS.importCommit, async ({ selections }) => ({
@@ -122,7 +130,12 @@ const PICKER_OPTIONS = {
 	// list, where its name would advertise which accounts live on this machine.
 	properties: ['openFile', 'multiSelections', 'dontAddToRecent'] as const,
 	filters: [
-		{ name: 'Steam authenticator files', extensions: ['maFile'] },
+		// `json` is in the first filter so that an SDA `manifest.json` can be picked
+		// alongside the maFiles without the user having to work out that they must
+		// switch to "All files" first. For an encrypted install the manifest is not
+		// optional — it holds the IV and salt, and there is no decrypting anything
+		// without it.
+		{ name: 'Steam authenticator files', extensions: ['maFile', 'json'] },
 		{ name: 'All files', extensions: ['*'] }
 	]
 } satisfies Electron.OpenDialogOptions;

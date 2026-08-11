@@ -318,7 +318,27 @@ export const importReportResponse = z.object({
 	cancelled: z.boolean(),
 	candidates: z.array(importCandidate),
 	/** Files that could not be parsed at all, with the reason shown to the user. */
-	rejected: z.array(z.object({ sourceName: z.string(), reason: z.string() }))
+	rejected: z.array(z.object({ sourceName: z.string(), reason: z.string() })),
+	/**
+	 * Encrypted SDA files waiting for a passphrase.
+	 *
+	 * Not `rejected`: these are recoverable, and the difference decides what the
+	 * screen offers. Defaulted so a report built before this field existed still
+	 * parses.
+	 */
+	locked: z
+		.array(
+			z.object({
+				sourceName: z.string(),
+				/**
+				 * False when no `manifest.json` supplied this file's IV and salt, so no
+				 * passphrase could decrypt it. The fix is to choose the manifest too,
+				 * which is not something a failed decryption would ever suggest.
+				 */
+				decryptable: z.boolean()
+			})
+		)
+		.default([])
 });
 
 export const importCommitRequest = z
@@ -651,6 +671,14 @@ export const IPC_CONTRACT = {
 	},
 
 	[CHANNELS.importScan]: { request: emptyRequest, response: importReportResponse },
+	[CHANNELS.importUnlock]: {
+		// The SDA passphrase, inbound exactly as a vault passphrase is, and dropped
+		// as soon as the files have been decrypted. Not bounded below by a minimum:
+		// this passphrase was chosen in another program under another program's
+		// rules, and refusing a short one would just be refusing to import.
+		request: z.object({ passphrase: z.string().min(1).max(1024) }).strict(),
+		response: importReportResponse
+	},
 	[CHANNELS.importCommit]: { request: importCommitRequest, response: importCommitResponse },
 	[CHANNELS.importDiscard]: { request: emptyRequest, response: okResponse },
 
@@ -787,6 +815,13 @@ export interface RendererApi {
 
 	/** Opens the OS file picker and reports what was chosen. No paths, no secrets. */
 	scanMaFiles(): Promise<ImportReport>;
+	/**
+	 * Decrypt the encrypted files from the last scan, and report again.
+	 *
+	 * Files that do not decrypt stay locked so the passphrase can be retried; the
+	 * new report says which, and why.
+	 */
+	unlockImport(passphrase: string): Promise<ImportReport>;
 	commitImport(selections: ImportSelection[]): Promise<{ outcomes: ImportOutcome[] }>;
 	discardImport(): Promise<{ ok: true }>;
 
