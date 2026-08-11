@@ -315,6 +315,15 @@ export function App(): React.JSX.Element {
 						await api.createVault(passphrase);
 						await refresh({ includeCodes: false });
 					}}
+					// A vault file can be missing while its backup is not — moved,
+					// deleted, or a restore that failed partway. Without this, the only
+					// route the screen offered was creating a fresh vault, whose second
+					// save copies over the backup that still held every account.
+					backupAvailable={status.backupAvailable}
+					onRestoreBackup={async (passphrase) => {
+						await api.restoreVaultBackup(passphrase);
+						await refresh({ includeCodes: false });
+					}}
 				/>
 			);
 		}

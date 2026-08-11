@@ -6,6 +6,7 @@ import {
 	STRENGTH_ADVICE
 } from '../../shared/passphrase-policy';
 import { messageOf } from '../ipc-message';
+import { BackupRestore } from './BackupRestore';
 
 /**
  * Vault creation, including the "there is no recovery" ceremony (§10.3).
@@ -16,9 +17,14 @@ import { messageOf } from '../ipc-message';
  * the moment they need it.
  */
 export function CreateVault({
-	onCreate
+	onCreate,
+	backupAvailable,
+	onRestoreBackup
 }: {
 	onCreate: (passphrase: string) => Promise<void>;
+	/** True when a `vault.json.bak` is on disk even though the vault itself is gone. */
+	backupAvailable: boolean;
+	onRestoreBackup: (passphrase: string) => Promise<void>;
 }): React.JSX.Element {
 	const [passphrase, setPassphrase] = useState('');
 	const [confirmation, setConfirmation] = useState('');
@@ -59,6 +65,29 @@ export function CreateVault({
 			<p className="muted">
 				One passphrase protects every account you add. It never leaves this machine.
 			</p>
+
+			{/* **The reason this screen can be reached with accounts still on disk.**
+			    `vault.json` going missing — moved, deleted, or a restore that failed
+			    partway — shows "create a vault" while `vault.json.bak` still holds
+			    every account. Following the only route offered would write a fresh
+			    vault, and the second save after that copies it over the backup: the
+			    app would talk the user through destroying what it could have given
+			    back. */}
+			{backupAvailable && (
+				<div className="ceremony">
+					<h2>There is a backup here</h2>
+					<p>
+						This machine has no vault file, but it does have a backup of one. If you have used this
+						app before, that backup is your accounts —{' '}
+						<strong>do not create a new vault before restoring it</strong>, because creating one
+						will eventually overwrite the backup.
+					</p>
+					<BackupRestore
+						onRestore={onRestoreBackup}
+						introduction="Restoring it makes it your vault, exactly as it was when it was written."
+					/>
+				</div>
+			)}
 
 			<div className="ceremony">
 				<h2>There is no recovery</h2>

@@ -300,6 +300,27 @@ describe('§12 F2 — the recovery path is reachable from the interface', () => 
 		expect(home).toContain('Recover from file');
 	});
 
+	it('offers the backup on the create screen too, not only the unlock screen', () => {
+		// A missing `vault.json` with a good `vault.json.bak` beside it routes to
+		// CreateVault, which offered no way to load it. Following the only route the
+		// screen gave would write a fresh vault, and the second save after that
+		// copies it over the backup — the app talking the user through destroying
+		// what it could have handed back.
+		const app = read('src/renderer/App.tsx');
+		const create = read('src/renderer/screens/CreateVault.tsx');
+		const unlock = read('src/renderer/screens/UnlockVault.tsx');
+
+		// The **rendered element**, not the import. Matching the import alone passes
+		// while the component sits unused at the top of a file doing nothing, which
+		// is exactly what this test would then be certifying.
+		expect(create).toContain('<BackupRestore');
+		expect(unlock).toContain('<BackupRestore');
+		// Both routes reach the same handler, and the create screen is given the
+		// flag that decides whether there is anything to offer.
+		expect(app.match(/restoreVaultBackup/g) ?? []).toHaveLength(2);
+		expect(app).toContain('backupAvailable={status.backupAvailable}');
+	});
+
 	it('the vault backup the unlock screen announces can actually be loaded', () => {
 		// Same class, found by re-reading the whole tree: `writeEnvelope` keeps a
 		// `.bak`, `backupAvailable` reported it, and the unlock screen said it "is
