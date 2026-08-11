@@ -464,14 +464,19 @@ function start(): void {
 		 * second and every later attempt there is no explanation of any kind.
 		 */
 		app.on('second-instance', () => {
-			if (mainWindow.isDestroyed()) {
+			// Looked up rather than closed over. `activate` can replace the window,
+			// and a handler holding the original would find it destroyed and do
+			// nothing — silently reproducing the very failure it exists to fix.
+			const window = BrowserWindow.getAllWindows()[0];
+			if (!window) {
+				createMainWindow();
 				return;
 			}
-			if (mainWindow.isMinimized()) {
-				mainWindow.restore();
+			if (window.isMinimized()) {
+				window.restore();
 			}
-			mainWindow.show();
-			mainWindow.focus();
+			window.show();
+			window.focus();
 		});
 
 		mainWindow.on('close', (event) => {

@@ -69,13 +69,26 @@ export function SteamSignIn({
 	return (
 		<>
 			<div className="ceremony">
-				<h2>Steam needs you to sign in</h2>
-				<p>{reason ?? `There is no saved Steam session for ${accountName}.`}</p>
-				<p>
-					This happens once. Afterwards the app keeps a session that lasts months and renews itself,
-					and you will not be asked again unless it expires or you change this account&rsquo;s
-					routing.
-				</p>
+				{/* The reassurance is only true while signing in here is still possible.
+				    Left in place above a message saying it cannot work, "this happens
+				    once and you will not be asked again" reads as the app contradicting
+				    itself at the moment the user most needs to believe it. */}
+				{hopeless === undefined ? (
+					<>
+						<h2>Steam needs you to sign in</h2>
+						<p>{reason ?? `There is no saved Steam session for ${accountName}.`}</p>
+						<p>
+							This happens once. Afterwards the app keeps a session that lasts months and renews
+							itself, and you will not be asked again unless it expires or you change this
+							account&rsquo;s routing.
+						</p>
+					</>
+				) : (
+					<>
+						<h2>This sign-in cannot be completed here</h2>
+						<p>Steam will not accept a password for {accountName} from this app right now.</p>
+					</>
+				)}
 			</div>
 
 			{error && <p className="error">{error}</p>}

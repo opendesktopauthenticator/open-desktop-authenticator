@@ -810,6 +810,53 @@ describe('the recovery file after activation', () => {
 		expect(updated[0]?.revocationCode).toBe('R12345');
 	});
 
+	it('does not fail an activation because the vault locked right after it was written', async () => {
+		// `mutate` is awaited, so the vault can lock during it — and the read that
+		// follows, to fetch the account for the recovery update, throws when locked.
+		// Outside the guard that turned a fully successful activation into a
+		// reported failure, sending the user back to a screen that would then tell
+		// them the account is already activated.
+		let locked = false;
+		const accounts: Account[] = [];
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+
+		const service = new EnrollmentService(
+			{
+				isUnlocked: () => !locked,
+				read: () => {
+					if (locked) {
+						throw new Error('the vault is locked');
+					}
+					return { accounts };
+				},
+				mutate: (apply: (draft: { accounts: Account[] }) => void) => {
+					apply({ accounts });
+					return Promise.resolve();
+				}
+			} as never,
+			transports,
+			{
+				now: () => NOW,
+				loginSession: () => fakeSession(),
+				startEnrollment: () => Promise.resolve(STARTED),
+				finalizeEnrollment: () => {
+					// The lock lands while the activation is in flight.
+					locked = true;
+					return Promise.resolve({ state: 'activated' as const });
+				},
+				writeRecovery: () => undefined,
+				updateRecovery: () => undefined
+			}
+		);
+
+		await service.begin('trader', 'password');
+		locked = false;
+
+		await expect(service.activate(STEAM_ID, '12345')).resolves.toBe('activated');
+	});
+
 	it('does not fail an activation Steam accepted just because the backup could not be rewritten', async () => {
 		const { vault } = fakeVault();
 		const transports = {

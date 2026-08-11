@@ -1151,6 +1151,12 @@ describe('cancelling work when the vault locks', () => {
 		// Refused at construction, so no transport is ever handed out.
 		await expect(building).rejects.toThrow(/closed before the request was sent/);
 		expect(requests).toHaveLength(0);
+
+		// And the session it built is not left behind. It was cached *after* the
+		// teardown had already looked for it, so nothing wiped it and nothing would
+		// — a session the lock never saw is the state this class promises not to
+		// keep, cookies or no cookies.
+		expect(factory.routingStatus(routed.steamId64)).toBeUndefined();
 	});
 
 	it('aborts the connection when a response is implausibly large', async () => {

@@ -296,7 +296,16 @@ export class SteamTransportFactory {
 		// Construction is itself a window — `setProxy` is awaited above, and for its
 		// duration this account exists in none of the maps `forgetAll` walks. Fail
 		// here rather than hand back a transport whose first use will throw.
-		this.assertGranted(account.steamId64, granted);
+		try {
+			this.assertGranted(account.steamId64, granted);
+		} catch (err) {
+			// `sessionFor` cached this session *after* the teardown had already looked
+			// for it, so nothing wiped it and nothing will. It holds no cookies yet —
+			// no request was ever made through it — but a session the lock never saw
+			// is exactly the state this class promises not to keep.
+			this.forget(account.steamId64);
+			throw err;
+		}
 
 		// Planned again rather than remembered from `sessionFor`, which caches
 		// sessions and returns early for one it already has. Safe: it has already

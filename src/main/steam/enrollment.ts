@@ -469,10 +469,18 @@ export class EnrollmentService {
 		// The recovery file still says `pendingActivation`, because that was true
 		// when it was written. Correct it now, from the stored account rather than
 		// the local one, so what lands on disk is exactly what the vault holds.
-		const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
-		if (stored && this.updateRecovery) {
+		//
+		// **The vault read is inside the try**, not beside it. `mutate` above is
+		// awaited, so the vault can lock during it — and `read` throws when locked.
+		// Left outside, that turned an activation Steam accepted and the vault
+		// recorded into a reported failure, which sends the user back to a screen
+		// that will then tell them the account is already activated.
+		if (this.updateRecovery) {
 			try {
-				this.updateRecovery(stored);
+				const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+				if (stored) {
+					this.updateRecovery(stored);
+				}
 			} catch {
 				// Swallowed. Steam has activated and the vault agrees; a stale backup is
 				// a smaller problem than reporting a failure for something that worked.
