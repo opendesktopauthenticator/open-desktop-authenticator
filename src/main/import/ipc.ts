@@ -1,9 +1,10 @@
 import { BrowserWindow, dialog } from 'electron';
 import { readFileSync, statSync } from 'node:fs';
-import { basename } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import type { ImportReport } from '../../shared/ipc';
+import { looksEncrypted } from './sda-crypto';
 import type { ImportService, StagedFile } from './service';
 
 /**
@@ -25,6 +26,11 @@ const MAX_FILE_BYTES = 1024 * 1024;
 
 /** More than this in one go is a wrong folder, not an import. */
 const MAX_FILES = 100;
+
+/** The only file this module will ever open without the user having picked it. */
+const MANIFEST_NAME = 'manifest.json';
+
+const isManifestName = (file: StagedFile): boolean => file.name.toLowerCase() === MANIFEST_NAME;
 
 /**
  * Put manifests at the front of the selection, before the cap is applied.
@@ -103,6 +109,31 @@ export function registerImportHandlers(imports: ImportService): void {
 				sourceName: `${picked.filePaths.length - MAX_FILES} more file(s)`,
 				reason: `only ${MAX_FILES} files can be imported at once.`
 			});
+		}
+
+		// **Pick up `manifest.json` from beside the files, if it was not chosen.**
+		//
+		// SDA keeps each encrypted maFile's IV and salt in the manifest, so without
+		// it there is nothing a passphrase could be applied to. The screen said so
+		// and offered no way to act on it: the user had to cancel and start the
+		// selection over, which is a dead end dressed up as an instruction.
+		//
+		// Reading a sibling the user did not tick is a small extension of what they
+		// authorised — they picked files out of that folder, and this reads one
+		// specific, named, non-secret file from the same one. It is not a search: no
+		// directory is enumerated, and nothing but `manifest.json` is ever opened.
+		if (files.some((file) => looksEncrypted(file.text)) && !files.some(isManifestName)) {
+			for (const directory of new Set(picked.filePaths.map((path) => dirname(path)))) {
+				const beside = join(directory, MANIFEST_NAME);
+				try {
+					if (statSync(beside).size <= MAX_FILE_BYTES) {
+						files.unshift({ name: MANIFEST_NAME, text: readFileSync(beside, 'utf8') });
+						break;
+					}
+				} catch {
+					// Not there, or not readable. The screen's advice still stands.
+				}
+			}
 		}
 
 		// Handed to the service rather than merged onto its answer here. Merging

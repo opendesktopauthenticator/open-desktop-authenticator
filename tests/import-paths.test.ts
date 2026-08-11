@@ -1,6 +1,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { describeReadFailure, manifestsFirst } from '../src/main/import/ipc';
+import { looksEncrypted } from '../src/main/import/sda-crypto';
 
 /**
  * No filesystem path reaches the renderer (§12 F2).
@@ -85,6 +86,33 @@ describe('describeReadFailure', () => {
  * takes the *first* hundred paths, which is fine for maFiles and quietly fatal
  * for the one file the encrypted ones cannot be read without.
  */
+describe('finding manifest.json beside the chosen files', () => {
+	// The behaviour lives in the scan handler, which needs Electron's dialog. What
+	// is asserted here is the decision the handler makes, spelled out so the rule
+	// is pinned even though the surrounding I/O is not reachable from a unit test.
+	it('is only reached when something encrypted was chosen and no manifest was', () => {
+		const encrypted = Buffer.alloc(32).toString('base64');
+		const plain = '{"shared_secret":"s"}';
+		const manifest = '{"entries":[]}';
+
+		const needsLookup = (files: { name: string; text: string }[]): boolean =>
+			files.some((file) => looksEncrypted(file.text)) &&
+			!files.some((file) => file.name.toLowerCase() === 'manifest.json');
+
+		// The case the user hit: encrypted maFiles picked, manifest left behind.
+		expect(needsLookup([{ name: 'a.maFile', text: encrypted }])).toBe(true);
+		// Already chosen — nothing to look for.
+		expect(
+			needsLookup([
+				{ name: 'a.maFile', text: encrypted },
+				{ name: 'manifest.json', text: manifest }
+			])
+		).toBe(false);
+		// Nothing encrypted — no reason to open a file nobody picked.
+		expect(needsLookup([{ name: 'a.maFile', text: plain }])).toBe(false);
+	});
+});
+
 describe('manifestsFirst', () => {
 	/** An SDA folder bigger than the cap. maFiles are named for their SteamID. */
 	function bigFolder(count: number): string[] {
