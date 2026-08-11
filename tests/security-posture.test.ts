@@ -259,6 +259,19 @@ describe('§12 F2 — the recovery path is reachable from the interface', () => 
 		expect(home).toContain('Recover from file');
 	});
 
+	it('the vault backup the unlock screen announces can actually be loaded', () => {
+		// Same class, found by re-reading the whole tree: `writeEnvelope` keeps a
+		// `.bak`, `backupAvailable` reported it, and the unlock screen said it "is
+		// never loaded automatically" — which reads as an invitation to load it
+		// deliberately. Nothing could. A vault file that would not parse was
+		// therefore a total lockout with a good copy sitting beside it.
+		const unlock = read('src/renderer/screens/UnlockVault.tsx');
+		const app = read('src/renderer/App.tsx');
+
+		expect(unlock).toContain('onRestoreBackup');
+		expect(app).toContain('restoreVaultBackup');
+	});
+
 	it('the wording matches what the enrollment failure tells the user to do', () => {
 		// If either side is reworded without the other, the instruction sends the
 		// user looking for a control whose label no longer matches — which is how

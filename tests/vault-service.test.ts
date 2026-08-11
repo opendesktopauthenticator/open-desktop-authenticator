@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -345,6 +345,61 @@ describe('backup recovery', () => {
 
 		await v.mutate((d) => d.accounts.push(account));
 		expect(v.backupAvailable()).toBeDefined();
+	});
+
+	it('opens the backup when the vault file will not parse', async () => {
+		// The situation the whole mechanism exists for, and the one that was
+		// unreachable: `unlock` reads the main file unconditionally, so a corrupted
+		// vault locked the user out of every account they had while a good copy sat
+		// beside it — and the unlock screen told them it was there.
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+		writeFileSync(file, 'this is not a vault', 'utf8');
+
+		const reopened = service();
+		await expect(reopened.unlock(PASS)).rejects.toThrow();
+
+		await reopened.restoreFromBackup(PASS);
+
+		expect(reopened.isUnlocked()).toBe(true);
+		// The backup predates the account being added, which is exactly what a
+		// rollback means and why it is never automatic.
+		expect(reopened.read().accounts).toHaveLength(0);
+	});
+
+	it('keeps the file it replaced rather than deleting it', async () => {
+		// It may be corrupt, or it may be a perfectly good vault the user is rolling
+		// back by mistake. Nothing here can tell those apart, and a file holding
+		// revocation codes is not thrown away on an assumption.
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+
+		await service().restoreFromBackup(PASS);
+
+		const superseded = readdirSync(dir).filter((name) => name.includes('superseded'));
+		expect(superseded).toHaveLength(1);
+	});
+
+	it('refuses a wrong passphrase without touching anything', async () => {
+		// Decryption comes first precisely so a typo cannot cost the current vault.
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+		const before = readFileSync(file, 'utf8');
+
+		await expect(service().restoreFromBackup('not the passphrase')).rejects.toThrow();
+
+		expect(readFileSync(file, 'utf8')).toBe(before);
+		expect(readdirSync(dir).filter((name) => name.includes('superseded'))).toHaveLength(0);
+	});
+
+	it('says so plainly when there is no backup at all', async () => {
+		const v = service();
+		await v.create(PASS);
+
+		await expect(v.restoreFromBackup(PASS)).rejects.toThrow(/no backup/);
 	});
 
 	it('does not load the backup on its own', async () => {

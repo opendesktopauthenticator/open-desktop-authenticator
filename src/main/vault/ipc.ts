@@ -84,6 +84,14 @@ export function registerVaultHandlers(
 		return { ok: true as const };
 	});
 
+	// Same post-unlock work as a normal unlock: this leaves the vault open, so
+	// anything that runs on unlocking has to run here too.
+	registerHandler(CHANNELS.vaultRestoreBackup, async ({ passphrase }) => {
+		await vault.restoreFromBackup(passphrase);
+		await onUnlocked?.();
+		return { ok: true as const };
+	});
+
 	registerHandler(CHANNELS.vaultLock, () => {
 		vault.lock('manual');
 		return { ok: true as const };

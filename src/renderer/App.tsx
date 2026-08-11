@@ -320,6 +320,10 @@ export function App(): React.JSX.Element {
 			return (
 				<UnlockVault
 					backupAvailable={status.backupAvailable}
+					onRestoreBackup={async (passphrase) => {
+						await api.restoreVaultBackup(passphrase);
+						await refresh({ includeCodes: false });
+					}}
 					onUnlock={async (passphrase) => {
 						await api.unlockVault(passphrase);
 						// Without codes, so the screen swaps as soon as the vault is open

@@ -31,6 +31,14 @@ export const CHANNELS = {
 	vaultCreate: 'vault:create',
 	/** Unlock an existing vault. Passphrase inbound. */
 	vaultUnlock: 'vault:unlock',
+	/**
+	 * Replace the vault with its backup and unlock it. Passphrase inbound.
+	 *
+	 * The way out of a corrupted vault file. Without it, `unlock` reads the main
+	 * file unconditionally, so a damaged one locked the user out of every account
+	 * they had while a good copy sat beside it — and the unlock screen said so.
+	 */
+	vaultRestoreBackup: 'vault:restoreBackup',
 	/** Lock now. */
 	vaultLock: 'vault:lock',
 	/** Defer the idle auto-lock. */

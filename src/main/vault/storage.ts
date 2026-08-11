@@ -174,6 +174,27 @@ function restore(paths: VaultPaths, hadExisting: boolean): void {
 }
 
 /**
+ * Move the current vault out of the way, keeping it.
+ *
+ * Used before restoring a backup over it. Deliberately a rename rather than a
+ * delete: the file being displaced may be corrupt, or it may be a perfectly good
+ * vault that the user is rolling back by mistake, and nothing here is in a
+ * position to tell those apart. A file holding revocation codes does not get
+ * thrown away on an assumption.
+ */
+export function setAside(file: string): void {
+	if (!existsSync(file)) {
+		return;
+	}
+	const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+	try {
+		renameSync(file, `${file}.superseded-${stamp}`);
+	} catch (err) {
+		throw new VaultStorageError('could not set the current vault file aside', err);
+	}
+}
+
+/**
  * Recover from the backup after a corrupted vault (§12 F1).
  *
  * Deliberately explicit rather than automatic: silently loading an older vault

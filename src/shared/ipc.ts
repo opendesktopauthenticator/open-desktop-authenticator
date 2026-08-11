@@ -701,6 +701,13 @@ export const IPC_CONTRACT = {
 		response: okResponse
 	},
 
+	[CHANNELS.vaultRestoreBackup]: {
+		// The passphrase the **backup** was sealed under, which is usually the
+		// current one but need not be if it has been changed since.
+		request: z.object({ passphrase }).strict(),
+		response: okResponse
+	},
+
 	[CHANNELS.importScan]: { request: emptyRequest, response: importReportResponse },
 	[CHANNELS.importUnlock]: {
 		// The SDA passphrase, inbound exactly as a vault passphrase is, and dropped
@@ -767,6 +774,8 @@ export interface RendererApi {
 	getVaultStatus(): Promise<VaultStatus>;
 	createVault(passphrase: string): Promise<{ ok: true }>;
 	unlockVault(passphrase: string): Promise<{ ok: true }>;
+	/** Replace the vault with its backup and unlock it. The way out of a corrupt file. */
+	restoreVaultBackup(passphrase: string): Promise<{ ok: true }>;
 	lockVault(): Promise<{ ok: true }>;
 	touchVault(): Promise<{ ok: true }>;
 	changePassphrase(current: string, next: string): Promise<{ ok: true }>;

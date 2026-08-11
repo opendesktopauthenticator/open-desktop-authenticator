@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { deriveKey, sealWithKey, unseal, VaultCryptoError, wipe } from './crypto';
-import { readBackupEnvelope, readEnvelope, vaultExists, writeEnvelope } from './storage';
+import { readBackupEnvelope, readEnvelope, setAside, vaultExists, writeEnvelope } from './storage';
 import { SALT_BYTES, SCRYPT_DEFAULTS, type Envelope, type Kdf } from '../../shared/vault-format';
 import {
 	emptyVault,
@@ -358,6 +358,81 @@ export class VaultService {
 
 	backupAvailable(): Envelope | undefined {
 		return readBackupEnvelope(this.file);
+	}
+
+	/**
+	 * Open the backup vault and make it the live one (§12 F1).
+	 *
+	 * ## The dead end this closes
+	 *
+	 * `writeEnvelope` keeps the previous good vault as `.bak`, and the unlock
+	 * screen has always announced it — "a backup of the previous vault is on disk;
+	 * it is never loaded automatically". That sentence implies a deliberate load is
+	 * possible. **It was not.** `backupAvailable` was read to produce a boolean and
+	 * nothing else, there was no channel and no service method, and `unlock` reads
+	 * the main file unconditionally.
+	 *
+	 * So a corrupted vault file was a total lockout — every account, every
+	 * revocation code — while a perfectly good copy sat beside it and the screen
+	 * said so.
+	 *
+	 * ## Order of operations
+	 *
+	 * The backup is decrypted **before** anything on disk is touched. That proves
+	 * both the passphrase and the file in one step, so a wrong passphrase cannot
+	 * cost the current vault, and a backup that is itself damaged fails harmlessly.
+	 *
+	 * The file being replaced is then kept, not deleted. It may be corrupt, or it
+	 * may be a perfectly good vault the user has rolled back by mistake — and this
+	 * class does not get to decide that a file holding revocation codes is
+	 * disposable.
+	 */
+	async restoreFromBackup(passphrase: string): Promise<void> {
+		const envelope = readBackupEnvelope(this.file);
+		if (!envelope) {
+			throw new VaultServiceError('there is no backup vault to restore from');
+		}
+
+		// Proves the passphrase and the file before a byte is written.
+		const { plaintext, key, kdf } = await unseal(envelope, passphrase);
+
+		let contents: VaultContents;
+		try {
+			contents = vaultContentsSchema.parse(JSON.parse(plaintext));
+		} catch (err) {
+			wipe(key);
+			throw new VaultServiceError(
+				`the backup decrypted but its contents are not valid: ${
+					err instanceof Error ? err.message : String(err)
+				}`
+			);
+		}
+
+		// The underlying error is not forwarded: Node embeds the absolute path in
+		// every filesystem failure, and these messages reach the renderer.
+		try {
+			setAside(this.file);
+		} catch {
+			wipe(key);
+			throw new VaultServiceError(
+				'the current vault file could not be set aside, so nothing was replaced.'
+			);
+		}
+
+		try {
+			writeEnvelope(this.file, envelope);
+		} catch {
+			wipe(key);
+			throw new VaultServiceError(
+				'the backup could not be written into place. The previous file is still on disk, ' +
+					'renamed with a "superseded" suffix.'
+			);
+		}
+
+		if (this.state) {
+			wipe(this.state.key);
+		}
+		this.state = { contents, key, kdf, lastActivity: this.now() };
 	}
 
 	private require(): UnlockedState {

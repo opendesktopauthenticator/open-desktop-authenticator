@@ -55,6 +55,8 @@ const api: RendererApi = {
 		ipcRenderer.invoke(CHANNELS.vaultCreate, { passphrase }) as Promise<{ ok: true }>,
 	unlockVault: (passphrase: string) =>
 		ipcRenderer.invoke(CHANNELS.vaultUnlock, { passphrase }) as Promise<{ ok: true }>,
+	restoreVaultBackup: (passphrase: string) =>
+		ipcRenderer.invoke(CHANNELS.vaultRestoreBackup, { passphrase }) as Promise<{ ok: true }>,
 	lockVault: () => ipcRenderer.invoke(CHANNELS.vaultLock, {}) as Promise<{ ok: true }>,
 	touchVault: () => ipcRenderer.invoke(CHANNELS.vaultTouch, {}) as Promise<{ ok: true }>,
 	changePassphrase: (current: string, next: string) =>
