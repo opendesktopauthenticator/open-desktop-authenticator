@@ -221,9 +221,11 @@ export function ImportAccounts({
 			{outcomes && <ImportResults outcomes={outcomes} />}
 
 			{!report && (
-				<button type="button" onClick={scan} disabled={busy}>
-					{busy ? 'Working…' : 'Choose files…'}
-				</button>
+				<div className="controls">
+					<button type="button" onClick={scan} disabled={busy}>
+						{busy ? 'Working…' : 'Choose files…'}
+					</button>
+				</div>
 			)}
 
 			{report && (

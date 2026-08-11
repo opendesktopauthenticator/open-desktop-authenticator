@@ -67,9 +67,11 @@ export function UnlockVault({
 
 				{error && <p className="error">{error}</p>}
 
-				<button type="submit" disabled={!passphrase || busy}>
-					{busy ? 'Unlocking…' : 'Unlock'}
-				</button>
+				<div className="controls">
+					<button type="submit" disabled={!passphrase || busy}>
+						{busy ? 'Unlocking…' : 'Unlock'}
+					</button>
+				</div>
 				{busy && <p className="muted">Deriving the key — this takes a moment by design.</p>}
 			</form>
 

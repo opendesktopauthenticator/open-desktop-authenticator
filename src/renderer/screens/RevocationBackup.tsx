@@ -110,9 +110,11 @@ export function RevocationBackup({
 							Asked again on purpose. Being unlocked means this machine was used recently, not that
 							you are the one at it.
 						</p>
-						<button type="submit" disabled={busy || passphrase.length === 0}>
-							{busy ? 'Checking…' : 'Show the code'}
-						</button>
+						<div className="controls">
+							<button type="submit" disabled={busy || passphrase.length === 0}>
+								{busy ? 'Checking…' : 'Show the code'}
+							</button>
+						</div>
 					</form>
 				</>
 			) : (

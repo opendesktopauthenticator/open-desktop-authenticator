@@ -203,9 +203,11 @@ export function CreateVault({
 
 				{error && <p className="error">{error}</p>}
 
-				<button type="submit" disabled={!ready || busy}>
-					{busy ? 'Creating…' : 'Create vault'}
-				</button>
+				<div className="controls">
+					<button type="submit" disabled={!ready || busy}>
+						{busy ? 'Creating…' : 'Create vault'}
+					</button>
+				</div>
 				{busy && (
 					<p className="muted">
 						Deriving the key. This is deliberately slow — it is what makes guessing your passphrase
