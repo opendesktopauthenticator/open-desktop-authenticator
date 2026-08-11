@@ -48,6 +48,11 @@ export function BackupRestore({
 
 	return (
 		<>
+			{/* **Still shown.** This used to be replaced by the form, so the sentence
+			    explaining what a backup is disappeared at the exact moment the user
+			    was about to load one. */}
+			<p className="hint">{introduction}</p>
+
 			{error && <p className="error">{error}</p>}
 
 			<form
@@ -78,10 +83,20 @@ export function BackupRestore({
 					disabled={busy}
 					autoFocus
 				/>
+				{/* **Both directions, because the second one surprises people.** The
+				    copy used to say only that later changes are missing, which reads as
+				    "you might lose something". The other half is that a backup written
+				    before a removal still contains what you removed, so restoring it
+				    brings those accounts back — found by a founder who removed an
+				    account, restored, and watched it reappear. */}
 				<p className="hint">
-					The backup becomes your vault. Anything changed since it was written — accounts added,
-					settings altered — is not in it. If a vault file is being replaced it is kept on disk
-					rather than deleted, renamed with a <code>superseded</code> suffix.
+					The backup replaces your vault with how it was when it was written. Accounts you have
+					<strong> added</strong> since then will be gone, and accounts you have
+					<strong> removed</strong> since then will come back.
+				</p>
+				<p className="hint">
+					If a vault file is being replaced it is kept on disk rather than deleted, renamed with a{' '}
+					<code>superseded</code> suffix.
 				</p>
 				<p className="hint">
 					Usually the same passphrase. If you have changed it since the backup was written, the
