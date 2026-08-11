@@ -1080,6 +1080,26 @@ describe('cancelling work when the vault locks', () => {
 		expect(cleared).toBe(true);
 	});
 
+	it('forgets what it knew about the route, so a lock leaves nothing verified', async () => {
+		// `routingStatus` documents exactly this: "absent means no request has been
+		// attempted since the last lock, so nothing is known — which the UI must
+		// show as unverified rather than as fine". The map was never cleared, so an
+		// account card went on reporting `verified` after a lock, on the strength of
+		// a check made in a session that no longer exists. For a control whose only
+		// job is to say whether traffic really left through the proxy, a stale yes is
+		// the one answer it must never give.
+		const { electron } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(routed);
+		await transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+
+		expect(factory.routingStatus(routed.steamId64)?.state).toBe('verified');
+
+		factory.forgetAll();
+
+		expect(factory.routingStatus(routed.steamId64)).toBeUndefined();
+	});
+
 	it('aborts a request it has given up waiting for', async () => {
 		// Timing out used to reject and walk away, leaving the request running: the
 		// socket stayed open and Steam could still act on it. Worse, the reject path

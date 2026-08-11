@@ -403,3 +403,75 @@ describe('halting after repeated failure', () => {
 		expect(runAutoConfirm).toHaveBeenCalledTimes(19);
 	});
 });
+
+/**
+ * Work that outlives the lock that stopped it.
+ *
+ * `stop` clears the schedule, but a sweep already inside an await is not
+ * stopped by clearing a map — it is stopped by refusing to let it write when it
+ * comes back. Without that refusal the lock's own aborts were counted as Steam
+ * failures, and ten locks during polling produced a permanent halt the user
+ * never caused.
+ */
+describe('stopping while a sweep is in the air', () => {
+	function parked(): {
+		harness: ReturnType<typeof harness>;
+		release: (fail?: boolean) => void;
+	} {
+		let settle: ((fail: boolean) => void) | undefined;
+		const gate = new Promise<boolean>((resolve) => {
+			settle = resolve;
+		});
+		const parkedHarness = harness({
+			accounts: [account({ trades: true })],
+			run: async () => {
+				const shouldFail = await gate;
+				if (shouldFail) {
+					throw new Error('the request was aborted');
+				}
+				return { approved: [], held: [] };
+			}
+		});
+		return { harness: parkedHarness, release: (fail = false) => settle?.(fail) };
+	}
+
+	it('does not score a failure against an account when the lock caused it', async () => {
+		// The compounding one. Nothing here can tell "Steam refused us" from "we
+		// aborted our own request on lock", so a lock must not count at all.
+		const { harness, release } = parked();
+		const sweep = harness.engine.tick();
+
+		harness.engine.stop();
+		release(true);
+		await sweep;
+
+		expect(harness.failures).toHaveLength(0);
+		expect(harness.dueTimes()).toHaveLength(0);
+	});
+
+	it('does not reschedule an account after the schedule was cleared', async () => {
+		// A success landing after the clear would put the account back on the map,
+		// so the next unlock inherits a schedule from a session that has ended.
+		const { harness, release } = parked();
+		const sweep = harness.engine.tick();
+
+		harness.engine.stop();
+		release(false);
+		await sweep;
+
+		expect(harness.dueTimes()).toHaveLength(0);
+	});
+
+	it('still reports an outcome that really happened', async () => {
+		// Being disowned by a lock does not make the approval imaginary. Steam acted
+		// on it, so the activity log has to say so.
+		const { harness, release } = parked();
+		const sweep = harness.engine.tick();
+
+		harness.engine.stop();
+		release(false);
+		await sweep;
+
+		expect(harness.outcomes).toHaveLength(1);
+	});
+});

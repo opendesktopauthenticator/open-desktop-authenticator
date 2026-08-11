@@ -1,3 +1,4 @@
+import { redactCredentials } from '../net/egress';
 import type { ConfirmationsService, AutoConfirmOutcome } from './service';
 import type { VaultService } from '../vault/service';
 
@@ -87,6 +88,15 @@ export class AutoConfirmEngine {
 	/** Guards against a slow pass overlapping the next tick. */
 	private running = false;
 
+	/**
+	 * Bumped by `stop`, so work started before a lock cannot write state after it.
+	 *
+	 * The same shape as the epoch the transport uses to refuse a request that
+	 * outlived its unlock, applied one layer up to the bookkeeping rather than to
+	 * the request.
+	 */
+	private generation = 0;
+
 	constructor(options: AutoConfirmEngineOptions) {
 		this.vault = options.vault;
 		this.confirmations = options.confirmations;
@@ -111,6 +121,18 @@ export class AutoConfirmEngine {
 			this.clearTimer(this.ticker);
 			this.ticker = undefined;
 		}
+		// **Bumped before the clear, so anything already running is disowned.**
+		//
+		// Clearing alone did not stop a sweep that was mid-flight: `runOne` was
+		// inside an await, and when its request came back — aborted by the same
+		// lock, and therefore a failure — it wrote a backoff or a failure count into
+		// the map that had just been emptied. The next unlock inherited it.
+		//
+		// The compounding version is the one that bites: every lock during polling
+		// scored a failure against the account, and ten of those produce
+		// "automatic confirmation stopped after 10 failures in a row" — a permanent
+		// halt caused entirely by locking the vault normally.
+		this.generation += 1;
 		this.state.clear();
 	}
 
@@ -132,6 +154,7 @@ export class AutoConfirmEngine {
 		if (this.running) {
 			return;
 		}
+		const generation = this.generation;
 		// A locked vault is the clearest possible statement that nobody is present.
 		if (!this.vault.isUnlocked()) {
 			this.state.clear();
@@ -141,7 +164,12 @@ export class AutoConfirmEngine {
 		this.running = true;
 		try {
 			for (const account of this.dueAccounts()) {
-				await this.runOne(account.steamId64, account.pollIntervalSeconds);
+				// Re-checked between accounts as well as inside `runOne`: a lock partway
+				// through a sweep must not mean the rest of the list is still visited.
+				if (this.generation !== generation || !this.vault.isUnlocked()) {
+					return;
+				}
+				await this.runOne(account.steamId64, account.pollIntervalSeconds, generation);
 			}
 		} finally {
 			this.running = false;
@@ -206,20 +234,48 @@ export class AutoConfirmEngine {
 		return hash % Math.max(1, Math.floor(intervalMs / 4));
 	}
 
-	private async runOne(steamId64: string, pollIntervalSeconds: number): Promise<void> {
+	/**
+	 * @param generation the sweep this belongs to. Any write is skipped if `stop`
+	 * has been called since — see the note there.
+	 */
+	private async runOne(
+		steamId64: string,
+		pollIntervalSeconds: number,
+		generation = this.generation
+	): Promise<void> {
 		const interval = Math.max(MIN_INTERVAL_MS, pollIntervalSeconds * 1000);
 		const jitter = this.jitterFor(steamId64, interval);
 
 		try {
 			const outcome = await this.confirmations.runAutoConfirm(steamId64);
 
+			// Disowned by a `stop` that happened while this was in the air. Reporting
+			// the outcome is still right — it describes something that really did
+			// occur — but nothing may be scheduled on a cleared map.
+			if (this.generation !== generation) {
+				this.onOutcome(steamId64, outcome);
+				return;
+			}
+
 			// No `backoffMs` and no `failures`: a success clears both penalties.
 			this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
 			this.onOutcome(steamId64, outcome);
 		} catch (err) {
+			// **The failure is not recorded at all if a lock caused it.**
+			//
+			// Nothing here can distinguish "Steam refused us" from "our own abort on
+			// lock", and counting the second toward the ten-strike halt means normal
+			// locking eventually stops automatic confirmation for good — a fault the
+			// user never caused and cannot see the cause of.
+			if (this.generation !== generation) {
+				return;
+			}
+
 			const previous = this.state.get(steamId64);
 			const failures = (previous?.failures ?? 0) + 1;
-			const reason = err instanceof Error ? err.message : String(err);
+			// Redacted: this reaches the activity log and the renderer, and a routing
+			// failure quotes the proxy URL it failed on, credentials included.
+			const reason = redactCredentials(err instanceof Error ? err.message : String(err));
 
 			if (failures >= HALT_AFTER_FAILURES) {
 				// Ten in a row is not a blip. Stop, and say so — the alternative is

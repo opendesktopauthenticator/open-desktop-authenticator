@@ -3,6 +3,7 @@ import {
 	describeNetworkError,
 	describesDirectRoute,
 	EgressError,
+	redactCredentials,
 	isSteamEndpoint,
 	planProxy,
 	STEAM_MOBILE_CLIENT_COOKIE,
@@ -304,7 +305,9 @@ export class SteamTransportFactory {
 			resolved = await session.resolveProxy(url);
 		} catch (err) {
 			return block(
-				`the routing could not be checked (${err instanceof Error ? err.message : String(err)})`
+				`the routing could not be checked (${redactCredentials(
+					err instanceof Error ? err.message : String(err)
+				)})`
 			);
 		}
 
@@ -338,6 +341,17 @@ export class SteamTransportFactory {
 		// re-examines whether the vault is still unlocked until the answer arrives —
 		// by which point Steam has acted on it.
 		this.abortInFlight(steamId64);
+
+		// **What was known about this account's route is no longer known.**
+		//
+		// `routingStatus` documents exactly this: "absent means no request has been
+		// attempted since the last lock, so nothing is known — which the UI must
+		// show as unverified rather than as fine". The map was never cleared, so
+		// after a lock an account card went on reporting `verified` on the strength
+		// of a check made in a session that no longer exists. For a control whose
+		// entire job is to say whether traffic really left through the proxy, a
+		// stale yes is the one answer it must never give.
+		this.routing.delete(steamId64);
 
 		const session = this.sessions.get(steamId64);
 		this.sessions.delete(steamId64);
@@ -458,9 +472,9 @@ export class SteamTransportFactory {
 			);
 		} catch (err) {
 			throw new EgressError(
-				`could not route this account through ${plan?.redacted ?? 'the network'}: ${
+				`could not route this account through ${plan?.redacted ?? 'the network'}: ${redactCredentials(
 					err instanceof Error ? err.message : String(err)
-				}`
+				)}`
 			);
 		}
 

@@ -504,7 +504,13 @@ export function App(): React.JSX.Element {
 					onUnlock={(passphrase) => api.unlockImport(passphrase)}
 					onCommit={(selections) => api.commitImport(selections)}
 					onDiscard={() => api.discardImport()}
-					onClose={() => setView('accounts')}
+					onClose={() => {
+						setView('accounts');
+						// Imported accounts appear without waiting on the poll, the same way
+						// a recovered one does. A second of the list not showing what the
+						// previous screen just said it imported reads as a failure.
+						void refresh();
+					}}
 				/>
 			);
 		}

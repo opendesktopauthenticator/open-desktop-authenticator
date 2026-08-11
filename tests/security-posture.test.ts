@@ -225,6 +225,24 @@ describe('§11 — the lock drops every cached credential', () => {
 		expect(onLock).toContain(call);
 	});
 
+	it('does not block unlocking on a Steam round trip', () => {
+		// `vault:unlock` awaits this callback before it returns, so awaiting the
+		// clock sync inside it put a Steam request — with a thirty-second transport
+		// timeout behind it — between pressing Unlock and the screen changing.
+		// Offline, that was half a minute of "Unlocking…" with nothing to press.
+		//
+		// Asserted on the source because the cost is in the `await`, not in any
+		// value a test could read back.
+		const index = read('src/main/index.ts');
+		const onUnlocked = index.slice(
+			index.indexOf('registerVaultHandlers('),
+			index.indexOf('registerImportHandlers(')
+		);
+
+		expect(onUnlocked).toContain('void clock.ensureSynced()');
+		expect(onUnlocked).not.toContain('await clock.ensureSynced()');
+	});
+
 	it('found the handler it is asserting against', () => {
 		// Guards the slice above: if `onLock` is renamed or moved, every assertion
 		// would trivially pass against an empty string.

@@ -114,6 +114,33 @@ export class EnrollmentService {
 	private readonly activating = new Set<string>();
 
 	/**
+	 * True from the first line of `begin` until it settles.
+	 *
+	 * `discardPending` was the only guard, and it cannot be one: `pendingLogin` is
+	 * not assigned until after `startWithCredentials` has been awaited, so two
+	 * overlapping calls both found nothing pending, both opened a `LoginSession`,
+	 * and both could reach `enrol`. The class documents "one at a time,
+	 * deliberately"; this is what makes that true.
+	 *
+	 * A flag rather than a queue, because the second caller should be told no
+	 * rather than silently held: enrolling is an attended act with a code arriving
+	 * on a phone, and two of them at once is a mistake, not a workload.
+	 */
+	private beginning = false;
+
+	/**
+	 * Every `LoginSession` this service has opened and not yet finished with.
+	 *
+	 * `pendingLogin` only covers the pause waiting for an emailed code. Once that
+	 * code is submitted it is cleared and the session continues into `enrol` as a
+	 * local variable — and on the password-only path it is never set at all. So
+	 * for the whole of `enrol`, and for every sign-in that needs no email code,
+	 * there was no reference a lock could reach, and an authenticated session
+	 * outlived the lock that was supposed to end it.
+	 */
+	private readonly liveSessions = new Set<LoginSessionLike>();
+
+	/**
 	 * Whether Steam said it had a phone to text, per account mid-enrollment.
 	 *
 	 * Remembered from `AddAuthenticator` rather than inferred later, because it
@@ -150,6 +177,23 @@ export class EnrollmentService {
 	 * the account permanently. Nothing configured afterwards can undo it.
 	 */
 	async begin(accountName: string, password: string, proxyUrl?: string): Promise<BeginOutcome> {
+		// Set before anything is awaited, which is the whole point — see `beginning`.
+		if (this.beginning) {
+			throw new EnrollmentError('another sign-in is already in progress.');
+		}
+		this.beginning = true;
+		try {
+			return await this.beginOnce(accountName, password, proxyUrl);
+		} finally {
+			this.beginning = false;
+		}
+	}
+
+	private async beginOnce(
+		accountName: string,
+		password: string,
+		proxyUrl?: string
+	): Promise<BeginOutcome> {
 		this.discardPending();
 
 		// Validated before a password is sent anywhere. A proxy that cannot work
@@ -161,6 +205,9 @@ export class EnrollmentService {
 		}
 
 		const session = this.loginSession(route);
+		// Registered the moment it exists, so a lock can reach it wherever the flow
+		// has got to. `cancel` removes it again.
+		this.liveSessions.add(session);
 
 		const authenticated = new Promise<void>((resolve, reject) => {
 			session.on('authenticated', () => resolve());
@@ -234,7 +281,12 @@ export class EnrollmentService {
 		}
 
 		await authenticated;
-		return this.enrol(session, accountName, route);
+		try {
+			return await this.enrol(session, accountName, route);
+		} finally {
+			// The sign-in is over either way; only the vault matters from here.
+			this.release(session);
+		}
 	}
 
 	/** Answer the emailed Steam Guard code, then enrol. */
@@ -258,7 +310,11 @@ export class EnrollmentService {
 
 		await pending.authenticated;
 		this.pendingLogin = undefined;
-		return this.enrol(pending.session, pending.accountName, pending.proxyUrl);
+		try {
+			return await this.enrol(pending.session, pending.accountName, pending.proxyUrl);
+		} finally {
+			this.release(pending.session);
+		}
 	}
 
 	/**
@@ -420,8 +476,16 @@ export class EnrollmentService {
 	/** Drop any half-finished sign-in. Called when the vault locks. */
 	forget(): void {
 		this.discardPending();
+		// Every session, not just a pending one. See `liveSessions`.
+		for (const session of [...this.liveSessions]) {
+			this.cancel(session);
+		}
 		this.tokens.clear();
 		this.textedTheCode.clear();
+		// An activation in flight will clear its own entry when it settles, but a
+		// lock means nobody is waiting on it — and a stale marker would refuse the
+		// retry after the next unlock.
+		this.activating.clear();
 	}
 
 	/**
@@ -480,7 +544,16 @@ export class EnrollmentService {
 			identitySecret: started.identitySecret,
 			revocationCode: started.revocationCode,
 			deviceId: started.deviceId,
-			refreshToken: session.refreshToken,
+			// Gated the same way the import path gates one, and for the same reason
+			// (F-13): a token scoped for the Steam website cannot approve
+			// confirmations, so storing one produces an account that looks signed in
+			// and fails at the first confirmation with nothing to explain it. The
+			// access token above is already checked; this was not, which made
+			// enrollment the one door into the vault that skipped the rule.
+			...(session.refreshToken !== undefined &&
+			isUsableMobileToken(session.refreshToken, this.now())
+				? { refreshToken: session.refreshToken }
+				: {}),
 			...(proxyUrl !== undefined ? { proxyUrl } : {}),
 			...(started.serialNumber !== undefined ? { serialNumber: started.serialNumber } : {}),
 			...(started.tokenGid !== undefined ? { tokenGid: started.tokenGid } : {}),
@@ -602,11 +675,19 @@ export class EnrollmentService {
 	}
 
 	private cancel(session: LoginSessionLike): void {
+		// Deregistered whether or not the cancel throws: a session we can no longer
+		// stop is not one worth holding a reference to.
+		this.liveSessions.delete(session);
 		try {
 			session.cancelLoginAttempt();
 		} catch {
 			// Already finished. Nothing left to stop.
 		}
+	}
+
+	/** Done with this session, successfully. Stops tracking it without cancelling. */
+	private release(session: LoginSessionLike): void {
+		this.liveSessions.delete(session);
 	}
 
 	private discardPending(): void {

@@ -635,3 +635,87 @@ describe('activating twice', () => {
 		await first;
 	});
 });
+
+describe('one sign-in at a time', () => {
+	it('refuses a second begin while the first is still running', async () => {
+		// The class documents "one at a time, deliberately", and `discardPending`
+		// could not deliver it: `pendingLogin` is not assigned until after
+		// `startWithCredentials` has been awaited, so two overlapping calls both
+		// found nothing pending, both opened a LoginSession, and both could reach
+		// `enrol`.
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+
+		let opened = 0;
+		const service = new EnrollmentService(fakeVault().vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => {
+				opened += 1;
+				const base = fakeSession();
+				return {
+					...base,
+					startWithCredentials: async () => {
+						await gate;
+						return base.startWithCredentials({ accountName: '', password: '' });
+					}
+				};
+			},
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		const first = service.begin('trader', 'password');
+		await expect(service.begin('trader', 'password')).rejects.toThrow(/already in progress/);
+
+		release?.();
+		await first;
+
+		// Exactly one session was ever opened, which is the property that matters:
+		// the second call must not have left one running with nobody holding it.
+		expect(opened).toBe(1);
+	});
+
+	it('cancels a session that is still live when the vault locks', async () => {
+		// `pendingLogin` covers only the pause waiting for an emailed code. On the
+		// password-only path it is never set at all, so from `begin` through `enrol`
+		// there was no reference a lock could reach.
+		let cancelled = 0;
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const transports = {
+			forAccount: async () => {
+				await gate;
+				return () => Promise.resolve({ status: 200, text: '{}' });
+			}
+		} as unknown as SteamTransportFactory;
+
+		const service = new EnrollmentService(fakeVault().vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => ({
+				...fakeSession(),
+				cancelLoginAttempt: () => {
+					cancelled += 1;
+				}
+			}),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		// Parked inside `enrol`, past the point where `pendingLogin` exists.
+		const enrolling = service.begin('trader', 'password');
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		service.forget();
+		expect(cancelled).toBe(1);
+
+		release?.();
+		await enrolling.catch(() => undefined);
+	});
+});

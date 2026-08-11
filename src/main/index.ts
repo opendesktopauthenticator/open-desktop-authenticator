@@ -55,6 +55,9 @@ import {
  * unit rather than read out of scattered BrowserWindow options.
  */
 
+/** How long to wait on GitHub before giving up on an update check. */
+const UPDATE_CHECK_TIMEOUT_MS = 15_000;
+
 const isDev = !app.isPackaged;
 /** electron-vite sets this in dev; undefined in a packaged build. */
 const devServerUrl = process.env.ELECTRON_RENDERER_URL;
@@ -284,8 +287,20 @@ function start(): void {
 			vault,
 			dropAccountRouting,
 			ceremony,
-			async () => {
-				await clock.ensureSynced();
+			() => {
+				// **Not awaited.** This callback runs inside the `vault:unlock` handler,
+				// before it returns, so awaiting the clock sync put a Steam round trip —
+				// with a thirty-second transport timeout behind it — between pressing
+				// Unlock and the screen changing. Offline, or with a dead proxy, that is
+				// half a minute of "Unlocking…" with nothing to press.
+				//
+				// Nothing is lost by starting it here and letting it finish on its own:
+				// `ensureSynced` shares one in-flight promise, and the code and
+				// confirmation handlers already await it before they answer. So the
+				// first request that genuinely needs the offset still waits for it, and
+				// unlocking does not.
+				void clock.ensureSynced();
+
 				// Started only once a vault is open. Before that there is nothing to
 				// poll for and nobody to poll on behalf of.
 				autoConfirm.start();
@@ -347,6 +362,11 @@ function start(): void {
 			fetchText: async (url) => {
 				const response = await net.fetch(url, {
 					headers: { Accept: 'application/vnd.github+json', 'User-Agent': branding.binaryName },
+					// Bounded, like every Steam request is. Without it a GitHub connection
+					// that hangs leaves this handler unresolved for as long as the socket
+					// stays open — a leak rather than a stall, since the renderer fires
+					// this and forgets it, but there is no reason to hold either.
+					signal: AbortSignal.timeout(UPDATE_CHECK_TIMEOUT_MS),
 					// The URL is derived from `branding.repository` and pinned to
 					// api.github.com. Following a redirect would let whatever answers
 					// that name send us somewhere else, and the only thing checked
