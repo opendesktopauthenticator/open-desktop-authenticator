@@ -29,6 +29,7 @@ import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
 import {
 	RECOVERY_EXTENSION,
 	recoveryContents,
+	recoveryFilesFor,
 	recoveryPathFor,
 	updateRecoveryFile,
 	writeRecoveryFile
@@ -253,6 +254,24 @@ function start(): void {
 	 */
 	const recoveryFiles = new Map<string, string>();
 
+	/**
+	 * The one recovery file on disk for this account, when there is exactly one.
+	 *
+	 * The map above only knows about files **this run** wrote, and the case the
+	 * recovery file exists for is a crash between enrolling and activating — so the
+	 * correction normally happens in a later run, with nothing remembered and the
+	 * file left claiming `pendingActivation` forever.
+	 *
+	 * Falling back to the filesystem is safe only when the answer is unambiguous. A
+	 * second file means an earlier enrollment for the same SteamID left one behind,
+	 * and rewriting the wrong one would destroy a backup for an authenticator this
+	 * account no longer has. One file means one enrollment, and it is this one.
+	 */
+	const onlyRecoveryFileFor = (steamId64: string): string | undefined => {
+		const found = recoveryFilesFor(app.getPath('userData'), steamId64);
+		return found.length === 1 ? found[0] : undefined;
+	};
+
 	const enrollment = new EnrollmentService(vault, transports, {
 		timeOffsetSeconds: () => codes.timeOffsetSeconds(),
 		// Written once, at enrollment, into the app's own data directory. Removal
@@ -270,9 +289,10 @@ function start(): void {
 			recoveryFiles.set(account.steamId64, written);
 		},
 		updateRecovery: (account) => {
-			const written = recoveryFiles.get(account.steamId64);
-			// Only a file this run created. Anything else on disk belongs to an
-			// enrollment we know nothing about and is not ours to rewrite.
+			const written =
+				recoveryFiles.get(account.steamId64) ?? onlyRecoveryFileFor(account.steamId64);
+			// Nothing safe to correct. Either no file exists, or more than one does
+			// and none of them can be attributed to this account with certainty.
 			if (written === undefined) {
 				return;
 			}

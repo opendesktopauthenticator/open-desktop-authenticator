@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { open } from './crypto';
@@ -157,6 +157,32 @@ export function updateRecoveryFile(path: string, envelope: unknown): void {
 		mode: 0o600
 	});
 	renameSync(temp, path);
+}
+
+/**
+ * Every recovery file on disk for one account, primary and siblings alike.
+ *
+ * Used to correct a file written by an **earlier run**. Activation records the
+ * path it wrote so it can rewrite the same one, but that record is process-local
+ * — and the case the recovery file exists for is precisely a crash between
+ * enrolling and activating, which means the correction usually happens in a
+ * later run with nothing remembered.
+ *
+ * The caller may only act when this returns exactly one path. Two means a
+ * previous enrollment for the same SteamID left a file behind, and nothing here
+ * can tell which of them the current account owns.
+ */
+export function recoveryFilesFor(userDataPath: string, steamId64: string): string[] {
+	const directory = recoveryDirectory(userDataPath);
+	let names: string[];
+	try {
+		names = readdirSync(directory);
+	} catch {
+		return [];
+	}
+	return names
+		.filter((name) => name.startsWith(`${steamId64}.`) && name.endsWith(RECOVERY_EXTENSION))
+		.map((name) => join(directory, name));
 }
 
 /** A sibling path that cannot collide, for a second file about the same account. */

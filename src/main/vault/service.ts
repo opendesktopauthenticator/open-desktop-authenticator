@@ -1,6 +1,13 @@
 import { randomBytes } from 'node:crypto';
 import { deriveKey, sealWithKey, unseal, VaultCryptoError, wipe } from './crypto';
-import { readBackupEnvelope, readEnvelope, setAside, vaultExists, writeEnvelope } from './storage';
+import {
+	putBack,
+	readBackupEnvelope,
+	readEnvelope,
+	setAside,
+	vaultExists,
+	writeEnvelope
+} from './storage';
 import { SALT_BYTES, SCRYPT_DEFAULTS, type Envelope, type Kdf } from '../../shared/vault-format';
 import {
 	emptyVault,
@@ -430,8 +437,9 @@ export class VaultService {
 
 		// The underlying error is not forwarded: Node embeds the absolute path in
 		// every filesystem failure, and these messages reach the renderer.
+		let moved: string | undefined;
 		try {
-			setAside(this.file);
+			moved = setAside(this.file);
 		} catch {
 			wipe(key);
 			throw new VaultServiceError(
@@ -442,10 +450,19 @@ export class VaultService {
 		try {
 			writeEnvelope(this.file, envelope);
 		} catch {
+			// **Put the old file back.** `writeEnvelope` rolls back from `.bak` only
+			// when a main file existed when it started, and `setAside` has just made
+			// sure one does not — so its rollback does nothing here. Left as it was,
+			// a failed restore leaves no `vault.json` at all: the app reads that as a
+			// fresh install and offers to create one, and the second save of that new
+			// vault would copy it over the `.bak` that still held everything.
+			if (moved) {
+				putBack(moved, this.file);
+			}
 			wipe(key);
 			throw new VaultServiceError(
-				'the backup could not be written into place. The previous file is still on disk, ' +
-					'renamed with a "superseded" suffix.'
+				'the backup could not be written into place, so nothing was changed. Your vault file ' +
+					'is as it was.'
 			);
 		}
 

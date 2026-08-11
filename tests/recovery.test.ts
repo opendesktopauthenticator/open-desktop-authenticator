@@ -8,6 +8,7 @@ import {
 	RecoveryError,
 	recoveryContents,
 	recoveryDirectory,
+	recoveryFilesFor,
 	recoveryPathFor,
 	updateRecoveryFile,
 	writeRecoveryFile
@@ -219,6 +220,41 @@ describe('the file on disk', () => {
 			// And no temp file left behind.
 			expect(readdirSync(recoveryDirectory(dir)).some((name) => name.endsWith('.tmp'))).toBe(false);
 		});
+	});
+
+	it('finds the one file for an account written by an earlier run', () => {
+		// The correction after activation normally happens in a *later* process than
+		// the enrollment — a crash between the two is the case the recovery file
+		// exists for. The in-memory record of where the file went is gone by then,
+		// so the file has to be found on disk.
+		const path = recoveryPathFor(dir, '76561199999999999');
+		writeRecoveryFile(path, vault.sealForBackup(recoveryContents(account(), NOW_ISO)));
+
+		expect(recoveryFilesFor(dir, '76561199999999999')).toEqual([path]);
+	});
+
+	it('reports both when an earlier enrollment left one behind', () => {
+		// Two files means the caller must not act: nothing here can say which of
+		// them belongs to the account being activated, and rewriting the wrong one
+		// destroys a backup for an authenticator that account no longer has.
+		const path = recoveryPathFor(dir, '76561199999999999');
+		writeRecoveryFile(path, vault.sealForBackup(recoveryContents(account(), NOW_ISO)));
+		writeRecoveryFile(path, vault.sealForBackup(recoveryContents(account(), NOW_ISO)));
+
+		expect(recoveryFilesFor(dir, '76561199999999999')).toHaveLength(2);
+	});
+
+	it('does not confuse one account with another whose id is a prefix', () => {
+		writeRecoveryFile(
+			recoveryPathFor(dir, '76561199999999999'),
+			vault.sealForBackup(recoveryContents(account(), NOW_ISO))
+		);
+
+		expect(recoveryFilesFor(dir, '7656119999999999')).toHaveLength(0);
+	});
+
+	it('answers with nothing when the directory does not exist yet', () => {
+		expect(recoveryFilesFor(join(dir, 'nope'), '76561199999999999')).toEqual([]);
 	});
 
 	it('reports the path it actually used when one already exists', () => {

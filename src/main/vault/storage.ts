@@ -182,15 +182,34 @@ function restore(paths: VaultPaths, hadExisting: boolean): void {
  * position to tell those apart. A file holding revocation codes does not get
  * thrown away on an assumption.
  */
-export function setAside(file: string): void {
+export function setAside(file: string): string | undefined {
 	if (!existsSync(file)) {
-		return;
+		return undefined;
 	}
 	const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+	const moved = `${file}.superseded-${stamp}`;
 	try {
-		renameSync(file, `${file}.superseded-${stamp}`);
+		renameSync(file, moved);
 	} catch (err) {
 		throw new VaultStorageError('could not set the current vault file aside', err);
+	}
+	// **Returned so the move can be undone.** Whatever replaces this file may fail
+	// to write, and `writeEnvelope`'s own rollback cannot help: it restores from
+	// `.bak` only when a main file existed when it started, and this has just made
+	// sure one does not. Without a way back, a failed restore leaves no vault at
+	// all — which the app reads as a fresh install.
+	return moved;
+}
+
+/** Undo a `setAside`. Best effort: the caller is already handling a failure. */
+export function putBack(moved: string, file: string): void {
+	try {
+		if (existsSync(moved) && !existsSync(file)) {
+			renameSync(moved, file);
+		}
+	} catch {
+		// Nothing useful to do. The file is still on disk under its moved name, and
+		// the caller's error says so.
 	}
 }
 

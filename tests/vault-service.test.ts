@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -449,6 +449,40 @@ describe('backup recovery', () => {
 
 		const superseded = readdirSync(dir).filter((name) => name.includes('superseded'));
 		expect(superseded).toHaveLength(1);
+	});
+
+	it('puts the vault back when the restore write fails', async () => {
+		// `setAside` renames the main file away, which makes `writeEnvelope` believe
+		// there was never one — so its own rollback, which restores from `.bak` only
+		// when a main file existed, does nothing. Left like that a failed restore
+		// leaves no `vault.json` at all: the app reads that as a fresh install and
+		// offers to create one, and the second save of that new vault copies it over
+		// the `.bak` that still held everything.
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+		const before = readFileSync(file, 'utf8');
+
+		// The write lands in a directory that has been made unwritable by replacing
+		// it with something that is not a directory — the simplest reliable failure.
+		const restoring = service();
+		const original = writeFileSync;
+		void original;
+
+		// Force `writeEnvelope` to fail by holding the temp path open as a directory.
+		mkdirSync(`${file}.tmp`, { recursive: true });
+		try {
+			await expect(restoring.restoreFromBackup(PASS)).rejects.toThrow();
+		} finally {
+			rmSync(`${file}.tmp`, { recursive: true, force: true });
+		}
+
+		// The vault is exactly as it was, and still opens.
+		expect(readFileSync(file, 'utf8')).toBe(before);
+		expect(readdirSync(dir).filter((name) => name.includes('superseded'))).toHaveLength(0);
+		const reopened = service();
+		await reopened.unlock(PASS);
+		expect(reopened.read().accounts).toHaveLength(1);
 	});
 
 	it('refuses a wrong passphrase without touching anything', async () => {
