@@ -1,6 +1,6 @@
 import { readFileSync, statSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
-import { describeReadFailure } from '../src/main/import/ipc';
+import { describeReadFailure, manifestsFirst } from '../src/main/import/ipc';
 
 /**
  * No filesystem path reaches the renderer (§12 F2).
@@ -75,5 +75,56 @@ describe('describeReadFailure', () => {
 		for (const value of [undefined, null, 'a string', 42, {}]) {
 			expect(typeof describeReadFailure(value)).toBe('string');
 		}
+	});
+});
+
+/**
+ * The hundred-file cap and the manifest (§12 F2).
+ *
+ * The cap keeps a mistaken selection from pulling a whole drive into memory. It
+ * takes the *first* hundred paths, which is fine for maFiles and quietly fatal
+ * for the one file the encrypted ones cannot be read without.
+ */
+describe('manifestsFirst', () => {
+	/** An SDA folder bigger than the cap. maFiles are named for their SteamID. */
+	function bigFolder(count: number): string[] {
+		const files = Array.from(
+			{ length: count },
+			(_, index) => `C:/SDA/maFiles/765611980000${String(index).padStart(5, '0')}.maFile`
+		);
+		// Where an alphabetical picker puts it: every digit sorts ahead of `m`.
+		return [...files, 'C:/SDA/maFiles/manifest.json'];
+	}
+
+	it('keeps the manifest when the selection is over the cap', () => {
+		// Without this the manifest is sliced off, every encrypted file becomes
+		// undecryptable, and the screen tells the user to also choose manifest.json
+		// — which they just did. Selecting again reproduces it exactly, so there is
+		// no way out of it from the UI.
+		const kept = manifestsFirst(bigFolder(150)).slice(0, 100);
+
+		expect(kept.some((path) => path.endsWith('manifest.json'))).toBe(true);
+	});
+
+	it('does not drop or duplicate anything', () => {
+		const paths = bigFolder(5);
+		const ordered = manifestsFirst(paths);
+
+		expect(ordered).toHaveLength(paths.length);
+		expect([...ordered].sort()).toEqual([...paths].sort());
+	});
+
+	it('leaves the order of the maFiles themselves alone', () => {
+		// Only the manifests move. The report lists candidates in the order they
+		// were chosen, and shuffling that would make a long list hard to follow.
+		const ordered = manifestsFirst(['b.maFile', 'manifest.json', 'a.maFile', 'c.maFile']);
+
+		expect(ordered).toEqual(['manifest.json', 'b.maFile', 'a.maFile', 'c.maFile']);
+	});
+
+	it('handles a selection with no manifest, and one with nothing else', () => {
+		expect(manifestsFirst(['a.maFile', 'b.maFile'])).toEqual(['a.maFile', 'b.maFile']);
+		expect(manifestsFirst(['manifest.json'])).toEqual(['manifest.json']);
+		expect(manifestsFirst([])).toEqual([]);
 	});
 });

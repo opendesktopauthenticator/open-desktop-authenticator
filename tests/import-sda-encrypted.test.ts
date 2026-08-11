@@ -297,6 +297,41 @@ describe('unlocking', () => {
 		expect(report.rejected[0]?.reason).toMatch(/decrypted, but/);
 	});
 
+	it('stays retryable when the bytes decrypted but are not even JSON', () => {
+		// The freak case an unauthenticated cipher allows: a wrong passphrase whose
+		// padding validates *and* whose first byte is `{`. Roughly one in sixty-five
+		// thousand, and treating it as final would permanently strand a file whose
+		// real passphrase the user is about to type. The stake is a Steam account,
+		// so the rare-but-recoverable reading wins over the common-but-final one.
+		const salt = randomBytes(8);
+		const iv = randomBytes(16);
+		const key = pbkdf2Sync(SDA_PASS, salt, 50_000, 32, 'sha1');
+		const cipher = createCipheriv('aes-256-cbc', key, iv);
+		// Begins with `{`, so it clears the decryptor's guard, and is not JSON —
+		// which is what noise looks like, and what a real file never does.
+		const ciphertext = Buffer.concat([
+			cipher.update('{not json at all', 'utf8'),
+			cipher.final()
+		]).toString('base64');
+
+		imports.stage([
+			{ name: 'collision.maFile', text: ciphertext },
+			manifest([
+				{
+					filename: 'collision.maFile',
+					encryption_iv: iv.toString('base64'),
+					encryption_salt: salt.toString('base64')
+				}
+			])
+		]);
+
+		const report = imports.unlock(SDA_PASS);
+
+		expect(report.locked).toHaveLength(1);
+		expect(report.locked[0]?.lastError).toMatch(/passphrase is wrong, or the file is damaged/);
+		expect(report.rejected).toHaveLength(0);
+	});
+
 	it('accepts the right passphrase after a wrong one', () => {
 		const one = encryptedPair('a.maFile');
 		imports.stage([one.file, manifest([one.entry])]);

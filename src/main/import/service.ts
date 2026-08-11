@@ -308,17 +308,39 @@ export class ImportService {
 				parsed.warnings.push('This file was encrypted by SDA and was decrypted on import.');
 				parsedFiles.push(this.toEntry(file.name, parsed));
 			} catch (err) {
-				// **Not retryable, and a separate case entirely.** Getting here means
-				// the passphrase was *right* — the file decrypted — and what came out
-				// is not a usable maFile. Keeping it locked would ask the user to
-				// retype a correct passphrase for as long as they were willing to.
-				failures.push({
-					sourceName: file.name,
-					reason:
-						err instanceof MaFileParseError
-							? `it decrypted, but ${err.message}`
-							: 'it decrypted, but could not be read as a maFile.'
-				});
+				// Getting here means the bytes decrypted and begin with `{`, and are
+				// still not a usable maFile. Two very different things cause that, and
+				// the cost of confusing them is not symmetric.
+				//
+				// **Valid JSON that is not a maFile** is a real file: random bytes are
+				// essentially never parseable JSON. The passphrase was right and no
+				// amount of retyping will help, so this is final.
+				//
+				// **Not valid JSON** means a wrong passphrase got past both guards —
+				// valid padding *and* a leading brace, roughly one in sixty-five
+				// thousand. Rare, but treating it as final would permanently strand a
+				// file whose real passphrase the user is about to type, and the stake
+				// here is access to a Steam account. So it stays retryable.
+				//
+				// An earlier version of this branch rejected both outright, on the
+				// reasoning that decrypting proves the passphrase — which is exactly
+				// the thing an unauthenticated cipher cannot prove.
+				if (isJsonObject(plaintext)) {
+					failures.push({
+						sourceName: file.name,
+						reason:
+							err instanceof MaFileParseError
+								? `it decrypted, but ${err.message}`
+								: 'it decrypted, but could not be read as a maFile.'
+					});
+				} else {
+					stillLocked.push({
+						...file,
+						lastError:
+							'this decrypted into something that is not a maFile. Either the passphrase is ' +
+							'wrong, or the file is damaged.'
+					});
+				}
 			}
 		}
 
@@ -654,6 +676,23 @@ export class ImportService {
 	private expired(): boolean {
 		const held = this.staged.length + this.locked.length;
 		return held > 0 && this.now() - this.stagedAt > this.ttlMs;
+	}
+}
+
+/**
+ * Whether text parses as a JSON object.
+ *
+ * Used to tell a real file apart from a freak decryption collision. Random bytes
+ * can begin with `{` about one time in 256; they are essentially never valid
+ * JSON, so this is the line between "the passphrase was right and this file is
+ * unusable" and "the passphrase was wrong and got lucky twice".
+ */
+function isJsonObject(text: string): boolean {
+	try {
+		const parsed: unknown = JSON.parse(text);
+		return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed);
+	} catch {
+		return false;
 	}
 }
 

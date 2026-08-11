@@ -26,6 +26,35 @@ const MAX_FILE_BYTES = 1024 * 1024;
 /** More than this in one go is a wrong folder, not an import. */
 const MAX_FILES = 100;
 
+/**
+ * Put manifests at the front of the selection, before the cap is applied.
+ *
+ * The cap takes the first hundred paths the picker hands back. An SDA folder
+ * with more than a hundred accounts — which is squarely the audience this
+ * application exists for — therefore risks losing `manifest.json` off the end,
+ * since it is one file among many and nothing guarantees where the OS puts it in
+ * the list. maFiles are named for their SteamID, so in any alphabetical ordering
+ * every digit sorts ahead of the `m`, and the manifest lands last.
+ *
+ * Losing it is not a partial failure. The IV and salt live only there, so every
+ * encrypted file in the import becomes undecryptable and the screen advises the
+ * user to also choose `manifest.json` — which they just did. There is no way out
+ * of that from the UI, because selecting the files again reproduces it exactly.
+ *
+ * A manifest is a few kilobytes and there is one per folder, so promoting them
+ * costs nothing and cannot itself push maFiles out in any realistic selection.
+ */
+export function manifestsFirst(paths: string[]): string[] {
+	const manifests: string[] = [];
+	const rest: string[] = [];
+	for (const path of paths) {
+		// By extension only. Reading the file to be sure would mean reading files
+		// we have already decided not to import, which is the opposite of the point.
+		(/\.json$/i.test(path) ? manifests : rest).push(path);
+	}
+	return [...manifests, ...rest];
+}
+
 export function registerImportHandlers(imports: ImportService): void {
 	registerHandler(CHANNELS.importScan, async (): Promise<ImportReport> => {
 		// Checked before the picker opens, so a locked vault never even asks.
@@ -52,7 +81,7 @@ export function registerImportHandlers(imports: ImportService): void {
 		const files: StagedFile[] = [];
 		const rejected: ImportReport['rejected'] = [];
 
-		for (const path of picked.filePaths.slice(0, MAX_FILES)) {
+		for (const path of manifestsFirst(picked.filePaths).slice(0, MAX_FILES)) {
 			const name = basename(path);
 			try {
 				const size = statSync(path).size;
