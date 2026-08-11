@@ -77,6 +77,14 @@ interface LockedFile {
 	/** From the manifest entry. Absent when no manifest covered this file. */
 	ivBase64?: string;
 	saltBase64?: string;
+	/**
+	 * Why the last attempt failed, shown on the row itself.
+	 *
+	 * Lives here rather than in the report's `rejected` list because a failed
+	 * decryption is retryable, and "Not imported" is where files go when there is
+	 * nothing left to do about them.
+	 */
+	lastError?: string;
 }
 
 export interface ImportServiceOptions {
@@ -274,26 +282,42 @@ export class ImportService {
 				continue;
 			}
 
+			let plaintext: string;
 			try {
-				const plaintext = decryptSdaMaFile({
+				plaintext = decryptSdaMaFile({
 					ciphertextBase64: file.ciphertextBase64,
 					passphrase,
 					ivBase64: file.ivBase64,
 					saltBase64: file.saltBase64
 				});
+			} catch (err) {
+				// **Retryable.** Stays locked with the reason attached to it, rather
+				// than also appearing as a rejection: listing one file under both
+				// "Encrypted" and "Not imported" told the user, in the same breath,
+				// that they could try again and that this file was finished.
+				stillLocked.push({
+					...file,
+					lastError:
+						err instanceof SdaDecryptError ? err.message : 'this file could not be decrypted.'
+				});
+				continue;
+			}
+
+			try {
 				const parsed = parseMaFile(plaintext, file.name, this.now());
 				parsed.warnings.push('This file was encrypted by SDA and was decrypted on import.');
 				parsedFiles.push(this.toEntry(file.name, parsed));
 			} catch (err) {
-				// Left locked, not rejected: the passphrase is retryable and throwing the
-				// file away would make the user pick it again to try a second one.
-				stillLocked.push(file);
+				// **Not retryable, and a separate case entirely.** Getting here means
+				// the passphrase was *right* — the file decrypted — and what came out
+				// is not a usable maFile. Keeping it locked would ask the user to
+				// retype a correct passphrase for as long as they were willing to.
 				failures.push({
 					sourceName: file.name,
 					reason:
-						err instanceof SdaDecryptError || err instanceof MaFileParseError
-							? err.message
-							: 'this file could not be decrypted.'
+						err instanceof MaFileParseError
+							? `it decrypted, but ${err.message}`
+							: 'it decrypted, but could not be read as a maFile.'
 				});
 			}
 		}
@@ -397,13 +421,17 @@ export class ImportService {
 			cancelled: false,
 			candidates,
 			rejected: [...this.rejected, ...extraRejected],
-			locked: this.locked.map((file) => ({
-				sourceName: file.name,
-				// Without an IV and salt there is nothing a passphrase could be applied
-				// to. The screen turns this into "also choose manifest.json", which is
-				// the actual fix and is not guessable from a decryption failure.
-				decryptable: file.ivBase64 !== undefined && file.saltBase64 !== undefined
-			}))
+			locked: this.locked.map((file) => {
+				const entry: ImportReport['locked'][number] = {
+					sourceName: file.name,
+					// Without an IV and salt there is nothing a passphrase could be applied
+					// to. The screen turns this into "also choose manifest.json", which is
+					// the actual fix and is not guessable from a decryption failure.
+					decryptable: file.ivBase64 !== undefined && file.saltBase64 !== undefined
+				};
+				if (file.lastError !== undefined) entry.lastError = file.lastError;
+				return entry;
+			})
 		};
 	}
 

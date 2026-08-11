@@ -258,7 +258,43 @@ describe('unlocking', () => {
 
 		expect(report.locked).toHaveLength(1);
 		expect(report.candidates).toHaveLength(0);
-		expect(report.rejected[0]?.reason).toMatch(/passphrase/i);
+		// The reason belongs to the row, not to "Not imported". Listing the file in
+		// both places told the user it was retryable and finished at the same time.
+		expect(report.locked[0]?.lastError).toMatch(/passphrase/i);
+		expect(report.rejected).toHaveLength(0);
+	});
+
+	it('does not keep asking for a passphrase that already worked', () => {
+		// Decryption succeeding and the result being a usable maFile are different
+		// things. When the passphrase is right but what comes out is not a maFile,
+		// leaving the file locked asks the user to retype a *correct* passphrase for
+		// as long as they are willing to.
+		const salt = randomBytes(8);
+		const iv = randomBytes(16);
+		const key = pbkdf2Sync(SDA_PASS, salt, 50_000, 32, 'sha1');
+		const cipher = createCipheriv('aes-256-cbc', key, iv);
+		// Valid JSON, so it is past the "not a maFile" guard in the decryptor, but
+		// missing every secret the importer needs.
+		const ciphertext = Buffer.concat([
+			cipher.update(JSON.stringify({ account_name: 'trader' }), 'utf8'),
+			cipher.final()
+		]).toString('base64');
+
+		imports.stage([
+			{ name: 'broken.maFile', text: ciphertext },
+			manifest([
+				{
+					filename: 'broken.maFile',
+					encryption_iv: iv.toString('base64'),
+					encryption_salt: salt.toString('base64')
+				}
+			])
+		]);
+
+		const report = imports.unlock(SDA_PASS);
+
+		expect(report.locked).toHaveLength(0);
+		expect(report.rejected[0]?.reason).toMatch(/decrypted, but/);
 	});
 
 	it('accepts the right passphrase after a wrong one', () => {

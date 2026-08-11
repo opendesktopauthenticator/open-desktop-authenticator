@@ -335,7 +335,14 @@ export const importReportResponse = z.object({
 				 * passphrase could decrypt it. The fix is to choose the manifest too,
 				 * which is not something a failed decryption would ever suggest.
 				 */
-				decryptable: z.boolean()
+				decryptable: z.boolean(),
+				/**
+				 * Why the last attempt failed, if there was one.
+				 *
+				 * On the row rather than in `rejected`, because the file can still be
+				 * decrypted — a wrong passphrase is a retry, not a verdict.
+				 */
+				lastError: z.string().optional()
 			})
 		)
 		.default([])

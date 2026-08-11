@@ -366,6 +366,10 @@ function LockedFiles({
 										'settings was not among the files you chose. Choose the files again, ' +
 										'including manifest.json from the same folder.'}
 							</p>
+							{/* On the row, next to the file it is about. This used to be a
+							    second entry under "Not imported", which said the file was
+							    finished at the same moment this section invited a retry. */}
+							{file.lastError && <p className="hint bad">{file.lastError}</p>}
 						</div>
 					</li>
 				))}
