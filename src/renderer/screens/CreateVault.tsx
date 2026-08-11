@@ -37,6 +37,14 @@ export function CreateVault({
 	const [error, setError] = useState<string | undefined>();
 	/** Set when a vault file was offered and the picker was closed without one. */
 	const [adoptNote, setAdoptNote] = useState<string | undefined>();
+	/**
+	 * Kept apart from `error`, which renders beside the create form far below.
+	 *
+	 * Sharing it meant clicking "Load a vault file" and having the reason it failed
+	 * appear off the bottom of the screen — indistinguishable from the button doing
+	 * nothing at all, which is how it was reported.
+	 */
+	const [adoptError, setAdoptError] = useState<string | undefined>();
 
 	const mismatch = confirmation.length > 0 && confirmation !== passphrase;
 	// One shared gate, so the button's disabled state and the submit guard can
@@ -107,6 +115,7 @@ export function CreateVault({
 					here rather than starting again. It is only offered because this machine has none — it can
 					never replace a vault you already have.
 				</p>
+				{adoptError && <p className="error">{adoptError}</p>}
 				{adoptNote && <p className="hint">{adoptNote}</p>}
 				<div className="controls">
 					<button
@@ -114,7 +123,7 @@ export function CreateVault({
 						className="secondary"
 						disabled={busy}
 						onClick={() => {
-							setError(undefined);
+							setAdoptError(undefined);
 							setAdoptNote(undefined);
 							setBusy(true);
 							onAdopt()
@@ -125,7 +134,7 @@ export function CreateVault({
 										setAdoptNote('No file was chosen. Nothing changed.');
 									}
 								})
-								.catch((err: unknown) => setError(messageOf(err)))
+								.catch((err: unknown) => setAdoptError(messageOf(err)))
 								.finally(() => setBusy(false));
 						}}
 					>
