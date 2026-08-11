@@ -1,0 +1,332 @@
+/*
+ * The site's stylesheet.
+ *
+ * Local fonts only, matching the application: no web font means no third-party
+ * request, which is what lets the content security policy stay absolute. The
+ * palette is the application's, so the site and the product look like one thing.
+ */
+:root {
+	--mint: #42f29a;
+	--mint-pale: #9fe7bd;
+	--bg: #070a0e;
+	--panel: #0e141b;
+	--line: rgba(147, 168, 158, 0.18);
+	--line-strong: rgba(147, 168, 158, 0.32);
+	--text: #ecf0f1;
+	--muted: #9db0a6;
+	--warn: #f5c26b;
+	--radius: 14px;
+	--font-display: 'Segoe UI Variable Display', 'Segoe UI', Inter, system-ui, sans-serif;
+	--font-ui: 'Segoe UI Variable Text', 'Segoe UI', Inter, system-ui, sans-serif;
+	--font-small: 'Segoe UI Variable Small', 'Segoe UI', Inter, system-ui, sans-serif;
+	--font-mono: 'Cascadia Mono', Consolas, ui-monospace, monospace;
+	color-scheme: dark;
+}
+* {
+	box-sizing: border-box;
+}
+html {
+	scroll-behavior: smooth;
+}
+body {
+	margin: 0;
+	background: var(--bg);
+	color: var(--text);
+	font-family: var(--font-ui);
+	font-size: 17px;
+	line-height: 1.65;
+	-webkit-font-smoothing: antialiased;
+}
+body::before {
+	content: '';
+	position: fixed;
+	inset: -30%;
+	z-index: -1;
+	pointer-events: none;
+	background:
+		radial-gradient(closest-side at 20% 12%, rgba(46, 204, 113, 0.11), transparent),
+		radial-gradient(closest-side at 82% 4%, rgba(26, 188, 156, 0.09), transparent);
+}
+.wrap {
+	max-width: 760px;
+	margin: 0 auto;
+	padding: 0 24px;
+}
+
+/* Keyboard users get to the content without tabbing the whole nav. */
+.skip {
+	position: absolute;
+	left: -9999px;
+	background: var(--mint);
+	color: #04140c;
+	padding: 10px 16px;
+	border-radius: 0 0 8px 0;
+	font-weight: 700;
+	z-index: 10;
+}
+.skip:focus {
+	left: 0;
+	top: 0;
+}
+
+.masthead {
+	border-bottom: 1px solid var(--line);
+	background: rgba(7, 10, 14, 0.85);
+	backdrop-filter: blur(10px);
+	position: sticky;
+	top: 0;
+	z-index: 5;
+}
+.masthead .wrap {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 20px;
+	flex-wrap: wrap;
+	padding-top: 14px;
+	padding-bottom: 14px;
+	max-width: 1060px;
+}
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 11px;
+	color: var(--text);
+	text-decoration: none;
+	font-size: 0.98rem;
+	letter-spacing: -0.01em;
+}
+.brand b {
+	font-weight: 680;
+}
+.masthead nav {
+	display: flex;
+	gap: 4px;
+	flex-wrap: wrap;
+	font-family: var(--font-small);
+	font-size: 0.88rem;
+}
+.masthead nav a {
+	color: var(--muted);
+	text-decoration: none;
+	padding: 6px 11px;
+	border-radius: 8px;
+}
+.masthead nav a:hover {
+	color: var(--mint);
+	background: rgba(66, 242, 154, 0.09);
+}
+.masthead nav a[aria-current='page'] {
+	color: var(--mint);
+	background: rgba(66, 242, 154, 0.12);
+}
+
+main {
+	padding: 46px 24px 80px;
+}
+h1 {
+	font-family: var(--font-display);
+	font-size: clamp(1.9rem, 1.3rem + 2.4vw, 2.7rem);
+	font-weight: 660;
+	letter-spacing: -0.025em;
+	line-height: 1.15;
+	margin: 0 0 20px;
+	background: linear-gradient(180deg, #fff 34%, var(--mint-pale));
+	-webkit-background-clip: text;
+	background-clip: text;
+	color: transparent;
+}
+h2 {
+	font-family: var(--font-display);
+	font-size: 1.42rem;
+	font-weight: 640;
+	letter-spacing: -0.018em;
+	margin: 46px 0 14px;
+}
+h3 {
+	font-size: 1.06rem;
+	font-weight: 650;
+	margin: 26px 0 8px;
+}
+p,
+li {
+	color: #d6e0da;
+}
+.lede {
+	font-size: 1.14rem;
+	line-height: 1.6;
+	color: var(--text);
+}
+a {
+	color: var(--mint);
+	text-decoration-color: rgba(66, 242, 154, 0.4);
+	text-underline-offset: 3px;
+}
+a:hover {
+	text-decoration-color: var(--mint);
+}
+code {
+	font-family: var(--font-mono);
+	font-size: 0.88em;
+	background: rgba(147, 168, 158, 0.12);
+	padding: 1px 6px;
+	border-radius: 5px;
+}
+pre {
+	background: #05080b;
+	border: 1px solid var(--line);
+	border-radius: 10px;
+	padding: 15px 17px;
+	overflow-x: auto;
+}
+pre code {
+	background: none;
+	padding: 0;
+	font-size: 0.86rem;
+}
+ul,
+ol {
+	padding-left: 22px;
+}
+li {
+	margin: 7px 0;
+}
+.plain {
+	list-style: none;
+	padding-left: 0;
+}
+.plain > li {
+	margin: 11px 0;
+	padding-left: 18px;
+	border-left: 2px solid var(--line-strong);
+}
+.next > li {
+	border-left-color: rgba(66, 242, 154, 0.5);
+}
+ol.signs > li {
+	margin: 14px 0;
+}
+
+.callout {
+	margin: 26px 0;
+	padding: 18px 20px;
+	border: 1px solid var(--line-strong);
+	border-left: 3px solid var(--mint);
+	border-radius: var(--radius);
+	background: linear-gradient(160deg, rgba(255, 255, 255, 0.035), transparent), var(--panel);
+}
+.callout-warn {
+	border-left-color: var(--warn);
+}
+.callout h2 {
+	margin: 0 0 8px;
+	font-size: 1.08rem;
+}
+.callout p:last-child {
+	margin-bottom: 0;
+}
+
+.grid {
+	display: grid;
+	gap: 18px;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+	margin: 22px 0;
+}
+.grid section {
+	padding: 18px 20px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+}
+.grid h3 {
+	margin-top: 0;
+	color: var(--mint-pale);
+}
+.grid p:last-child {
+	margin-bottom: 0;
+}
+
+.defs {
+	margin: 20px 0;
+}
+.defs dt {
+	font-weight: 650;
+	color: var(--mint-pale);
+	margin-top: 18px;
+}
+.defs dd {
+	margin: 5px 0 0;
+	padding-left: 16px;
+	border-left: 2px solid var(--line);
+	color: #d6e0da;
+}
+
+.faq-item {
+	border-top: 1px solid var(--line);
+	padding-top: 6px;
+}
+.faq-item h2 {
+	font-size: 1.18rem;
+}
+
+.button {
+	display: inline-block;
+	background: linear-gradient(135deg, var(--mint), #1abc9c);
+	color: #04140c;
+	font-weight: 660;
+	padding: 11px 20px;
+	border-radius: 10px;
+	text-decoration: none;
+}
+.button:hover {
+	filter: brightness(1.07);
+}
+
+.site-foot {
+	border-top: 1px solid var(--line);
+	padding: 34px 0 54px;
+	margin-top: 40px;
+	font-family: var(--font-small);
+	font-size: 0.88rem;
+	color: var(--muted);
+}
+.site-foot .wrap {
+	max-width: 1060px;
+}
+.foot-lead {
+	color: #d6e0da;
+	margin-top: 0;
+}
+.site-foot nav {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 18px;
+	margin: 14px 0 20px;
+}
+.site-foot nav a {
+	color: var(--muted);
+	text-decoration: none;
+}
+.site-foot nav a:hover {
+	color: var(--mint);
+	text-decoration: underline;
+}
+.fineprint {
+	font-size: 0.82rem;
+	color: #7d8f85;
+	max-width: 62ch;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html {
+		scroll-behavior: auto;
+	}
+}
+@media (max-width: 620px) {
+	body {
+		font-size: 16px;
+	}
+	main {
+		padding-top: 30px;
+	}
+}
