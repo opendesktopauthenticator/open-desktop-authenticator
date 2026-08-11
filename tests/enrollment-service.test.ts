@@ -773,6 +773,66 @@ describe('the pause waiting for an emailed code', () => {
 	});
 });
 
+describe('the recovery file after activation', () => {
+	it('stops saying the authenticator was never activated', async () => {
+		// The file is written before activation — that is the window it exists to
+		// survive — so it records `pendingActivation`. Nothing corrected it, so
+		// restoring after an ordinary activate-then-remove produced an account the
+		// app believed had never been activated: it offered to finish, and could
+		// not, because the file carries no refresh token by design.
+		const written: Account[] = [];
+		const updated: Account[] = [];
+		const { vault, accounts } = fakeVault();
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => fakeSession(),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			writeRecovery: (account) => written.push({ ...account }),
+			updateRecovery: (account) => updated.push({ ...account })
+		});
+
+		await service.begin('trader', 'password');
+		expect(written[0]?.status).toBe('pendingActivation');
+
+		await service.activate(STEAM_ID, '12345');
+
+		expect(updated).toHaveLength(1);
+		// What the vault holds, not what enrollment had in hand.
+		expect(updated[0]?.status).toBe(accounts[0]?.status);
+		expect(updated[0]?.status).not.toBe('pendingActivation');
+		// And the secrets are still there — a corrected file is still a backup.
+		expect(updated[0]?.sharedSecret).toBe(SHARED);
+		expect(updated[0]?.revocationCode).toBe('R12345');
+	});
+
+	it('does not fail an activation Steam accepted just because the backup could not be rewritten', async () => {
+		const { vault } = fakeVault();
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => fakeSession(),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			writeRecovery: () => undefined,
+			updateRecovery: () => {
+				throw new Error('disk is gone');
+			}
+		});
+
+		await service.begin('trader', 'password');
+
+		await expect(service.activate(STEAM_ID, '12345')).resolves.toBe('activated');
+	});
+});
+
 describe('a lock landing while the transport is being built', () => {
 	it('never asks Steam to attach an authenticator it could not store', async () => {
 		// `forAccount` is awaited immediately before the one irreversible request in

@@ -74,6 +74,18 @@ export interface EnrollmentServiceOptions {
 	 * Optional: an enrollment must not fail because a backup could not be written.
 	 */
 	writeRecovery?: (account: Account) => void;
+	/**
+	 * Corrects the recovery file once activation has succeeded.
+	 *
+	 * The file has to be written before activation — that is the window it exists
+	 * to survive — so it necessarily records `pendingActivation`. Left uncorrected,
+	 * restoring it after an ordinary activate-then-remove produced an account the
+	 * app thought had never been activated, offered to finish, and could not.
+	 *
+	 * Optional and best-effort, exactly like `writeRecovery`: a backup that cannot
+	 * be refreshed is not a reason to fail an activation Steam has accepted.
+	 */
+	updateRecovery?: (account: Account) => void;
 }
 
 interface PendingLogin {
@@ -96,6 +108,7 @@ export class EnrollmentService {
 	private readonly finalize: typeof finalizeEnrollment;
 	private readonly detach: typeof removeAuthenticator;
 	private readonly writeRecovery: ((account: Account) => void) | undefined;
+	private readonly updateRecovery: ((account: Account) => void) | undefined;
 
 	/**
 	 * One at a time, deliberately.
@@ -164,6 +177,7 @@ export class EnrollmentService {
 		this.finalize = options.finalizeEnrollment ?? finalizeEnrollment;
 		this.detach = options.removeAuthenticator ?? removeAuthenticator;
 		this.writeRecovery = options.writeRecovery;
+		this.updateRecovery = options.updateRecovery;
 	}
 
 	/**
@@ -450,6 +464,19 @@ export class EnrollmentService {
 					'more; if it says the account is already activated, that is the truth and nothing ' +
 					'is wrong.'
 			);
+		}
+
+		// The recovery file still says `pendingActivation`, because that was true
+		// when it was written. Correct it now, from the stored account rather than
+		// the local one, so what lands on disk is exactly what the vault holds.
+		const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+		if (stored && this.updateRecovery) {
+			try {
+				this.updateRecovery(stored);
+			} catch {
+				// Swallowed. Steam has activated and the vault agrees; a stale backup is
+				// a smaller problem than reporting a failure for something that worked.
+			}
 		}
 
 		this.tokens.delete(steamId64);

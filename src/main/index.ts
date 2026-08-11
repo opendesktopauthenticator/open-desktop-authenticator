@@ -30,6 +30,7 @@ import {
 	RECOVERY_EXTENSION,
 	recoveryContents,
 	recoveryPathFor,
+	updateRecoveryFile,
 	writeRecoveryFile
 } from './vault/recovery';
 import { SteamTransportFactory, type ElectronNetworking } from './net/transport';
@@ -244,14 +245,39 @@ function start(): void {
 	// Constructed after the network pieces so a commit that changes routing can
 	// drop the stale session through the same seam the settings path uses.
 	const imports = new ImportService(vault, { onRoutingChanged: dropAccountRouting });
+	/**
+	 * Where this run wrote each account's recovery file.
+	 *
+	 * Only paths written during this process, so `updateRecovery` can correct a
+	 * file it created and can never touch one it did not.
+	 */
+	const recoveryFiles = new Map<string, string>();
+
 	const enrollment = new EnrollmentService(vault, transports, {
 		timeOffsetSeconds: () => codes.timeOffsetSeconds(),
 		// Written once, at enrollment, into the app's own data directory. Removal
 		// deliberately does not delete it — recovering from that removal is the
 		// whole reason it exists.
 		writeRecovery: (account) => {
-			writeRecoveryFile(
+			const written = writeRecoveryFile(
 				recoveryPathFor(app.getPath('userData'), account.steamId64),
+				vault.sealForBackup(recoveryContents(account, new Date().toISOString()))
+			);
+			// Remembered so activation can correct this same file. The path is not
+			// always the one asked for — a pre-existing backup for this SteamID sends
+			// the write to a sibling — and updating the wrong one would overwrite an
+			// older enrollment's only copy.
+			recoveryFiles.set(account.steamId64, written);
+		},
+		updateRecovery: (account) => {
+			const written = recoveryFiles.get(account.steamId64);
+			// Only a file this run created. Anything else on disk belongs to an
+			// enrollment we know nothing about and is not ours to rewrite.
+			if (written === undefined) {
+				return;
+			}
+			updateRecoveryFile(
+				written,
 				vault.sealForBackup(recoveryContents(account, new Date().toISOString()))
 			);
 		}

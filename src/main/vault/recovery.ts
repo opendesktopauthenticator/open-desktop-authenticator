@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { open } from './crypto';
@@ -95,7 +95,7 @@ export function recoveryContents(account: Account, nowIso: string): string {
  * than the protection, but there is no reason for another user on the machine to
  * be able to copy it and attack the passphrase offline at their leisure.
  */
-export function writeRecoveryFile(path: string, envelope: unknown): void {
+export function writeRecoveryFile(path: string, envelope: unknown): string {
 	mkdirSync(dirname(path), { recursive: true });
 	const body = `${JSON.stringify(envelope, null, 2)}\n`;
 
@@ -109,12 +109,54 @@ export function writeRecoveryFile(path: string, envelope: unknown): void {
 	// destroying the one they turn out to need.
 	try {
 		writeFileSync(path, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+		return path;
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException | undefined)?.code !== 'EEXIST') {
 			throw err;
 		}
-		writeFileSync(supersededPath(path), body, { encoding: 'utf8', mode: 0o600 });
+		const beside = supersededPath(path);
+		writeFileSync(beside, body, { encoding: 'utf8', mode: 0o600 });
+		// **The path actually used**, which is not always the one asked for. A
+		// caller that wants to correct this file later needs to know where it went;
+		// updating the primary path when the write landed beside it would overwrite
+		// a different enrollment's backup — the exact loss `wx` exists to prevent.
+		return beside;
 	}
+}
+
+/**
+ * Rewrite a recovery file this process created, in place.
+ *
+ * Separate from `writeRecoveryFile`, and deliberately so: that one must never
+ * overwrite, because what it would replace may be the only copy of a different
+ * authenticator's secrets. This one overwrites on purpose, and callers must only
+ * ever hand it a path returned by `writeRecoveryFile` during this same run.
+ *
+ * ## Why an update is needed at all
+ *
+ * The file is written the moment Steam issues the secrets — necessarily before
+ * activation, because the window before the vault write is what it exists to
+ * survive. So it records `status: 'pendingActivation'`, and nothing ever
+ * corrected that. Restoring after an ordinary activate-then-remove therefore
+ * produced an account the application believed had never been activated: it
+ * offered to finish activating, and could not, because the file carries no
+ * refresh token by design.
+ *
+ * Deciding the status at restore time instead would be a guess. The file cannot
+ * distinguish "activated, then removed" from "crashed before activating", and
+ * both are real situations this feature is for. Correcting the file at the
+ * moment the fact becomes known needs no guess.
+ *
+ * Temp-then-rename, so a failure leaves the existing file exactly as it was: a
+ * half-written recovery file is worse than a stale one.
+ */
+export function updateRecoveryFile(path: string, envelope: unknown): void {
+	const temp = `${path}.tmp`;
+	writeFileSync(temp, `${JSON.stringify(envelope, null, 2)}\n`, {
+		encoding: 'utf8',
+		mode: 0o600
+	});
+	renameSync(temp, path);
 }
 
 /** A sibling path that cannot collide, for a second file about the same account. */

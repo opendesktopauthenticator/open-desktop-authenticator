@@ -9,6 +9,7 @@ import {
 	recoveryContents,
 	recoveryDirectory,
 	recoveryPathFor,
+	updateRecoveryFile,
 	writeRecoveryFile
 } from '../src/main/vault/recovery';
 import { VaultService } from '../src/main/vault/service';
@@ -190,6 +191,50 @@ describe('the file on disk', () => {
 		// read it, and to our own importer, which would reject it confusingly.
 		expect(recoveryPathFor(dir, '76561199999999999')).toContain(RECOVERY_EXTENSION);
 		expect(RECOVERY_EXTENSION).not.toContain('maFile');
+	});
+
+	it('updates in place without ever leaving a half-written file', () => {
+		// The correction applied after activation. It overwrites on purpose — unlike
+		// `writeRecoveryFile` — so it has to be atomic: a truncated recovery file is
+		// worse than a stale one, and this is the file somebody reaches for when
+		// everything else has already gone wrong.
+		const path = recoveryPathFor(dir, '76561199999999999');
+		const written = writeRecoveryFile(
+			path,
+			vault.sealForBackup(recoveryContents(account(), NOW_ISO))
+		);
+		expect(written).toBe(path);
+
+		updateRecoveryFile(
+			written,
+			vault.sealForBackup(recoveryContents(account({ status: 'active' }), NOW_ISO))
+		);
+
+		return readRecoveryFile(readFileSync(path, 'utf8'), PASS).then((recovered) => {
+			expect(recovered.account.status).toBe('active');
+			// One file, not two: this is a correction, not a second backup.
+			expect(
+				readdirSync(recoveryDirectory(dir)).filter((name) => name.endsWith(RECOVERY_EXTENSION))
+			).toHaveLength(1);
+			// And no temp file left behind.
+			expect(readdirSync(recoveryDirectory(dir)).some((name) => name.endsWith('.tmp'))).toBe(false);
+		});
+	});
+
+	it('reports the path it actually used when one already exists', () => {
+		// The caller needs this to correct the right file later. Updating the
+		// primary path when the write landed beside it would overwrite an older
+		// enrollment's only copy.
+		const path = recoveryPathFor(dir, '76561199999999999');
+		writeRecoveryFile(path, vault.sealForBackup(recoveryContents(account(), NOW_ISO)));
+
+		const second = writeRecoveryFile(
+			path,
+			vault.sealForBackup(recoveryContents(account(), NOW_ISO))
+		);
+
+		expect(second).not.toBe(path);
+		expect(second).toContain(RECOVERY_EXTENSION);
 	});
 
 	it('never replaces a recovery file that is already there', () => {
