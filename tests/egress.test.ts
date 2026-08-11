@@ -1100,6 +1100,75 @@ describe('cancelling work when the vault locks', () => {
 		expect(factory.routingStatus(routed.steamId64)).toBeUndefined();
 	});
 
+	it('refuses a transport granted before the lock, even after construction finished', async () => {
+		// The epoch used to be read when each request *started*, which cannot detect
+		// a lock that already happened: `forgetAll` bumps it to 1, and the next
+		// request then reads 1 as its own baseline and compares it against itself.
+		// The question is not "did anything change while I was sending" but "is the
+		// permission I was granted still valid".
+		const { electron, requests } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(routed);
+
+		factory.forgetAll();
+
+		await expect(transport({ url: STEAM_URL, method: 'GET', cookie: '' })).rejects.toThrow(
+			/closed before the request was sent/
+		);
+		expect(requests).toHaveLength(0);
+	});
+
+	it('refuses a transport whose session was still being built when the lock came', async () => {
+		// `forgetAll` can only reach accounts present in `sessions` or `inFlight`,
+		// and an account is added to `sessions` only after `setProxy` has been
+		// awaited — so for the whole of that await a lock bumped nothing at all.
+		//
+		// For enrollment that meant `AddAuthenticator`, the one irreversible request
+		// in the application, could be sent after the vault locked, leaving Steam
+		// holding an authenticator whose secrets the vault could no longer store.
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		const { electron, requests } = fakeElectron();
+		const gatedElectron: ElectronNetworking = {
+			...electron,
+			sessionFromPartition: (partition, options) => {
+				const session = electron.sessionFromPartition(partition, options);
+				return { ...session, setProxy: async (): Promise<void> => gate };
+			}
+		};
+
+		const factory = new SteamTransportFactory(gatedElectron);
+		const building = factory.forAccount(routed);
+		await Promise.resolve();
+
+		// The vault locks while construction is parked inside setProxy.
+		factory.forgetAll();
+		release?.();
+
+		// Refused at construction, so no transport is ever handed out.
+		await expect(building).rejects.toThrow(/closed before the request was sent/);
+		expect(requests).toHaveLength(0);
+	});
+
+	it('aborts the connection when a response is implausibly large', async () => {
+		// The size limit bounds how much is *retained*, not how much is sent. The
+		// timeout path aborts; this one only rejected, so a peer that kept streaming
+		// kept the socket alive — with the timer cleared and the handle already
+		// removed from `outstanding`, leaving nothing able to cancel it.
+		const oversized = 'x'.repeat(4 * 1024 * 1024 + 1);
+		const { electron, aborted } = fakeElectron({ body: oversized });
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(routed);
+
+		await expect(transport({ url: STEAM_URL, method: 'GET', cookie: '' })).rejects.toThrow(
+			/implausibly large/
+		);
+		expect(aborted()).toBe(1);
+	});
+
 	it('aborts a request it has given up waiting for', async () => {
 		// Timing out used to reject and walk away, leaving the request running: the
 		// socket stayed open and Steam could still act on it. Worse, the reject path

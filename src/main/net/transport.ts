@@ -158,6 +158,19 @@ export interface EgressAccount {
 	proxyUrl?: string | undefined;
 }
 
+/**
+ * Permission to talk to Steam as one account, as of one moment.
+ *
+ * Two counters because two different things revoke it: `epoch` is per account
+ * and moves when that one account is forgotten (a lock, or a routing change);
+ * `generation` is factory-wide and moves on `forgetAll`, which is the only one
+ * able to reach an account that is still being constructed.
+ */
+interface Grant {
+	generation: number;
+	epoch: number;
+}
+
 /** How long any single Steam request may take before it is abandoned. */
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -218,6 +231,25 @@ export class SteamTransportFactory {
 	 * across the await closes that window.
 	 */
 	private readonly epoch = new Map<string, number>();
+
+	/**
+	 * Bumped by `forgetAll`, and checked by every transport it granted.
+	 *
+	 * The per-account `epoch` above cannot cover a lock on its own, because
+	 * `forgetAll` can only reach accounts that appear in `sessions` or `inFlight`
+	 * — and an account whose session is still being constructed is in neither. It
+	 * is added to `sessions` only after `setProxy` has been awaited, so for the
+	 * whole of that await a lock bumped nothing, and the transport handed back
+	 * afterwards was indistinguishable from one granted while unlocked.
+	 *
+	 * For enrollment that meant `AddAuthenticator` — the one irreversible request
+	 * in the application — could be sent after the vault had locked, with the
+	 * vault then unable to store the secrets Steam had just issued.
+	 *
+	 * A factory-wide counter needs no bookkeeping per in-flight construction and
+	 * cannot miss an account it has never heard of.
+	 */
+	private generation = 0;
 	private readonly now: () => number;
 
 	constructor(electron: ElectronNetworking, now: () => number = () => Date.now()) {
@@ -245,10 +277,26 @@ export class SteamTransportFactory {
 	 * they would have no way to notice.
 	 */
 	async forAccount(account: EgressAccount): Promise<SteamTransport> {
+		// **Captured before the first await, and carried into every request this
+		// transport ever makes.**
+		//
+		// It used to be read at the start of each request instead, which cannot
+		// detect a lock that happened *earlier*: `forgetAll` would bump the epoch to
+		// 1, and the next request would then read 1 as its own baseline and compare
+		// it against itself. The question a transport has to answer is not "did
+		// anything change while I was sending" but "is the permission I was granted
+		// still valid", and only a value captured at the grant can answer that.
+		const granted = this.currentGrant(account.steamId64);
+
 		// Any wipe still running against this partition finishes first. See `forget`.
 		await this.clearing.get(account.steamId64);
 
 		const session = await this.sessionFor(account);
+
+		// Construction is itself a window — `setProxy` is awaited above, and for its
+		// duration this account exists in none of the maps `forgetAll` walks. Fail
+		// here rather than hand back a transport whose first use will throw.
+		this.assertGranted(account.steamId64, granted);
 
 		// Planned again rather than remembered from `sessionFor`, which caches
 		// sessions and returns early for one it already has. Safe: it has already
@@ -268,7 +316,7 @@ export class SteamTransportFactory {
 			this.routing.set(account.steamId64, { state: 'off' });
 		}
 
-		return (request) => this.perform(session, request, plan, account.steamId64);
+		return (request) => this.perform(session, request, plan, account.steamId64, granted);
 	}
 
 	/**
@@ -386,6 +434,12 @@ export class SteamTransportFactory {
 	 * lock a smaller thing than it claims to be.
 	 */
 	forgetAll(): void {
+		// **First, and unconditionally.** The loop below can only reach accounts
+		// that already appear in one of the maps; an account whose session is still
+		// being built appears in neither, and bumping the shared generation is what
+		// reaches it.
+		this.generation += 1;
+
 		// Every account with work in the air, not only those holding a session — an
 		// account can have a request out before its session is cached.
 		for (const steamId64 of new Set([...this.sessions.keys(), ...this.inFlight.keys()])) {
@@ -401,6 +455,21 @@ export class SteamTransportFactory {
 	 * removes is the application continuing to issue and await work after a lock,
 	 * which is the part we actually control.
 	 */
+	/** Permission as it stands right now, to be checked against later. */
+	private currentGrant(steamId64: string): Grant {
+		return { generation: this.generation, epoch: this.epoch.get(steamId64) ?? 0 };
+	}
+
+	/** Throw unless the permission granted earlier is still the current one. */
+	private assertGranted(steamId64: string, granted: Grant): void {
+		if (
+			this.generation !== granted.generation ||
+			(this.epoch.get(steamId64) ?? 0) !== granted.epoch
+		) {
+			throw new EgressError('this account was closed before the request was sent');
+		}
+	}
+
 	private abortInFlight(steamId64: string): void {
 		this.epoch.set(steamId64, (this.epoch.get(steamId64) ?? 0) + 1);
 
@@ -494,10 +563,14 @@ export class SteamTransportFactory {
 		session: ProxyCapableSession,
 		request: SteamRequest,
 		plan: ProxyPlan | undefined,
-		steamId64: string
+		steamId64: string,
+		granted: Grant
 	): Promise<SteamResponse> {
 		const routedThrough = plan?.redacted;
-		const startedAt = this.epoch.get(steamId64) ?? 0;
+
+		// Before anything is sent. A transport granted before a lock must not be
+		// usable after it, however long it sat unused in between.
+		this.assertGranted(steamId64, granted);
 
 		// Before anything is sent, and before the endpoint check below, because a
 		// refusal to route is not a reason to look at the URL — it is a reason to
@@ -510,9 +583,7 @@ export class SteamTransportFactory {
 		// had no handle to abort, so without this the request is built and sent
 		// afterwards — which is precisely the "auto-confirm approves after lock"
 		// case, one layer lower than where it was first noticed.
-		if ((this.epoch.get(steamId64) ?? 0) !== startedAt) {
-			throw new EgressError('this account was closed before the request was sent');
-		}
+		this.assertGranted(steamId64, granted);
 
 		return new Promise<SteamResponse>((resolve, reject) => {
 			// Checked on every request, not once at construction. This function
@@ -633,6 +704,18 @@ export class SteamTransportFactory {
 					if (length > MAX_RESPONSE_BYTES) {
 						// Steam's answers are kilobytes. Anything of this size is a captive
 						// portal or a proxy error page, and it is not going to parse.
+						//
+						// **Aborted, not merely abandoned** — the same rule the timeout path
+						// follows, and for the same reason. `finish` removes the handle from
+						// `outstanding`, so rejecting alone left a peer streaming into a
+						// request nothing could cancel: the timer is cleared, the lock-time
+						// `abortInFlight` can no longer see it, and the socket stays open for
+						// as long as the other end keeps writing.
+						try {
+							handle.abort?.();
+						} catch {
+							// Already finished or never connected. Nothing to stop.
+						}
 						finish(() => reject(new EgressError('Steam sent an implausibly large response.')));
 						return;
 					}

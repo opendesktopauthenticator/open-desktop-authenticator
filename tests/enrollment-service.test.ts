@@ -45,6 +45,7 @@ function fakeVault(): { vault: { read: () => { accounts: Account[] } }; accounts
 	return {
 		accounts,
 		vault: {
+			isUnlocked: () => true,
 			read: () => ({ accounts }),
 			mutate: async (apply: (draft: { accounts: Account[] }) => void) => {
 				apply({ accounts });
@@ -310,6 +311,7 @@ describe('deactivating an authenticator', () => {
 		const detachCalls: unknown[] = [];
 
 		const vault = {
+			isUnlocked: () => true,
 			read: () => ({ accounts }),
 			verifyPassphrase: (passphrase: string) => {
 				verified.push(passphrase);
@@ -412,6 +414,7 @@ describe('when the vault write fails after Steam has already attached', () => {
 	/** A vault whose `mutate` always fails, as it would if it locked mid-write. */
 	function brokenVault(): { read: () => { accounts: Account[] } } {
 		return {
+			isUnlocked: () => true,
 			read: () => ({ accounts: [] }),
 			mutate: () =>
 				Promise.reject(
@@ -770,10 +773,57 @@ describe('the pause waiting for an emailed code', () => {
 	});
 });
 
+describe('a lock landing while the transport is being built', () => {
+	it('never asks Steam to attach an authenticator it could not store', async () => {
+		// `forAccount` is awaited immediately before the one irreversible request in
+		// the application, and the idle timer does not pause for it. Without a check
+		// after that await, Steam attaches an authenticator whose secrets the vault
+		// is then unable to write — recoverable only through Steam Support.
+		let unlocked = true;
+		let attachments = 0;
+
+		const transports = {
+			forAccount: () => {
+				// The vault locks while the session is being constructed.
+				unlocked = false;
+				return Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }));
+			}
+		} as unknown as SteamTransportFactory;
+
+		const accounts: Account[] = [];
+		const service = new EnrollmentService(
+			{
+				isUnlocked: () => unlocked,
+				read: () => ({ accounts }),
+				mutate: async (apply: (draft: { accounts: Account[] }) => void) => {
+					apply({ accounts });
+					return Promise.resolve();
+				}
+			} as never,
+			transports,
+			{
+				now: () => NOW,
+				loginSession: () => fakeSession(),
+				startEnrollment: () => {
+					attachments += 1;
+					return Promise.resolve(STARTED);
+				},
+				finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			}
+		);
+
+		await expect(service.begin('trader', 'password')).rejects.toThrow(/vault locked before/);
+
+		expect(attachments).toBe(0);
+		expect(accounts).toHaveLength(0);
+	});
+});
+
 describe('when Steam has acted and the vault write fails', () => {
 	function brokenAfter(accounts: Account[]): { read: () => { accounts: Account[] } } {
 		let writes = 0;
 		return {
+			isUnlocked: () => true,
 			read: () => ({ accounts }),
 			mutate: (apply: (draft: { accounts: Account[] }) => void) => {
 				writes += 1;

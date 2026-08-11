@@ -588,6 +588,23 @@ export class EnrollmentService {
 		// itself leaves through the proxy rather than from the user's own address.
 		const transport = await this.transports.forAccount({ steamId64, proxyUrl });
 
+		// **Re-checked after that await, immediately before the irreversible call.**
+		//
+		// `vault.read()` above already refuses a locked vault, and the transport
+		// layer now refuses a grant that predates a lock — but neither is a reason
+		// to leave the gap here open. `forAccount` awaits, the idle timer does not
+		// pause for it, and the very next statement asks Steam to attach an
+		// authenticator that this vault would then be unable to store. A second
+		// check costs one line at the one place in the application where being
+		// wrong cannot be undone.
+		if (!this.vault.isUnlocked()) {
+			throw new EnrollmentError(
+				'The vault locked before the authenticator could be created, so nothing was changed ' +
+					'on Steam. Unlock and start again.',
+				false
+			);
+		}
+
 		// From here until the vault write completes is the only unrecoverable
 		// window in the application. Nothing is awaited in between that does not
 		// have to be.
