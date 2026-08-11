@@ -258,6 +258,12 @@ describe('§11 — the lock drops every cached credential', () => {
 		expect(index).toContain('show: showMainWindow');
 		// A second `mainWindow.show()` anywhere would be a second path re-appearing.
 		expect(index.match(/mainWindow\.show\(\)/g) ?? []).toHaveLength(0);
+
+		// And every tray control resolves the same window. Making only `show` do so
+		// left the menu deciding its label from one window and acting on another —
+		// the same defect, reintroduced by the fix for it.
+		expect(index).toContain('hide: () => liveWindow()?.hide()');
+		expect(index).toContain('isVisible: () => liveWindow()?.isVisible()');
 	});
 
 	it('found the handler it is asserting against', () => {

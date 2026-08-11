@@ -476,8 +476,19 @@ function start(): void {
 		 * window and a handler holding a destroyed reference would silently do
 		 * nothing.
 		 */
+		/**
+		 * The window as it is now, which is not necessarily the one created above.
+		 *
+		 * Every tray control has to agree about which window it is talking about.
+		 * Making only `show` resolve this while `hide` and `isVisible` closed over
+		 * the original left the menu deciding its label from one window and acting
+		 * on another — the same "two things that must agree" shape the shared
+		 * `showMainWindow` was introduced to remove, reintroduced by introducing it.
+		 */
+		const liveWindow = (): BrowserWindow | undefined => BrowserWindow.getAllWindows()[0];
+
 		const showMainWindow = (): void => {
-			const window = BrowserWindow.getAllWindows()[0];
+			const window = liveWindow();
 			if (!window) {
 				createMainWindow();
 				return;
@@ -512,8 +523,10 @@ function start(): void {
 
 		tray = createTray({
 			show: showMainWindow,
-			hide: () => mainWindow.hide(),
-			isVisible: () => mainWindow.isVisible(),
+			hide: () => liveWindow()?.hide(),
+			// No window is not visible. Answering from a destroyed one would throw,
+			// and taking the whole tray menu down with it.
+			isVisible: () => liveWindow()?.isVisible() ?? false,
 			lock: () => vault.lock('manual'),
 			isUnlocked: () => vault.isUnlocked(),
 			quit: () => {
