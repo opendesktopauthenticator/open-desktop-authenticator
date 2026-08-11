@@ -9,6 +9,7 @@ import home from './home.mjs';
 import sda from './sda.mjs';
 import { scamClones, verify, security } from './safety.mjs';
 import { download, importFromSda, docs, faq, support, notFound } from './guides.mjs';
+import { mafile, lostAuthenticator, alternatives } from './answers.mjs';
 
 export const PAGES = [
 	home,
@@ -16,6 +17,9 @@ export const PAGES = [
 	scamClones,
 	verify,
 	security,
+	mafile,
+	lostAuthenticator,
+	alternatives,
 	download,
 	importFromSda,
 	docs,

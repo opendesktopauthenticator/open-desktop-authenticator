@@ -39,6 +39,14 @@ export const SITE = {
 	short: 'ODA',
 	tagline: 'An open-source Steam authenticator for the desktop.',
 	publisher: 'MASTERPANEL LLC',
+	/*
+	 * When the content was last reviewed. A real date, set by hand.
+	 *
+	 * Not `new Date()`: stamping every page with the build date claims a review
+	 * that did not happen, and a site whose every page updates whenever CSS
+	 * changes is telling search engines something false about its freshness.
+	 */
+	updated: '2026-08-12',
 	repo: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator'
 };
 
@@ -83,7 +91,10 @@ function head(page) {
 	<meta property="og:description" content="${escape(page.description)}">
 	<meta property="og:url" content="${escape(url)}">
 	<meta property="og:image" content="${SITE.origin}/assets/mark-512.png">
+	<meta property="og:image:alt" content="The Open Desktop Authenticator shield mark">
+	<meta property="og:locale" content="en_GB">
 	<meta name="twitter:card" content="summary">
+	<meta property="article:modified_time" content="${page.updated ?? SITE.updated}">
 	<link rel="icon" href="/assets/mark.svg" type="image/svg+xml">
 	<link rel="apple-touch-icon" href="/assets/mark-512.png">
 	<link rel="stylesheet" href="/assets/site.css">
@@ -113,6 +124,37 @@ function breadcrumbs(page) {
 	};
 }
 
+const formatDate = (iso) =>
+	new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', {
+		day: 'numeric',
+		month: 'long',
+		year: 'numeric',
+		timeZone: 'UTC'
+	});
+
+/**
+ * The breadcrumb the reader sees.
+ *
+ * The same trail as the JSON-LD, from the same function. Structured data that
+ * describes a breadcrumb the page does not actually show is the kind of
+ * mismatch that gets rich results withdrawn — and it is unhelpful to the reader,
+ * who is the reason to have one.
+ */
+function trail(page) {
+	if (page.slug === 'index') {
+		return '';
+	}
+	const items = breadcrumbs(page).itemListElement;
+	const li = items.map((item, index) =>
+		index === items.length - 1
+			? `\t\t\t<li aria-current="page">${escape(item.name)}</li>`
+			: `\t\t\t<li><a href="${item.item.replace(SITE.origin, '') || '/'}">${escape(item.name)}</a></li>`
+	);
+	return ['\t\t<nav class="crumbs" aria-label="Breadcrumb"><ol>', ...li, '\t\t</ol></nav>'].join(
+		'\n'
+	);
+}
+
 function layout(page) {
 	const nav = NAV.map((slug) => {
 		const target = PAGES.find((p) => p.slug === slug);
@@ -140,7 +182,9 @@ function layout(page) {
 	</header>
 
 	<main id="main" class="wrap">
+${trail(page)}
 ${page.body(SITE)}
+		<p class="reviewed">Last reviewed <time datetime="${page.updated ?? SITE.updated}">${formatDate(page.updated ?? SITE.updated)}</time>.</p>
 	</main>
 
 	<footer class="site-foot">
@@ -152,6 +196,9 @@ ${page.body(SITE)}
 				<a href="/verify">Verify a download</a>
 				<a href="/security">Security</a>
 				<a href="/scam-clones">Scam clones</a>
+				<a href="/what-is-a-mafile">What is a maFile</a>
+				<a href="/lost-authenticator">Lost your authenticator</a>
+				<a href="/alternatives">Alternatives compared</a>
 				<a href="/import-from-sda">Import from SDA</a>
 				<a href="/docs">Documentation</a>
 				<a href="/faq">FAQ</a>

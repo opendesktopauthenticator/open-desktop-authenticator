@@ -330,3 +330,42 @@ ol.signs > li {
 		padding-top: 30px;
 	}
 }
+
+/* Breadcrumbs, and the review date that closes every page. */
+.crumbs {
+	font-family: var(--font-small);
+	font-size: 0.82rem;
+	margin: 0 0 18px;
+}
+.crumbs ol {
+	list-style: none;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 0;
+	padding: 0;
+}
+.crumbs li + li::before {
+	content: '›';
+	color: #6b7f74;
+	margin-right: 8px;
+}
+.crumbs a {
+	color: var(--muted);
+	text-decoration: none;
+}
+.crumbs a:hover {
+	color: var(--mint);
+	text-decoration: underline;
+}
+.crumbs [aria-current='page'] {
+	color: #7d8f85;
+}
+.reviewed {
+	margin-top: 46px;
+	padding-top: 16px;
+	border-top: 1px solid var(--line);
+	font-family: var(--font-small);
+	font-size: 0.82rem;
+	color: #7d8f85;
+}

@@ -174,6 +174,9 @@ export default {
 			<h2>Related reading</h2>
 			<ul class="plain next">
 				<li><a href="/scam-clones">How the fake SDA sites work</a></li>
+				<li><a href="/what-is-a-mafile">What is inside a maFile</a></li>
+				<li><a href="/alternatives">How the options compare</a></li>
+				<li><a href="/lost-authenticator">If you have already lost access</a></li>
 				<li><a href="/verify">Verifying that a download is genuine</a></li>
 				<li><a href="/import-from-sda">Moving maFiles into this application</a></li>
 				<li><a href="/security">What this application does with your secrets</a></li>

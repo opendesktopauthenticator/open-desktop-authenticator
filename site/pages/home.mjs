@@ -151,6 +151,7 @@ export default {
 				<li><a href="/scam-clones">How the fake authenticator sites work</a></li>
 				<li><a href="/security">The security model, in detail</a></li>
 				<li><a href="/import-from-sda">Bringing your existing maFiles across</a></li>
+				<li><a href="/alternatives">Which authenticator you should actually use</a></li>
 			</ul>
 		</article>`
 };
