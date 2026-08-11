@@ -1,5 +1,5 @@
 import { generateGuardCode } from '../codes/totp';
-import { steamSessionProxy } from '../net/egress';
+import { redactCredentials, steamSessionProxy } from '../net/egress';
 import { jwtAudience, jwtExpiry } from '../steam-jwt';
 
 /**
@@ -359,5 +359,8 @@ function describeLibraryError(err: unknown): string {
 	if (/RateLimitExceeded|TooManyAttempts/i.test(message)) {
 		return 'Steam is rate-limiting sign-ins from this address. Wait a few minutes and try again.';
 	}
-	return `Steam refused the sign-in: ${message}`;
+	// Redacted, because this is the branch that forwards whatever the library
+	// said — and what it says routinely includes the URL it failed on, proxy
+	// credentials and all.
+	return `Steam refused the sign-in: ${redactCredentials(message)}`;
 }

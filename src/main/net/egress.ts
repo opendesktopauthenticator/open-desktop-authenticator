@@ -154,6 +154,23 @@ export function describeNetworkError(error: unknown, routedThrough?: string): st
 }
 
 /** A proxy, split into the part Chromium takes and the part it cannot. */
+/**
+ * Strip credentials out of anything before it is shown to a user or logged.
+ *
+ * Library errors quote what they were given. `steam-session` and Chromium both
+ * embed the URL they failed on, so a proxy configured as
+ * `socks5://user:hunter2@host:1080` arrives inside an error message with the
+ * password intact — and enrollment, sign-in and routing all forwarded those
+ * messages to the renderer verbatim.
+ *
+ * Applied at the point of display rather than trusting each library to be
+ * careful, because the one that is not careful is the one nobody checked.
+ */
+export function redactCredentials(message: string): string {
+	// scheme://user:pass@host -> scheme://***:***@host
+	return message.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1***:***@');
+}
+
 export interface ProxyPlan {
 	/** `proxyRules` for `session.setProxy`. Never contains credentials. */
 	proxyRules: string;

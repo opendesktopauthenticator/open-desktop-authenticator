@@ -106,6 +106,11 @@ export function AddAuthenticator({
 			// Dropped the instant it has been used. It is never needed again — the
 			// refresh token Steam issued is what keeps this account working.
 			setPassword('');
+			// The proxy goes with it. It routinely carries a username and password of
+			// its own, it has already been stored against the account, and leaving it
+			// in a field keeps a credential on screen for the rest of a flow that can
+			// sit open for fifteen minutes waiting on an email.
+			setProxyUrl('');
 			applyOutcome(outcome);
 		});
 	};

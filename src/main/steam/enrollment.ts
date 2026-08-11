@@ -7,7 +7,7 @@ import {
 } from './enroll';
 import { isUsableMobileToken } from '../steam-jwt';
 import { mintAccessToken } from './access-token';
-import { planProxy } from '../net/egress';
+import { planProxy, redactCredentials } from '../net/egress';
 import type { SteamTransportFactory } from '../net/transport';
 import type { VaultService } from '../vault/service';
 import type { Account } from '../../shared/vault-schema';
@@ -189,7 +189,7 @@ export class EnrollmentService {
 			session.on('error', (err) =>
 				reject(
 					new EnrollmentError(
-						`Steam refused the sign-in: ${err instanceof Error ? err.message : String(err)}`,
+						`Steam refused the sign-in: ${redactCredentials(err instanceof Error ? err.message : String(err))}`,
 						false
 					)
 				)
@@ -205,7 +205,7 @@ export class EnrollmentService {
 		} catch (err) {
 			this.cancel(session);
 			throw new EnrollmentError(
-				`Steam refused the sign-in: ${err instanceof Error ? err.message : String(err)}`,
+				`Steam refused the sign-in: ${redactCredentials(err instanceof Error ? err.message : String(err))}`,
 				false
 			);
 		}
@@ -251,7 +251,7 @@ export class EnrollmentService {
 			// Deliberately not discarded: a mistyped code should not cost the user
 			// the session and a fresh email. The same one can be tried again.
 			throw new EnrollmentError(
-				`Steam did not accept that code: ${err instanceof Error ? err.message : String(err)}`,
+				`Steam did not accept that code: ${redactCredentials(err instanceof Error ? err.message : String(err))}`,
 				false
 			);
 		}

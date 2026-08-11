@@ -189,6 +189,14 @@ export type RoutingStatus =
 export class SteamTransportFactory {
 	private readonly electron: ElectronNetworking;
 	private readonly sessions = new Map<string, ProxyCapableSession>();
+	/**
+	 * Wipes still running, per account.
+	 *
+	 * `clearStorageData` is asynchronous and `fromPartition` is not: the same
+	 * partition name always yields the same session object, so a rebuild during a
+	 * wipe races it. `forAccount` waits on whatever is here first.
+	 */
+	private readonly clearing = new Map<string, Promise<void>>();
 	private readonly routing = new Map<string, RoutingStatus>();
 	/**
 	 * Requests currently on the wire, per account, so a lock can cancel them.
@@ -236,6 +244,9 @@ export class SteamTransportFactory {
 	 * they would have no way to notice.
 	 */
 	async forAccount(account: EgressAccount): Promise<SteamTransport> {
+		// Any wipe still running against this partition finishes first. See `forget`.
+		await this.clearing.get(account.steamId64);
+
 		const session = await this.sessionFor(account);
 
 		// Planned again rather than remembered from `sessionFor`, which caches
@@ -330,9 +341,27 @@ export class SteamTransportFactory {
 
 		const session = this.sessions.get(steamId64);
 		this.sessions.delete(steamId64);
-		// Fire and forget: nothing waits on a cookie jar being empty, and a failure
-		// here must not take down a lock or a settings change.
-		void session?.clearStorageData?.();
+
+		// Not awaited here — a lock or a settings change must not block on a cookie
+		// jar, and a failure emptying one must not take either of them down.
+		//
+		// But it is **remembered**, because `fromPartition` hands back the same
+		// underlying session for the same name. Rebuilding this account's transport
+		// while the clear was still running gave the new session the old object with
+		// a wipe in flight against it, and whichever finished last decided what was
+		// in the jar. `sessionFor` waits on this before handing the session out, so
+		// the ordering is settled in the one place that can settle it.
+		const cleared = session?.clearStorageData?.();
+		if (cleared) {
+			const pending = cleared
+				.catch(() => undefined)
+				.finally(() => {
+					if (this.clearing.get(steamId64) === pending) {
+						this.clearing.delete(steamId64);
+					}
+				});
+			this.clearing.set(steamId64, pending);
+		}
 	}
 
 	/**

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
 	describeNetworkError,
 	describesDirectRoute,
+	redactCredentials,
 	EgressError,
 	isSteamEndpoint,
 	planProxy,
@@ -984,6 +985,35 @@ describe('reading a resolveProxy answer', () => {
  * automatic confirmation. Aborting narrows that to the physical race nobody can
  * close — a request Steam has already received cannot be recalled.
  */
+describe('redacting credentials out of messages', () => {
+	it('strips a password from a proxy URL a library quoted back', () => {
+		// Libraries quote what they were given. `steam-session` and Chromium both
+		// embed the URL they failed on, and enrollment, sign-in and routing all
+		// forwarded those messages to the renderer verbatim.
+		expect(redactCredentials('connect ECONNREFUSED socks5://user:hunter2@10.0.0.1:1080')).toBe(
+			'connect ECONNREFUSED socks5://***:***@10.0.0.1:1080'
+		);
+	});
+
+	it('leaves a URL without credentials alone', () => {
+		expect(redactCredentials('failed on https://steamcommunity.com/mobileconf')).toBe(
+			'failed on https://steamcommunity.com/mobileconf'
+		);
+	});
+
+	it('handles more than one', () => {
+		const redacted = redactCredentials('http://a:b@one:1 and socks5://c:d@two:2');
+		expect(redacted).not.toContain('b@');
+		expect(redacted).not.toContain('d@');
+	});
+
+	it('does not mangle an ordinary sentence', () => {
+		expect(redactCredentials('Steam did not accept that username and password.')).toBe(
+			'Steam did not accept that username and password.'
+		);
+	});
+});
+
 describe('cancelling work when the vault locks', () => {
 	const routed = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.1:1080' };
 
@@ -1002,6 +1032,52 @@ describe('cancelling work when the vault locks', () => {
 		factory.forget(routed.steamId64);
 
 		expect(aborted()).toBe(1);
+	});
+
+	it('finishes emptying a cookie jar before handing that session out again', async () => {
+		// `fromPartition` returns the same underlying session for the same name, and
+		// `clearStorageData` is asynchronous. Rebuilding an account's transport while
+		// the wipe was still running gave the new session the old object with a wipe
+		// in flight against it, and whichever finished last decided what was left in
+		// the jar.
+		let releaseClear: (() => void) | undefined;
+		const clearFinished = new Promise<void>((resolve) => {
+			releaseClear = resolve;
+		});
+		let cleared = false;
+
+		const { electron } = fakeElectron();
+		const original = electron.sessionFromPartition.bind(electron);
+		const slowClearing: ElectronNetworking = {
+			...electron,
+			sessionFromPartition: (partition, options) => {
+				const session = original(partition, options);
+				session.clearStorageData = async (): Promise<void> => {
+					await clearFinished;
+					cleared = true;
+				};
+				return session;
+			}
+		};
+
+		const factory = new SteamTransportFactory(slowClearing);
+		await factory.forAccount(routed);
+		factory.forget(routed.steamId64);
+
+		let rebuilt = false;
+		const rebuilding = factory.forAccount(routed).then(() => {
+			rebuilt = true;
+		});
+
+		// The wipe has not finished, so the rebuild must not have either.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(cleared).toBe(false);
+		expect(rebuilt).toBe(false);
+
+		releaseClear?.();
+		await rebuilding;
+
+		expect(cleared).toBe(true);
 	});
 
 	it('aborts a request it has given up waiting for', async () => {
