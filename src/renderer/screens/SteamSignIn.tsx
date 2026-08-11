@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { SignInResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -23,12 +24,22 @@ export function SteamSignIn({
 	accountName: string;
 	/** Why the sign-in is being asked for, in Steam's own terms. */
 	reason?: string;
-	onSignIn: (password: string) => Promise<unknown>;
+	/**
+	 * Returns the outcome rather than throwing it.
+	 *
+	 * A sign-in can fail in a way no second attempt can fix — Steam wanting the
+	 * approval on the device that holds the authenticator, or an account using
+	 * emailed codes this app cannot answer. `retryable: false` says so, and the
+	 * form withdraws instead of inviting another password.
+	 */
+	onSignIn: (password: string) => Promise<SignInResult>;
 	onCancel: () => void;
 }): React.JSX.Element {
 	const [password, setPassword] = useState('');
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
+	/** Set when Steam has said something no further attempt can change. */
+	const [hopeless, setHopeless] = useState<string | undefined>();
 
 	const submit = (event: React.FormEvent): void => {
 		event.preventDefault();
@@ -38,10 +49,18 @@ export function SteamSignIn({
 		setBusy(true);
 		setError(undefined);
 		onSignIn(password)
-			.then(() => {
+			.then((result) => {
 				// Cleared on the way out rather than left in a state object for the
-				// lifetime of the screen.
+				// lifetime of the screen — whatever the outcome was.
 				setPassword('');
+				if (result.ok) {
+					return;
+				}
+				if (result.retryable) {
+					setError(result.reason);
+				} else {
+					setHopeless(result.reason);
+				}
 			})
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => setBusy(false));
@@ -61,31 +80,53 @@ export function SteamSignIn({
 
 			{error && <p className="error">{error}</p>}
 
-			<form onSubmit={submit}>
-				<label htmlFor="steam-password">Steam password for {accountName}</label>
-				<input
-					id="steam-password"
-					type="password"
-					value={password}
-					onChange={(event) => setPassword(event.target.value)}
-					autoComplete="off"
-					spellCheck={false}
-					autoFocus
-				/>
-				<p className="hint">
-					Not saved. It is used to get a session and then discarded — the Steam Guard code is
-					generated here, so there is nothing else to enter.
-				</p>
+			{/* The form withdraws entirely. Steam has said something a password
+			    cannot answer — the sign-in must be approved on the device holding the
+			    authenticator, or the account uses emailed codes this app cannot
+			    complete — and leaving the box on screen invites attempts that are
+			    guaranteed to fail. `permanent` was classified for exactly this and
+			    then discarded on the way to the renderer, so every failure looked
+			    alike. */}
+			{hopeless !== undefined ? (
+				<>
+					<p className="error">{hopeless}</p>
+					<p className="hint">
+						Another password attempt will not change this. Deal with it on Steam&rsquo;s side, then
+						come back.
+					</p>
+					<div className="controls">
+						<button type="button" className="secondary" onClick={onCancel}>
+							Back
+						</button>
+					</div>
+				</>
+			) : (
+				<form onSubmit={submit}>
+					<label htmlFor="steam-password">Steam password for {accountName}</label>
+					<input
+						id="steam-password"
+						type="password"
+						value={password}
+						onChange={(event) => setPassword(event.target.value)}
+						autoComplete="off"
+						spellCheck={false}
+						autoFocus
+					/>
+					<p className="hint">
+						Not saved. It is used to get a session and then discarded — the Steam Guard code is
+						generated here, so there is nothing else to enter.
+					</p>
 
-				<div className="controls">
-					<button type="submit" disabled={busy || password === ''}>
-						{busy ? 'Signing in…' : 'Sign in'}
-					</button>
-					<button type="button" className="secondary" onClick={onCancel} disabled={busy}>
-						Not now
-					</button>
-				</div>
-			</form>
+					<div className="controls">
+						<button type="submit" disabled={busy || password === ''}>
+							{busy ? 'Signing in…' : 'Sign in'}
+						</button>
+						<button type="button" className="secondary" onClick={onCancel} disabled={busy}>
+							Not now
+						</button>
+					</div>
+				</form>
+			)}
 		</>
 	);
 }

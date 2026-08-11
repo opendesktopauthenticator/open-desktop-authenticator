@@ -256,6 +256,24 @@ export const enrollBeginResponse = z.discriminatedUnion('state', [
  * nothing else — the secrets it restored go straight into the vault and never
  * pass through the renderer.
  */
+/**
+ * The outcome of signing in to Steam.
+ *
+ * A **returned** failure rather than a thrown one, because the screen has to act
+ * on more than the message: `retryable: false` means no password will ever work
+ * — Steam wants the sign-in approved elsewhere, or the account uses emailed
+ * codes this app cannot answer — and a form that keeps inviting another attempt
+ * is telling the user something untrue.
+ *
+ * Electron's IPC preserves only an error's message, so a thrown failure could
+ * not carry the flag. This mirrors `confirmations:list`, which already returns
+ * `signInRequired` rather than throwing for the same reason.
+ */
+export const signInResponse = z.discriminatedUnion('ok', [
+	z.object({ ok: z.literal(true) }),
+	z.object({ ok: z.literal(false), retryable: z.boolean(), reason: z.string() })
+]);
+
 export const recoverResponse = z.discriminatedUnion('state', [
 	z.object({ state: z.literal('cancelled') }),
 	z.object({ state: z.literal('restored'), accountName: z.string(), steamId64: z.string() }),
@@ -736,7 +754,7 @@ export const IPC_CONTRACT = {
 		// The password travels inbound, exactly as a vault passphrase does, and is
 		// dropped as soon as Steam has answered.
 		request: z.object({ steamId64: z.string(), password: z.string().min(1).max(1024) }).strict(),
-		response: okResponse
+		response: signInResponse
 	},
 
 	[CHANNELS.revocationReveal]: {
@@ -767,6 +785,7 @@ export type UpdateCheckResult = z.infer<typeof updateCheckResponse>;
 export type EnrollBegin = z.infer<typeof enrollBeginResponse>;
 export type ExportResult = z.infer<typeof exportResponse>;
 export type RecoverResult = z.infer<typeof recoverResponse>;
+export type SignInResult = z.infer<typeof signInResponse>;
 
 /** The typed surface preload puts on `window`. Renderer sees exactly this. */
 export interface RendererApi {
@@ -886,7 +905,7 @@ export interface RendererApi {
 		ids: string[]
 	): Promise<{ ok: true }>;
 	/** Sign in once. The password is used and dropped; the session is what is kept. */
-	signInToSteam(steamId64: string, password: string): Promise<{ ok: true }>;
+	signInToSteam(steamId64: string, password: string): Promise<SignInResult>;
 
 	/** §11 S2 exception (a). Requires the passphrase again. */
 	revealRevocationCode(steamId64: string, passphrase: string): Promise<{ revocationCode: string }>;

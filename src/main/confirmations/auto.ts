@@ -97,6 +97,18 @@ export class AutoConfirmEngine {
 	 */
 	private generation = 0;
 
+	/**
+	 * Identifies the scheduler chain, so a fired timer can tell whether it is
+	 * still the current one.
+	 *
+	 * `schedule` used to decide whether to continue by testing `if (this.ticker)`
+	 * — truthiness, not identity. A sweep parked on the network during a lock and
+	 * unlock therefore saw the *new* chain's handle, judged itself current, and
+	 * scheduled a second chain alongside it. `this.ticker` can only track one, so
+	 * `stop` could then clear only one and the other kept firing.
+	 */
+	private chain = 0;
+
 	constructor(options: AutoConfirmEngineOptions) {
 		this.vault = options.vault;
 		this.confirmations = options.confirmations;
@@ -112,7 +124,7 @@ export class AutoConfirmEngine {
 		if (this.ticker) {
 			return;
 		}
-		this.schedule();
+		this.schedule(this.chain);
 	}
 
 	/** Stop, and forget every account's schedule. Called on lock and on quit. */
@@ -133,6 +145,9 @@ export class AutoConfirmEngine {
 		// "automatic confirmation stopped after 10 failures in a row" — a permanent
 		// halt caused entirely by locking the vault normally.
 		this.generation += 1;
+		// Disowns any chain already scheduled or mid-sweep, including one this call
+		// cannot reach because its timer has already fired.
+		this.chain += 1;
 		this.state.clear();
 	}
 
@@ -305,14 +320,20 @@ export class AutoConfirmEngine {
 		}
 	}
 
-	private schedule(): void {
+	private schedule(chain: number): void {
 		// A fixed short heartbeat rather than one timer per account: per-account
 		// timing is decided by `nextDueAt`, so a settings change takes effect on the
 		// next beat instead of needing timers torn down and rebuilt.
 		const handle = this.setTimer(() => {
+			// Identity, not truthiness. A chain `stop` has disowned must not run a
+			// sweep and must not schedule a successor, however healthy the engine
+			// looks by the time its timer fires.
+			if (chain !== this.chain) {
+				return;
+			}
 			void this.tick().finally(() => {
-				if (this.ticker) {
-					this.schedule();
+				if (chain === this.chain) {
+					this.schedule(chain);
 				}
 			});
 		}, MIN_INTERVAL_MS);

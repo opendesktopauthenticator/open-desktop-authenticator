@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ConfirmationsService } from '../src/main/confirmations/service';
+import { ConfirmationsError, ConfirmationsService } from '../src/main/confirmations/service';
+import { SteamLoginError } from '../src/main/steam/login';
 import type { SteamRequest, SteamResponse } from '../src/main/confirmations/client';
 import type { SteamTransportFactory } from '../src/main/net/transport';
 import type { VaultService } from '../src/main/vault/service';
@@ -412,6 +413,46 @@ describe('what a routing change invalidates', () => {
 		release();
 
 		await expect(pending).rejects.toThrow();
+	});
+});
+
+describe('classifying a sign-in failure', () => {
+	it('carries `permanent` through, so the UI can stop offering a password', async () => {
+		// `SteamLoginError.permanent` exists to say that retrying cannot help —
+		// Steam wanting the approval on the device that holds the authenticator, or
+		// an account using emailed codes this app cannot answer. It was assigned,
+		// unit-tested, and then flattened away here: every login failure became an
+		// identical retryable one on the way to the renderer.
+		const { transports } = fakeNetwork();
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: () => {
+				throw new SteamLoginError('approve this on the device that holds the authenticator', true);
+			}
+		});
+
+		const failure = await confirmations
+			.signIn('76561198000000001', 'a-password')
+			.catch((err: unknown) => err);
+
+		expect(failure).toBeInstanceOf(ConfirmationsError);
+		expect((failure as ConfirmationsError).permanent).toBe(true);
+	});
+
+	it('leaves a retryable failure retryable', async () => {
+		const { transports } = fakeNetwork();
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: () => {
+				throw new SteamLoginError('Steam is rate-limiting sign-ins from this address', false);
+			}
+		});
+
+		const failure = await confirmations
+			.signIn('76561198000000001', 'a-password')
+			.catch((err: unknown) => err);
+
+		expect((failure as ConfirmationsError).permanent).toBe(false);
 	});
 });
 

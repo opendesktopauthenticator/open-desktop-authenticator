@@ -16,6 +16,7 @@ import type {
 	EnrollBegin,
 	ExportResult,
 	RecoverResult,
+	SignInResult,
 	UpdateCheckResult,
 	VaultSettingsView,
 	VaultStatus
@@ -151,7 +152,7 @@ const api: RendererApi = {
 			ok: true;
 		}>,
 	signInToSteam: (steamId64: string, password: string) =>
-		ipcRenderer.invoke(CHANNELS.steamSignIn, { steamId64, password }) as Promise<{ ok: true }>,
+		ipcRenderer.invoke(CHANNELS.steamSignIn, { steamId64, password }) as Promise<SignInResult>,
 
 	// §11 S2 exception (a). The passphrase is required again on purpose.
 	revealRevocationCode: (steamId64: string, passphrase: string) =>

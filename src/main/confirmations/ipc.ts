@@ -67,7 +67,17 @@ export function registerConfirmationHandlers(
 		// The password is a parameter here and nothing more: it is not returned, not
 		// cached, and not written anywhere. What survives this call is the refresh
 		// token the service stores in the vault.
-		await confirmations.signIn(steamId64, password);
-		return { ok: true as const };
+		try {
+			await confirmations.signIn(steamId64, password);
+			return { ok: true as const };
+		} catch (err) {
+			// **Only a sign-in failure becomes a value.** Anything else — a bug here,
+			// a locked vault — still throws, because turning every error into
+			// "sign-in failed" would hide faults behind a message about passwords.
+			if (err instanceof ConfirmationsError) {
+				return { ok: false as const, retryable: !err.permanent, reason: err.message };
+			}
+			throw err;
+		}
 	});
 }

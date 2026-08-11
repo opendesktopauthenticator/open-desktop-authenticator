@@ -413,6 +413,82 @@ describe('halting after repeated failure', () => {
  * failures, and ten locks during polling produced a permanent halt the user
  * never caused.
  */
+describe('the scheduler chain', () => {
+	/** A harness that records every timer and whether it was ever cleared. */
+	function chainHarness(): {
+		engine: AutoConfirmEngine;
+		timers: { id: number; cleared: boolean; fire: () => void }[];
+		release: () => void;
+	} {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const timers: { id: number; cleared: boolean; fire: () => void }[] = [];
+		let nextId = 0;
+
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts: [account({ trades: true })] })
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: async (): Promise<AutoConfirmOutcome> => {
+					await gate;
+					return { approved: [], held: [] };
+				}
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			setTimer: (callback: () => void) => {
+				const entry = { id: nextId++, cleared: false, fire: callback };
+				timers.push(entry);
+				return entry as unknown as NodeJS.Timeout;
+			},
+			clearTimer: (handle: NodeJS.Timeout) => {
+				(handle as unknown as { cleared: boolean }).cleared = true;
+			}
+		});
+
+		return { engine, timers, release: () => release?.() };
+	}
+
+	it('leaves nothing armed that stop() cannot reach', async () => {
+		// Locking and unlocking while a sweep is parked on the network used to fork
+		// the heartbeat: the parked sweep saw the *new* chain's handle, judged itself
+		// current, and scheduled a second chain beside it. `this.ticker` tracks one,
+		// so `stop` could clear only one and the other kept firing.
+		const { engine, timers, release } = chainHarness();
+
+		engine.start();
+		timers[0]?.fire();
+		await Promise.resolve();
+
+		engine.stop();
+		engine.start();
+
+		release();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		engine.stop();
+
+		expect(timers.filter((timer) => !timer.cleared)).toHaveLength(0);
+	});
+
+	it('does not run a sweep for a chain that has been disowned', async () => {
+		// The fired timer of a stopped chain must do nothing at all — not merely
+		// decline to reschedule.
+		const { engine, timers } = chainHarness();
+		engine.start();
+
+		engine.stop();
+		// The handle fires anyway; a cleared timer is not necessarily an uncalled one.
+		timers[0]?.fire();
+		await Promise.resolve();
+
+		expect(timers).toHaveLength(1);
+	});
+});
+
 describe('stopping while a sweep is in the air', () => {
 	function parked(): {
 		harness: ReturnType<typeof harness>;

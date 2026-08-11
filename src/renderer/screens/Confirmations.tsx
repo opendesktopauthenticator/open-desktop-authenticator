@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AccountSummary, ConfirmationsList, ConfirmationSummary } from '../../shared/ipc';
+import type {
+	AccountSummary,
+	ConfirmationsList,
+	ConfirmationSummary,
+	SignInResult
+} from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 import { SteamSignIn } from './SteamSignIn';
 
@@ -30,7 +35,7 @@ export function Confirmations({
 	account: AccountSummary;
 	onList: () => Promise<ConfirmationsList>;
 	onAct: (action: 'allow' | 'cancel', ids: string[]) => Promise<unknown>;
-	onSignIn: (password: string) => Promise<unknown>;
+	onSignIn: (password: string) => Promise<SignInResult>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [confirmations, setConfirmations] = useState<ConfirmationSummary[] | undefined>();
@@ -186,7 +191,14 @@ export function Confirmations({
 					accountName={account.accountName}
 					{...(signInReason === '' ? {} : { reason: signInReason })}
 					onSignIn={async (password) => {
-						await onSignIn(password);
+						const result = await onSignIn(password);
+						// **Only on success.** A failure is now returned rather than
+						// thrown, so advancing unconditionally would clear the form and
+						// reload as though the sign-in had worked — the outcome reported
+						// back to `SteamSignIn`, which shows it, would never be seen.
+						if (!result.ok) {
+							return result;
+						}
 						// Straight into the list the user came here for, rather than
 						// leaving them on a form that has served its purpose.
 						//
@@ -198,6 +210,7 @@ export function Confirmations({
 						setConfirmations(undefined);
 						setSignInReason(undefined);
 						refresh();
+						return result;
 					}}
 					onCancel={onClose}
 				/>

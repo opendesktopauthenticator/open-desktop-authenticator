@@ -424,6 +424,30 @@ function start(): void {
 		 */
 		let toldAboutTray = false;
 
+		/**
+		 * Bring the existing window back when the app is launched a second time.
+		 *
+		 * `hardenApp` takes the single-instance lock and quits the loser, which
+		 * Electron's own documentation pairs with this handler — and without it the
+		 * two behaviours combine badly. Closing the window hides to the tray, so
+		 * launching again from a shortcut starts a process that silently exits and
+		 * leaves the first one hidden: the application appears not to start at all,
+		 * while it is still running and holding the vault.
+		 *
+		 * The tray balloon does not cover this. It fires once per run, so on the
+		 * second and every later attempt there is no explanation of any kind.
+		 */
+		app.on('second-instance', () => {
+			if (mainWindow.isDestroyed()) {
+				return;
+			}
+			if (mainWindow.isMinimized()) {
+				mainWindow.restore();
+			}
+			mainWindow.show();
+			mainWindow.focus();
+		});
+
 		mainWindow.on('close', (event) => {
 			if (quitting) {
 				return;

@@ -72,10 +72,22 @@ export class ConfirmationsError extends Error {
 	/** True when the user has to sign in again; nothing else will fix it. */
 	readonly needsSignIn: boolean;
 
-	constructor(message: string, needsSignIn = false) {
+	/**
+	 * True when trying the same thing again cannot possibly work.
+	 *
+	 * Carried from `SteamLoginError.permanent`, which classified failures for
+	 * exactly this purpose and was then dropped here — every login failure became
+	 * an identical retryable one, so the screen went on offering a password box
+	 * for cases like "Steam wants this approved on the device that holds the
+	 * authenticator", where no password will ever help.
+	 */
+	readonly permanent: boolean;
+
+	constructor(message: string, needsSignIn = false, permanent = false) {
 		super(message);
 		this.name = 'ConfirmationsError';
 		this.needsSignIn = needsSignIn;
+		this.permanent = permanent;
 	}
 }
 
@@ -288,7 +300,9 @@ export class ConfirmationsService {
 					stored.proxyUrl
 				);
 			} catch (err) {
-				throw err instanceof SteamLoginError ? new ConfirmationsError(err.message, true) : err;
+				throw err instanceof SteamLoginError
+					? new ConfirmationsError(err.message, true, err.permanent)
+					: err;
 			}
 
 			this.requireGeneration(generation);
