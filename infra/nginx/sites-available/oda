@@ -1,0 +1,121 @@
+# opendesktopauthenticator.com
+#
+# HTTP only for now: the domain still resolves to Cloudflare, so there is no
+# certificate yet. The ACME location is live, so certbot will work the moment
+# DNS points here and will add the TLS server and redirect itself.
+
+# One canonical hostname. Serving the whole site on www as well as the apex is
+# two copies of every page as far as a crawler is concerned; the canonical tag
+# asks it to pick one, a 301 tells it.
+server {
+	listen 80;
+	listen [::]:80;
+	server_name www.opendesktopauthenticator.com;
+
+	# ACME first: a certificate for www has to be obtainable without following
+	# the redirect, or renewal for that name quietly stops working.
+	location ^~ /.well-known/ {
+		root /var/www/letsencrypt;
+		default_type "text/plain";
+		access_log off;
+	}
+
+	location / {
+		return 301 http://opendesktopauthenticator.com$request_uri;
+	}
+}
+
+# Port 80 stays for the ACME challenge and to send everything else to HTTPS.
+server {
+	listen 80;
+	listen [::]:80;
+	server_name opendesktopauthenticator.com;
+
+	location ^~ /.well-known/acme-challenge/ {
+		root /var/www/letsencrypt;
+		default_type "text/plain";
+		access_log off;
+	}
+
+	location / {
+		return 301 https://opendesktopauthenticator.com$request_uri;
+	}
+}
+
+server {
+	# `http2 on;` as its own directive needs nginx 1.25.1; this is 1.24, where it
+	# is a listen parameter. The standalone form is not a warning, it is a hard
+	# "unknown directive" that stops nginx loading.
+	listen 443 ssl http2;
+	listen [::]:443 ssl http2;
+	server_name opendesktopauthenticator.com;
+
+	include snippets/tls.conf;
+
+	root /var/www/oda/public;
+	index index.html;
+	charset utf-8;
+
+	include snippets/security-headers.conf;
+
+	limit_req  zone=site burst=60 nodelay;
+	limit_conn perip 24;
+
+	# ^~ so no regex below can ever shadow it.
+	location ^~ /.well-known/ {
+		root /var/www/letsencrypt;
+		default_type "text/plain";
+		access_log off;
+	}
+
+	# --- one address per page ------------------------------------------------
+	#
+	# `try_files $uri $uri.html` means /security.html and /security both served
+	# the same bytes, and /index.html duplicated the home page. Ten pages, each
+	# reachable three ways, is thirty URLs for eleven pages of content. These
+	# three rules collapse them.
+	#
+	# Exact matches outrank regexes in nginx, which is what keeps the internal
+	# error_page redirect to /404.html from being turned into a 301 and breaking
+	# every 404 on the site.
+	location = /index.html { return 301 /; }
+	location = /404.html   { internal; }
+	location ~ ^(/.+)\.html$ { return 301 $1; }
+	location ~ ^(/.+)/$      { return 301 $1; }
+
+	location / {
+		try_files $uri $uri.html $uri/index.html =404;
+	}
+
+	# --- assets --------------------------------------------------------------
+	#
+	# **The include is load-bearing.** An `add_header` anywhere in a location
+	# discards every add_header inherited from the server block — so adding a
+	# Cache-Control here silently stripped the CSP and all four other security
+	# headers from every stylesheet and image on the site. Re-including them is
+	# the only way to get them back.
+	location /assets/ {
+		include snippets/security-headers.conf;
+		expires 1y;
+		add_header Cache-Control "public, immutable";
+		access_log off;
+	}
+
+	location = /sitemap.xml {
+		include snippets/security-headers.conf;
+		add_header Cache-Control "public, max-age=3600";
+	}
+
+	# RFC 9116. A security product with no route for reporting a vulnerability
+	# is asking to be told about one on a public forum instead.
+	location = /.well-known/security.txt {
+		include snippets/security-headers.conf;
+		default_type "text/plain";
+		alias /var/www/oda/public/security.txt;
+	}
+
+	location ~ /\. { deny all; }
+	location ~ ~$  { deny all; }
+
+	error_page 404 /404.html;
+}

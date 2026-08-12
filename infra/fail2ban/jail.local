@@ -1,0 +1,51 @@
+# Only sshd is exposed today. Web jails get added with the vhost.
+[DEFAULT]
+# The administrator's own address, exempted after fail2ban banned it during
+# setup: three deliberately-failed logins while testing the config was enough.
+# The founder connects from here, so a ban here locks the owner out of the box
+# while leaving the actual attackers to keep trying from elsewhere.
+#
+# Redacted here because this repository is public; the deployed file
+# carries the real address. It is residential and will change. If admin logins ever start
+# being refused, this line is the first thing to check.
+ignoreip = 127.0.0.1/8 ::1 ADMIN_IP_REDACTED
+
+backend  = systemd
+# Long bans: nothing legitimate fails key auth repeatedly, and the log is
+# already full of people trying.
+bantime  = 24h
+findtime = 30m
+maxretry = 3
+banaction = ufw
+
+[sshd]
+enabled = true
+mode    = aggressive
+
+# --- web -------------------------------------------------------------------
+# Nothing was watching nginx at all: sshd was the only jail, so anything
+# probing the site for phpMyAdmin or wp-login could do so indefinitely.
+
+[nginx-botsearch]
+enabled  = true
+port     = http,https
+logpath  = /var/log/nginx/access.log
+maxretry = 2
+findtime = 10m
+bantime  = 48h
+
+[nginx-bad-request]
+enabled  = true
+port     = http,https
+logpath  = /var/log/nginx/access.log
+maxretry = 6
+findtime = 10m
+
+# Anyone who trips the rate limit repeatedly is not a visitor.
+[nginx-limit-req]
+enabled  = true
+port     = http,https
+logpath  = /var/log/nginx/error.log
+maxretry = 8
+findtime = 10m
+bantime  = 24h
