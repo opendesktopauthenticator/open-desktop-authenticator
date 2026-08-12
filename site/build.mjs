@@ -25,7 +25,8 @@
  * ticket tool, which is deliberately a separate, sandboxed service.
  */
 
-import { mkdirSync, writeFileSync, cpSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
@@ -57,7 +58,15 @@ const escape = (s) =>
 	);
 
 /** The pages that appear in the header, in the order a newcomer needs them. */
-const NAV = ['steam-desktop-authenticator', 'download', 'verify', 'security', 'docs', 'support'];
+const NAV = [
+	'steam-desktop-authenticator',
+	'download',
+	'verify',
+	'security',
+	'docs',
+	'owners',
+	'support'
+];
 
 /**
  * One page's `<head>`.
@@ -181,7 +190,8 @@ function layout(page) {
 		</div>
 	</header>
 
-	<main id="main" class="wrap">
+	<main id="main" class="wrap${page.hero ? ' has-hero' : ''}">
+${page.hero ? page.hero(SITE) : ''}
 ${trail(page)}
 ${page.body(SITE)}
 		<p class="reviewed">Last reviewed <time datetime="${page.updated ?? SITE.updated}">${formatDate(page.updated ?? SITE.updated)}</time>.</p>
@@ -202,6 +212,7 @@ ${page.body(SITE)}
 				<a href="/import-from-sda">Import from SDA</a>
 				<a href="/docs">Documentation</a>
 				<a href="/faq">FAQ</a>
+				<a href="/owners">Who we are</a>
 				<a href="/support">Report a problem</a>
 				<a href="${SITE.repo}" rel="noopener">Source code</a>
 			</nav>
@@ -222,13 +233,62 @@ ${page.body(SITE)}
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
+/**
+ * Assets, with a content hash in the filename.
+ *
+ * **This is what makes the cache header honest.** nginx serves /assets/ with
+ * `immutable, max-age=31536000`, which promises the bytes at that URL will never
+ * change. With a fixed name like `site.css` that promise is a lie, and the
+ * consequence is not theoretical: the first restyle went out, Cloudflare kept
+ * serving the previous stylesheet from cache, and the new design simply did not
+ * appear. Nothing short of a manual purge would have fixed it, and returning
+ * visitors would have held the old file for a year.
+ *
+ * Hashing the name makes the promise true. New content is a new URL, so it is
+ * never in anyone's cache, and the old URL can be cached as hard as we like.
+ */
+function publishAssets() {
+	const from = join(here, 'assets');
+	const map = new Map();
+
+	const walk = (dir, prefix = '') => {
+		for (const name of readdirSync(dir)) {
+			const full = join(dir, name);
+			if (statSync(full).isDirectory()) {
+				walk(full, `${prefix}${name}/`);
+				continue;
+			}
+			const bytes = readFileSync(full);
+			const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 10);
+			const dot = name.lastIndexOf('.');
+			const hashed = `${name.slice(0, dot)}.${hash}${name.slice(dot)}`;
+			const target = join(out, 'assets', prefix, hashed);
+			mkdirSync(dirname(target), { recursive: true });
+			writeFileSync(target, bytes);
+			map.set(`/assets/${prefix}${name}`, `/assets/${prefix}${hashed}`);
+		}
+	};
+	walk(from);
+	return map;
+}
+
+const ASSETS = publishAssets();
+
+/** Rewrite every asset reference in a finished page to its hashed name. */
+function fingerprint(html) {
+	let out = html;
+	// Longest first, so /assets/mark.svg cannot partially match a longer name.
+	for (const [plain, hashed] of [...ASSETS].sort((a, b) => b[0].length - a[0].length)) {
+		out = out.split(plain).join(hashed);
+	}
+	return out;
+}
+
 for (const page of PAGES) {
 	const file = join(out, `${page.slug}.html`);
 	mkdirSync(dirname(file), { recursive: true });
-	writeFileSync(file, layout(page));
+	writeFileSync(file, fingerprint(layout(page)));
 }
-
-cpSync(join(here, 'assets'), join(out, 'assets'), { recursive: true });
 
 /**
  * The sitemap, generated from the same list that generated the pages, so it can

@@ -171,11 +171,17 @@ if (origin) {
 		}
 	}
 
-	// The things that are not pages but must still work.
+	// The things that are not pages but must still work. The stylesheet's name
+	// carries a content hash, so it is read out of the page rather than assumed —
+	// and checking the exact URL the HTML asks for is the stronger test anyway,
+	// since a mismatch there is a page with no styling at all.
+	const styleHref =
+		/<link rel="stylesheet" href="([^"]+)"/.exec(built.get('index') ?? '')?.[1] ??
+		'/assets/site.css';
 	for (const [path, expect] of [
 		['/robots.txt', 'text/plain'],
 		['/sitemap.xml', 'xml'],
-		['/assets/site.css', 'text/css']
+		[styleHref, 'text/css']
 	]) {
 		const response = await fetch(`${origin}${path}`).catch(() => undefined);
 		if (!response || response.status !== 200) {

@@ -84,6 +84,19 @@ server {
 	location ~ ^(/.+)/$      { return 301 $1; }
 
 	location / {
+		# **HTML must revalidate; assets must not.**
+		#
+		# With no Cache-Control at all a browser is free to guess a freshness
+		# lifetime from Last-Modified, so a corrected security page can sit stale
+		# in someone's browser for days with nothing to force a refresh.
+		# `no-cache` does not mean "do not store" — it means "store it, but ask
+		# before reusing it". The ETag then makes that question cost a 304, so
+		# revalidation is nearly free and updates are immediate.
+		#
+		# The assets can be cached hard precisely because their filenames carry a
+		# content hash: new bytes are always a new URL.
+		add_header Cache-Control "no-cache" always;
+		include snippets/security-headers.conf;
 		try_files $uri $uri.html $uri/index.html =404;
 	}
 

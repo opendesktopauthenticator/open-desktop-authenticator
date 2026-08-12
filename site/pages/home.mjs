@@ -29,17 +29,49 @@ export default {
 			}
 		]
 	}),
-	body: (s) => `
-		<article>
+	/*
+	 * The h1 lives here rather than in the body, so the page still has exactly
+	 * one. A hero with its own heading plus a heading below it is the commonest
+	 * way a landing page ends up with two, and then neither is what the page is
+	 * about as far as a crawler is concerned.
+	 */
+	hero: (s) => `
+		<section class="hero">
+			<img class="hero-mark" src="/assets/mark.svg" width="88" height="88"
+			     alt="" aria-hidden="true">
 			<h1>An open-source Steam authenticator for the desktop</h1>
-
 			<p class="lede">
 				${s.name} generates Steam Guard codes on your computer, approves trades and
 				market listings, and imports the <code>.maFile</code> accounts you already
-				have. It is free, the source is public, and it is built so that you never
-				have to take our word for anything.
+				have — without ever asking you to take our word for anything.
 			</p>
+			<div class="hero-actions">
+				<a class="button" href="/steam-desktop-authenticator">What this replaces</a>
+				<a class="button button-quiet" href="/verify">How to verify a build</a>
+			</div>
 
+			<ul class="signals">
+				<li>
+					<b>Open source</b>
+					<span>Every line that touches a secret is public and readable.</span>
+				</li>
+				<li>
+					<b>No account</b>
+					<span>Nothing to sign up for. No server of ours, no telemetry.</span>
+				</li>
+				<li>
+					<b>No self-update</b>
+					<span>It links to a new version. It never replaces itself.</span>
+				</li>
+				<li>
+					<b>Verifiable builds</b>
+					<span>Checksums and signatures you can check against the source.</span>
+				</li>
+			</ul>
+		</section>`,
+
+	body: () => `
+		<article>
 			<div class="callout callout-warn">
 				<h2>Status: in development, not yet released</h2>
 				<p>

@@ -1,107 +1,179 @@
 /*
- * The site's stylesheet.
+ * opendesktopauthenticator.com
+ *
+ * ## The layout idea
+ *
+ * The first version set everything in one 760px column, which made a product
+ * site read like a text file: no entry point, no rhythm, and a third of a
+ * desktop screen left empty beside the text. This version separates two widths
+ * that were being conflated.
+ *
+ * **`.band`** is full width. Sections sit in bands, and a band can carry its own
+ * background, so the page has visible joints instead of running together.
+ *
+ * **`.prose`** is the reading measure, about 68 characters. Body text never gets
+ * wider than that no matter how large the window, because a line you have to
+ * track back across is a line people skip.
+ *
+ * Everything else — the hero, the signal strip, card grids, the project list —
+ * is free to use the full band. That contrast between narrow text and wide
+ * structure is most of what makes a page feel designed rather than typed.
+ *
+ * ## Constraints
  *
  * Local fonts only, matching the application: no web font means no third-party
- * request, which is what lets the content security policy stay absolute. The
- * palette is the application's, so the site and the product look like one thing.
+ * request, which is what lets the content security policy stay absolute with no
+ * `unsafe-inline` anywhere. Segoe UI Variable ships three optical sizes and each
+ * is used at the size it was cut for.
  */
+
 :root {
 	--mint: #42f29a;
+	--mint-bright: #6cffbe;
 	--mint-pale: #9fe7bd;
+	--emerald: #2ecc71;
+	--teal: #1abc9c;
+
 	--bg: #070a0e;
+	--bg-lift: #0b1016;
 	--panel: #0e141b;
-	--line: rgba(147, 168, 158, 0.18);
-	--line-strong: rgba(147, 168, 158, 0.32);
-	--text: #ecf0f1;
-	--muted: #9db0a6;
+	--panel-hi: #131b24;
+
+	--line: rgba(147, 168, 158, 0.16);
+	--line-strong: rgba(147, 168, 158, 0.3);
+
+	--text: #eef3f0;
+	--body: #c8d5cd;
+	--muted: #93a89e;
+	--faint: #71857a;
+
 	--warn: #f5c26b;
-	--radius: 14px;
-	--font-display: 'Segoe UI Variable Display', 'Segoe UI', Inter, system-ui, sans-serif;
-	--font-ui: 'Segoe UI Variable Text', 'Segoe UI', Inter, system-ui, sans-serif;
+	--danger: #ff8a8a;
+
+	--radius: 16px;
+	--radius-sm: 10px;
+	--ease: cubic-bezier(0.16, 1, 0.3, 1);
+
+	--font-display:
+		'Segoe UI Variable Display', 'Segoe UI', Inter, 'SF Pro Display', system-ui, sans-serif;
+	--font-ui: 'Segoe UI Variable Text', 'Segoe UI', Inter, 'SF Pro Text', system-ui, sans-serif;
 	--font-small: 'Segoe UI Variable Small', 'Segoe UI', Inter, system-ui, sans-serif;
+	--font-numeric: Bahnschrift, 'DIN Alternate', 'Segoe UI Variable Text', system-ui, sans-serif;
 	--font-mono: 'Cascadia Mono', Consolas, ui-monospace, monospace;
+
 	color-scheme: dark;
 }
+
 * {
 	box-sizing: border-box;
 }
+
 html {
 	scroll-behavior: smooth;
 }
+
 body {
 	margin: 0;
 	background: var(--bg);
-	color: var(--text);
+	color: var(--body);
 	font-family: var(--font-ui);
 	font-size: 17px;
-	line-height: 1.65;
+	line-height: 1.68;
 	-webkit-font-smoothing: antialiased;
+	font-variant-numeric: tabular-nums;
 }
+
+/* Two low emerald washes, fixed. The room the page sits in, not part of it. */
 body::before {
 	content: '';
 	position: fixed;
-	inset: -30%;
+	inset: 0;
 	z-index: -1;
 	pointer-events: none;
 	background:
-		radial-gradient(closest-side at 20% 12%, rgba(46, 204, 113, 0.11), transparent),
-		radial-gradient(closest-side at 82% 4%, rgba(26, 188, 156, 0.09), transparent);
-}
-.wrap {
-	max-width: 760px;
-	margin: 0 auto;
-	padding: 0 24px;
+		radial-gradient(900px 520px at 12% -8%, rgba(46, 204, 113, 0.1), transparent 62%),
+		radial-gradient(760px 460px at 96% 2%, rgba(26, 188, 156, 0.08), transparent 58%);
 }
 
-/* Keyboard users get to the content without tabbing the whole nav. */
+/* ------------------------------------------------------------------ shell -- */
+
+.wrap {
+	max-width: 1080px;
+	margin: 0 auto;
+	padding: 0 28px;
+}
+
+/* The reading measure. Applied to the text of every page; wide elements opt out
+   by living outside it. */
+.prose {
+	max-width: 68ch;
+}
+
+.band {
+	padding: 62px 0;
+	border-top: 1px solid var(--line);
+}
+
+.band-tint {
+	background: linear-gradient(180deg, rgba(255, 255, 255, 0.022), transparent);
+}
+
 .skip {
 	position: absolute;
 	left: -9999px;
 	background: var(--mint);
 	color: #04140c;
-	padding: 10px 16px;
-	border-radius: 0 0 8px 0;
+	padding: 10px 18px;
+	border-radius: 0 0 10px 0;
 	font-weight: 700;
-	z-index: 10;
+	z-index: 20;
 }
 .skip:focus {
 	left: 0;
 	top: 0;
 }
 
+/* --------------------------------------------------------------- masthead -- */
+
 .masthead {
-	border-bottom: 1px solid var(--line);
-	background: rgba(7, 10, 14, 0.85);
-	backdrop-filter: blur(10px);
 	position: sticky;
 	top: 0;
-	z-index: 5;
+	z-index: 10;
+	border-bottom: 1px solid var(--line);
+	background: rgba(7, 10, 14, 0.78);
+	backdrop-filter: blur(14px) saturate(1.3);
 }
+
 .masthead .wrap {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 20px;
+	gap: 24px;
 	flex-wrap: wrap;
-	padding-top: 14px;
-	padding-bottom: 14px;
-	max-width: 1060px;
+	padding-top: 15px;
+	padding-bottom: 15px;
 }
+
 .brand {
 	display: flex;
 	align-items: center;
 	gap: 11px;
 	color: var(--text);
 	text-decoration: none;
-	font-size: 0.98rem;
-	letter-spacing: -0.01em;
+	font-size: 0.99rem;
+	letter-spacing: -0.012em;
+	white-space: nowrap;
 }
 .brand b {
 	font-weight: 680;
 }
+.brand img {
+	filter: drop-shadow(0 2px 8px rgba(46, 204, 113, 0.35));
+}
+
 .masthead nav {
 	display: flex;
-	gap: 4px;
+	gap: 2px;
 	flex-wrap: wrap;
 	font-family: var(--font-small);
 	font-size: 0.88rem;
@@ -109,8 +181,11 @@ body::before {
 .masthead nav a {
 	color: var(--muted);
 	text-decoration: none;
-	padding: 6px 11px;
+	padding: 7px 12px;
 	border-radius: 8px;
+	transition:
+		color 160ms var(--ease),
+		background 160ms var(--ease);
 }
 .masthead nav a:hover {
 	color: var(--mint);
@@ -118,109 +193,215 @@ body::before {
 }
 .masthead nav a[aria-current='page'] {
 	color: var(--mint);
-	background: rgba(66, 242, 154, 0.12);
+	background: rgba(66, 242, 154, 0.13);
 }
 
-main {
-	padding: 46px 24px 80px;
+/* ------------------------------------------------------------------- hero -- */
+
+.hero {
+	position: relative;
+	padding: 82px 0 56px;
+	text-align: center;
+	overflow: hidden;
 }
+
+/* A single soft bloom behind the mark. One light source, so the page reads as
+   lit rather than decorated. */
+.hero::before {
+	content: '';
+	position: absolute;
+	top: -180px;
+	left: 50%;
+	width: 720px;
+	height: 480px;
+	transform: translateX(-50%);
+	pointer-events: none;
+	background: radial-gradient(closest-side, rgba(46, 204, 113, 0.17), transparent 72%);
+}
+
+.hero > * {
+	position: relative;
+}
+
+.hero-mark {
+	filter: drop-shadow(0 12px 34px rgba(46, 204, 113, 0.4));
+}
+
+.hero h1 {
+	margin: 22px auto 0;
+	max-width: 17ch;
+	font-size: clamp(2.2rem, 1.3rem + 3.6vw, 3.5rem);
+	line-height: 1.08;
+	letter-spacing: -0.032em;
+}
+
+.hero .lede {
+	margin: 20px auto 0;
+	max-width: 60ch;
+	font-size: 1.14rem;
+	color: var(--body);
+}
+
+.hero-actions {
+	display: flex;
+	justify-content: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-top: 30px;
+}
+
+/* Short, checkable claims rather than adjectives. Each is a fact the site can
+   be held to elsewhere. */
+.signals {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 1px;
+	margin: 46px 0 0;
+	padding: 0;
+	list-style: none;
+	background: var(--line);
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	overflow: hidden;
+}
+.signals li {
+	margin: 0;
+	padding: 18px 20px;
+	background: var(--bg);
+	text-align: left;
+}
+.signals b {
+	display: block;
+	font-family: var(--font-small);
+	font-size: 0.72rem;
+	font-weight: 680;
+	letter-spacing: 0.11em;
+	text-transform: uppercase;
+	color: var(--mint);
+}
+.signals span {
+	display: block;
+	margin-top: 4px;
+	font-size: 0.9rem;
+	color: var(--muted);
+	line-height: 1.5;
+}
+
+/* ------------------------------------------------------------------- type -- */
+
 h1 {
 	font-family: var(--font-display);
-	font-size: clamp(1.9rem, 1.3rem + 2.4vw, 2.7rem);
+	font-size: clamp(1.95rem, 1.3rem + 2.5vw, 2.7rem);
 	font-weight: 660;
-	letter-spacing: -0.025em;
-	line-height: 1.15;
-	margin: 0 0 20px;
-	background: linear-gradient(180deg, #fff 34%, var(--mint-pale));
+	letter-spacing: -0.026em;
+	line-height: 1.14;
+	margin: 0 0 18px;
+	background: linear-gradient(176deg, #fff 30%, var(--mint-pale));
 	-webkit-background-clip: text;
 	background-clip: text;
 	color: transparent;
 }
+
 h2 {
 	font-family: var(--font-display);
-	font-size: 1.42rem;
+	font-size: 1.46rem;
 	font-weight: 640;
-	letter-spacing: -0.018em;
-	margin: 46px 0 14px;
+	letter-spacing: -0.02em;
+	color: var(--text);
+	margin: 52px 0 14px;
 }
+
 h3 {
 	font-size: 1.06rem;
 	font-weight: 650;
-	margin: 26px 0 8px;
+	color: var(--text);
+	margin: 28px 0 8px;
 }
+
 p,
 li {
-	color: #d6e0da;
+	color: var(--body);
 }
+
 .lede {
-	font-size: 1.14rem;
-	line-height: 1.6;
+	font-size: 1.16rem;
+	line-height: 1.62;
 	color: var(--text);
 }
+
 a {
 	color: var(--mint);
-	text-decoration-color: rgba(66, 242, 154, 0.4);
+	text-decoration-color: rgba(66, 242, 154, 0.38);
 	text-underline-offset: 3px;
 }
 a:hover {
 	text-decoration-color: var(--mint);
 }
+
 code {
 	font-family: var(--font-mono);
-	font-size: 0.88em;
-	background: rgba(147, 168, 158, 0.12);
+	font-size: 0.87em;
+	background: rgba(147, 168, 158, 0.13);
 	padding: 1px 6px;
 	border-radius: 5px;
+	color: var(--mint-pale);
 }
+
 pre {
 	background: #05080b;
 	border: 1px solid var(--line);
-	border-radius: 10px;
-	padding: 15px 17px;
+	border-left: 3px solid rgba(66, 242, 154, 0.5);
+	border-radius: var(--radius-sm);
+	padding: 16px 18px;
 	overflow-x: auto;
 }
 pre code {
 	background: none;
 	padding: 0;
+	color: var(--mint-pale);
 	font-size: 0.86rem;
 }
+
 ul,
 ol {
 	padding-left: 22px;
 }
 li {
-	margin: 7px 0;
+	margin: 8px 0;
 }
 .plain {
 	list-style: none;
 	padding-left: 0;
 }
 .plain > li {
-	margin: 11px 0;
+	margin: 12px 0;
 	padding-left: 18px;
 	border-left: 2px solid var(--line-strong);
 }
 .next > li {
-	border-left-color: rgba(66, 242, 154, 0.5);
+	border-left-color: rgba(66, 242, 154, 0.55);
 }
 ol.signs > li {
-	margin: 14px 0;
+	margin: 15px 0;
 }
 
+/* --------------------------------------------------------------- surfaces -- */
+
 .callout {
-	margin: 26px 0;
-	padding: 18px 20px;
+	margin: 28px 0;
+	padding: 20px 22px;
 	border: 1px solid var(--line-strong);
 	border-left: 3px solid var(--mint);
 	border-radius: var(--radius);
-	background: linear-gradient(160deg, rgba(255, 255, 255, 0.035), transparent), var(--panel);
+	background: linear-gradient(160deg, rgba(255, 255, 255, 0.04), transparent 60%), var(--panel);
+	box-shadow: 0 16px 40px -28px rgba(0, 0, 0, 1);
 }
 .callout-warn {
 	border-left-color: var(--warn);
 }
 .callout h2 {
 	margin: 0 0 8px;
-	font-size: 1.08rem;
+	font-size: 1.1rem;
 }
 .callout p:last-child {
 	margin-bottom: 0;
@@ -228,18 +409,31 @@ ol.signs > li {
 
 .grid {
 	display: grid;
-	gap: 18px;
-	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-	margin: 22px 0;
+	gap: 16px;
+	grid-template-columns: repeat(auto-fit, minmax(252px, 1fr));
+	margin: 26px 0;
 }
 .grid section {
-	padding: 18px 20px;
+	position: relative;
+	padding: 22px 22px 20px;
 	border: 1px solid var(--line);
 	border-radius: var(--radius);
 	background: var(--panel);
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+	transition:
+		border-color 260ms var(--ease),
+		transform 260ms var(--ease),
+		box-shadow 260ms var(--ease);
+}
+.grid section:hover {
+	border-color: rgba(66, 242, 154, 0.28);
+	transform: translateY(-2px);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.07),
+		0 18px 38px -24px rgba(0, 0, 0, 1);
 }
 .grid h3 {
-	margin-top: 0;
+	margin: 0 0 7px;
 	color: var(--mint-pale);
 }
 .grid p:last-child {
@@ -247,95 +441,129 @@ ol.signs > li {
 }
 
 .defs {
-	margin: 20px 0;
+	margin: 22px 0;
 }
 .defs dt {
 	font-weight: 650;
 	color: var(--mint-pale);
-	margin-top: 18px;
+	margin-top: 20px;
 }
 .defs dd {
 	margin: 5px 0 0;
 	padding-left: 16px;
 	border-left: 2px solid var(--line);
-	color: #d6e0da;
 }
 
 .faq-item {
 	border-top: 1px solid var(--line);
-	padding-top: 6px;
+	padding-top: 4px;
 }
 .faq-item h2 {
-	font-size: 1.18rem;
+	font-size: 1.2rem;
+	margin-top: 34px;
 }
 
 .button {
 	display: inline-block;
-	background: linear-gradient(135deg, var(--mint), #1abc9c);
+	background: linear-gradient(135deg, var(--mint), var(--teal));
 	color: #04140c;
-	font-weight: 660;
-	padding: 11px 20px;
-	border-radius: 10px;
+	font-weight: 670;
+	padding: 12px 22px;
+	border-radius: var(--radius-sm);
 	text-decoration: none;
+	transition:
+		filter 160ms var(--ease),
+		transform 160ms var(--ease),
+		box-shadow 160ms var(--ease);
 }
 .button:hover {
 	filter: brightness(1.07);
+	transform: translateY(-1px);
+	box-shadow: 0 14px 30px -16px rgba(66, 242, 154, 0.75);
 }
-
-.site-foot {
-	border-top: 1px solid var(--line);
-	padding: 34px 0 54px;
-	margin-top: 40px;
-	font-family: var(--font-small);
-	font-size: 0.88rem;
-	color: var(--muted);
+.button-quiet {
+	background: transparent;
+	border: 1px solid var(--line-strong);
+	color: var(--text);
 }
-.site-foot .wrap {
-	max-width: 1060px;
-}
-.foot-lead {
-	color: #d6e0da;
-	margin-top: 0;
-}
-.site-foot nav {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 6px 18px;
-	margin: 14px 0 20px;
-}
-.site-foot nav a {
-	color: var(--muted);
-	text-decoration: none;
-}
-.site-foot nav a:hover {
+.button-quiet:hover {
+	border-color: var(--mint);
 	color: var(--mint);
-	text-decoration: underline;
-}
-.fineprint {
-	font-size: 0.82rem;
-	color: #7d8f85;
-	max-width: 62ch;
+	box-shadow: none;
 }
 
-@media (prefers-reduced-motion: reduce) {
-	html {
-		scroll-behavior: auto;
-	}
+/* --------------------------------------------------------------- projects -- */
+
+/*
+ * The other things MASTERPANEL builds.
+ *
+ * A fixed-height logo plate with the mark at its natural width, rather than
+ * forcing everything square. Two of these are square icons and one is a wide
+ * wordmark; boxing them identically would either crush the wordmark to
+ * illegibility or float the icons in empty space.
+ */
+.projects {
+	display: grid;
+	gap: 16px;
+	grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+	margin: 30px 0;
+	padding: 0;
+	list-style: none;
 }
-@media (max-width: 620px) {
-	body {
-		font-size: 16px;
-	}
-	main {
-		padding-top: 30px;
-	}
+.project {
+	display: flex;
+	flex-direction: column;
+	margin: 0;
+	padding: 24px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+	transition:
+		border-color 260ms var(--ease),
+		transform 260ms var(--ease);
+}
+.project:hover {
+	border-color: rgba(66, 242, 154, 0.28);
+	transform: translateY(-2px);
+}
+.project-plate {
+	display: flex;
+	align-items: center;
+	height: 44px;
+	margin-bottom: 16px;
+}
+.project-plate img {
+	max-height: 40px;
+	max-width: 170px;
+	width: auto;
+	height: auto;
+}
+.project h3 {
+	margin: 0 0 4px;
+	color: var(--text);
+}
+.project .domain {
+	font-family: var(--font-mono);
+	font-size: 0.8rem;
+	color: var(--faint);
+}
+.project p {
+	margin: 12px 0 0;
+	font-size: 0.94rem;
+}
+.project .go {
+	margin-top: auto;
+	padding-top: 16px;
+	font-family: var(--font-small);
+	font-size: 0.86rem;
 }
 
-/* Breadcrumbs, and the review date that closes every page. */
+/* ------------------------------------------------------------ furniture --- */
+
 .crumbs {
 	font-family: var(--font-small);
 	font-size: 0.82rem;
-	margin: 0 0 18px;
+	margin: 0 0 20px;
 }
 .crumbs ol {
 	list-style: none;
@@ -347,7 +575,7 @@ ol.signs > li {
 }
 .crumbs li + li::before {
 	content: '›';
-	color: #6b7f74;
+	color: var(--faint);
 	margin-right: 8px;
 }
 .crumbs a {
@@ -359,13 +587,128 @@ ol.signs > li {
 	text-decoration: underline;
 }
 .crumbs [aria-current='page'] {
-	color: #7d8f85;
+	color: var(--faint);
 }
+
 .reviewed {
-	margin-top: 46px;
+	margin-top: 52px;
 	padding-top: 16px;
 	border-top: 1px solid var(--line);
 	font-family: var(--font-small);
 	font-size: 0.82rem;
-	color: #7d8f85;
+	color: var(--faint);
+}
+
+.fineprint {
+	margin-top: 40px;
+	font-size: 0.8rem;
+	color: var(--faint);
+}
+
+.empty {
+	padding: 44px 28px;
+	border: 1px dashed var(--line-strong);
+	border-radius: var(--radius);
+	text-align: center;
+	color: var(--muted);
+}
+
+main {
+	padding: 42px 0 20px;
+}
+main.has-hero {
+	padding-top: 0;
+}
+
+.site-foot {
+	border-top: 1px solid var(--line);
+	padding: 40px 0 56px;
+	margin-top: 48px;
+	font-family: var(--font-small);
+	font-size: 0.88rem;
+	color: var(--muted);
+	background: linear-gradient(180deg, transparent, rgba(0, 0, 0, 0.35));
+}
+.foot-lead {
+	color: var(--text);
+	margin-top: 0;
+}
+.site-foot nav {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px 20px;
+	margin: 16px 0 22px;
+}
+.site-foot nav a {
+	color: var(--muted);
+	text-decoration: none;
+}
+.site-foot nav a:hover {
+	color: var(--mint);
+	text-decoration: underline;
+}
+.site-foot .fineprint {
+	margin-top: 0;
+	max-width: 66ch;
+}
+
+/* ------------------------------------------------------------- responsive -- */
+
+@media (max-width: 720px) {
+	body {
+		font-size: 16px;
+	}
+	.wrap {
+		padding: 0 18px;
+	}
+	.hero {
+		padding: 52px 0 40px;
+	}
+	.band {
+		padding: 44px 0;
+	}
+	h2 {
+		margin-top: 40px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	html {
+		scroll-behavior: auto;
+	}
+	*,
+	*::before,
+	*::after {
+		transition-duration: 0.001ms !important;
+		animation-duration: 0.001ms !important;
+	}
+}
+
+/*
+ * The reading measure, applied to text rather than to a wrapper.
+ *
+ * Constraining a container would drag the card grids and the project list in
+ * with it, which is the thing this layout exists to avoid. Limiting the text
+ * elements directly lets prose stay at a comfortable 68 characters while wide
+ * structure uses the whole 1080px band — that contrast is most of what stops a
+ * page reading like a document.
+ */
+article > p,
+article > h2,
+article > h3,
+article > ul,
+article > ol,
+article > dl,
+article > .callout,
+.faq-item > p,
+.faq-item > ul,
+.faq-item > ol {
+	max-width: 68ch;
+}
+
+/* Grids and the hero deliberately opt out. */
+article > .grid,
+article > .projects,
+article > .signals {
+	max-width: none;
 }
