@@ -221,7 +221,9 @@ if (origin) {
 		['/favicon.ico', 'image/'],
 		['/apple-touch-icon.png', 'image/png'],
 		['/apple-touch-icon-precomposed.png', 'image/png'],
-		['/site.webmanifest', 'json']
+		['/site.webmanifest', 'json'],
+		// Was 404 for a day after a deploy cleared the web root.
+		['/.well-known/security.txt', 'text/plain']
 	]) {
 		const response = await fetch(`${origin}${path}`).catch(() => undefined);
 		if (!response || response.status !== 200) {

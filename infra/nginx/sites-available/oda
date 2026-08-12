@@ -37,6 +37,21 @@ server {
 		access_log off;
 	}
 
+	# Straight to the canonical HTTPS URL in one hop. Without these, /x.html went
+	# to https://…/x.html and was redirected again — two hops for every legacy
+	# link, each one a little latency and a little link equity.
+	location ~ ^(/.+)\.html$ {
+		return 301 https://opendesktopauthenticator.com$1;
+	}
+
+	location ~ ^(/.+)/$ {
+		return 301 https://opendesktopauthenticator.com$1;
+	}
+
+	location = /index.html {
+		return 301 https://opendesktopauthenticator.com/;
+	}
+
 	location / {
 		return 301 https://opendesktopauthenticator.com$request_uri;
 	}

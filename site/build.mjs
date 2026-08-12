@@ -355,6 +355,32 @@ for (const [name, bytes] of rootIcons()) {
 }
 writeFileSync(join(out, 'site.webmanifest'), manifest(SITE, asset));
 
+/*
+ * RFC 9116.
+ *
+ * **Generated rather than placed on the server by hand.** It was hand-written
+ * into the web root once and a later deploy that cleared the directory removed
+ * it, so the path 404'd for a day without anything noticing. Anything the site
+ * serves belongs in the build; anything only on the server is one `rm` from
+ * gone.
+ *
+ * `Expires` is required by the spec and must be in the future — a lapsed one is
+ * treated as no file at all. Derived from the review date rather than from the
+ * clock, so rebuilding does not silently move it.
+ */
+const expires = new Date(`${SITE.updated}T00:00:00Z`);
+expires.setUTCFullYear(expires.getUTCFullYear() + 1);
+writeFileSync(
+	join(out, 'security.txt'),
+	`# ${SITE.name} — how to report a security problem.
+Contact: ${SITE.origin}/support
+Expires: ${expires.toISOString().replace(/\.\d{3}Z$/, '.000Z')}
+Preferred-Languages: en
+Canonical: ${SITE.origin}/.well-known/security.txt
+Policy: ${SITE.origin}/security
+`
+);
+
 const today = new Date().toISOString().slice(0, 10);
 writeFileSync(
 	join(out, 'sitemap.xml'),

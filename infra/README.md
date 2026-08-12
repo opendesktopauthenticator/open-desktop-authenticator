@@ -41,6 +41,25 @@ Both `sites-available` files need a symlink into `sites-enabled` to take effect.
   That address is redacted here as `ADMIN_IP_REDACTED`; the deployed file has
   the real one.
 
+## The origin is closed to everything but Cloudflare
+
+`cloudflare-only.sh` (deployed at `/usr/local/sbin/cloudflare-only`) restricts
+ports 80 and 443 to Cloudflare's published ranges. Before it ran, anyone who
+knew the address could reach the origin directly and skip the WAF, the rate
+limiting and the DDoS protection entirely — and the address is in DNS history,
+so it should be assumed known.
+
+**The trade-off, stated plainly:** if the domain is ever grey-clouded, the site
+becomes unreachable until this is turned off.
+
+```bash
+cloudflare-only --off   # reopen to the world
+cloudflare-only         # lock it down again, refreshing the ranges
+```
+
+Port 22 is never touched, so the box stays reachable either way. Cloudflare's
+ranges change; re-run the script to pick up new ones.
+
 ## Deploying the site
 
 The site itself is generated, not stored:
