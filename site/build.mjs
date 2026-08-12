@@ -32,6 +32,10 @@ import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
 import { rootIcons, hashedIcons, manifest } from './icons.mjs';
 import { checkAddresses } from './addresses.mjs';
+import { escape, reviewAsk } from './markup.mjs';
+
+// Re-exported so pages may take it from either module without a second import.
+export { reviewAsk };
 
 /*
  * Refuse to build a site with a bad payment address on it.
@@ -87,6 +91,26 @@ export const SITE = {
 		releases: 'https://github.com/Jessecar96/SteamDesktopAuthenticator/releases'
 	},
 
+	/*
+	 * The public review profile.
+	 *
+	 * Reviews are asked for here on the same grounds as everything else on this
+	 * domain: an anonymous authenticator with no third-party trace is
+	 * indistinguishable from a scam, and a review on a platform we do not control
+	 * is one more thing the next person can check that does not rely on taking
+	 * our word. That is the argument, and it is also the constraint — a review
+	 * from somebody who has not used anything is worth nothing to that person and
+	 * would make the profile another unverifiable claim.
+	 *
+	 * So the ask is only ever placed where something was actually received, and
+	 * it says what it is asking about. Nothing is offered in exchange, which is
+	 * both Trustpilot's rule and the only way the result means anything.
+	 */
+	reviews: {
+		profile: 'https://www.trustpilot.com/review/opendesktopauthenticator.com',
+		write: 'https://www.trustpilot.com/evaluate/opendesktopauthenticator.com'
+	},
+
 	/** The company behind this, and the other things it runs. */
 	brand: {
 		name: 'MASTERPANEL',
@@ -95,12 +119,6 @@ export const SITE = {
 		logo: '/assets/projects/masterspanel.svg'
 	}
 };
-
-const escape = (s) =>
-	String(s).replace(
-		/[&<>"']/g,
-		(c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]
-	);
 
 /** The pages that appear in the header, in the order a newcomer needs them. */
 const NAV = [
@@ -111,6 +129,7 @@ const NAV = [
 	'security',
 	'docs',
 	'owners',
+	'credits',
 	'support',
 	'donate'
 ];

@@ -19,7 +19,7 @@
 
 export default {
 	slug: 'steam-inventory-stolen',
-	navTitle: 'What happened to us',
+	navTitle: 'Our story',
 	title: 'A fake SDA download emptied my Steam inventory',
 	description:
 		'A first-hand account: a poisoned search result, a two-week wait, and an inventory sold on the Community Market to buy the thief’s own listings.',

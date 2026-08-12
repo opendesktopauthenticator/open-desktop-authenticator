@@ -1,3 +1,5 @@
+import { reviewAsk } from '../markup.mjs';
+
 /** Download status, migration, documentation hub, FAQ, support and 404. */
 
 export const download = {
@@ -81,6 +83,8 @@ export const download = {
 				verification steps are already written</a>, so you can learn them before you need
 				them.
 			</p>
+
+${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
 		</article>`
 };
 

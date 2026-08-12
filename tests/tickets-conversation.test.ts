@@ -362,3 +362,50 @@ describe('a rejected report keeps what was written', () => {
 		expect([...retry].sort()).toEqual([...published].sort());
 	});
 });
+
+describe('the review request is earned, not broadcast', () => {
+	/** Put a report into a given state and render it. */
+	async function inState(status: string) {
+		const reference = await fileReport();
+		const row = service.db.prepare('SELECT id FROM tickets WHERE reference = ?').get(reference) as {
+			id: number;
+		};
+		service.db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(status, row.id);
+		return (await view(reference)).body;
+	}
+
+	it.each(['open', 'assigned', 'waiting', 'declined'])(
+		'does not ask somebody whose report is %s',
+		async (status) => {
+			// Asking a person still waiting on help to go and vouch for the help is
+			// the exact behaviour that makes review requests feel like spam — and it
+			// would collect opinions from people who have not yet received anything.
+			expect(await inState(status)).not.toMatch(/class="ask"/);
+		}
+	);
+
+	it('asks only once the report is resolved', async () => {
+		const body = await inState('resolved');
+		expect(body).toMatch(/class="ask"/);
+		expect(body).toContain('Did we sort this out for you?');
+	});
+
+	it('promises nothing in return and hides nothing', async () => {
+		// Offering an incentive breaks Trustpilot's rules and, more to the point,
+		// makes every resulting review worthless as the third-party signal this is
+		// being collected for.
+		const body = await inState('resolved');
+		expect(body).toMatch(/Nothing is offered in return/i);
+		expect(body).toMatch(/negative reviews stay up/i);
+		expect(body).toContain('trustpilot.com/evaluate/opendesktopauthenticator.com');
+		// *Every* outbound review link carries nofollow, not merely one of them —
+		// asserting that the attribute appears somewhere passes while half the
+		// links are missing it, which is exactly what the first version of this
+		// check did.
+		const links = [...body.matchAll(/<a ([^>]*trustpilot\.com[^>]*)>/g)].map((m) => m[1]);
+		expect(links.length).toBeGreaterThan(1);
+		for (const attrs of links) {
+			expect(attrs, attrs).toContain('nofollow');
+		}
+	});
+});

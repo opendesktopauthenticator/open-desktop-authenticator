@@ -850,6 +850,44 @@ main.has-hero {
 	padding: 10px 18px;
 }
 
+/* ------------------------------------------------------------------- ask -- */
+
+/*
+ * The review request.
+ *
+ * Sits at the end of a page, after whatever it is asking about, and is styled
+ * to read as an aside rather than a call to action — no accent bar, no filled
+ * panel, nothing that competes with the content above it. A request that shouts
+ * is a request that gets ignored on a site like this one, where the reader has
+ * usually arrived because something went wrong.
+ */
+.ask {
+	display: grid;
+	gap: 18px;
+	margin: 48px 0 8px;
+	padding: 24px 26px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--bg-lift);
+}
+.ask-body h2 {
+	margin: 0 0 10px;
+	font-size: 1.15rem;
+}
+.ask-body p {
+	margin: 0 0 10px;
+	max-width: 66ch;
+}
+.ask-body p:last-child {
+	margin-bottom: 0;
+}
+.ask-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+	align-items: center;
+}
+
 /* ------------------------------------------------------------------ give -- */
 
 /* Three ways to pay somebody else, side by side and equally weighted. */

@@ -619,6 +619,35 @@ const BRAND = {
 	legal: 'MASTERPANEL LLC',
 	url: 'https://masterspanel.com'
 };
+const REVIEWS = {
+	profile: 'https://www.trustpilot.com/review/opendesktopauthenticator.com',
+	write: 'https://www.trustpilot.com/evaluate/opendesktopauthenticator.com'
+};
+
+/**
+ * Ask for a review, but only from somebody who was actually helped.
+ *
+ * Shown on a resolved report and nowhere else in this service. That is the one
+ * moment here where a person has demonstrably received something — they wrote
+ * in with a problem and it was dealt with — and it is the only basis on which
+ * asking is a request rather than a solicitation. A reporter still waiting, or
+ * one whose report was declined, is not asked.
+ */
+function reviewAsk(got) {
+	return `			<aside class="ask">
+				<div class="ask-body">
+					<h2>${escape(got)}</h2>
+					<p>An authenticator nobody has vouched for looks exactly like one nobody
+					should trust. A review on a platform we do not own is something the next
+					person can check without taking our word for it.</p>
+					<p class="hint">Nothing is offered in return, and negative reviews stay up.</p>
+				</div>
+				<div class="ask-actions">
+					<a class="button" href="${REVIEWS.write}" rel="noopener nofollow">Write a review →</a>
+					<a class="button button-quiet" href="${REVIEWS.profile}" rel="noopener nofollow">Read the reviews</a>
+				</div>
+			</aside>`;
+}
 
 /**
  * The product mark, by its hashed name, read out of the built home page.
@@ -1032,6 +1061,7 @@ ${thread}
 			</form>
 
 			<p class="hint">Keep the reference ${escape(ticket.reference)} — it is the only way back to this page.</p>
+			${ticket.status === 'resolved' ? reviewAsk('Did we sort this out for you?') : ''}
 		</article>`
 	});
 }

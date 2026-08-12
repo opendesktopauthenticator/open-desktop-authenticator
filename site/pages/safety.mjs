@@ -1,3 +1,5 @@
+import { reviewAsk } from '../markup.mjs';
+
 /** The three pages that exist to stop somebody being robbed. */
 
 export const scamClones = {
@@ -14,7 +16,7 @@ export const scamClones = {
 		publisher: { '@type': 'Organization', name: s.publisher },
 		mainEntityOfPage: `${s.origin}/scam-clones`
 	}),
-	body: () => `
+	body: (s) => `
 		<article>
 			<h1>Fake Steam authenticator downloads</h1>
 			<p class="lede">
@@ -178,6 +180,8 @@ export const scamClones = {
 				<li><a href="/steam-desktop-authenticator">What SDA and maFiles are</a></li>
 				<li><a href="/support">Report a suspected clone site</a></li>
 			</ul>
+
+${reviewAsk(s, { got: 'Did this help you spot a fake before you ran it?' })}
 		</article>`
 };
 
@@ -200,7 +204,7 @@ export const verify = {
 			{ '@type': 'HowToStep', name: 'Verify the signature over the checksum file' }
 		]
 	}),
-	body: () => `
+	body: (s) => `
 		<article>
 			<h1>How to verify a download is genuine</h1>
 			<p class="lede">
@@ -274,6 +278,8 @@ export const verify = {
 				<li><a href="/scam-clones">What a counterfeit build does</a></li>
 				<li><a href="/security">The security model</a></li>
 			</ul>
+
+${reviewAsk(s, { got: 'Did these steps help you check a download?' })}
 		</article>`
 };
 
