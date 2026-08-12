@@ -34,7 +34,7 @@ jobs:
       # mutable. That is acceptable for this job — it holds no secrets and has
       # read-only permissions. `release.yml` will handle signing material and
       # MUST pin actions to full commit SHAs instead.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v4
         with:
@@ -82,7 +82,7 @@ jobs:
       # It also now holds a load-bearing test: `tests/totp-parity` checks the
       # app's own Steam Guard code generator against `steam-totp`, which lives
       # here and nowhere else. Deleting the spike would delete that proof.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
@@ -99,7 +99,7 @@ jobs:
     name: dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
@@ -141,7 +141,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
