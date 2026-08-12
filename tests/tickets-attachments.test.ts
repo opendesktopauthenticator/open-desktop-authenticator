@@ -197,6 +197,49 @@ describe('what the bytes actually are', () => {
 			service.sniff(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="10"></svg>'))
 		).toBeUndefined();
 	});
+
+	// The matcher, tested against entry shapes no shipping format uses — because
+	// the guard it protects is invisible to every real format. WEBP is the only
+	// multi-offset signature today and it also carries a `magic`, so a bug in how
+	// the offsets combine cannot surface through `sniff` until a new format is
+	// added on exactly the day nobody is testing signature logic.
+	describe('the signature matcher combines offsets correctly', () => {
+		const buf = (parts: Record<number, number[]>) => {
+			const b = Buffer.alloc(32);
+			for (const [offset, bytes] of Object.entries(parts)) b.set(bytes, Number(offset));
+			return b;
+		};
+
+		it('matches an entry defined only at offset 8', () => {
+			// The regression guard. Under the old `magic || at4` return condition
+			// this passed the byte check and was then reported as no match.
+			const entry = { type: 'test/at8', kind: 'image', at8: [0x41, 0x42, 0x43, 0x44] };
+			expect(service.signatureMatches(buf({ 8: [0x41, 0x42, 0x43, 0x44] }), entry)).toBe(true);
+			expect(service.signatureMatches(buf({ 8: [0x41, 0x42, 0x43, 0x00] }), entry)).toBe(false);
+		});
+
+		it('requires every declared offset, not just one', () => {
+			// WEBP's real shape: RIFF at 0 and WEBP at 8. Matching only one is a WAV
+			// or an AVI, which must not pass as WEBP.
+			const webp = {
+				type: 'image/webp',
+				kind: 'image',
+				magic: [0x52, 0x49, 0x46, 0x46],
+				at8: [0x57, 0x45, 0x42, 0x50]
+			};
+			expect(
+				service.signatureMatches(
+					buf({ 0: [0x52, 0x49, 0x46, 0x46], 8: [0x57, 0x45, 0x42, 0x50] }),
+					webp
+				)
+			).toBe(true);
+			expect(service.signatureMatches(buf({ 0: [0x52, 0x49, 0x46, 0x46] }), webp)).toBe(false);
+		});
+
+		it('matches nothing for an entry that declares no signature', () => {
+			expect(service.signatureMatches(buf({}), { type: 'test/empty', kind: 'image' })).toBe(false);
+		});
+	});
 });
 
 describe('the declared type is never believed', () => {

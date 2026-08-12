@@ -198,18 +198,31 @@ const CLOSED_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 const startsWith = (buffer, bytes, offset = 0) => bytes.every((b, i) => buffer[offset + i] === b);
 
+/**
+ * Whether a buffer carries every byte signature one MEDIA entry declares.
+ *
+ * Pulled out of `sniff` so its guard can be tested against an entry shape no
+ * current format uses. The guard lists all three offsets — `magic || at4 ||
+ * at8`, not `magic || at4` — because an entry defined with only `at8` (a
+ * WEBP-shaped signature at a different offset is entirely plausible) would
+ * otherwise pass its byte checks and then be reported as *no match*, silently.
+ * No shipping entry hits it, because WEBP also carries a `magic`, so the trap
+ * stays invisible until the next format lands on it. An entry declaring no
+ * signature at all still matches nothing.
+ */
+function signatureMatches(buffer, entry) {
+	if (entry.magic && !startsWith(buffer, entry.magic)) return false;
+	if (entry.at4 && !startsWith(buffer, entry.at4, 4)) return false;
+	if (entry.at8 && !startsWith(buffer, entry.at8, 8)) return false;
+	return Boolean(entry.magic || entry.at4 || entry.at8);
+}
+
 /** The media type these bytes actually are, or undefined. */
 function sniff(buffer) {
 	if (buffer.length < 16) {
 		return undefined;
 	}
-	for (const entry of MEDIA) {
-		if (entry.magic && !startsWith(buffer, entry.magic)) continue;
-		if (entry.at4 && !startsWith(buffer, entry.at4, 4)) continue;
-		if (entry.at8 && !startsWith(buffer, entry.at8, 8)) continue;
-		if (entry.magic || entry.at4) return entry;
-	}
-	return undefined;
+	return MEDIA.find((entry) => signatureMatches(buffer, entry));
 }
 
 const FILES_DIR = process.env.TICKETS_FILES ?? join(dirname(DB_PATH), 'attachments');
@@ -1614,6 +1627,7 @@ export {
 	tooMany,
 	page,
 	sniff,
+	signatureMatches,
 	storeUpload,
 	fileFor,
 	claimAttachments,

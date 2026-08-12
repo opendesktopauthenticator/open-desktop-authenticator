@@ -52,6 +52,17 @@ export function refreshBootstrap(): void;
 /** What a buffer's leading bytes say it is, or undefined if it is not accepted. */
 export function sniff(buffer: Buffer): { type: string; kind: 'image' | 'video' } | undefined;
 
+/**
+ * Whether a buffer carries every byte signature one media entry declares.
+ *
+ * Exported for the tests: the offset-combining logic is invisible through
+ * `sniff` because no shipping format exercises the case that once broke.
+ */
+export function signatureMatches(
+	buffer: Buffer,
+	entry: { magic?: number[]; at4?: number[]; at8?: number[]; [key: string]: unknown }
+): boolean;
+
 /** Store an uploaded body, or explain why it was refused. */
 export function storeUpload(buffer: Buffer): {
 	error?: string;
