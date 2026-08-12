@@ -103,6 +103,10 @@ export function App(): React.JSX.Element {
 	 * live UI instead, and it disappears on the next tick that works.
 	 */
 	const [pollError, setPollError] = useState<string | undefined>();
+	/** Set from app info once the bridge answers. False until then, which is the
+	 * safe default: it shows the toggle rather than hiding a real control. */
+	const [installedFromStore, setInstalledFromStore] = useState(false);
+
 	/** Latest answer from the update check. Only `updateAvailable` is ever shown. */
 	const [update, setUpdate] = useState<UpdateCheckResult | undefined>();
 
@@ -168,6 +172,11 @@ export function App(): React.JSX.Element {
 			.getAppInfo()
 			.then((info) => {
 				document.title = info.productName;
+				// Which Windows channel installed this. Settings needs it because the
+				// update toggle is inert in a Store build, and showing a switch that
+				// cannot do anything is the thing this screen already refuses to do
+				// for the unimplemented vault options.
+				setInstalledFromStore(info.installedFromStore);
 			})
 			.catch(() => {
 				// Status polling below surfaces a broken bridge properly; a failed
@@ -455,6 +464,7 @@ export function App(): React.JSX.Element {
 		if (view === 'settings') {
 			return (
 				<Settings
+					installedFromStore={installedFromStore}
 					onLoad={() => api.getSettings()}
 					onSave={async (settings) => {
 						const result = await api.updateSettings(settings);

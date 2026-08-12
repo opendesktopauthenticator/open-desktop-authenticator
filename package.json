@@ -12,6 +12,8 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "npm run typecheck && electron-vite build",
+    "package": "npm run build && electron-builder --config electron-builder.config.mjs --publish never",
+    "package:store": "npm run build && electron-builder --config electron-builder.config.mjs --win appx --publish never",
     "start": "electron-vite preview",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "lint": "eslint .",
@@ -35,6 +37,7 @@
     "@types/react-dom": "19.2.4",
     "@vitejs/plugin-react": "5.2.0",
     "electron": "43.3.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "5.0.0",
     "eslint": "10.8.1",
     "eslint-config-prettier": "10.1.8",

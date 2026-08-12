@@ -25,6 +25,25 @@ export interface UpdateCheckDeps {
 	fetchText(url: string): Promise<string>;
 	/** Coalesces repeat checks. Injected so tests do not depend on the wall clock. */
 	now?: () => number;
+	/**
+	 * Whether this build was installed from the Microsoft Store.
+	 *
+	 * Injected rather than read from `process.windowsStore` inside the handler,
+	 * so the Store path can be tested on any platform. Defaults to the real
+	 * value, which Electron sets only for an appx package.
+	 */
+	isStoreBuild?: () => boolean;
+}
+
+/**
+ * True when running as an installed Store package.
+ *
+ * Electron sets `process.windowsStore` for appx builds and leaves it undefined
+ * everywhere else, so this is the only signal that distinguishes the two Windows
+ * channels at runtime — the binary is otherwise identical.
+ */
+export function installedFromStore(): boolean {
+	return (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true;
 }
 
 /** Don't re-ask GitHub more than this often, however often the UI mounts. */
@@ -35,7 +54,24 @@ export function registerUpdateHandlers(deps: UpdateCheckDeps): void {
 
 	let cached: { at: number; result: UpdateCheckResult } | undefined;
 
+	const isStoreBuild = deps.isStoreBuild ?? installedFromStore;
+
 	registerHandler(CHANNELS.updateCheck, async () => {
+		// **Before the settings check and before any request.**
+		//
+		// Windows already fetches and verifies new packages for a Store install,
+		// so asking GitHub would be a network call made for nothing — and worse
+		// than nothing if it answered: telling this user a release exists invites
+		// them to install a second, unmanaged copy beside the managed one, and two
+		// installs of an authenticator means two vaults and an account visible in
+		// only one of them.
+		//
+		// Ahead of `isEnabled()` because this is not a preference. There is no
+		// setting to respect here and nothing for the user to turn back on.
+		if (isStoreBuild()) {
+			return { state: 'storeManaged' as const };
+		}
+
 		// Checked on every call rather than captured once: the user can switch it
 		// off, and the next call must respect that without a restart.
 		if (!deps.isEnabled()) {

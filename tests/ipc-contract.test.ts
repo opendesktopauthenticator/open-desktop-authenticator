@@ -78,6 +78,7 @@ describe('response validation', () => {
 		repository: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator',
 		brandingUnresolved: true,
 		platform: 'win32' as const,
+		installedFromStore: false,
 		attribution: { mckay: 'a', valve: 'b' },
 		security: { sandbox: true, contextIsolation: true, nodeIntegration: false }
 	};
@@ -319,6 +320,7 @@ function sampleResponse(channel: string): Record<string, unknown> {
 				company: 'MASTERPANEL LLC',
 				brandingUnresolved: true,
 				platform: 'win32',
+				installedFromStore: false,
 				attribution: { mckay: 'a', valve: 'b' },
 				security: { sandbox: true, contextIsolation: true, nodeIntegration: false }
 			};

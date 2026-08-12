@@ -29,6 +29,7 @@ const INFO: AppInfo = {
 	repository: branding.repository,
 	brandingUnresolved: false,
 	platform: 'win32',
+	installedFromStore: false,
 	attribution: { mckay: attribution.mckay, valve: attribution.valve },
 	security: { sandbox: true, contextIsolation: true, nodeIntegration: false }
 };

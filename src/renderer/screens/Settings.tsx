@@ -21,11 +21,14 @@ import { messageOf } from '../ipc-message';
 export function Settings({
 	onLoad,
 	onSave,
-	onClose
+	onClose,
+	installedFromStore = false
 }: {
 	onLoad: () => Promise<VaultSettingsView>;
 	onSave: (settings: VaultSettingsView) => Promise<unknown>;
 	onClose: () => void;
+	/** Store builds are updated by Windows, so the update toggle does nothing there. */
+	installedFromStore?: boolean;
 }): React.JSX.Element {
 	const [settings, setSettings] = useState<VaultSettingsView | undefined>();
 	const [busy, setBusy] = useState(false);
@@ -145,28 +148,11 @@ export function Settings({
 					</p>
 
 					<h2>Update checks</h2>
-					<label className="checkbox">
-						<input
-							type="checkbox"
-							checked={settings.updateCheck}
-							onChange={(event) => change({ updateCheck: event.target.checked })}
-						/>
-						<span>
-							Tell me when a new version is released
-							{/* Stated exactly, because this is the only request this app makes
-							    that is not to Steam, and the README promises no telemetry. The
-							    honest description is what makes that promise checkable. */}
-							<p className="hint">
-								Asks GitHub once every few hours whether a newer release exists. It sends nothing
-								about you or your accounts — it is the same question any visitor to the releases
-								page asks. GitHub will see your IP address and that this application is running.
-							</p>
-							<p className="hint">
-								It never downloads or installs anything. When there is a new version you get a link,
-								and you go and get it yourself — that is the point.
-							</p>
-						</span>
-					</label>
+					<UpdateCheckSetting
+						installedFromStore={installedFromStore}
+						checked={settings.updateCheck}
+						onChange={(updateCheck) => change({ updateCheck })}
+					/>
 
 					<div className="controls">
 						<button type="submit" disabled={busy}>
@@ -183,5 +169,65 @@ export function Settings({
 				work and does nothing is worse than no switch.
 			</div>
 		</main>
+	);
+}
+
+/**
+ * The update-check control, or the reason there is not one.
+ *
+ * Split out of the screen so it can be rendered on its own in a test. `Settings`
+ * loads asynchronously and shows nothing until its first answer arrives, so
+ * `renderToStaticMarkup` of the whole screen returns a loading state and asserts
+ * on nothing — the same reason `About` was split into a loader and a view. Only
+ * the branching part is extracted here rather than the whole form, because only
+ * the branching part has two outcomes worth proving.
+ *
+ * **No toggle in a Store build.** The check is refused before it ever reads this
+ * preference, so the switch would change nothing and the text beside it would
+ * describe a request to GitHub that is never made. It is the same reasoning as
+ * the notice at the foot of this screen: a control that appears to do something
+ * it does not is worse than no control at all.
+ */
+export function UpdateCheckSetting({
+	installedFromStore,
+	checked,
+	onChange
+}: {
+	installedFromStore: boolean;
+	checked: boolean;
+	onChange: (value: boolean) => void;
+}): React.JSX.Element {
+	if (installedFromStore) {
+		return (
+			<p className="hint">
+				This copy came from the Microsoft Store, so Windows keeps it up to date and installs new
+				versions itself. Nothing is asked of GitHub, and there is nothing to switch on here.
+			</p>
+		);
+	}
+
+	return (
+		<label className="checkbox">
+			<input
+				type="checkbox"
+				checked={checked}
+				onChange={(event) => onChange(event.target.checked)}
+			/>
+			<span>
+				Tell me when a new version is released
+				{/* Stated exactly, because this is the only request this app makes
+				    that is not to Steam, and the README promises no telemetry. The
+				    honest description is what makes that promise checkable. */}
+				<p className="hint">
+					Asks GitHub once every few hours whether a newer release exists. It sends nothing about
+					you or your accounts — it is the same question any visitor to the releases page asks.
+					GitHub will see your IP address and that this application is running.
+				</p>
+				<p className="hint">
+					It never downloads or installs anything. When there is a new version you get a link, and
+					you go and get it yourself — that is the point.
+				</p>
+			</span>
+		</label>
 	);
 }

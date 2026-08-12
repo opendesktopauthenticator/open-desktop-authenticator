@@ -2,6 +2,7 @@ import { app } from 'electron';
 import { attribution, branding, hasUnresolvedBranding } from '../shared/branding';
 import { CHANNELS } from '../shared/channels';
 import { registerHandler } from './ipc/router';
+import { installedFromStore } from './update/ipc';
 import { SECURE_WEB_PREFERENCES } from './security';
 
 /**
@@ -24,6 +25,7 @@ export function registerAppInfoHandler(): void {
 		repository: branding.repository,
 		brandingUnresolved: hasUnresolvedBranding(),
 		platform: process.platform,
+		installedFromStore: installedFromStore(),
 		attribution: {
 			mckay: attribution.mckay,
 			valve: attribution.valve

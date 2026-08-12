@@ -201,3 +201,76 @@ describe('the update handler', () => {
 		expect(serialised).not.toContain('tarball');
 	});
 });
+
+/**
+ * The Microsoft Store build asks nothing.
+ *
+ * The same binary ships through two Windows channels and must behave
+ * differently in one of them — a difference easy to write and easy to leave
+ * untested, since there is no Store to install from in CI and
+ * `process.windowsStore` is undefined on every machine this suite runs on. So
+ * the channel is injected.
+ *
+ * Two properties, and the second matters more than it looks. No request,
+ * because Windows already fetches and verifies the package and this is the one
+ * request the application makes that is not to Steam. And no offer: telling a
+ * Store user a release exists invites them to install a second, unmanaged copy
+ * beside the managed one, and two installs of an authenticator means two vaults
+ * — with an account in only one of them being an account they cannot produce a
+ * code for.
+ */
+describe('a build installed from the Microsoft Store', () => {
+	const newerRelease = () =>
+		vi.fn(() => Promise.resolve(JSON.stringify({ tag_name: 'v9.9.9', html_url: RELEASE_URL })));
+
+	it('answers storeManaged and reaches no network', async () => {
+		const fetchText = vi.fn(() => Promise.reject(new Error('must not ask GitHub')));
+		registerUpdateHandlers({
+			isEnabled: () => true,
+			currentVersion: '0.1.0',
+			fetchText,
+			isStoreBuild: () => true
+		});
+
+		expect(await invoke()).toEqual({ state: 'storeManaged' });
+		expect(fetchText, 'no request may be made at all').not.toHaveBeenCalled();
+	});
+
+	it('says so even when update checks are switched off', async () => {
+		// `disabled` is a preference; this is not. Reporting the setting would
+		// imply there is something here to switch back on.
+		registerUpdateHandlers({
+			isEnabled: () => false,
+			currentVersion: '0.1.0',
+			fetchText: vi.fn(() => Promise.resolve('{}')),
+			isStoreBuild: () => true
+		});
+
+		expect(await invoke()).toEqual({ state: 'storeManaged' });
+	});
+
+	it('never offers a release, however new the one on GitHub is', async () => {
+		registerUpdateHandlers({
+			isEnabled: () => true,
+			currentVersion: '0.1.0',
+			fetchText: newerRelease(),
+			isStoreBuild: () => true
+		});
+
+		expect(await invoke()).not.toMatchObject({ state: 'updateAvailable' });
+	});
+
+	it('leaves the direct-download build asking as it always did', async () => {
+		// The guard must be a branch, not a change of behaviour for everyone.
+		const fetchText = newerRelease();
+		registerUpdateHandlers({
+			isEnabled: () => true,
+			currentVersion: '0.1.0',
+			fetchText,
+			isStoreBuild: () => false
+		});
+
+		expect(await invoke()).toMatchObject({ state: 'updateAvailable', version: 'v9.9.9' });
+		expect(fetchText).toHaveBeenCalledTimes(1);
+	});
+});

@@ -97,6 +97,16 @@ export const appInfoResponse = z.object({
 	 * somewhere unsupported" into a hard IPC error on the About screen.
 	 */
 	platform: z.string(),
+	/**
+	 * Installed from the Microsoft Store, where Windows does the updating.
+	 *
+	 * The renderer needs this because the update-check setting is meaningless in
+	 * that build: the check is refused before it reads the preference, so leaving
+	 * a toggle on screen would offer a switch that changes nothing and describe a
+	 * GitHub request that is never made. A control that lies about what it does
+	 * is worse than one that is absent.
+	 */
+	installedFromStore: z.boolean(),
 	/** §8 attribution strings, rendered verbatim by the renderer. */
 	attribution: z.object({
 		mckay: z.string(),
@@ -222,6 +232,17 @@ export const settingsUpdateRequest = vaultSettingsView.strict();
  */
 export const updateCheckResponse = z.discriminatedUnion('state', [
 	z.object({ state: z.literal('disabled') }),
+	/**
+	 * Installed from the Microsoft Store, which does the updating itself.
+	 *
+	 * Distinct from `disabled`, which means the user switched checking off. This
+	 * is not a preference and there is nothing to turn back on: Windows fetches
+	 * and verifies the new package, so pointing this user at a GitHub release
+	 * would hand them a second, unmanaged copy of an application they already
+	 * have — the one outcome an authenticator can least afford, since the two
+	 * installs would keep separate vaults.
+	 */
+	z.object({ state: z.literal('storeManaged') }),
 	z.object({ state: z.literal('upToDate') }),
 	z.object({
 		state: z.literal('updateAvailable'),

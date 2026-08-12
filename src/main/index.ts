@@ -137,6 +137,17 @@ function createMainWindow(): BrowserWindow {
 }
 
 function start(): void {
+	// **Before anything reads a path, including the single-instance lock**, which
+	// Electron also derives from userData.
+	//
+	// Pinned rather than inherited: see `branding.dataDirectory`. The default is
+	// computed from `app.getName()`, which silently changes the moment a
+	// `productName` field appears in package.json — and a moved userData path
+	// means an installed user's vault stops being found. `setPath` rather than
+	// `setName` so only the directory is fixed; the name shown to the OS stays
+	// the readable one.
+	app.setPath('userData', join(app.getPath('appData'), branding.dataDirectory));
+
 	// Early return, not just app.quit(): quit() does not stop this tick, so a
 	// second instance would otherwise go on to register handlers and open a
 	// window alongside the one already running.

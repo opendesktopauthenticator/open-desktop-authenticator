@@ -72,7 +72,30 @@ export const branding = {
 	 * that a download is ours. It must resolve to the real repository, and the org
 	 * name must match what is published on `/official`.
 	 */
-	repository: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator'
+	repository: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator',
+
+	/**
+	 * The folder under the OS application-data directory. **Pinned, not derived.**
+	 *
+	 * `app.getPath('userData')` is built from `app.getName()`, and `getName()`
+	 * returns package.json's `productName` when that field exists and falls back
+	 * to `name` when it does not. This project has no `productName` in
+	 * package.json today, so the vault lives in `open-desktop-authenticator`.
+	 *
+	 * Which means adding a `productName` field — an obvious, harmless-looking
+	 * tidy-up that any packaging guide will suggest — would move the vault path.
+	 * The application would then open a fresh empty directory, find no vault, and
+	 * present itself as a first run. Every account still on disk, none of them
+	 * visible, and the user reaching for a recovery code because the app appears
+	 * to have eaten their authenticator.
+	 *
+	 * Nothing has shipped yet, so this is free to fix now and expensive later:
+	 * once a release exists, changing this value orphans the vault of everybody
+	 * who installed it. `app.setName()` is called with this before any path is
+	 * read, so the location is a decision recorded here rather than a side effect
+	 * of a field somebody may add.
+	 */
+	dataDirectory: 'open-desktop-authenticator'
 } as const;
 
 /** Fields that are still placeholders. Empty once every naming question is closed. */
