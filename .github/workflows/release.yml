@@ -1,0 +1,269 @@
+name: Release
+
+# Tags only, and only ones shaped like a version.
+#
+# **Never on a branch push.** §4's chain is website -> company -> repository ->
+# public CI build -> published hash, and the value of the CI link is that the
+# artifact corresponds to a specific reviewable commit that a stranger can check
+# out. A release built from a moving branch corresponds to nothing.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (must already be pushed)'
+        required: true
+
+# Read-only by default; each job widens only what it needs.
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # Deliberately NOT cancel-in-progress. Half-publishing a release is worse than
+  # running twice.
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The same gate CI runs, re-run against the tag.
+  #
+  # Not redundant with ci.yml. CI proves a *commit* was green; this proves the
+  # tag is, and a tag can point somewhere CI never saw — moved, cut from a
+  # branch that was never pushed, or created before a fix landed. The release
+  # checklist says "main is green" and this is what makes that true of the thing
+  # actually being shipped.
+  # ---------------------------------------------------------------------------
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - run: npx electron-vite build
+      - run: npm test
+      - run: node site/build.mjs
+      - run: node site/verify.mjs
+
+      # Production dependencies are what ships. A release is exactly the moment
+      # a known-vulnerable transitive dependency must not go out quietly.
+      - name: npm audit (production)
+        run: npm audit --audit-level=high --omit=dev
+
+  # ---------------------------------------------------------------------------
+  # The tag says one thing; package.json must say the same.
+  #
+  # Cheap, and it catches the mistake that is impossible to fix after the fact:
+  # tagging v0.2.0 while the manifest still reads 0.1.0 produces installers named
+  # for a version the application does not report, so the About screen, the
+  # update check and the filename disagree for ever.
+  # ---------------------------------------------------------------------------
+  version:
+    name: tag matches package.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Compare
+        shell: bash
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          manifest="v$(node -p "require('./package.json').version")"
+          echo "tag=$tag manifest=$manifest"
+          if [ "$tag" != "$manifest" ]; then
+            echo "::error::tag $tag does not match package.json ($manifest)"
+            exit 1
+          fi
+
+      # The checklist's other gate — `hasUnresolvedBranding()` returning false —
+      # is not repeated here. `tests/branding.test.ts` already asserts it, and
+      # the verify job runs the suite against this same tag, so a placeholder
+      # product name fails the release before this job is even reached. A second
+      # copy of the check would be one more thing to keep in step with the first.
+
+  # ---------------------------------------------------------------------------
+  # Package, per platform, on the platform.
+  #
+  # Windows installers are built on Windows and Linux packages on Linux. Cross
+  # building is possible and is not worth the class of bug it invites — an NSIS
+  # installer produced under wine differs from one produced by the toolchain
+  # users actually run.
+  #
+  # The Store package (appx) is deliberately NOT built here. It needs the
+  # Partner Center identity, it is submitted through Partner Center rather than
+  # attached to a GitHub release, and `electron-builder.config.mjs` refuses to
+  # produce one while that identity is a placeholder. Adding it to this workflow
+  # would make every release fail on a step that has nothing to do with the
+  # release.
+  # ---------------------------------------------------------------------------
+  package:
+    name: package (${{ matrix.os }})
+    needs: [verify, version]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            targets: --win nsis portable
+          - os: ubuntu-latest
+            targets: --linux AppImage deb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      # `--publish never`. This workflow uploads deliberately, in one place,
+      # after hashing — rather than letting the packager push assets as it
+      # finishes each one, which would produce a release whose contents depend
+      # on how far the build got.
+      - name: Package
+        run: npm run build && npx electron-builder --config electron-builder.config.mjs ${{ matrix.targets }} --publish never
+
+      # Installers and archives only. `release/` also holds the unpacked tree,
+      # the block maps and builder metadata, none of which anybody should
+      # download and all of which would otherwise be hashed and published.
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p dist-release
+          find release -maxdepth 1 -type f \
+            \( -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
+            -exec cp {} dist-release/ \;
+          ls -l dist-release
+          if [ -z "$(ls -A dist-release)" ]; then
+            echo "::error::packaging produced no installable artifact"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-${{ matrix.os }}
+          path: dist-release/
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # One hash file over everything, generated where everything is together.
+  #
+  # Per-platform SHA256SUMS files would give a verifier several files to check
+  # and no single statement of what the release contains. §4 asks a stranger to
+  # compare one published hash against the file they downloaded, so there is one
+  # list covering every published asset.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: publish draft release
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+      id-token: write # sign the provenance attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+
+      - name: Download every platform's artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: staging
+          merge-multiple: true
+
+      - name: List what will be published
+        shell: bash
+        run: ls -l staging
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: .
+          format: spdx-json
+          output-file: staging/sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate SHA256SUMS.txt
+        shell: bash
+        working-directory: staging
+        run: |
+          # Removed first. On a re-run the file is already there, the glob picks
+          # it up, and the list gains an entry for its own earlier contents —
+          # which can never verify, on a file whose whole job is verifying.
+          rm -f SHA256SUMS.txt
+          # Sorted, and with bare filenames rather than paths, so the file reads
+          # the same way `sha256sum -c SHA256SUMS.txt` expects to consume it.
+          sha256sum -- * | sort -k2 > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # Proof of *where* the bytes came from: which workflow, which commit,
+      # which runner. This is the closest thing to a signature the direct
+      # download channel has until the SignPath certificate exists, and unlike a
+      # certificate it says something a certificate cannot — that these bytes
+      # were produced by this public workflow from this tag.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            staging/*.exe
+            staging/*.AppImage
+            staging/*.deb
+
+      # A draft, always. The checklist requires a human to read the notes and
+      # the asset list before anything is public, and "published automatically
+      # by CI" is the one thing a release of this application must not be.
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          gh release create "$TAG" \
+            --draft \
+            --title "$TAG" \
+            --notes "Draft. Release notes are written by hand before publishing — see docs/RELEASE_CHECKLIST.md.
+
+          **Unsigned.** These builds carry no code-signing certificate yet, so Windows will warn on first run. Verify the download against \`SHA256SUMS.txt\` below, and check the provenance attestation on this release.
+
+          Verify on Linux or macOS:
+          \`\`\`
+          sha256sum -c SHA256SUMS.txt
+          \`\`\`
+          Verify on Windows PowerShell:
+          \`\`\`
+          Get-FileHash .\\<file> -Algorithm SHA256
+          \`\`\`" \
+            staging/*
+          echo "Draft created. Nothing is public until a human publishes it."
