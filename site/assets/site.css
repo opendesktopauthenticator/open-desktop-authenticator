@@ -68,6 +68,30 @@
 	box-sizing: border-box;
 }
 
+/*
+ * Long words break rather than push the page sideways.
+ *
+ * This site is full of URLs written out in full — that is the point of them,
+ * since "check the address" is most of the advice here — and
+ * `github.com/Jessecar96/SteamDesktopAuthenticator` is one unbreakable word to a
+ * layout engine. On a 375px phone every page was 7px wider than the viewport
+ * because of it, which means the whole document slides under the thumb and
+ * every tap lands slightly wrong.
+ *
+ * `break-word` rather than `anywhere`: it only breaks a word that cannot fit on
+ * a line of its own, so ordinary prose is untouched.
+ */
+p,
+li,
+dd,
+dt,
+td,
+th,
+figcaption,
+blockquote {
+	overflow-wrap: break-word;
+}
+
 html {
 	scroll-behavior: smooth;
 }
@@ -254,7 +278,17 @@ body::before {
    be held to elsewhere. */
 .signals {
 	display: grid;
-	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	/*
+	 * Four items, so the column count is stated rather than derived.
+	 *
+	 * `auto-fit` with a minimum track was picking three columns at some widths,
+	 * which left one claim alone on a second row beside a large empty cell. And
+	 * it was picking three at 1024 only when a scrollbar was present — a layout
+	 * that changes shape depending on whether the page happens to scroll is not
+	 * one to tune by adjusting the minimum and re-measuring. 4, 2 or 1 divides
+	 * four evenly; three never will.
+	 */
+	grid-template-columns: repeat(4, 1fr);
 	gap: 1px;
 	margin: 46px 0 0;
 	padding: 0;
@@ -285,6 +319,18 @@ body::before {
 	font-size: 0.9rem;
 	color: var(--muted);
 	line-height: 1.5;
+}
+
+/* Two-by-two through the middle widths, one column on a phone. */
+@media (max-width: 1100px) {
+	.signals {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+@media (max-width: 560px) {
+	.signals {
+		grid-template-columns: 1fr;
+	}
 }
 
 /* ------------------------------------------------------------------- type -- */
@@ -447,6 +493,19 @@ ol.signs > li {
 	font-weight: 650;
 	color: var(--mint-pale);
 	margin-top: 20px;
+}
+
+/*
+ * A term that links somewhere is a navigation target, not prose.
+ *
+ * In the documentation index these are the way through to each section, and as
+ * a bare inline link the tappable area was the 21px height of the text. Given
+ * its own block with padding it becomes something a thumb can actually land on,
+ * without changing how the list reads.
+ */
+.defs dt a {
+	display: inline-block;
+	padding: 5px 0;
 }
 .defs dd {
 	margin: 5px 0 0;
@@ -675,7 +734,10 @@ main.has-hero {
 	background: var(--panel);
 }
 .foot-origin {
+	/* `min-width: 0` so the flex item may shrink past the long URL inside it;
+	   without it the item floors at its min-content width and overflows. */
 	flex: 1 1 380px;
+	min-width: 0;
 	margin: 0;
 	max-width: 68ch;
 	font-family: var(--font-small);
@@ -697,7 +759,10 @@ main.has-hero {
 	border-radius: 999px;
 	text-decoration: none;
 	color: var(--text);
-	white-space: nowrap;
+	/* Not `nowrap`: at 375px the pill could not shrink and pushed the footer
+	   past the viewport. The two words wrap onto their own lines instead. */
+	white-space: normal;
+	max-width: 100%;
 	transition:
 		border-color 160ms var(--ease),
 		background-color 160ms var(--ease),
@@ -755,6 +820,7 @@ main.has-hero {
 }
 .origin-note p {
 	flex: 1 1 300px;
+	min-width: 0;
 	margin: 0;
 	font-size: 0.95rem;
 	color: var(--body);
@@ -1053,7 +1119,14 @@ button.button:active {
 	display: block;
 	width: 100%;
 	height: 116px;
-	object-fit: cover;
+	/*
+	 * `contain`, not `cover`. A tidy grid of centre-crops is the wrong trade for
+	 * this content: these are screenshots of a problem, and the crop reliably
+	 * throws away the edges — which is where the error dialog, the address bar
+	 * and the thing being pointed at usually are. Letterboxed and complete beats
+	 * neat and partial.
+	 */
+	object-fit: contain;
 	border-radius: 8px;
 	background: var(--bg);
 }
@@ -1282,9 +1355,62 @@ button.button:active {
 	.message {
 		padding: 15px 16px;
 	}
-	/* Stacked, and the brand pill goes full width rather than stranded right. */
+
+	/*
+	 * The header stops being sticky on a phone.
+	 *
+	 * Nine navigation links wrap to three rows at 375px, and stuck to the top
+	 * that bar held 190px of an 812px screen — a quarter of the display, on every
+	 * page, permanently, so a quarter of every article was unreachable without
+	 * more scrolling. Sticky navigation earns its space when it is one compact
+	 * row; at three rows it is a menu that refuses to go away.
+	 *
+	 * It stays at the top of the document, where a scroll upward still finds it,
+	 * and the skip link still jumps past it for keyboard and screen-reader use.
+	 */
+	.masthead {
+		position: static;
+	}
+	.masthead .wrap {
+		padding-top: 12px;
+		padding-bottom: 12px;
+	}
+	.masthead nav {
+		gap: 0 2px;
+	}
+
+	/*
+	 * Commands wrap instead of scrolling sideways.
+	 *
+	 * The verification page exists to get somebody to actually run a checksum
+	 * before they open an installer. In a 339px box those commands were a
+	 * horizontal scrollbar showing about half of each one — and a command you
+	 * have to drag through to read is a command people skip, on the one page
+	 * where skipping it is how the account gets taken.
+	 *
+	 * Soft wrapping inserts no characters, so copying still yields the original
+	 * single line.
+	 */
+	pre {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		padding: 13px 14px;
+	}
+	pre code {
+		font-size: 0.8rem;
+	}
+	/*
+	 * Stacked, and the brand pill goes full width rather than stranded right.
+	 *
+	 * `flex-wrap: nowrap` is the load-bearing line. A column flex container that
+	 * is allowed to wrap sizes each line to its contents rather than to the
+	 * container, so `align-items: stretch` stretched the text to the width of
+	 * the longest unbreakable thing in it — the SDA repository URL — and every
+	 * page on the site came out 7px wider than a 375px phone.
+	 */
 	.foot-brand {
 		flex-direction: column;
+		flex-wrap: nowrap;
 		align-items: stretch;
 		gap: 16px;
 	}
