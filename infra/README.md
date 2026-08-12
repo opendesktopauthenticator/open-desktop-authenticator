@@ -15,16 +15,16 @@ afterwards. That is a real limitation and worth fixing if the setup grows.
 
 ## Where each file belongs
 
-| Repository path | Host path |
-| --- | --- |
-| `nginx/conf.d/00-hardening.conf` | `/etc/nginx/conf.d/00-hardening.conf` |
-| `nginx/snippets/security-headers.conf` | `/etc/nginx/snippets/security-headers.conf` |
-| `nginx/snippets/tls.conf` | `/etc/nginx/snippets/tls.conf` |
-| `nginx/sites-available/oda` | `/etc/nginx/sites-available/oda` |
+| Repository path                          | Host path                                     |
+| ---------------------------------------- | --------------------------------------------- |
+| `nginx/conf.d/00-hardening.conf`         | `/etc/nginx/conf.d/00-hardening.conf`         |
+| `nginx/snippets/security-headers.conf`   | `/etc/nginx/snippets/security-headers.conf`   |
+| `nginx/snippets/tls.conf`                | `/etc/nginx/snippets/tls.conf`                |
+| `nginx/sites-available/oda`              | `/etc/nginx/sites-available/oda`              |
 | `nginx/sites-available/000-default-deny` | `/etc/nginx/sites-available/000-default-deny` |
-| `sshd_config.d/00-hardening.conf` | `/etc/ssh/sshd_config.d/00-hardening.conf` |
-| `fail2ban/jail.local` | `/etc/fail2ban/jail.local` |
-| `sysctl.d/99-hardening.conf` | `/etc/sysctl.d/99-hardening.conf` |
+| `sshd_config.d/00-hardening.conf`        | `/etc/ssh/sshd_config.d/00-hardening.conf`    |
+| `fail2ban/jail.local`                    | `/etc/fail2ban/jail.local`                    |
+| `sysctl.d/99-hardening.conf`             | `/etc/sysctl.d/99-hardening.conf`             |
 
 Both `sites-available` files need a symlink into `sites-enabled` to take effect.
 
