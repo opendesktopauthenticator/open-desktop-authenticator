@@ -172,7 +172,10 @@ body::before {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 24px;
+	/* 20 rather than 24: the mark and nine links came to nine pixels more than
+	   the 1024px the measure leaves once its padding is taken off, and those
+	   nine pixels were the whole reason the nav dropped to a second line. */
+	gap: 20px;
 	flex-wrap: wrap;
 	padding-top: 15px;
 	padding-bottom: 15px;
@@ -195,17 +198,33 @@ body::before {
 	filter: drop-shadow(0 2px 8px rgba(46, 204, 113, 0.35));
 }
 
+/*
+ * The navigation, which has to survive items being added to it.
+ *
+ * Nine links plus the wordmark came to a few pixels more than the 1080px
+ * measure, so the whole nav dropped onto a second line — the mark alone on top
+ * and the links beneath it, which reads as a mistake rather than a layout. The
+ * padding is tightened enough to fit, and `flex-end` means that if a tenth item
+ * ever pushes it over again it wraps to a row aligned with the right edge
+ * instead of drifting to the left of the mark above it. Deliberate in both
+ * states, rather than correct in one and accidental in the other.
+ */
 .masthead nav {
 	display: flex;
 	gap: 2px;
 	flex-wrap: wrap;
+	justify-content: flex-end;
+	/* Pushes the whole nav to the right edge even when it is alone on a wrapped
+	   line, where `space-between` on the parent would otherwise leave it hard
+	   against the left and sitting under the middle of nothing. */
+	margin-left: auto;
 	font-family: var(--font-small);
 	font-size: 0.88rem;
 }
 .masthead nav a {
 	color: var(--muted);
 	text-decoration: none;
-	padding: 7px 12px;
+	padding: 7px 9px;
 	border-radius: 8px;
 	transition:
 		color 160ms var(--ease),
@@ -1494,12 +1513,33 @@ button.button:active {
 	.masthead {
 		position: static;
 	}
+
+	/*
+	 * Two deliberate rows, rather than one row that ran out of space.
+	 *
+	 * The desktop header is `justify-content: space-between` with wrapping, which
+	 * on a phone put the mark alone on the first line and left the links to fall
+	 * underneath it, ragged and hard against the left edge. Nothing was broken and
+	 * it looked broken — the giveaway of a wrapped flex row is that the two halves
+	 * are aligned to different things.
+	 *
+	 * So on a narrow screen it stops being a row at all. The mark is centred on a
+	 * line of its own, a rule separates it, and the links are centred beneath —
+	 * symmetrical, which reads as a decision instead of an accident.
+	 */
 	.masthead .wrap {
-		padding-top: 12px;
-		padding-bottom: 12px;
+		display: block;
+		padding: 0 18px;
+	}
+	.brand {
+		justify-content: center;
+		padding: 13px 0 12px;
 	}
 	.masthead nav {
-		gap: 0 2px;
+		justify-content: center;
+		gap: 2px 4px;
+		padding: 9px 0 11px;
+		border-top: 1px solid var(--line);
 	}
 
 	/*
@@ -1536,6 +1576,20 @@ button.button:active {
 		flex-wrap: nowrap;
 		align-items: stretch;
 		gap: 16px;
+	}
+	/*
+	 * `flex-basis` changes meaning with the direction, and this container changes
+	 * direction here.
+	 *
+	 * `flex: 1 1 380px` on the text is a width hint for the desktop row. Turned
+	 * into a column, the basis applies to the main axis instead — so 380px became
+	 * a *height*, and four lines of text sat in a 380px box with an empty
+	 * quarter-screen underneath it, on every page. Nothing overflowed and no tap
+	 * target shrank, which is why the layout sweep passed it and only looking at
+	 * the page found it.
+	 */
+	.foot-origin {
+		flex: 0 0 auto;
 	}
 	.powered {
 		justify-content: center;

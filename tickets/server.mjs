@@ -506,6 +506,25 @@ const BRAND = {
 	url: 'https://masterspanel.com'
 };
 
+/**
+ * The product mark, by its hashed name, read out of the built home page.
+ *
+ * These pages had no mark at all — the masthead was the wordmark on its own —
+ * so a person who followed a reference into their own report, or opened the
+ * admin view, saw a header subtly different from every other page on the
+ * domain. On a site whose argument is "check that you are in the right place",
+ * a header that does not match the rest of the site is the wrong detail to get
+ * wrong.
+ */
+function markHref() {
+	try {
+		const home = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8');
+		return /<img src="(\/assets\/mark\.[^"]+\.svg)"/.exec(home)?.[1] ?? '/assets/mark.svg';
+	} catch {
+		return '/assets/mark.svg';
+	}
+}
+
 /** The company mark, by its hashed name, read out of the built home page. */
 function brandLogoHref() {
 	try {
@@ -542,7 +561,7 @@ function page({ title, body, noindex = true }) {
 </head>
 <body>
 	<header class="masthead"><div class="wrap">
-		<a class="brand" href="/"><span><b>Open Desktop</b> Authenticator</span></a>
+		<a class="brand" href="/"><img src="${escape(markHref())}" width="30" height="30" alt="" aria-hidden="true"><span><b>Open Desktop</b> Authenticator</span></a>
 		<nav aria-label="Main"><a href="/support">Support</a></nav>
 	</div></header>
 	<main id="main" class="wrap">
