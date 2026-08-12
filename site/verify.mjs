@@ -23,6 +23,21 @@ const here = dirname(fileURLToPath(import.meta.url));
 const dist = join(here, 'dist');
 const origin = process.argv[2];
 
+/**
+ * Files served from the root under names browsers hardcode.
+ *
+ * Not pages and not hashed assets, so the link checker needs to know about them
+ * — but they are still verified to exist rather than waved through.
+ */
+const ROOT_FILES = new Set([
+	'/favicon.ico',
+	'/apple-touch-icon.png',
+	'/apple-touch-icon-precomposed.png',
+	'/site.webmanifest',
+	'/robots.txt',
+	'/sitemap.xml'
+]);
+
 const problems = [];
 const fail = (page, message) => problems.push(`${page}: ${message}`);
 const count = (text, re) => (text.match(re) ?? []).length;
@@ -88,10 +103,13 @@ for (const [slug, html] of built) {
 		}
 	}
 
-	// Every internal link must go somewhere that exists.
+	// Every internal link must go somewhere that exists — a page, a hashed asset,
+	// or one of the fixed-name files at the root. All three are checked on disk
+	// rather than merely tolerated, because a head that points at a missing icon
+	// is exactly the failure this whole set was added to fix.
 	for (const [, href] of html.matchAll(/href="(\/[^"#?]*)"/g)) {
-		if (href.startsWith('/assets/')) {
-			if (!existsSync(join(dist, href))) fail(slug, `links to missing asset ${href}`);
+		if (href.startsWith('/assets/') || ROOT_FILES.has(href)) {
+			if (!existsSync(join(dist, href))) fail(slug, `links to ${href}, which was not built`);
 			continue;
 		}
 		const target = href === '/' ? 'index' : href.slice(1);
@@ -188,6 +206,46 @@ if (origin) {
 			fail(path, `served ${response?.status ?? 'nothing'}`);
 		} else if (!(response.headers.get('content-type') ?? '').includes(expect)) {
 			fail(path, `content-type is ${response.headers.get('content-type')}, expected ${expect}`);
+		}
+	}
+
+	/*
+	 * The icons, including the ones no HTML points at.
+	 *
+	 * Checked here rather than assumed, because the failure is silent: a 404 on
+	 * /favicon.ico does not break anything, it just means every tab shows the
+	 * browser's generic default — and browsers cache that miss, so it outlives
+	 * the fix. Every one of these paths was returning 404 before this ran.
+	 */
+	for (const [path, type] of [
+		['/favicon.ico', 'image/'],
+		['/apple-touch-icon.png', 'image/png'],
+		['/apple-touch-icon-precomposed.png', 'image/png'],
+		['/site.webmanifest', 'json']
+	]) {
+		const response = await fetch(`${origin}${path}`).catch(() => undefined);
+		if (!response || response.status !== 200) {
+			fail(path, `served ${response?.status ?? 'nothing'} — browsers ask for this by name`);
+			continue;
+		}
+		if (!(response.headers.get('content-type') ?? '').includes(type)) {
+			fail(path, `content-type is ${response.headers.get('content-type')}, expected ${type}`);
+		}
+		// These cannot be content-hashed, so an immutable cache would strand a
+		// stale icon in every browser that ever loaded the old one.
+		const cache = response.headers.get('cache-control') ?? '';
+		if (cache.includes('immutable')) {
+			fail(path, `is immutable but cannot be versioned: ${cache}`);
+		}
+	}
+
+	// Every icon the HTML declares must actually resolve.
+	for (const [, href] of (built.get('index') ?? '').matchAll(
+		/<link rel="(?:icon|apple-touch-icon|mask-icon|manifest)"[^>]*href="([^"]+)"/g
+	)) {
+		const response = await fetch(`${origin}${href}`).catch(() => undefined);
+		if (!response || response.status !== 200) {
+			fail(href, `declared in the head but served ${response?.status ?? 'nothing'}`);
 		}
 	}
 

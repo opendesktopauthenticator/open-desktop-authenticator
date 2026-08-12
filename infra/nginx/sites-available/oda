@@ -114,6 +114,25 @@ server {
 		access_log off;
 	}
 
+	# The icons browsers fetch by name, and the manifest.
+	#
+	# **These are the one part of the icon set that cannot be content-hashed**,
+	# because nothing in our HTML names them — the browser just asks for
+	# /favicon.ico. So they get `no-cache` rather than the `immutable` used for
+	# hashed assets: store it, but ask before reusing it. The ETag makes that
+	# question cost a 304 of a couple of hundred bytes, and it is what guarantees
+	# a changed mark actually replaces the one already sitting in a tab strip.
+	# Getting this wrong is how a stale or generic favicon outlives three
+	# redesigns.
+	location ~ ^/(favicon\.ico|apple-touch-icon(-precomposed)?\.png|site\.webmanifest)$ {
+		include snippets/security-headers.conf;
+		add_header Cache-Control "no-cache" always;
+		# Not in nginx's default mime.types, and the wrong type means the manifest
+		# is ignored and Android falls back to a screenshot of the page.
+		types { application/manifest+json webmanifest; image/x-icon ico; image/png png; }
+		default_type application/octet-stream;
+	}
+
 	location = /sitemap.xml {
 		include snippets/security-headers.conf;
 		add_header Cache-Control "public, max-age=3600";

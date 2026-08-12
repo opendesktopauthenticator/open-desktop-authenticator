@@ -30,6 +30,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
+import { rootIcons, hashedIcons, manifest } from './icons.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const out = join(here, 'dist');
@@ -99,14 +100,41 @@ function head(page) {
 	<meta property="og:title" content="${escape(title)}">
 	<meta property="og:description" content="${escape(page.description)}">
 	<meta property="og:url" content="${escape(url)}">
-	<meta property="og:image" content="${SITE.origin}/assets/mark-512.png">
+	<meta property="og:image" content="${SITE.origin}${asset('og-512.png')}">
+	<meta property="og:image:width" content="512">
+	<meta property="og:image:height" content="512">
 	<meta property="og:image:alt" content="The Open Desktop Authenticator shield mark">
 	<meta property="og:locale" content="en_GB">
 	<meta name="twitter:card" content="summary">
 	<meta property="article:modified_time" content="${page.updated ?? SITE.updated}">
-	<link rel="icon" href="/assets/mark.svg" type="image/svg+xml">
-	<link rel="apple-touch-icon" href="/assets/mark-512.png">
-	<link rel="stylesheet" href="/assets/site.css">
+
+	<!--
+		The icon set. (No backticks in this comment: it lives inside a JS template
+		literal, and one would end the string.)
+
+		favicon.ico is declared even though browsers request it regardless. An
+		explicit link stops the browser guessing, and the guess it makes when the
+		path 404s is the generic default it then caches.
+
+		Order matters to older browsers, which take the last icon they understand
+		rather than the best one — so the SVG, which every modern browser prefers,
+		comes last among the icon entries.
+	-->
+	<link rel="icon" href="/favicon.ico" sizes="32x32">
+	<link rel="icon" type="image/png" sizes="16x16" href="${asset('favicon-16.png')}">
+	<link rel="icon" type="image/png" sizes="32x32" href="${asset('favicon-32.png')}">
+	<link rel="icon" type="image/png" sizes="48x48" href="${asset('favicon-48.png')}">
+	<link rel="icon" type="image/png" sizes="96x96" href="${asset('favicon-96.png')}">
+	<link rel="icon" type="image/svg+xml" href="${asset('icon.svg')}">
+	<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+	<link rel="mask-icon" href="${asset('mask-icon.svg')}" color="#42f29a">
+	<link rel="manifest" href="/site.webmanifest">
+	<meta name="application-name" content="${escape(SITE.name)}">
+	<meta name="apple-mobile-web-app-title" content="${escape(SITE.short)}">
+	<meta name="msapplication-TileColor" content="#070a0e">
+	<meta name="msapplication-TileImage" content="${asset('mstile-150.png')}">
+
+	<link rel="stylesheet" href="${asset('site.css')}">
 	${page.structuredData ? `<script type="application/ld+json">${JSON.stringify(page.structuredData(SITE))}</script>` : ''}
 	<script type="application/ld+json">${JSON.stringify(breadcrumbs(page))}</script>`.trim();
 }
@@ -250,6 +278,7 @@ mkdirSync(out, { recursive: true });
 function publishAssets() {
 	const from = join(here, 'assets');
 	const map = new Map();
+	mkdirSync(join(out, 'assets'), { recursive: true });
 
 	const walk = (dir, prefix = '') => {
 		for (const name of readdirSync(dir)) {
@@ -269,10 +298,23 @@ function publishAssets() {
 		}
 	};
 	walk(from);
+
+	// Generated icons go through the same hashing, so the favicon set is cached
+	// as hard as everything else and still replaced the moment the mark changes.
+	for (const [name, bytes] of hashedIcons()) {
+		const hash = createHash('sha256').update(bytes).digest('hex').slice(0, 10);
+		const dot = name.lastIndexOf('.');
+		const hashed = `${name.slice(0, dot)}.${hash}${name.slice(dot)}`;
+		writeFileSync(join(out, 'assets', hashed), bytes);
+		map.set(`/assets/${name}`, `/assets/${hashed}`);
+	}
 	return map;
 }
 
 const ASSETS = publishAssets();
+
+/** The published path of an asset, hash included. */
+const asset = (name) => ASSETS.get(`/assets/${name}`) ?? `/assets/${name}`;
 
 /** Rewrite every asset reference in a finished page to its hashed name. */
 function fingerprint(html) {
@@ -298,6 +340,19 @@ for (const page of PAGES) {
  * and their presence is a reliable sign a sitemap was written by someone
  * following a 2009 checklist.
  */
+/*
+ * The files browsers fetch by name, without being told to.
+ *
+ * No content hash is possible here — nothing in our HTML names these paths, the
+ * browser simply asks for them — so they are the one part of the icon set that
+ * relies on revalidation rather than an immutable URL. nginx serves them with a
+ * short max-age for exactly that reason.
+ */
+for (const [name, bytes] of rootIcons()) {
+	writeFileSync(join(out, name), bytes);
+}
+writeFileSync(join(out, 'site.webmanifest'), manifest(SITE, asset));
+
 const today = new Date().toISOString().slice(0, 10);
 writeFileSync(
 	join(out, 'sitemap.xml'),
