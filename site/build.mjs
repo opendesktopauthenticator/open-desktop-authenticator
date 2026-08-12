@@ -72,6 +72,18 @@ export const SITE = {
 	repo: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator',
 
 	/*
+	 * The GitHub organisation on its own.
+	 *
+	 * Derived from `repo` rather than written twice: /verify prints it inside a
+	 * command the reader is told to copy (`gh attestation verify --owner ...`),
+	 * and a command that is subtly wrong is worse than no command — it fails,
+	 * and the reader concludes the download is bad rather than the docs.
+	 */
+	get githubOrg() {
+		return new URL(this.repo).pathname.split('/')[1];
+	},
+
+	/*
 	 * The original Steam Desktop Authenticator, and its only official home.
 	 *
 	 * Linked from everywhere this site mentions SDA, which until now it did not

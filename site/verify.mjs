@@ -268,7 +268,27 @@ const CLAIMS = [
 	{
 		flag: 'signed',
 		says: 'releases are signed',
-		patterns: [/every release[^.]{0,60}signature/i, /releases are signed/i]
+		/*
+		 * The last two are here because the first two were not enough.
+		 *
+		 * /verify carried a step telling people to run `gpg --verify
+		 * SHA256SUMS.txt.asc` against a detached signature that the release
+		 * workflow does not produce and never has. It never matched a pattern
+		 * above, because it did not *claim* releases were signed — it just
+		 * instructed the reader to check a signature, which is the same lie told
+		 * as a command instead of a sentence, and worse: the reader who follows
+		 * it gets "No such file or directory" and has to guess whether that means
+		 * the download is bad.
+		 *
+		 * So the tripwire now also matches the artefacts of signing, not only
+		 * assertions about it.
+		 */
+		patterns: [
+			/every release[^.]{0,60}signature/i,
+			/releases are signed/i,
+			/gpg\s+--verify/i,
+			/SHA256SUMS\.txt\.asc/i
+		]
 	},
 	{
 		flag: 'published',

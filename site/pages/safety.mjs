@@ -201,7 +201,7 @@ export const verify = {
 			{ '@type': 'HowToStep', name: 'Get the checksum file from the release page' },
 			{ '@type': 'HowToStep', name: 'Compute the hash of your download' },
 			{ '@type': 'HowToStep', name: 'Compare the two, character for character' },
-			{ '@type': 'HowToStep', name: 'Verify the signature over the checksum file' }
+			{ '@type': 'HowToStep', name: 'Check the build provenance attestation' }
 		]
 	}),
 	body: (s) => `
@@ -220,6 +220,34 @@ export const verify = {
 					published now so the process is familiar before it matters.
 				</p>
 			</div>
+
+			<h2>First: which copy do you have?</h2>
+			<p>
+				There will be two ways to get this application, and they are verified
+				differently. Checking the wrong thing for your copy produces a scary-looking
+				result that means nothing, so start here.
+			</p>
+			<dl class="pairs">
+				<dt>From the Microsoft Store</dt>
+				<dd>
+					Windows verified the package before it installed anything, and it will keep
+					doing so on every update. <strong>There is nothing for you to check by
+					hand.</strong> The signature on a Store package is Microsoft's, not ours —
+					so if you inspect it you will see Microsoft named as the signer, and that is
+					correct rather than suspicious.
+				</dd>
+				<dt>From the GitHub release page</dt>
+				<dd>
+					Nothing has checked this file for you. The steps below are the whole of the
+					verification, and they are worth the minute they take.
+				</dd>
+			</dl>
+			<p>
+				Anywhere else is neither of those. No download of this application is genuine
+				unless it came from the Store or from the release page linked on
+				<a href="/download">our download page</a> — see
+				<a href="/scam-clones">what a counterfeit build does</a>.
+			</p>
 
 			<h2>1. Get the checksums from the release page itself</h2>
 			<p>
@@ -243,26 +271,52 @@ export const verify = {
 				character, the file is not the file we published. Delete it.
 			</p>
 
-			<h2>4. Verify the signature over the checksum file</h2>
+			<h2>4. Check where the bytes came from</h2>
 			<p>
-				A checksum proves the file was not corrupted. A signature proves who wrote the
-				checksum. Without step 4, anyone who can replace the download can also replace
-				the list of hashes.
+				A checksum proves the file was not corrupted on the way to you. It does not
+				prove who produced it — anyone who can replace the download can also replace the
+				list of hashes sitting next to it. What closes that gap is a statement, made by
+				something other than us, about which build produced these bytes.
 			</p>
-			<pre><code>gpg --verify SHA256SUMS.txt.asc SHA256SUMS.txt</code></pre>
 			<p>
-				You are looking for a good signature from the release key published on the
-				repository. A warning that the key is not certified with a trusted signature is
-				normal and only means you have not personally marked it as trusted; a
-				<em>BAD signature</em> is not normal and means stop.
+				Every release is built by a public workflow on GitHub's runners, from a tag
+				anyone can read, and GitHub signs a record of that. You can check it:
+			</p>
+			<pre><code>gh attestation verify &lt;file&gt; --owner ${s.githubOrg}</code></pre>
+			<p>
+				A pass tells you the file was produced by this project's release workflow, from
+				a specific commit, and not assembled on somebody's laptop. That is a stronger
+				statement than a signature alone, because it names the source the binary came
+				from rather than only the person who signed it. It needs the
+				<a href="https://cli.github.com/" rel="noopener">GitHub CLI</a>, which is the
+				only tool here you may not already have.
 			</p>
 
-			<h2>5. On Windows, check the executable's signature too</h2>
-			<pre><code>Get-AuthenticodeSignature .\\OpenDesktopAuthenticator-Setup.exe | Format-List Status, SignerCertificate</code></pre>
+			<h2>5. On Windows, check the publisher</h2>
+			<pre><code>Get-AuthenticodeSignature .\\&lt;file&gt;.exe | Format-List Status, SignerCertificate</code></pre>
 			<p>
-				<code>Status</code> should read <code>Valid</code> and the signer should be the
-				publisher named on the release page. An unsigned build, or one signed by a name
-				you do not recognise, is not ours.
+				What you should see depends on where the file came from, and right now the
+				honest answer for direct downloads is uncomfortable:
+			</p>
+			<dl class="pairs">
+				<dt>A Store install</dt>
+				<dd>
+					Signed, and the signer is Microsoft. Windows checked it before installing.
+				</dd>
+				<dt>A download from the release page, today</dt>
+				<dd>
+					<strong><code>Status</code> will read <code>NotSigned</code>.</strong> These
+					builds carry no code-signing certificate yet, so Windows will also warn on
+					first run. That is expected and it is stated here rather than left for you
+					to discover — but it does mean this step cannot tell you anything for now,
+					and steps 3 and 4 are doing all the work. When signing exists, the signer
+					will be ${s.publisher} and anything else is not ours.
+				</dd>
+			</dl>
+			<p>
+				A build signed by a name you do not recognise is the one result that should stop
+				you outright. "Unsigned" is a gap in what we have published so far; "signed by
+				someone else" means the file is not from us at all.
 			</p>
 
 			<h2>Going further: build it yourself</h2>
