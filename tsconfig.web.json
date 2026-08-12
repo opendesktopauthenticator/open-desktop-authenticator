@@ -20,5 +20,14 @@
       "@shared/*": ["./src/shared/*"]
     }
   },
-  "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx", "src/shared/**/*.ts"]
+  // Renderer tests belong to this project rather than the node one: they contain
+  // JSX, which only this config knows how to parse. Left out of both, the file
+  // was type-checked by nothing and eslint refused to parse it at all — a test
+  // sitting in the tree with none of the checks the rest of the suite gets.
+  "include": [
+    "src/renderer/**/*.ts",
+    "src/renderer/**/*.tsx",
+    "src/shared/**/*.ts",
+    "tests/**/*.test.tsx"
+  ]
 }

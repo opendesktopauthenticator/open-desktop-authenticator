@@ -147,7 +147,25 @@ export const EXTERNAL_LINK_ALLOWLIST = Object.freeze([
 	'steamcommunity.com',
 	'steampowered.com',
 	'valvesoftware.com',
-	'github.com'
+	'github.com',
+	/*
+	 * Our own domain and the publisher's.
+	 *
+	 * Both were missing, which meant the application could not open a link to its
+	 * own website. That is not a cosmetic gap: §4's answer to the clone problem is
+	 * a chain a suspicious person can walk — website, company, repository, source,
+	 * build, signature — and the first two links in it did nothing when clicked.
+	 * An authenticator that cannot show you who publishes it is arguing for the
+	 * wrong side.
+	 *
+	 * They belong on an allowlist rather than the list being abandoned: the reason
+	 * it exists is that this UI renders attacker-influenced text — Steam item
+	 * names, trade counterparties, confirmation descriptions — and a crafted link
+	 * in that content must not be able to send somebody anywhere it likes. Two
+	 * first-party domains do not weaken that.
+	 */
+	'opendesktopauthenticator.com',
+	'masterspanel.com'
 ]);
 
 /** Whether a URL may be handed to the OS browser handler. */

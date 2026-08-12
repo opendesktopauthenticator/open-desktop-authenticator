@@ -83,6 +83,12 @@ export const appInfoResponse = z.object({
 	productName: z.string(),
 	version: z.string(),
 	company: z.string(),
+	/** Publisher short form and site, for the "powered by" mark and the About screen. */
+	companyShort: z.string(),
+	companyWebsite: z.string(),
+	/** Where a suspicious person goes to check this build is ours (§4). */
+	website: z.string(),
+	repository: z.string(),
 	/** True while the product name is still a placeholder (Q1). */
 	brandingUnresolved: z.boolean(),
 	/**

@@ -27,6 +27,7 @@ export function VaultHome({
 	onFinishActivation,
 	onExport,
 	onSettings,
+	onAbout,
 	onActivity,
 	activityUrgent,
 	onLock
@@ -56,6 +57,7 @@ export function VaultHome({
 	/** Write one account out as a maFile. */
 	onExport: (account: AccountSummary) => Promise<ExportResult>;
 	onSettings: () => void;
+	onAbout: () => void;
 	onActivity: () => void;
 	/** Something automatic confirmation did needs a person to look at it. */
 	activityUrgent: boolean;
@@ -160,6 +162,9 @@ export function VaultHome({
 					</button>
 					<button type="button" className="secondary" onClick={onSettings}>
 						Settings
+					</button>
+					<button type="button" className="secondary" onClick={onAbout}>
+						About
 					</button>
 					<button type="button" className="secondary" onClick={onLock}>
 						Lock now

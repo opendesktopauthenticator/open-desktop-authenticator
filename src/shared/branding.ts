@@ -47,6 +47,19 @@ export const branding = {
 	/** The legal owner. Settled from the start (D1/D2). */
 	company: 'MASTERPANEL LLC',
 
+	/** Short form of the publisher, for the "powered by" mark in tight spaces. */
+	companyShort: 'MASTERPANEL',
+
+	/**
+	 * The publisher's own site.
+	 *
+	 * Part of the same chain as `repository`: somebody deciding whether this
+	 * download is genuine should be able to get from the application to a named
+	 * company and check that it exists. A publisher who cannot be looked up is
+	 * indistinguishable from one who does not.
+	 */
+	companyWebsite: 'https://masterspanel.com',
+
 	/** Official domains registry lives at /official (§16). */
 	website: 'https://opendesktopauthenticator.com',
 

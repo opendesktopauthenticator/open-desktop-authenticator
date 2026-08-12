@@ -212,3 +212,54 @@ describe('navigation lock', () => {
 		}
 	});
 });
+
+describe('the application says who publishes it', () => {
+	/**
+	 * The gap this covers.
+	 *
+	 * `app:info` carried the publisher and the attribution strings from the day
+	 * the channel was written — the handler describes itself as metadata "for the
+	 * About screen" — and there was no About screen. Every one of those values
+	 * crossed the bridge and went nowhere, so the application named its publisher
+	 * precisely nowhere in its own interface.
+	 *
+	 * §4's answer to the clone problem is a chain a suspicious person can walk:
+	 * the running application names a company, the company can be looked up, the
+	 * repository read, the build checked. These assert the first links exist.
+	 */
+	it('exposes the publisher and the places to check it', () => {
+		expect(branding.company).toBe('MASTERPANEL LLC');
+		expect(branding.companyShort).toBe('MASTERPANEL');
+		expect(branding.companyWebsite).toMatch(/^https:\/\//);
+		expect(branding.website).toMatch(/^https:\/\//);
+		expect(branding.repository).toMatch(/^https:\/\/github\.com\//);
+	});
+
+	it('can actually open its own site and its publisher', () => {
+		// The links were unreachable before this: the external-link allowlist held
+		// Steam, Valve and GitHub, and neither our own domain nor the company's.
+		// A "powered by" link that silently does nothing is worse than none — it
+		// looks like the check failed rather than that it was never wired up.
+		expect(isOpenableExternally(branding.companyWebsite)).toBe(true);
+		expect(isOpenableExternally(branding.website)).toBe(true);
+		expect(isOpenableExternally(branding.repository)).toBe(true);
+	});
+
+	it('still refuses somewhere it was not asked to go', () => {
+		// The allowlist exists because this UI renders attacker-influenced text —
+		// item names, trade counterparties. Adding two first-party domains must not
+		// have turned it into "anything https".
+		expect(isOpenableExternally('https://evil.example')).toBe(false);
+		expect(isOpenableExternally('https://masterspanel.com.evil.example')).toBe(false);
+		expect(isOpenableExternally('https://opendesktopauthenticator.com.evil.example')).toBe(false);
+		expect(isOpenableExternally('javascript:alert(1)')).toBe(false);
+	});
+
+	it('keeps the attribution wording exact', () => {
+		// Rendered verbatim by About (§8). Worded to credit without implying
+		// endorsement, which is a distinction that does not survive paraphrase.
+		expect(attribution.mckay).toContain('steam-session');
+		expect(attribution.mckay).toContain('not affiliated with or endorsed by DoctorMcKay');
+		expect(attribution.valve).toContain('Not affiliated with, endorsed by, or sponsored by Valve');
+	});
+});

@@ -12,6 +12,7 @@ import { Activity } from './screens/Activity';
 import { AutoConfirm } from './screens/AutoConfirm';
 import { Confirmations } from './screens/Confirmations';
 import { RemoveAccount } from './screens/RemoveAccount';
+import { About } from './screens/About';
 import { Settings } from './screens/Settings';
 import { ImportAccounts } from './screens/ImportAccounts';
 import { RecoverAccount } from './screens/RecoverAccount';
@@ -52,7 +53,7 @@ export function App(): React.JSX.Element {
 	 * on the account list rather than resuming a half-finished import.
 	 */
 	const [view, setView] = useState<
-		'accounts' | 'import' | 'settings' | 'activity' | 'enroll' | 'recover'
+		'accounts' | 'import' | 'settings' | 'activity' | 'enroll' | 'recover' | 'about'
 	>('accounts');
 	/**
 	 * An enrolled-but-unactivated account being resumed, if any.
@@ -447,6 +448,10 @@ export function App(): React.JSX.Element {
 			);
 		}
 
+		if (view === 'about') {
+			return <About onLoad={() => api.getAppInfo()} onClose={() => setView('accounts')} />;
+		}
+
 		if (view === 'settings') {
 			return (
 				<Settings
@@ -561,6 +566,7 @@ export function App(): React.JSX.Element {
 				}}
 				onExport={(account) => api.exportAccount(account.steamId64)}
 				onSettings={() => setView('settings')}
+				onAbout={() => setView('about')}
 				onActivity={() => setView('activity')}
 				activityUrgent={activityUrgent}
 				onLock={() => {

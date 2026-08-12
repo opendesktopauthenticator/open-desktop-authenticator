@@ -18,6 +18,10 @@ export function registerAppInfoHandler(): void {
 		productName: branding.productName,
 		version: app.getVersion(),
 		company: branding.company,
+		companyShort: branding.companyShort,
+		companyWebsite: branding.companyWebsite,
+		website: branding.website,
+		repository: branding.repository,
 		brandingUnresolved: hasUnresolvedBranding(),
 		platform: process.platform,
 		attribution: {

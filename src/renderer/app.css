@@ -1563,3 +1563,71 @@ footer {
 		animation: none !important;
 	}
 }
+
+/* ------------------------------------------------------------------ about -- */
+
+/*
+ * The About screen.
+ *
+ * Adds the few classes it needs rather than borrowing the website's: the two
+ * stylesheets are separate on purpose, and a component that silently depends on
+ * a class defined in the other one renders unstyled with nothing to indicate
+ * why. `.lede` and `.plain` did not exist here at all.
+ */
+.lede {
+	margin: 0 0 4px;
+	font-size: 1.05rem;
+	color: var(--text);
+}
+
+ul.plain {
+	margin: 10px 0 0;
+	padding: 0;
+	list-style: none;
+}
+ul.plain li {
+	margin: 7px 0;
+	color: var(--muted);
+	font-size: 0.9rem;
+	line-height: 1.55;
+}
+
+/*
+ * The publisher line.
+ *
+ * Set apart from the version above it and given the accent, because the point
+ * of the screen is that this application will tell you who made it — that is
+ * the first link in the chain a suspicious person walks, and it should not read
+ * like a footnote.
+ */
+.powered-by {
+	margin: 14px 0 0;
+	font-family: var(--font-small, inherit);
+	font-size: 0.78rem;
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+.powered-by a {
+	margin-left: 6px;
+	font-size: 1.02rem;
+	font-weight: 680;
+	letter-spacing: 0.02em;
+	text-transform: none;
+	color: var(--mint);
+	text-decoration: none;
+	border-bottom: 1px solid transparent;
+}
+.powered-by a:hover,
+.powered-by a:focus-visible {
+	border-bottom-color: var(--mint);
+}
+
+/* Links inside About, which is the only screen that has any. */
+.shell a {
+	color: var(--mint);
+}
+.shell a:hover,
+.shell a:focus-visible {
+	color: var(--mint-pale);
+}
