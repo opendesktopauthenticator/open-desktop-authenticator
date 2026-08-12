@@ -83,9 +83,9 @@ async function fileReport(over: Record<string, string> = {}) {
 
 /** Split a rendered thread into its messages, each with the side that sent it. */
 function page(out: { body: string }) {
-	return [...out.body.matchAll(/<li class="message (message-us|message-reporter)">([\s\S]*?)<\/li>/g)].map(
-		(m) => ({ side: m[1] === 'message-us' ? 'us' : 'reporter', text: m[2] })
-	);
+	return [
+		...out.body.matchAll(/<li class="message (message-us|message-reporter)">([\s\S]*?)<\/li>/g)
+	].map((m) => ({ side: m[1] === 'message-us' ? 'us' : 'reporter', text: m[2] }));
 }
 
 async function view(reference: string) {
@@ -102,9 +102,9 @@ async function reply(reference: string, body: string, headers = {}) {
 
 /** Act as the maintainer, without going through the sign-in flow. */
 function asUs(reference: string, note: string, status: string) {
-	const ticket = service.db
-		.prepare('SELECT * FROM tickets WHERE reference = ?')
-		.get(reference) as { id: number };
+	const ticket = service.db.prepare('SELECT * FROM tickets WHERE reference = ?').get(reference) as {
+		id: number;
+	};
 	service.db
 		.prepare('INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)')
 		.run(ticket.id, note, 'us', new Date().toISOString());
@@ -114,7 +114,9 @@ function asUs(reference: string, note: string, status: string) {
 describe('the reporter can add to their own report', () => {
 	it('accepts a reply and shows it in the thread', async () => {
 		const reference = await fileReport();
-		expect((await reply(reference, 'I forgot to say: this only happens after a reboot.')).status).toBe(303);
+		expect(
+			(await reply(reference, 'I forgot to say: this only happens after a reboot.')).status
+		).toBe(303);
 
 		const page = await view(reference);
 		expect(page.body).toContain('only happens after a reboot');
@@ -192,6 +194,40 @@ describe('the reporter can add to their own report', () => {
 		expect(page.body).not.toContain('<img src=x onerror');
 		expect(page.body).not.toContain('<script>alert(2)</script>');
 		expect(page.body).toContain('&lt;img');
+	});
+});
+
+describe('routing', () => {
+	it('sends a GET of the reply endpoint to the report itself', async () => {
+		// The form's action URL used to answer 200 with a second copy of the whole
+		// report — the same page at a URL that is not its canonical one, reachable
+		// by a prefetch, a bookmark saved after a failed post, or a shared link.
+		const reference = await fileReport();
+		const { out, response } = capture();
+		await service.handle(get(), response, at(`/support/ticket/${reference}/reply`));
+		expect(out.status).toBe(303);
+		expect(out.headers.location).toBe(`/support/ticket/${reference}`);
+		expect(out.body).not.toMatch(/<article/);
+	});
+
+	it('reports whether it handled a request', async () => {
+		// The router's contract: undefined means "not mine, try the next handler".
+		// Every answered route returned undefined too, so the only thing preventing
+		// a second response was a `headersSent` check further down.
+		const reference = await fileReport();
+
+		const answered = capture();
+		const handled = await service.handle(
+			get(),
+			answered.response,
+			at(`/support/ticket/${reference}`)
+		);
+		expect(handled, 'an answered request must not look unanswered').toBeDefined();
+
+		const ignored = capture();
+		const notMine = await service.handle(get(), ignored.response, at('/somewhere-else'));
+		expect(notMine, 'an unclaimed path must fall through').toBeUndefined();
+		expect(ignored.out.status).toBe(0);
 	});
 });
 

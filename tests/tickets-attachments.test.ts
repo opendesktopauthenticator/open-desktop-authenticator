@@ -39,7 +39,12 @@ const pad = (bytes: number[], size = 64) =>
 const PNG = pad([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG = pad([0xff, 0xd8, 0xff]);
 const GIF = pad([0x47, 0x49, 0x46, 0x38]);
-const WEBP = Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP'), Buffer.alloc(52)]);
+const WEBP = Buffer.concat([
+	Buffer.from('RIFF'),
+	Buffer.alloc(4),
+	Buffer.from('WEBP'),
+	Buffer.alloc(52)
+]);
 const MP4 = Buffer.concat([Buffer.alloc(4), Buffer.from('ftyp'), Buffer.alloc(56)]);
 const WEBM = pad([0x1a, 0x45, 0xdf, 0xa3]);
 
@@ -99,7 +104,11 @@ function formRequest(fields: Record<string, string>, ip = someAddress()) {
 	return request;
 }
 
-const getRequest = (ip = someAddress()) => ({ method: 'GET', headers: {}, socket: { remoteAddress: ip } });
+const getRequest = (ip = someAddress()) => ({
+	method: 'GET',
+	headers: {},
+	socket: { remoteAddress: ip }
+});
 
 /** Upload one file and return its id. */
 async function upload(payload: Buffer, headers = {}, ip?: string) {
@@ -142,7 +151,10 @@ describe('what the bytes actually are', () => {
 
 	it.each([
 		['HTML', Buffer.from('<html><body><script>alert(1)</script></body></html>')],
-		['an SVG carrying script', Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')],
+		[
+			'an SVG carrying script',
+			Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>')
+		],
 		['a shell script', Buffer.from('#!/bin/sh\nrm -rf /\n')],
 		['a PHP file', Buffer.from('<?php system($_GET["c"]); ?>\n\n\n\n\n\n')],
 		['plain text', Buffer.from('just some words, at least sixteen of them here')],
@@ -158,7 +170,9 @@ describe('what the bytes actually are', () => {
 		// Called out on its own because it is the one exclusion that looks like an
 		// oversight. An SVG can carry script and event handlers, so serving one
 		// from this origin would hand back the execution everything else denies.
-		expect(service.sniff(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="10"></svg>'))).toBeUndefined();
+		expect(
+			service.sniff(Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="10"></svg>'))
+		).toBeUndefined();
 	});
 });
 
@@ -166,9 +180,12 @@ describe('the declared type is never believed', () => {
 	it('refuses HTML no matter what the request calls it', async () => {
 		// A content type is a string the uploader picks. If it were trusted, this
 		// would be a stored-XSS delivery service.
-		const { out } = await upload(Buffer.from('<html><script>alert(document.domain)</script></html>'), {
-			'content-type': 'image/png'
-		});
+		const { out } = await upload(
+			Buffer.from('<html><script>alert(document.domain)</script></html>'),
+			{
+				'content-type': 'image/png'
+			}
+		);
 		expect(out.status).toBe(415);
 	});
 
@@ -352,7 +369,11 @@ describe('storage', () => {
 		const { id } = await upload(WEBP);
 		expect(id).toMatch(/^[0-9a-f]{32}$/);
 		// The file on disk is exactly the id — no extension, no original name.
-		expect(readFileSync(join(files, id ?? '')).subarray(0, 4).toString()).toBe('RIFF');
+		expect(
+			readFileSync(join(files, id ?? ''))
+				.subarray(0, 4)
+				.toString()
+		).toBe('RIFF');
 	});
 
 	it('sweeps uploads nobody ever attached to a report', async () => {

@@ -50,9 +50,7 @@ export function derive(passphrase: string, salt: Buffer): Buffer;
 export function refreshBootstrap(): void;
 
 /** What a buffer's leading bytes say it is, or undefined if it is not accepted. */
-export function sniff(
-	buffer: Buffer
-): { type: string; kind: 'image' | 'video' } | undefined;
+export function sniff(buffer: Buffer): { type: string; kind: 'image' | 'video' } | undefined;
 
 /** Store an uploaded body, or explain why it was refused. */
 export function storeUpload(buffer: Buffer): {

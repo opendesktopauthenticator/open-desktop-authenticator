@@ -149,7 +149,12 @@ const MEDIA = [
 	{ type: 'image/jpeg', kind: 'image', magic: [0xff, 0xd8, 0xff] },
 	{ type: 'image/gif', kind: 'image', magic: [0x47, 0x49, 0x46, 0x38] },
 	// RIFF....WEBP — the four size bytes in between are skipped.
-	{ type: 'image/webp', kind: 'image', magic: [0x52, 0x49, 0x46, 0x46], at8: [0x57, 0x45, 0x42, 0x50] },
+	{
+		type: 'image/webp',
+		kind: 'image',
+		magic: [0x52, 0x49, 0x46, 0x46],
+		at8: [0x57, 0x45, 0x42, 0x50]
+	},
 	// An ISO base media file: the box type at offset 4 is 'ftyp'.
 	{ type: 'video/mp4', kind: 'video', at4: [0x66, 0x74, 0x79, 0x70] },
 	{ type: 'video/webm', kind: 'video', magic: [0x1a, 0x45, 0xdf, 0xa3] }
@@ -160,8 +165,7 @@ const MAX_FILES = 4;
 /** Long enough to finish writing a report, short enough not to be storage. */
 const UNCLAIMED_LIFETIME_MS = 2 * 60 * 60 * 1000;
 
-const startsWith = (buffer, bytes, offset = 0) =>
-	bytes.every((b, i) => buffer[offset + i] === b);
+const startsWith = (buffer, bytes, offset = 0) => bytes.every((b, i) => buffer[offset + i] === b);
 
 /** The media type these bytes actually are, or undefined. */
 function sniff(buffer) {
@@ -236,7 +240,8 @@ function storeUpload(buffer) {
 	const media = sniff(buffer);
 	if (!media) {
 		return {
-			error: 'That file is not a kind we accept. Screenshots as PNG, JPEG, GIF or WebP; video as MP4 or WebM.'
+			error:
+				'That file is not a kind we accept. Screenshots as PNG, JPEG, GIF or WebP; video as MP4 or WebM.'
 		};
 	}
 	if (buffer.length > SIZE[media.kind]) {
@@ -505,7 +510,10 @@ const BRAND = {
 function brandLogoHref() {
 	try {
 		const home = readFileSync(join(PUBLIC_DIR, 'owners.html'), 'utf8');
-		return /"(\/assets\/projects\/masterspanel\.[^"]+\.svg)"/.exec(home)?.[1] ?? '/assets/projects/masterspanel.svg';
+		return (
+			/"(\/assets\/projects\/masterspanel\.[^"]+\.svg)"/.exec(home)?.[1] ??
+			'/assets/projects/masterspanel.svg'
+		);
 	} catch {
 		return '/assets/projects/masterspanel.svg';
 	}
@@ -582,6 +590,18 @@ ${body}
 `;
 }
 
+/**
+ * Send a response, and say that one was sent.
+ *
+ * The `true` matters. The router's contract is that a handler returning
+ * `undefined` did not claim the request, so the next handler should try it —
+ * but this returned nothing, which made every *answered* request look
+ * unanswered. Nothing broke, because the fallthrough happens to check
+ * `headersSent` before writing a 404 and the admin routes happen not to overlap
+ * the public ones. That is two coincidences holding up the contract rather than
+ * the contract holding itself up, and the next route added on either side is
+ * where it stops being funny.
+ */
 const send = (response, status, html, headers = {}) => {
 	response.writeHead(status, {
 		'content-type': 'text/html; charset=utf-8',
@@ -591,6 +611,7 @@ const send = (response, status, html, headers = {}) => {
 		...headers
 	});
 	response.end(html);
+	return true;
 };
 
 /* ----------------------------------------------------------------- forms -- */
@@ -714,15 +735,23 @@ function submitted(reference) {
  */
 const STATUS = {
 	open: { label: 'Received', says: 'Filed and waiting to be picked up.' },
-	assigned: { label: 'Being looked at', says: 'A maintainer has this open and is working through it.' },
-	waiting: { label: 'Waiting on you', says: 'We have asked something below and cannot go further until you answer.' },
+	assigned: {
+		label: 'Being looked at',
+		says: 'A maintainer has this open and is working through it.'
+	},
+	waiting: {
+		label: 'Waiting on you',
+		says: 'We have asked something below and cannot go further until you answer.'
+	},
 	resolved: { label: 'Resolved', says: 'Closed as done. Reply below if it is not.' },
 	declined: { label: 'Declined', says: 'Closed without a change. The reason is below.' }
 };
 const STATUSES = Object.keys(STATUS);
 
 const bytesLabel = (n) =>
-	n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+	n >= 1024 * 1024
+		? `${(n / (1024 * 1024)).toFixed(1)} MB`
+		: `${Math.max(1, Math.round(n / 1024))} KB`;
 
 /** A day, spelled out — "12 August 2026" reads unambiguously in every country. */
 const dayLabel = (iso) =>
@@ -763,7 +792,12 @@ function ticketView(ticket, notes, files, options = {}) {
 	const opening = files.filter((f) => f.note_id === null);
 
 	const thread = [
-		message('reporter', ticket.created_at, ticket.detail, attachmentList(ticket.reference, opening)),
+		message(
+			'reporter',
+			ticket.created_at,
+			ticket.detail,
+			attachmentList(ticket.reference, opening)
+		),
 		...notes.map((n) =>
 			message(n.author, n.created_at, n.body, attachmentList(ticket.reference, ofNote(n.id)))
 		)
@@ -907,9 +941,10 @@ async function handle(request, response, url) {
 	}
 
 	/* ---- public: a report, and everything on it ---- */
-	const onTicket = /^\/support\/ticket\/(ODA-[A-Z0-9]{4}-[A-Z0-9]{4})(\/reply|\/file\/([0-9a-f]{32}))?$/.exec(
-		url.pathname
-	);
+	const onTicket =
+		/^\/support\/ticket\/(ODA-[A-Z0-9]{4}-[A-Z0-9]{4})(\/reply|\/file\/([0-9a-f]{32}))?$/.exec(
+			url.pathname
+		);
 	if (onTicket) {
 		const ticket = db.prepare('SELECT * FROM tickets WHERE reference = ?').get(onTicket[1]);
 		if (!ticket) {
@@ -935,13 +970,21 @@ async function handle(request, response, url) {
 				.prepare('SELECT * FROM attachments WHERE id = ? AND ticket_id = ?')
 				.get(onTicket[3], ticket.id);
 			if (!file) {
-				return send(response, 404, page({ title: 'Not found', body: notice('callout-warn', ['No such file.']) }));
+				return send(
+					response,
+					404,
+					page({ title: 'Not found', body: notice('callout-warn', ['No such file.']) })
+				);
 			}
 			let bytes;
 			try {
 				bytes = readFileSync(fileFor(file.id));
 			} catch {
-				return send(response, 404, page({ title: 'Not found', body: notice('callout-warn', ['No such file.']) }));
+				return send(
+					response,
+					404,
+					page({ title: 'Not found', body: notice('callout-warn', ['No such file.']) })
+				);
 			}
 			response.writeHead(200, {
 				// The type recorded from the file's own bytes, never a string the
@@ -976,14 +1019,20 @@ async function handle(request, response, url) {
 				return send(
 					response,
 					403,
-					page({ title: 'Refused', body: notice('callout-warn', ['That form was not submitted from this site.']) })
+					page({
+						title: 'Refused',
+						body: notice('callout-warn', ['That form was not submitted from this site.'])
+					})
 				);
 			}
 			if (tooMany(`reply:${client}`, 10, 10 * 60 * 1000)) {
 				return send(
 					response,
 					429,
-					page({ title: 'Too many', body: notice('callout-warn', ['Too many messages. Try again shortly.']) })
+					page({
+						title: 'Too many',
+						body: notice('callout-warn', ['Too many messages. Try again shortly.'])
+					})
 				);
 			}
 			const form = await readForm(request).catch(() => ({}));
@@ -992,7 +1041,10 @@ async function handle(request, response, url) {
 				return send(
 					response,
 					400,
-					page({ title: 'Not sent', body: notice('callout-warn', ['A message needs between 4 and 4000 characters.']) })
+					page({
+						title: 'Not sent',
+						body: notice('callout-warn', ['A message needs between 4 and 4000 characters.'])
+					})
 				);
 			}
 			// The same refusal the first message gets. Somebody who has been asked a
@@ -1000,7 +1052,11 @@ async function handle(request, response, url) {
 			// in answer to it.
 			const leaked = secretsIn(body);
 			if (leaked.length) {
-				return send(response, 400, page({ title: 'Not sent', body: notice('callout-warn', leaked) }));
+				return send(
+					response,
+					400,
+					page({ title: 'Not sent', body: notice('callout-warn', leaked) })
+				);
 			}
 			const stamp = now();
 			const note = db
@@ -1019,8 +1075,23 @@ async function handle(request, response, url) {
 			return send(response, 303, '', { location: `/support/ticket/${ticket.reference}` });
 		}
 
-		if (method === 'GET') {
-			const notes = db.prepare('SELECT * FROM notes WHERE ticket_id = ? ORDER BY id').all(ticket.id);
+		/*
+		 * A GET of the reply endpoint goes to the report, rather than rendering it.
+		 *
+		 * Without the suffix check this fell through and served the whole page at
+		 * `/support/ticket/REF/reply` — the form's own action URL answering 200 with
+		 * a second copy of the report at a URL that is not its canonical one. A
+		 * browser prefetch, a bookmark saved after a failed post, or a shared link
+		 * all land there.
+		 */
+		if (onTicket[2] === '/reply' && method === 'GET') {
+			return send(response, 303, '', { location: `/support/ticket/${ticket.reference}` });
+		}
+
+		if (method === 'GET' && !onTicket[2]) {
+			const notes = db
+				.prepare('SELECT * FROM notes WHERE ticket_id = ? ORDER BY id')
+				.all(ticket.id);
 			const files = db
 				.prepare('SELECT * FROM attachments WHERE ticket_id = ? ORDER BY created_at, id')
 				.all(ticket.id);
@@ -1171,7 +1242,10 @@ async function handleAdmin(request, response, url) {
 			return send(
 				response,
 				429,
-				page({ title: 'Too many', body: notice('callout-warn', ['Too many attempts. Wait fifteen minutes.']) })
+				page({
+					title: 'Too many',
+					body: notice('callout-warn', ['Too many attempts. Wait fifteen minutes.'])
+				})
 			);
 		}
 		const form = await readForm(request).catch(() => ({}));
@@ -1243,7 +1317,13 @@ async function handleAdmin(request, response, url) {
 	if (url.pathname === '/admin/logout' && method === 'POST') {
 		// A POST with the session's own token, so another site cannot sign the
 		// administrator out by pointing them at a link.
-		if (session && sameSecret(Buffer.from(String((await readForm(request).catch(() => ({}))).csrf ?? '')), Buffer.from(session.csrf))) {
+		if (
+			session &&
+			sameSecret(
+				Buffer.from(String((await readForm(request).catch(() => ({}))).csrf ?? '')),
+				Buffer.from(session.csrf)
+			)
+		) {
 			sessions.delete(session.id);
 		}
 		return send(response, 303, '', {
@@ -1259,7 +1339,9 @@ async function handleAdmin(request, response, url) {
 		const tickets = db.prepare('SELECT * FROM tickets ORDER BY id DESC LIMIT 200').all();
 		const counts = new Map(
 			db
-				.prepare('SELECT ticket_id, COUNT(*) AS n FROM attachments WHERE ticket_id IS NOT NULL GROUP BY ticket_id')
+				.prepare(
+					'SELECT ticket_id, COUNT(*) AS n FROM attachments WHERE ticket_id IS NOT NULL GROUP BY ticket_id'
+				)
 				.all()
 				.map((r) => [r.ticket_id, r.n])
 		);

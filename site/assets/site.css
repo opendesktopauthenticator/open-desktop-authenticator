@@ -978,8 +978,7 @@ main.has-hero {
 	border: 1px solid var(--line);
 	border-radius: var(--radius);
 	background:
-		radial-gradient(120% 90% at 0% 0%, rgba(66, 242, 154, 0.05), transparent 55%),
-		var(--panel);
+		radial-gradient(120% 90% at 0% 0%, rgba(66, 242, 154, 0.05), transparent 55%), var(--panel);
 }
 
 .field {
@@ -1076,7 +1075,8 @@ main.has-hero {
 .form select {
 	appearance: none;
 	padding-right: 42px;
-	background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+	background-image:
+		linear-gradient(45deg, transparent 50%, var(--muted) 50%),
 		linear-gradient(135deg, var(--muted) 50%, transparent 50%);
 	background-position:
 		calc(100% - 20px) calc(50% + 2px),
@@ -1087,7 +1087,8 @@ main.has-hero {
 	background-repeat: no-repeat;
 }
 .form select:hover {
-	background-image: linear-gradient(45deg, transparent 50%, var(--mint) 50%),
+	background-image:
+		linear-gradient(45deg, transparent 50%, var(--mint) 50%),
 		linear-gradient(135deg, var(--mint) 50%, transparent 50%);
 }
 

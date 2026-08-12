@@ -62,7 +62,9 @@
 	const MAX_FILES = 4;
 
 	const bytesLabel = (n) =>
-		n >= 1024 * 1024 ? (n / (1024 * 1024)).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
+		n >= 1024 * 1024
+			? (n / (1024 * 1024)).toFixed(1) + ' MB'
+			: Math.max(1, Math.round(n / 1024)) + ' KB';
 
 	document.querySelectorAll('[data-attach]').forEach((field) => {
 		const form = field.closest('form');
@@ -89,7 +91,8 @@
 		const settle = () => {
 			if (submit) {
 				submit.disabled = inFlight > 0;
-				submit.textContent = inFlight > 0 ? 'Uploading…' : submit.dataset.label || submit.textContent;
+				submit.textContent =
+					inFlight > 0 ? 'Uploading…' : submit.dataset.label || submit.textContent;
 			}
 		};
 		if (submit) {
@@ -154,8 +157,15 @@
 			const kind = file.type.indexOf('video/') === 0 ? 'video' : 'image';
 			if (file.size > LIMITS[kind]) {
 				complain(
-					'“' + file.name + '” is ' + bytesLabel(file.size) + ', over the ' +
-						LIMITS[kind] / (1024 * 1024) + ' MB limit for a ' + kind + '.'
+					'“' +
+						file.name +
+						'” is ' +
+						bytesLabel(file.size) +
+						', over the ' +
+						LIMITS[kind] / (1024 * 1024) +
+						' MB limit for a ' +
+						kind +
+						'.'
 				);
 				return;
 			}

@@ -43,7 +43,9 @@ import { checkAddresses } from './addresses.mjs';
  */
 const badAddresses = checkAddresses();
 if (badAddresses.length) {
-	throw new Error(`refusing to build with unverified donation addresses:\n  ${badAddresses.join('\n  ')}`);
+	throw new Error(
+		`refusing to build with unverified donation addresses:\n  ${badAddresses.join('\n  ')}`
+	);
 }
 
 const here = dirname(fileURLToPath(import.meta.url));

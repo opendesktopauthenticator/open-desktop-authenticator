@@ -15,18 +15,11 @@ import globals from 'globals';
  */
 export default tseslint.config(
 	{
-		// `site/dist/**` is generated; `site/assets/*.js` is browser script that
-		// ships as-is rather than through the TypeScript project, so the
-		// type-checked rules have no program to check it against.
-		ignores: [
-			'out/**',
-			'dist/**',
-			'site/dist/**',
-			'site/assets/**/*.js',
-			'node_modules/**',
-			'spike/**',
-			'coverage/**'
-		]
+		// Only generated output is ignored. `site/assets/*.js` was in this list for
+		// a while, which meant the one script the public actually executes — the
+		// upload and clipboard code — was the single unlinted file in the project.
+		// It has its own block below instead.
+		ignores: ['out/**', 'dist/**', 'site/dist/**', 'node_modules/**', 'spike/**', 'coverage/**']
 	},
 
 	js.configs.recommended,
@@ -171,6 +164,36 @@ export default tseslint.config(
 			// block reattached them and every .mjs became "not found by the project".
 			...tseslint.configs.disableTypeChecked.languageOptions,
 			globals: globals.node
+		}
+	},
+
+	/*
+	 * The site's browser script.
+	 *
+	 * Ships to the public as-is rather than through the TypeScript build, so it is
+	 * in no tsconfig project and the type-aware rules have nothing to work from —
+	 * the same situation as the `.mjs` files above, and handled the same way
+	 * rather than by excluding it. This is the only code on the domain that a
+	 * visitor's browser executes; leaving it unchecked was the wrong trade.
+	 */
+	{
+		files: ['site/assets/**/*.js'],
+		...tseslint.configs.disableTypeChecked,
+		languageOptions: {
+			...tseslint.configs.disableTypeChecked.languageOptions,
+			globals: globals.browser,
+			ecmaVersion: 2022,
+			sourceType: 'script'
+		},
+		rules: {
+			// Merged, not replaced. `disableTypeChecked` carries its own `rules` that
+			// switch the type-aware rules off; defining a fresh object here discarded
+			// them and eslint then crashed trying to run `await-thenable` with no type
+			// information — the same ordering trap the .mjs block above documents.
+			...tseslint.configs.disableTypeChecked.rules,
+			// It runs on other people's machines with no build step and no
+			// transpilation, so the browser APIs it uses are the ones it gets.
+			'no-console': 'error'
 		}
 	},
 

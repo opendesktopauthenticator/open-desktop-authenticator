@@ -95,13 +95,15 @@ const NETWORKS = {
 			const raw = base58Decode(a);
 			return !!raw && raw.length === 32;
 		},
-		proof: 'base58 decodes to exactly 32 bytes — catches a dropped or added character, but Solana addresses carry no checksum, so a swap of two valid characters cannot be detected here'
+		proof:
+			'base58 decodes to exactly 32 bytes — catches a dropped or added character, but Solana addresses carry no checksum, so a swap of two valid characters cannot be detected here'
 	},
 	evm: {
 		label: 'Polygon and BNB Smart Chain',
 		// 20 bytes of hex. Lowercase, so EIP-55 case checksumming does not apply.
 		check: (a) => /^0x[0-9a-f]{40}$/.test(a),
-		proof: 'twenty bytes of lowercase hex — an all-lowercase address carries no EIP-55 checksum, so this confirms the shape only'
+		proof:
+			'twenty bytes of lowercase hex — an all-lowercase address carries no EIP-55 checksum, so this confirms the shape only'
 	}
 };
 

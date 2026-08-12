@@ -37,7 +37,11 @@ function capture() {
 	return { out, response };
 }
 
-function req(method: string, fields?: Record<string, string>, headers: Record<string, string> = {}) {
+function req(
+	method: string,
+	fields?: Record<string, string>,
+	headers: Record<string, string> = {}
+) {
 	const base = { origin: 'https://opendesktopauthenticator.com', ...headers };
 	if (!fields) {
 		return { method, headers: base, socket: { remoteAddress: '10.1.0.1' } };
