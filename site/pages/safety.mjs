@@ -440,10 +440,13 @@ export const security = {
 
 			<h2>Reporting a vulnerability</h2>
 			<p>
-				If you have found a security problem, please report it privately rather than
-				opening a public issue: use the <a href="/support">reporting form</a> and mark it
-				as a security report. We will acknowledge it, and we will not argue about
-				severity before fixing something that is obviously wrong.
+				Privately, please, rather than as a public issue. Two routes, both live:
+				<a href="${'https://github.com/opendesktopauthenticator/open-desktop-authenticator/security/advisories/new'}" rel="noopener">GitHub
+				private vulnerability reporting</a>, which is preferred, or
+				<strong>security@opendesktopauthenticator.com</strong>.
+				<a href="/support#security-reports">What we commit to</a> is written down:
+				acknowledgement in 72 hours, an assessment in 7 days, a fix or a dated plan in
+				30 for a confirmed high or critical.
 			</p>
 		</article>`
 };

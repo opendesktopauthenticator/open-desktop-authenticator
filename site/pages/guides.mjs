@@ -32,6 +32,11 @@ export const download = {
 				<li>The application itself: codes, confirmations, enrollment, import and export, encrypted vault, recovery files.</li>
 				<li>The security posture described on the <a href="/security">security page</a>.</li>
 				<li>An automated test suite that runs on every change.</li>
+				<li>
+					End-to-end testing against live Steam accounts — import from SDA,
+					enrollment, codes, confirmations, backup and recovery — with the defects it
+					surfaced fixed. Maintainer testing, not an independent audit.
+				</li>
 			</ul>
 
 			<h2>What is left before a release</h2>
@@ -375,11 +380,12 @@ export const support = {
 			</div>
 
 			<div class="callout">
-				<h2>The form is not live yet</h2>
+				<h2>The form is not live yet — but the channels are</h2>
 				<p>
-					The tracker is being built and will appear at this address. Until it does,
-					issues can be raised on the public repository. Security reports should wait
-					for the private channel here rather than being filed publicly.
+					The tracker is being built and will appear at this address. Nothing is
+					waiting on it. Ordinary bugs and documentation errors can go on the
+					<a href="${'https://github.com/opendesktopauthenticator/open-desktop-authenticator/issues'}" rel="noopener">public issue tracker</a>,
+					and security reports have a private route that works today — see below.
 				</p>
 			</div>
 
@@ -424,11 +430,29 @@ export const support = {
 				minutes; one that turns out not to be may save somebody their inventory.
 			</p>
 
-			<h2>Security reports</h2>
+			<h2 id="security-reports">Security reports</h2>
 			<p>
-				If you have found a vulnerability, mark the report as a security issue. It goes
-				to a private queue rather than a public list, it will be acknowledged, and we
-				will not argue about severity before fixing something that is plainly wrong.
+				<strong>Do not open a public issue for a security problem.</strong> There are
+				two private routes, both live now:
+			</p>
+			<ul class="plain next">
+				<li>
+					<strong><a href="https://github.com/opendesktopauthenticator/open-desktop-authenticator/security/advisories/new" rel="noopener">GitHub private vulnerability
+					reporting</a></strong> — preferred. It is private, it threads, and it does
+					not depend on an address staying monitored.
+				</li>
+				<li>
+					<strong>security@opendesktopauthenticator.com</strong> — read, if you would
+					rather not use GitHub.
+				</li>
+			</ul>
+			<p>
+				What we commit to, in writing: acknowledgement within 72 hours, an initial
+				assessment within 7 days, and a fix or a dated plan within 30 days for a
+				confirmed high or critical. Those are the commitments of a single maintainer,
+				and if one is going to be missed we will say so before the deadline rather than
+				after. The full policy is in
+				<a href="${'https://github.com/opendesktopauthenticator/open-desktop-authenticator/blob/main/SECURITY.md'}" rel="noopener">SECURITY.md</a>.
 			</p>
 			<p>
 				Please give us a reasonable window to release a fix before publishing details.

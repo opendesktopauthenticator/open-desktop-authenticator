@@ -377,11 +377,16 @@ expires.setUTCFullYear(expires.getUTCFullYear() + 1);
 writeFileSync(
 	join(out, 'security.txt'),
 	`# ${SITE.name} — how to report a security problem.
-Contact: ${SITE.origin}/support
+#
+# Listed in preference order. GitHub's private reporting threads and does not
+# depend on a mailbox staying monitored; the address is read as well.
+Contact: ${SITE.repo}/security/advisories/new
+Contact: mailto:security@opendesktopauthenticator.com
+Contact: ${SITE.origin}/support#security-reports
 Expires: ${expires.toISOString().replace(/\.\d{3}Z$/, '.000Z')}
 Preferred-Languages: en
 Canonical: ${SITE.origin}/.well-known/security.txt
-Policy: ${SITE.origin}/security
+Policy: ${SITE.repo}/blob/main/SECURITY.md
 `
 );
 

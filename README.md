@@ -5,10 +5,13 @@ A maintained successor to SDA.
 
 Built and maintained by **MASTERPANEL LLC** · [opendesktopauthenticator.com](https://opendesktopauthenticator.com)
 
-> **Pre-release.** Feature-complete for 0.1 and **not yet verified against live
-> Steam end to end.** There are no signed releases, so there is nothing to
-> install — and until there are, anything claiming to be a build of this is not
-> ours.
+> **Pre-release.** Feature-complete for 0.1 and **exercised end to end against
+> live Steam accounts** by the maintainer — import from SDA, enrollment, codes,
+> confirmations, backup and recovery — with the defects that surfaced fixed.
+>
+> That is maintainer testing, not an independent audit, and there are still no
+> signed releases. Until there are, anything claiming to be a build of this is
+> not ours.
 
 ---
 

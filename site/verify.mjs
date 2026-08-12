@@ -223,7 +223,17 @@ if (origin) {
 		}
 		const body = await response.text();
 		if (body !== built.get(page.slug)) {
-			fail(path, 'served content differs from the build output');
+			// Name the cause when we recognise it. Cloudflare's Email Address
+			// Obfuscation rewrites any plain-text address in HTML and injects a
+			// decoder script — on a site that ships none, and leaving the address
+			// unreadable to anyone without JavaScript, which for a security contact
+			// is the wrong audience to exclude. Turn it off under
+			// Scrape Shield → Email Address Obfuscation.
+			if (/__cf_email__|email-decode\.min\.js/.test(body)) {
+				fail(path, 'Cloudflare is obfuscating an email address and injecting a script');
+			} else {
+				fail(path, 'served content differs from the build output');
+			}
 		}
 	}
 

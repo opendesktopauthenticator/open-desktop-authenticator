@@ -157,7 +157,11 @@ Pre-release. Nothing has shipped; there is no version to install.
 - The product is named **Open Desktop Authenticator**, at
   `opendesktopauthenticator.com`, with source at
   `github.com/opendesktopauthenticator/open-desktop-authenticator`.
-- **Nothing here has been verified against live Steam end to end.** The protocol
-  work was validated in Phase 0, but the assembled application has not been run
-  against a real account through sign-in, confirmations and routing. Treat this
-  as unproven until a release says otherwise.
+- **Verified against live Steam end to end.** Phase 0 validated the protocol
+  through the spike; the assembled application has since been run against real
+  accounts by the maintainer, covering import from SDA, enrollment, code
+  generation, confirmations, backup, restore and recovery. Defects found that
+  way — a removed account returning after a restore, an unreachable error on the
+  vault-adoption screen — were fixed and covered by tests.
+- This is maintainer testing rather than independent review, and there is still
+  no signed release. Treat it as tested, not as audited.

@@ -1,18 +1,36 @@
 # Founder test plan — what has to be checked by a human
 
-Every line of this application is covered by automated tests, and none of it has
-ever spoken to live Steam as an assembled application. Those are both true, and
-the gap between them is what this document is for.
+**Status: worked through.** This plan was written when the assembled application
+had never spoken to live Steam. It since has, across several rounds against real
+accounts, and the plan is kept here as the record of what was covered and as the
+checklist to repeat before a release.
 
-Phase 0 validated the **protocol** against live accounts — but through
-[`/spike`](../spike), a CLI, not through the app. The app has its own transport,
-its own session partitions, its own token storage and its own UI on top of that
-protocol, and none of it has been exercised for real. Automated tests prove the
-code does what it was written to do; they cannot prove it was written against
-Steam's actual behaviour.
+Automated tests prove the code does what it was written to do; they cannot prove
+it was written against Steam's actual behaviour. That is what these are for, and
+it is why the list matters more than its pass marks — it should be run again
+against each release candidate, not treated as done once.
 
-So: **T1–T24 below are the untested surface.** Working through them is what
-closes it.
+## What that testing found
+
+Working through it was not a formality. It surfaced defects the whole automated
+suite had missed, because they only exist when a real person uses the thing:
+
+- **A removed account came back after restoring a backup.** The backup predated
+  the removal, so restoring reinstated it — correct behaviour, described nowhere,
+  and alarming when it is your account. Now stated on the restore screen in both
+  directions.
+- **The vault-adoption error was unreachable**, rendered sixty lines below the
+  button that produced it, so "Load a vault file" looked broken.
+- **A session that should have been remembered was asking again**, and several
+  smaller interface faults around spacing and stuck states.
+
+Each is fixed and carries a regression test.
+
+## What this is not
+
+Maintainer testing, not independent review. No third party has audited this
+application, and this document should not be read as though one has. T19 was
+skipped by agreement rather than passed.
 
 ---
 
