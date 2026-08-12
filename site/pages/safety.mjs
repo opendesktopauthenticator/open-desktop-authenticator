@@ -280,7 +280,7 @@ export const verify = {
 export const security = {
 	slug: 'security',
 	navTitle: 'Security',
-	title: 'Security model',
+	title: 'Security model: how your Steam secrets are stored',
 	description:
 		'How Steam secrets are stored: scrypt, AES-256-GCM, an isolated renderer, no network but Steam — and the limits of what any desktop authenticator can do.',
 	structuredData: (s) => ({

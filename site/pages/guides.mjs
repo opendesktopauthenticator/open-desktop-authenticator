@@ -3,7 +3,7 @@
 export const download = {
 	slug: 'download',
 	navTitle: 'Download',
-	title: 'Download and release status',
+	title: 'Open Desktop Authenticator download and release status',
 	description:
 		'Release status for Open Desktop Authenticator. No public build has been published yet. What exists, what is left, and how to build from source in the meantime.',
 	body: (s) => `
@@ -164,7 +164,7 @@ export const importFromSda = {
 export const docs = {
 	slug: 'docs',
 	navTitle: 'Docs',
-	title: 'Documentation',
+	title: 'Documentation: setup, codes, confirmations and backups',
 	description:
 		'Guides for Open Desktop Authenticator: setting up a vault, adding accounts, confirmations, automatic confirmation, backups, recovery codes and troubleshooting.',
 	body: () => `
@@ -273,7 +273,7 @@ export const docs = {
 export const faq = {
 	slug: 'faq',
 	navTitle: 'FAQ',
-	title: 'Frequently asked questions',
+	title: 'FAQ: Steam Guard codes, maFiles and security',
 	description:
 		'Is it free, does it work with SDA maFiles, can it take my items, and what happens if I lose my passphrase. Answers about Open Desktop Authenticator.',
 	structuredData: () => ({
@@ -302,8 +302,8 @@ const FAQ_ITEMS = [
 	{
 		q: 'Is it free?',
 		plain:
-			'Yes. It is free and open source under the GPL. There is no paid tier, no account, and no telemetry.',
-		a: `<p>Yes. Free and open source under the GPL. There is no paid tier, no account to create, and no telemetry. It is published by MASTERPANEL LLC as an open-source project.</p>`
+			'Yes. It is free and open source under the MIT licence. There is no paid tier, no account, and no telemetry.',
+		a: `<p>Yes. Free and open source under the <a href="${'https://github.com/opendesktopauthenticator/open-desktop-authenticator/blob/main/LICENSE'}" rel="noopener">MIT licence</a>. There is no paid tier, no account to create, and no telemetry. It is published by MASTERPANEL LLC as an open-source project.</p>`
 	},
 	{
 		q: 'Can I use my existing SDA maFiles?',

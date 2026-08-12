@@ -84,8 +84,12 @@ function head(page) {
 	// and a title cut off at "Open Desktop Authentica…" has spent that room on
 	// nothing. Pages that are already long enough go without it entirely.
 	const suffix = ' · ODA';
+	// Skipped when the title already names the product, or the result reads
+	// "Open Desktop Authenticator download … · ODA" — the brand twice, in the one
+	// line a result has before it is truncated.
+	const namesTheProduct = /Open Desktop Authenticator|ODA/.test(page.title);
 	const title =
-		page.slug === 'index' || page.title.length + suffix.length > 62
+		page.slug === 'index' || namesTheProduct || page.title.length + suffix.length > 62
 			? page.title
 			: page.title + suffix;
 	return `

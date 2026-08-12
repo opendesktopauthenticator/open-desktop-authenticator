@@ -22,7 +22,9 @@ export default {
 				applicationCategory: 'SecurityApplication',
 				operatingSystem: 'Windows 10, Windows 11, Linux',
 				isAccessibleForFree: true,
-				license: 'https://www.gnu.org/licenses/gpl-3.0.html',
+				// The repository's LICENSE is MIT. This said GPL-3.0, which is a false
+				// claim in machine-readable form — see tests in site/verify.mjs.
+				license: 'https://opensource.org/license/mit',
 				publisher: { '@id': `${s.origin}/#org` },
 				softwareHelp: `${s.origin}/docs`,
 				offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' }

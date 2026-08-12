@@ -48,7 +48,7 @@ const PROJECTS = [
 export default {
 	slug: 'owners',
 	navTitle: 'Who we are',
-	title: 'Who builds this',
+	title: 'Who builds Open Desktop Authenticator',
 	description:
 		'Open Desktop Authenticator is published by MASTERPANEL LLC. Who we are, what else we build, and why a Steam trading company wrote an open-source authenticator.',
 	structuredData: (s) => ({

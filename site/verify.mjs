@@ -148,6 +148,38 @@ for (const page of PAGES) {
 	if (!page.noindex && !listed) fail('sitemap', `is missing ${url}`);
 }
 
+/*
+ * The licence the site claims must be the licence the repository carries.
+ *
+ * These had drifted. The FAQ said GPL — in the visible answer and again inside
+ * the FAQPage structured data — while LICENSE, package.json, the README and
+ * CONTRIBUTING all said MIT, and the home page's SoftwareApplication data
+ * asserted gpl-3.0 in machine-readable form. An outside reviewer caught it by
+ * comparing the site against the repository, which is a comparison a machine
+ * can make on every build instead.
+ */
+const licencePath = join(here, '..', 'LICENSE');
+// Reported rather than thrown. A crash here would take the whole verification
+// down over a missing file, which is how a check stops running without anyone
+// deciding that it should.
+const declaredLicence = !existsSync(licencePath)
+	? (fail('LICENSE', 'not found beside the site, so licence claims cannot be checked'), 'UNKNOWN')
+	: /^MIT License/.test(readFileSync(licencePath, 'utf8'))
+		? 'MIT'
+		: 'UNKNOWN';
+
+for (const [slug, html] of built) {
+	const words = html.replace(/<[^>]+>/g, ' ');
+	for (const other of ['GPL', 'Apache License', 'BSD']) {
+		if (declaredLicence !== other && new RegExp(`\\b${other}\\b`).test(words)) {
+			fail(slug, `claims the ${other} licence; LICENSE says ${declaredLicence}`);
+		}
+	}
+	if (declaredLicence === 'MIT' && /gnu\.org\/licenses/.test(html)) {
+		fail(slug, 'points structured data at a GNU licence while LICENSE says MIT');
+	}
+}
+
 process.stdout.write(`pass 1 — ${built.size} pages read from site/dist\n`);
 
 /* --------------------------------------------------------------- pass two -- */
