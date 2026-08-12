@@ -49,7 +49,35 @@ export const SITE = {
 	 * changes is telling search engines something false about its freshness.
 	 */
 	updated: '2026-08-12',
-	repo: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator'
+	repo: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator',
+
+	/*
+	 * The original Steam Desktop Authenticator, and its only official home.
+	 *
+	 * Linked from everywhere this site mentions SDA, which until now it did not
+	 * do at all — sixteen pages discussing a piece of software without ever
+	 * saying where the real one lives. For a site whose entire argument is that
+	 * people are downloading fakes, that was the most useful link on the domain
+	 * and it was missing. Somebody who reads a page here and decides they would
+	 * rather stay on SDA should be one click from the genuine repository, not
+	 * back in a search result next to the clone.
+	 *
+	 * Ours is the successor, not the replacement, and Jessecar96 wrote the thing
+	 * this exists because of. Saying so is both accurate and the safer default.
+	 */
+	sda: {
+		author: 'Jessecar96',
+		repo: 'https://github.com/Jessecar96/SteamDesktopAuthenticator',
+		releases: 'https://github.com/Jessecar96/SteamDesktopAuthenticator/releases'
+	},
+
+	/** The company behind this, and the other things it runs. */
+	brand: {
+		name: 'MASTERPANEL',
+		legal: 'MASTERPANEL LLC',
+		url: 'https://masterspanel.com',
+		logo: '/assets/projects/masterspanel.svg'
+	}
 };
 
 const escape = (s) =>
@@ -256,10 +284,43 @@ ${page.body(SITE)}
 				<a href="/support">Report a problem</a>
 				<a href="${SITE.repo}" rel="noopener">Source code</a>
 			</nav>
+
+			<!--
+				Two attributions, both load-bearing.
+
+				The first is the original project. Every page here that says "SDA"
+				now has somewhere real to point, and the footer means the link is on
+				all sixteen of them — including whichever one a search result drops
+				somebody onto. A person who lands here looking for SDA and leaves
+				with the genuine repository is the best outcome this site can have,
+				even though it is not the one that gets us a download.
+
+				The second is whose site this is. Anonymous software asking to hold
+				your Steam authenticator is the shape of the problem, not the shape
+				of the answer, so the company is named, linked and checkable.
+			-->
+			<div class="foot-brand">
+				<p class="foot-origin">
+					Looking for the original <strong>Steam Desktop Authenticator</strong> by
+					${escape(SITE.sda.author)}? It lives at
+					<a href="${SITE.sda.repo}" rel="noopener">github.com/${escape(SITE.sda.author)}/SteamDesktopAuthenticator</a>
+					— that repository is the only official source for it, and any other site
+					offering "SDA" is not it.
+				</p>
+				<a class="powered" href="${SITE.brand.url}" rel="noopener">
+					<img src="${SITE.brand.logo}" alt="" width="28" height="28" loading="lazy">
+					<span><span class="powered-by">Powered by</span>
+					<strong>${escape(SITE.brand.name)}</strong></span>
+				</a>
+			</div>
+
 			<p class="fineprint">
-				Published by ${escape(SITE.publisher)}. Not affiliated with, endorsed by, or
-				connected to Valve Corporation, Steam, or the authors of Steam Desktop
-				Authenticator. Steam is a trademark of Valve Corporation.
+				Published by
+				<a href="${SITE.brand.url}" rel="noopener">${escape(SITE.publisher)}</a>.
+				Not affiliated with, endorsed by, or connected to Valve Corporation, Steam, or
+				${escape(SITE.sda.author)} and the authors of
+				<a href="${SITE.sda.repo}" rel="noopener">Steam Desktop Authenticator</a>.
+				Steam is a trademark of Valve Corporation.
 			</p>
 		</div>
 	</footer>

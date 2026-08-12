@@ -652,6 +652,119 @@ main.has-hero {
 	max-width: 66ch;
 }
 
+/* ------------------------------------------------------- foot attribution -- */
+
+/*
+ * Credit where it belongs, on every page.
+ *
+ * Two blocks that have to survive being read quickly: where the original SDA
+ * actually lives, and who publishes this. The first is the more important of
+ * the two — somebody who came here searching for SDA should be able to leave
+ * with the genuine repository rather than the clone they would otherwise click.
+ */
+.foot-brand {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 18px 28px;
+	align-items: center;
+	justify-content: space-between;
+	margin: 26px 0 22px;
+	padding: 18px 20px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+}
+.foot-origin {
+	flex: 1 1 380px;
+	margin: 0;
+	max-width: 68ch;
+	font-family: var(--font-small);
+	font-size: 0.9rem;
+	line-height: 1.6;
+	color: var(--body);
+}
+.foot-origin strong {
+	color: var(--text);
+}
+
+/* The company mark. A link, because a brand you cannot follow is decoration. */
+.powered {
+	display: inline-flex;
+	align-items: center;
+	gap: 11px;
+	padding: 9px 15px 9px 11px;
+	border: 1px solid var(--line-strong);
+	border-radius: 999px;
+	text-decoration: none;
+	color: var(--text);
+	white-space: nowrap;
+	transition:
+		border-color 160ms var(--ease),
+		background-color 160ms var(--ease),
+		transform 160ms var(--ease);
+}
+.powered:hover {
+	border-color: var(--mint);
+	background: var(--panel-hi);
+	transform: translateY(-1px);
+}
+.powered img {
+	display: block;
+	width: 28px;
+	height: 28px;
+	border-radius: 6px;
+}
+.powered span {
+	display: grid;
+	line-height: 1.25;
+}
+.powered .powered-by {
+	font-family: var(--font-small);
+	font-size: 0.72rem;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--faint);
+}
+.powered strong {
+	font-size: 0.95rem;
+	font-weight: 680;
+	letter-spacing: 0.02em;
+}
+.powered:hover strong {
+	color: var(--mint);
+}
+
+/*
+ * The same pointer, used mid-page where SDA is being discussed.
+ *
+ * Deliberately not styled as a warning. Somebody choosing the original over
+ * this is making a reasonable choice, and a box that looks like an alarm would
+ * be arguing with them rather than helping.
+ */
+.origin-note {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 14px;
+	margin: 26px 0;
+	padding: 16px 18px;
+	border: 1px solid var(--line-strong);
+	border-left: 3px solid var(--mint-pale);
+	border-radius: var(--radius);
+	background: var(--bg-lift);
+}
+.origin-note p {
+	flex: 1 1 300px;
+	margin: 0;
+	font-size: 0.95rem;
+	color: var(--body);
+}
+.origin-note .button {
+	flex: 0 0 auto;
+	font-size: 0.92rem;
+	padding: 10px 18px;
+}
+
 /* ------------------------------------------------------------------ forms -- */
 
 /*
@@ -813,6 +926,7 @@ main.has-hero {
 }
 
 .form button,
+.controls button,
 button.button {
 	font-family: inherit;
 	font-size: 0.98rem;
@@ -829,27 +943,32 @@ button.button {
 		box-shadow 160ms var(--ease);
 }
 .form button:hover,
+.controls button:hover,
 button.button:hover {
 	filter: brightness(1.07);
 	transform: translateY(-1px);
 	box-shadow: 0 14px 30px -16px rgba(66, 242, 154, 0.75);
 }
 .form button:active,
+.controls button:active,
 button.button:active {
 	transform: translateY(0);
 }
 
-.form button.secondary {
+.form button.secondary,
+.controls button.secondary {
 	background: transparent;
 	border-color: var(--line-strong);
 	color: var(--text);
 }
-.form button.secondary:hover {
+.form button.secondary:hover,
+.controls button.secondary:hover {
 	border-color: var(--mint);
 	color: var(--mint);
 	box-shadow: none;
 }
-.form button:disabled {
+.form button:disabled,
+.controls button:disabled {
 	opacity: 0.5;
 	cursor: not-allowed;
 	filter: none;
@@ -1037,6 +1156,18 @@ button.button:active {
 	}
 }
 
+/* Title on the left, sign-out on the right, rather than orphaned beneath it. */
+.admin-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+}
+.admin-head h1 {
+	margin: 0;
+}
+
 .ticket-head {
 	display: flex;
 	flex-wrap: wrap;
@@ -1150,6 +1281,19 @@ button.button:active {
 	}
 	.message {
 		padding: 15px 16px;
+	}
+	/* Stacked, and the brand pill goes full width rather than stranded right. */
+	.foot-brand {
+		flex-direction: column;
+		align-items: stretch;
+		gap: 16px;
+	}
+	.powered {
+		justify-content: center;
+	}
+	.origin-note .button {
+		width: 100%;
+		text-align: center;
 	}
 }
 

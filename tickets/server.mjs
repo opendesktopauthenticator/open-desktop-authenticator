@@ -484,6 +484,33 @@ function styleHref() {
  * stale reference here would mean the reply form silently loses its file picker
  * while still rendering perfectly.
  */
+/*
+ * Attribution shown on every page this service renders.
+ *
+ * Kept in step with the same values in site/build.mjs by hand — two small
+ * constants in two programs is a smaller price than a shared module that the
+ * service would have to read off disk at request time.
+ */
+const SDA = {
+	author: 'Jessecar96',
+	repo: 'https://github.com/Jessecar96/SteamDesktopAuthenticator'
+};
+const BRAND = {
+	name: 'MASTERPANEL',
+	legal: 'MASTERPANEL LLC',
+	url: 'https://masterspanel.com'
+};
+
+/** The company mark, by its hashed name, read out of the built home page. */
+function brandLogoHref() {
+	try {
+		const home = readFileSync(join(PUBLIC_DIR, 'owners.html'), 'utf8');
+		return /"(\/assets\/projects\/masterspanel\.[^"]+\.svg)"/.exec(home)?.[1] ?? '/assets/projects/masterspanel.svg';
+	} catch {
+		return '/assets/projects/masterspanel.svg';
+	}
+}
+
 function scriptHref() {
 	try {
 		const support = readFileSync(join(PUBLIC_DIR, 'support.html'), 'utf8');
@@ -513,6 +540,43 @@ function page({ title, body, noindex = true }) {
 	<main id="main" class="wrap">
 ${body}
 	</main>
+	<!--
+		The same footer the static pages carry.
+
+		These pages had none at all, which meant a person following a reference
+		into their own report landed somewhere that shared the site's stylesheet
+		but none of its attribution — no way back, no publisher named, and no link
+		to the original project. A support page is exactly where somebody is
+		already unsure who they are dealing with.
+	-->
+	<footer class="site-foot">
+		<div class="wrap">
+			<div class="foot-brand">
+				<p class="foot-origin">
+					Looking for the original <strong>Steam Desktop Authenticator</strong> by
+					${SDA.author}? It lives at
+					<a href="${SDA.repo}" rel="noopener">github.com/${SDA.author}/SteamDesktopAuthenticator</a>
+					— the only official source for it.
+				</p>
+				<a class="powered" href="${BRAND.url}" rel="noopener">
+					<img src="${escape(brandLogoHref())}" alt="" width="28" height="28" loading="lazy">
+					<span><span class="powered-by">Powered by</span>
+					<strong>${BRAND.name}</strong></span>
+				</a>
+			</div>
+			<nav aria-label="Footer">
+				<a href="/">Home</a>
+				<a href="/support">Report a problem</a>
+				<a href="/security">Security</a>
+				<a href="/docs">Documentation</a>
+			</nav>
+			<p class="fineprint">
+				Published by <a href="${BRAND.url}" rel="noopener">${BRAND.legal}</a>. Not
+				affiliated with, endorsed by, or connected to Valve Corporation, Steam, or
+				${SDA.author}. Steam is a trademark of Valve Corporation.
+			</p>
+		</div>
+	</footer>
 </body>
 </html>
 `;
@@ -977,9 +1041,11 @@ function loginPage(message) {
 		body: `		<article>
 			<h1>Admin</h1>
 			${message ? notice('callout-warn', [message]) : ''}
-			<form method="post" action="/admin/login">
-				<label for="passphrase">Passphrase</label>
-				<input id="passphrase" name="passphrase" type="password" autocomplete="current-password" required>
+			<form class="form" method="post" action="/admin/login">
+				<div class="field">
+					<label for="passphrase">Passphrase</label>
+					<input id="passphrase" name="passphrase" type="password" autocomplete="current-password" required>
+				</div>
 				<div class="controls"><button type="submit">Sign in</button></div>
 			</form>
 		</article>`
@@ -1021,11 +1087,13 @@ function adminList(session, tickets, counts) {
 	return page({
 		title: 'Admin',
 		body: `		<article>
-			<h1>Reports</h1>
-			<form method="post" action="/admin/logout" class="controls">
-				<input type="hidden" name="csrf" value="${escape(session.csrf)}">
-				<button type="submit" class="secondary">Sign out</button>
-			</form>
+			<div class="admin-head">
+				<h1>Reports</h1>
+				<form method="post" action="/admin/logout" class="controls">
+					<input type="hidden" name="csrf" value="${escape(session.csrf)}">
+					<button type="submit" class="secondary">Sign out</button>
+				</form>
+			</div>
 			<p class="lede">${live.length} open, ${closed.length} closed.</p>
 			<h2>Open</h2>
 			${live.length ? `<ul class="thread">\n${live.map(row).join('\n')}\n</ul>` : '<p class="muted">Nothing open.</p>'}
@@ -1082,11 +1150,15 @@ async function handleAdmin(request, response, url) {
 			<p>The setup token was printed to the service journal when it started with no
 			administrator configured. Read it on the server with
 			<code>journalctl -u tickets | grep "setup token"</code> and paste it below.</p>
-			<form method="post" action="/admin/bootstrap">
-				<label for="t">Setup token</label>
-				<input id="t" name="token" type="password" autocomplete="off" required>
-				<label for="p">Passphrase (16 characters or more)</label>
-				<input id="p" name="passphrase" type="password" autocomplete="new-password" required>
+			<form class="form" method="post" action="/admin/bootstrap">
+				<div class="field">
+					<label for="t">Setup token</label>
+					<input id="t" name="token" type="password" autocomplete="off" required>
+				</div>
+				<div class="field">
+					<label for="p">Passphrase (16 characters or more)</label>
+					<input id="p" name="passphrase" type="password" autocomplete="new-password" required>
+				</div>
 				<div class="controls"><button type="submit">Set it</button></div>
 			</form>
 		</article>`

@@ -20,6 +20,26 @@ export const download = {
 				</p>
 			</div>
 
+			<!--
+				The most useful thing this page can do today.
+
+				Somebody arrives here wanting a Steam authenticator, finds there is
+				nothing to download, and goes back to a search result — which is the
+				precise sequence that cost the person who runs this site their
+				inventory. Sending them to the genuine original instead is worth more
+				than keeping them on a page with no build on it.
+			-->
+			<div class="origin-note">
+				<p>
+					<strong>Need one today?</strong> Use the original Steam Desktop Authenticator
+					by ${s.sda.author}. It is the software this project succeeds, it works, and
+					<a href="${s.sda.repo}" rel="noopener">github.com/${s.sda.author}/SteamDesktopAuthenticator</a>
+					is its only official source — not a mirror, not a lookalike domain, not a
+					sponsored result.
+				</p>
+				<a class="button" href="${s.sda.releases}" rel="noopener">Original SDA releases →</a>
+			</div>
+
 			<h2>Why the page exists anyway</h2>
 			<p>
 				Because "coming soon" pages get replaced by scam listings the moment a product

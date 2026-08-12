@@ -193,6 +193,37 @@ for (const [slug, html] of built) {
 	}
 }
 
+/*
+ * Attribution, on every page.
+ *
+ * Two links that are easy to lose in a redesign and expensive to be missing.
+ *
+ * The original project's repository is the more important of the two. This site
+ * spent its whole existence discussing Steam Desktop Authenticator without ever
+ * saying where the real one lives, which on a site about fake downloads was the
+ * worst possible omission — so it is checked rather than remembered.
+ *
+ * The publisher is the other half of the same argument. Anonymous software
+ * asking to hold a Steam Guard secret is the shape of the problem; a named,
+ * followable company is part of the answer.
+ */
+const ORIGINAL_SDA = 'https://github.com/Jessecar96/SteamDesktopAuthenticator';
+const BRAND_URL = 'https://masterspanel.com';
+
+for (const [slug, html] of built) {
+	if (!html.includes(ORIGINAL_SDA)) {
+		fail(slug, 'does not link the original SDA repository anywhere on the page');
+	}
+	if (!html.includes(BRAND_URL)) {
+		fail(slug, 'does not link the publisher anywhere on the page');
+	}
+	// A brand mark nobody can follow is decoration, so the logo has to be inside
+	// the link rather than beside it.
+	if (!/<a class="powered"[^>]*>[\s\S]*?<img[\s\S]*?<\/a>/.test(html)) {
+		fail(slug, 'has no followable "powered by" mark in the footer');
+	}
+}
+
 process.stdout.write(`pass 1 — ${built.size} pages read from site/dist\n`);
 
 /* --------------------------------------------------------------- pass two -- */

@@ -14,7 +14,7 @@ export default {
 		publisher: { '@type': 'Organization', name: s.publisher },
 		mainEntityOfPage: `${s.origin}/steam-desktop-authenticator`
 	}),
-	body: () => `
+	body: (s) => `
 		<article>
 			<h1>Steam Desktop Authenticator: what it is, and how to use it safely</h1>
 
@@ -25,6 +25,24 @@ export default {
 				dangerous, and what your options are. It is not a download page for SDA, and we
 				are not its authors.
 			</p>
+
+			<!--
+				This page ranks for the query that gets people robbed, so the official
+				repository belongs above the fold rather than in a paragraph two
+				screens down. Somebody who reads one sentence and leaves should still
+				leave with the right link.
+			-->
+			<div class="origin-note">
+				<p>
+					<strong>The official SDA is at
+					<a href="${s.sda.repo}" rel="noopener">github.com/${s.sda.author}/SteamDesktopAuthenticator</a>.</strong>
+					It is written by ${s.sda.author} and that repository is its only real home.
+					Everything else calling itself SDA — a lookalike domain, a "mirror", an
+					installer from a forum post, a sponsored search result — is somebody else's
+					software with somebody else's motives.
+				</p>
+				<a class="button" href="${s.sda.releases}" rel="noopener">Official releases →</a>
+			</div>
 
 			<h2>What Steam Guard actually is</h2>
 			<p>
@@ -106,8 +124,9 @@ export default {
 			<h2>Looking for the Steam Desktop Authenticator download?</h2>
 			<div class="callout callout-warn">
 				<p>
-					<strong>Get it from the project's own repository, and nowhere else.</strong>
-					SDA is released on GitHub by its authors. Any other site offering a
+					<strong>Get it from the project's own repository, and nowhere else:</strong>
+					<a href="${s.sda.repo}" rel="noopener">github.com/${s.sda.author}/SteamDesktopAuthenticator</a>.
+					SDA is released there by ${s.sda.author}. Any other site offering a
 					&ldquo;Steam Desktop Authenticator download&rdquo; — an installer, a zip, a
 					mirror, a &ldquo;fixed&rdquo; or &ldquo;updated&rdquo; build — is not the
 					project, whatever the page looks like.
