@@ -49,7 +49,16 @@ const MP4 = Buffer.concat([Buffer.alloc(4), Buffer.from('ftyp'), Buffer.alloc(56
 const WEBM = pad([0x1a, 0x45, 0xdf, 0xa3]);
 
 function capture() {
-	const out = { status: 0, body: '', raw: Buffer.alloc(0), headers: {} as Record<string, string> };
+	// `raw` is annotated because `Buffer.alloc` returns the narrower
+	// `Buffer<ArrayBuffer>`, and TypeScript 7 then refuses to store a plain
+	// `Buffer` (which may wrap a SharedArrayBuffer) in the inferred field. The
+	// wide type is the one this capture actually means.
+	const out: { status: number; body: string; raw: Buffer; headers: Record<string, string> } = {
+		status: 0,
+		body: '',
+		raw: Buffer.alloc(0),
+		headers: {}
+	};
 	const response = {
 		headersSent: false,
 		writeHead(status: number, headers: Record<string, string>) {
