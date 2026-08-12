@@ -45,6 +45,16 @@ export class VaultServiceError extends Error {
 
 export type LockReason = 'manual' | 'idle' | 'suspend' | 'shutdown';
 
+/**
+ * What a caller is told when a lock overtook the work it asked for.
+ *
+ * Phrased for somebody reading it on screen after waking a machine: the thing
+ * they asked for did not finish, nothing is broken, and the passphrase still
+ * works. It is not an error in the sense of something having gone wrong.
+ */
+export const LOCKED_DURING_OPEN =
+	'the vault locked while it was being opened, so it was left locked. Enter your passphrase again.';
+
 export interface VaultServiceOptions {
 	file: string;
 	/** Injected for testability. Defaults to the wall clock. */
@@ -66,10 +76,40 @@ export class VaultService {
 	private readonly onLock: (reason: LockReason) => void;
 	private state: UnlockedState | undefined;
 
+	/**
+	 * Bumped by every lock, including one that finds the vault already locked.
+	 *
+	 * **This is what makes a lock cancel work that is already in flight.** Opening
+	 * a vault is deliberately slow — the whole point of the KDF — and for those
+	 * seconds there is no state installed. `lock()` returned early in exactly that
+	 * window, so a machine suspending mid-unlock cancelled nothing: the derivation
+	 * finished afterwards and installed an unlocked vault behind the lock screen.
+	 *
+	 * An operation captures this before it awaits and checks it after. A changed
+	 * value means "something locked while I was working", and the only correct
+	 * response is to wipe the key it derived and install nothing.
+	 */
+	private generation = 0;
+
 	constructor(options: VaultServiceOptions) {
 		this.file = options.file;
 		this.now = options.now ?? (() => Date.now());
 		this.onLock = options.onLock ?? (() => undefined);
+	}
+
+	/**
+	 * Refuse to install state derived before a lock, wiping the key if so.
+	 *
+	 * Returns true when the caller may proceed. Called immediately before the
+	 * assignment to `this.state`, with nothing awaited in between — a check with
+	 * an await after it is not a check.
+	 */
+	private stillCurrent(generation: number, key: Buffer): boolean {
+		if (generation === this.generation) {
+			return true;
+		}
+		wipe(key);
+		return false;
 	}
 
 	exists(): boolean {
@@ -107,12 +147,20 @@ export class VaultService {
 		};
 
 		const contents = emptyVault(new Date(this.now()));
+		const generation = this.generation;
 		const key = await deriveKey(passphrase, salt, kdf);
 		try {
 			writeEnvelope(this.file, sealWithKey(JSON.stringify(contents), key, kdf));
 		} catch (err) {
 			wipe(key);
 			throw err;
+		}
+
+		// The vault file is written either way — it exists on disk and the
+		// passphrase opens it. What a lock during the derivation cancels is
+		// leaving it *open*, which is the part that matters.
+		if (!this.stillCurrent(generation, key)) {
+			throw new VaultServiceError(LOCKED_DURING_OPEN);
 		}
 
 		// Leave it unlocked: the user just proved they know the passphrase, and
@@ -127,6 +175,7 @@ export class VaultService {
 		}
 
 		const envelope = readEnvelope(this.file);
+		const generation = this.generation;
 		const { plaintext, key, kdf } = await unseal(envelope, passphrase);
 
 		let contents: VaultContents;
@@ -141,6 +190,12 @@ export class VaultService {
 					err instanceof Error ? err.message : String(err)
 				}`
 			);
+		}
+
+		// A lock arrived while the key was being derived — the machine suspended,
+		// the idle timer fired, or the user pressed Lock. Install nothing.
+		if (!this.stillCurrent(generation, key)) {
+			throw new VaultServiceError(LOCKED_DURING_OPEN);
 		}
 
 		// Unlocking while already unlocked would otherwise drop the previous key on
@@ -163,6 +218,14 @@ export class VaultService {
 	 * an attacker who can read our memory is explicitly outside the threat model.
 	 */
 	lock(reason: LockReason = 'manual'): void {
+		// **Before the early return, always.** A lock that arrives while the vault
+		// is still being opened finds no state and used to do nothing at all — so
+		// the derivation it was meant to cancel completed a second later and left
+		// the vault open behind an OS lock screen. Bumping the generation here is
+		// what cancels that work; the early return below only skips the parts that
+		// need state to exist.
+		this.generation += 1;
+
 		if (!this.state) {
 			return;
 		}
@@ -457,6 +520,7 @@ export class VaultService {
 		}
 
 		// Proves the passphrase and the file before a byte is written.
+		const generation = this.generation;
 		const { plaintext, key, kdf } = await unseal(envelope, passphrase);
 
 		let contents: VaultContents;
@@ -500,6 +564,14 @@ export class VaultService {
 				'the backup could not be written into place, so nothing was changed. Your vault file ' +
 					'is as it was.'
 			);
+		}
+
+		// The restore itself stands: the backup is on disk and is the vault now.
+		// A lock that arrived mid-derivation cancels leaving it open, not the
+		// replacement — undoing the file swap here would be the more destructive
+		// reading of "lock".
+		if (!this.stillCurrent(generation, key)) {
+			throw new VaultServiceError(LOCKED_DURING_OPEN);
 		}
 
 		if (this.state) {

@@ -1,0 +1,47 @@
+[Unit]
+# The unit oda-backup.timer activates.
+#
+# **This file was zero bytes in the repository.** The live box had a working one
+# written by hand, so backups were happening — but this directory is what a
+# rebuild would be reconstructed from, and rebuilding from it would have
+# installed an enabled daily timer pointing at a service that does nothing. A
+# timer with no service definition fails in the way that matters least visibly:
+# the schedule looks healthy and produces no files.
+#
+# It also drifted from the live unit in a way that mattered more. The improved
+# script was deployed as `oda-backup.sh` while the unit called `oda-backup`, so
+# the timer went on running the older copy — the one that did not back up the
+# ticket database. One name now, in both places.
+Description=Daily backup of configuration and the ticket database
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/oda-backup
+
+# The script reads /etc/letsencrypt and the ticket database, and drops privileges
+# to the service account for the SQLite snapshot, so it runs as root.
+User=root
+
+# The destination has to exist before the script writes into it. Declared here
+# rather than assumed: a fresh box would otherwise fail on the first run, which
+# is the run nobody is watching.
+ExecStartPre=/bin/mkdir -p /var/backups/oda
+ExecStartPre=/bin/chmod 700 /var/backups/oda
+
+# Nothing here needs the network, and a backup script that could reach one would
+# be a more interesting thing to compromise.
+PrivateNetwork=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+
+# `NoNewPrivileges=true` is deliberately absent.
+#
+# This unit's job requires changing user: the SQLite snapshot has to be taken as
+# the account that owns the database, or the write-ahead log cannot be read.
+# With no-new-privileges set that transition is refused — `runuser: cannot set
+# user id: Operation not permitted` — and the backup fails every night while the
+# timer goes on reporting a healthy schedule.
+#
+# It would buy little here in any case: the unit runs as root by necessity, so
+# there is nothing above it to escalate to.

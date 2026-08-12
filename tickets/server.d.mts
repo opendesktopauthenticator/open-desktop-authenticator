@@ -61,6 +61,23 @@ export function storeUpload(buffer: Buffer): {
 /** The path on disk for an attachment id. Throws on anything we did not generate. */
 export function fileFor(id: string): string;
 
+/**
+ * Attach uploaded files to a report, or to one message on it.
+ *
+ * Returns how many were actually claimed, which is not always how many were
+ * offered: ids that are unrecognised, already attached to something else, or
+ * older than the unclaimed lifetime are skipped, and the list is capped at the
+ * per-submission limit regardless of what it is handed.
+ */
+export function claimAttachments(
+	ticketId: number,
+	noteId: number | null,
+	raw: string | undefined
+): number;
+
+/** How many keys the rate limiter is tracking, and how many sweeps it has run. */
+export function attemptStats(): { size: number; sweeps: number };
+
 /** The statuses a report can be in. */
 export const STATUSES: string[];
 

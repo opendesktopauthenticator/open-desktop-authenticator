@@ -286,3 +286,94 @@ describe('the report list stays behind the passphrase', () => {
 		expect(out.body).not.toMatch(/Reports<\/h1>/);
 	});
 });
+
+describe('the queue does not lose old open reports', () => {
+	/**
+	 * The failure this covers.
+	 *
+	 * The admin screen took the newest two hundred tickets of any status and then
+	 * split those into open and closed. Closed reports competed with open ones for
+	 * the same rows, so two hundred newer tickets pushed an older unresolved one
+	 * off the end — and this screen is the only place reports are ever read. There
+	 * is no search and no pagination, so a report that falls out of the window is
+	 * gone as far as the maintainer is concerned.
+	 *
+	 * The person waiting on it has no way to tell. They see "Received" on their
+	 * own page for ever.
+	 */
+	/**
+	 * Sign in as the administrator the earlier block created.
+	 *
+	 * Not a fresh bootstrap: the token only exists while no administrator does,
+	 * and one has existed since the sessions tests above. Re-bootstrapping would
+	 * throw, which is the service behaving correctly.
+	 */
+	async function signedIn(): Promise<string> {
+		const login = Readable.from([
+			Buffer.from(new URLSearchParams({ passphrase: 'correct-horse-battery-staple' }).toString())
+		]) as unknown as Record<string, unknown>;
+		login.method = 'POST';
+		login.headers = { origin: 'https://opendesktopauthenticator.com' };
+		login.socket = { remoteAddress: '10.8.0.1' };
+		const out = capture();
+		await service.handleAdmin(login, out.response, at('/admin/login'));
+		expect(out.out.status, 'the queue tests need a signed-in session').toBe(303);
+		return /admin=([^;]+)/.exec(out.out.headers['set-cookie'] ?? '')?.[1] ?? '';
+	}
+
+	it('shows an open report buried under 200 newer closed ones', async () => {
+		const cookie = await signedIn();
+
+		const insert = service.db.prepare(
+			`INSERT INTO tickets (reference, access_key, kind, summary, detail, status, created_at, updated_at)
+			 VALUES (?, ?, 'bug', ?, 'A detail long enough to look like a real report.', ?, ?, ?)`
+		);
+		// The one that matters: oldest, and still unresolved.
+		insert.run(
+			'ODA-OLD1-OPEN',
+			'k'.repeat(43),
+			'The oldest unanswered report',
+			'open',
+			'2026-01-01',
+			'2026-01-01'
+		);
+		// Then two hundred newer ones, all closed.
+		for (let i = 0; i < 200; i++) {
+			insert.run(
+				`ODA-C${String(i).padStart(3, '0')}-DONE`,
+				'k'.repeat(43),
+				`A closed report number ${i}`,
+				'resolved',
+				`2026-06-${String((i % 28) + 1).padStart(2, '0')}`,
+				`2026-06-${String((i % 28) + 1).padStart(2, '0')}`
+			);
+		}
+
+		const { out, response } = capture();
+		await service.handleAdmin(
+			req('GET', undefined, { cookie: `admin=${cookie}` }),
+			response,
+			at('/admin')
+		);
+
+		expect(out.body, 'the oldest open report must still be on the page').toContain('ODA-OLD1-OPEN');
+		expect(out.body).toMatch(/1 open/);
+	});
+
+	it('puts the longest-waiting report first', async () => {
+		// Ordered by how long it has gone unanswered, not by arrival. The one at
+		// the top should be the one somebody has been waiting on longest.
+		const cookie = await signedIn();
+		const { out, response } = capture();
+		await service.handleAdmin(
+			req('GET', undefined, { cookie: `admin=${cookie}` }),
+			response,
+			at('/admin')
+		);
+		const open = out.body.slice(
+			out.body.indexOf('<h2>Open</h2>'),
+			out.body.indexOf('<h2>Closed</h2>')
+		);
+		expect(open).toContain('ODA-OLD1-OPEN');
+	});
+});

@@ -401,12 +401,29 @@ function storeUpload(buffer) {
  * Only unclaimed, recent rows can be claimed, so an id that has been seen on
  * someone else's report cannot be pinned to a second one.
  */
-function claimAttachments(ticketId, noteId, raw) {
-	const ids = String(raw ?? '')
+/**
+ * The ids on a submission, in order, junk discarded.
+ *
+ * Shared so the count a submission is refused on and the set that gets stored
+ * are produced by the same code. Two separate parses would drift, and the drift
+ * would show as a report refused for having five attachments while four were
+ * quietly stored anyway.
+ */
+function attachmentIds(raw) {
+	return String(raw ?? '')
 		.split(',')
 		.map((s) => s.trim())
-		.filter(isAttachmentId)
-		.slice(0, MAX_FILES);
+		.filter(isAttachmentId);
+}
+
+/** The one refusal, shared by the report form and the reply form. */
+function tooManyAttachments(raw) {
+	const count = attachmentIds(raw).length;
+	return count > MAX_FILES ? [`Four files at most — that one carried ${count}.`] : [];
+}
+
+function claimAttachments(ticketId, noteId, raw) {
+	const ids = attachmentIds(raw).slice(0, MAX_FILES);
 	const cutoff = new Date(Date.now() - UNCLAIMED_LIFETIME_MS).toISOString();
 	const claim = db.prepare(
 		'UPDATE attachments SET ticket_id = ?, note_id = ? WHERE id = ? AND ticket_id IS NULL AND created_at >= ?'
@@ -455,6 +472,19 @@ function validate(form) {
 	}
 
 	errors.push(...secretsIn(`${summary}\n${detail}`));
+
+	// More attachments than the limit is refused, not trimmed.
+	//
+	// `claimAttachments` slices to MAX_FILES, so over-sending was already bounded
+	// and could never fill the disk. What it did instead was lose files without
+	// saying so: the page had shown six thumbnails, the report arrived with four,
+	// and the reporter had no way to know which two were gone. For a report about
+	// a stolen inventory the missing picture may be the whole point of sending it.
+	//
+	// The client refuses first, so reaching here means a bypassed or stale page.
+	// Refusing sends the form back with every typed word preserved, which costs
+	// the reporter one re-selection and never a piece of evidence.
+	errors.push(...tooManyAttachments(form.attachments));
 
 	return { errors, value: { kind, summary, detail, contact: contact || null } };
 }
@@ -871,17 +901,76 @@ function readForm(request, limit = 16 * 1024) {
  * is the one endpoint where that would be expensive.
  */
 const attempts = new Map();
+
+/**
+ * The cap, and the level the sweep clears down to.
+ *
+ * Sweeping back to a level *below* the cap rather than to the cap itself is what
+ * keeps this cheap. The old version swept whenever the map sat above 5,000, and
+ * once it was full of entries too fresh to drop the sweep freed nothing — so
+ * every subsequent request walked all 5,000 again, on the busiest path, at
+ * exactly the moment the box was already under load from whatever filled the map
+ * in the first place. Clearing 20% means a sweep happens at most once per
+ * thousand requests, which is a handful of operations per request amortised.
+ */
+const ATTEMPT_CAP = 5000;
+const ATTEMPT_TARGET = 4000;
+
 function tooMany(key, max, windowMs) {
-	const cutoff = Date.now() - windowMs;
-	const hits = (attempts.get(key) ?? []).filter((t) => t > cutoff);
-	hits.push(Date.now());
-	attempts.set(key, hits);
-	if (attempts.size > 5000) {
-		// Bounded: an attacker rotating addresses must not grow this without limit.
-		for (const [k, v] of attempts) if (v[v.length - 1] < cutoff) attempts.delete(k);
+	const now = Date.now();
+	const previous = attempts.get(key);
+	// Each entry remembers when it stops mattering, rather than being judged
+	// against whatever window the caller happens to be using.
+	//
+	// **This was a hole in the admin login limiter.** The sweep used the calling
+	// window's cutoff for every entry it looked at, and the windows differ: ten
+	// minutes for the public forms, fifteen for login and bootstrap. So an upload
+	// — ten-minute window — could delete a `login:` entry that was twelve minutes
+	// old and still inside its own window, handing a password guesser five fresh
+	// attempts early. It needed the map to be over the cap to fire, which sounds
+	// unlikely until you notice what fills the map: thousands of distinct
+	// addresses, i.e. precisely the distributed attack during which nobody wants
+	// the login limiter quietly loosened.
+	const hits = (previous?.hits ?? []).filter((t) => t > now - windowMs);
+	hits.push(now);
+	attempts.set(key, { hits, expires: now + windowMs });
+
+	if (attempts.size > ATTEMPT_CAP) {
+		sweeps += 1;
+		for (const [k, v] of attempts) {
+			if (v.expires <= now) attempts.delete(k);
+		}
+		if (attempts.size > ATTEMPT_TARGET) {
+			// Still full of live entries, so this is a flood across many addresses
+			// and the map has to be cut regardless. Dropping an entry gives that key
+			// a clean budget, so the ones to drop are those closest to expiring
+			// anyway — which keeps the heaviest and most recent callers tracked and
+			// spends the amnesty on the ones about to be forgiven in any case.
+			//
+			// nginx limits these paths in front of this and is the defence that
+			// matters under load; this is the backstop for the day that zone is
+			// edited away, so degrading rather than growing without bound is the
+			// right trade.
+			const byExpiry = [...attempts].sort((a, b) => a[1].expires - b[1].expires);
+			for (const [k] of byExpiry.slice(0, attempts.size - ATTEMPT_TARGET)) {
+				attempts.delete(k);
+			}
+		}
 	}
 	return hits.length > max;
 }
+
+/**
+ * How many keys are being tracked, and how many sweeps it has taken.
+ *
+ * Exported so the bound and the sweep frequency can be asserted rather than
+ * inferred from a stopwatch. A timing test for this passed against the broken
+ * version — 2,000 full walks of a 5,000-entry map still finish in a fraction of
+ * a second on an idle laptop — so the number that distinguishes the two has to
+ * be counted, not measured.
+ */
+let sweeps = 0;
+const attemptStats = () => ({ size: attempts.size, sweeps });
 
 const clientOf = (request) =>
 	String(request.headers['x-real-ip'] ?? request.socket.remoteAddress ?? 'unknown');
@@ -1459,6 +1548,17 @@ async function handle(request, response, url) {
 					page({ title: 'Not sent', body: notice('callout-warn', leaked) })
 				);
 			}
+			// A reply carries attachments too, and this route never went through
+			// `validate` — so the limit the report form enforces had no counterpart
+			// here at all.
+			const excess = tooManyAttachments(form.attachments);
+			if (excess.length) {
+				return send(
+					response,
+					400,
+					page({ title: 'Not sent', body: notice('callout-warn', excess) })
+				);
+			}
 			const stamp = now();
 			const note = db
 				.prepare('INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)')
@@ -1507,7 +1607,19 @@ async function handle(request, response, url) {
 	return undefined;
 }
 
-export { handle, makeReference, originOk, tooMany, page, sniff, storeUpload, fileFor, STATUSES };
+export {
+	handle,
+	makeReference,
+	originOk,
+	tooMany,
+	page,
+	sniff,
+	storeUpload,
+	fileFor,
+	claimAttachments,
+	attemptStats,
+	STATUSES
+};
 
 /* ----------------------------------------------------------------- admin -- */
 
@@ -1741,7 +1853,35 @@ async function handleAdmin(request, response, url) {
 		if (!session) {
 			return send(response, 200, loginPage());
 		}
-		const tickets = db.prepare('SELECT * FROM tickets ORDER BY id DESC LIMIT 200').all();
+		/*
+		 * Every unresolved report, and only a window of the closed ones.
+		 *
+		 * One `LIMIT 200` over both used to decide this, which meant closed reports
+		 * competed with open ones for the same two hundred rows. Two hundred newer
+		 * tickets of any status pushed an older open one off the end, and the admin
+		 * screen — the only place these are ever read, with no search and no
+		 * pagination — said there was nothing open while somebody was still waiting.
+		 *
+		 * Open work is never truncated. History is, because it is history, and it
+		 * is ordered oldest-waiting-first so the report nobody has answered longest
+		 * is at the top rather than buried under today's.
+		 */
+		const open = db
+			.prepare(
+				`SELECT * FROM tickets
+				 WHERE status NOT IN ('resolved', 'declined')
+				 ORDER BY updated_at ASC, id ASC`
+			)
+			.all();
+		const closed = db
+			.prepare(
+				`SELECT * FROM tickets
+				 WHERE status IN ('resolved', 'declined')
+				 ORDER BY id DESC
+				 LIMIT 200`
+			)
+			.all();
+		const tickets = [...open, ...closed];
 		const counts = new Map(
 			db
 				.prepare(

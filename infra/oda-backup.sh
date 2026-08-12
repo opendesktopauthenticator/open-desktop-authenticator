@@ -56,9 +56,14 @@ if [ -f /var/lib/tickets/tickets.db ]; then
   # the problem and the write permission was the half that actually bit.
   chmod 700 "$snapshot"
   chown tickets:tickets "$snapshot"
-  # As the owning user: the WAL has to be readable, and nothing root-owned should
-  # be left behind in /var/lib/tickets.
-  sudo -u tickets node --input-type=module -e "
+  # `runuser`, not `sudo`. The unit sets `NoNewPrivileges=true`, which blocks the
+  # setuid transition sudo relies on — it fails with "error initializing audit
+  # plugin". runuser is the tool for dropping privilege when already root, and it
+  # needs no setuid at all, so the hardening stays on.
+  #
+  # As the owning user either way: the WAL has to be readable, and nothing
+  # root-owned should be left behind in /var/lib/tickets.
+  runuser -u tickets -- node --input-type=module -e "
     const { DatabaseSync } = await import('node:sqlite');
     const db = new DatabaseSync('/var/lib/tickets/tickets.db', { readOnly: true });
     db.exec(\"VACUUM INTO '$snapshot/tickets.db'\");

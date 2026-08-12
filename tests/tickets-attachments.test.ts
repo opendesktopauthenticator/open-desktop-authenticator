@@ -359,14 +359,30 @@ describe('claiming', () => {
 		expect(reference).toMatch(/^ODA-/);
 	});
 
-	it('takes no more than four files', async () => {
+	/*
+	 * This used to assert that a six-file report silently kept four.
+	 *
+	 * That behaviour is now a refusal — see 'a submission carrying more files
+	 * than the limit' below — so what is left to check here is the second line of
+	 * defence underneath it: the store itself still refuses to claim more than
+	 * four, whatever reaches it. Driven straight at `claimAttachments`, past the
+	 * validation, because a cap that only holds when the check above it holds is
+	 * not a cap.
+	 */
+	it('never claims more than four, even past the validation', async () => {
 		const ids: string[] = [];
 		for (let i = 0; i < 6; i++) {
 			const { id } = await upload(PNG);
 			if (id) ids.push(id);
 		}
 		expect(ids.length).toBe(6);
-		const reference = await report(ids.join(','));
+		const reference = await report();
+		const ticket = service.db
+			.prepare('SELECT id FROM tickets WHERE reference = ?')
+			.get(reference) as { id: number };
+
+		const claimed = service.claimAttachments(ticket.id, null, ids.join(','));
+		expect(claimed, 'the store stops at the limit on its own').toBe(4);
 
 		let served = 0;
 		for (const id of ids) {
@@ -413,5 +429,122 @@ describe('where an upload may come from', () => {
 		const { out, response } = capture();
 		await service.handle(request, response, at('/support/attach'));
 		expect(out.status).toBe(403);
+	});
+});
+
+/**
+ * More files than the limit.
+ *
+ * The page refuses at four, but a page is a suggestion. Before this the server
+ * took whatever arrived, sliced the list to four and stored those — so a report
+ * that had been composed with six screenshots on it arrived with four, and
+ * nothing anywhere said which two were missing or that any were. That is the
+ * worst shape a limit can take: it looks obeyed from the outside.
+ *
+ * Both submission paths are checked, because only one of them ran `validate` and
+ * so only one of them would have been fixed by fixing `validate`.
+ */
+describe('a submission carrying more files than the limit', () => {
+	/** `n` real uploads, returned as the comma-joined ids a form would carry. */
+	async function idsFor(n: number) {
+		const ids: string[] = [];
+		for (let i = 0; i < n; i++) {
+			const { id } = await upload(PNG);
+			expect(id, 'the fixture upload itself must succeed').toBeTruthy();
+			ids.push(id as string);
+		}
+		return ids;
+	}
+
+	const claimedOn = (reference: string) =>
+		(
+			service.db
+				.prepare(
+					'SELECT COUNT(*) AS n FROM attachments WHERE ticket_id = (SELECT id FROM tickets WHERE reference = ?)'
+				)
+				.get(reference) as { n: number }
+		).n;
+
+	it('is refused rather than quietly trimmed', async () => {
+		const ids = await idsFor(5);
+		const { out, response } = capture();
+		await service.handle(
+			formRequest({
+				kind: 'bug',
+				summary: 'A report with five screenshots on it',
+				detail: 'Long enough to pass validation, and describing nothing in particular at all.',
+				attachments: ids.join(',')
+			}),
+			response,
+			at('/support/submit')
+		);
+
+		expect(out.status, 'the report must not be accepted').toBe(400);
+		expect(out.body).toContain('Four files at most');
+		expect(out.body, 'the count it refused on belongs in the message').toContain('carried 5');
+		expect(
+			/ODA-[A-Z0-9]{4}-[A-Z0-9]{4}/.test(out.body),
+			'no report may be created by a refused submission'
+		).toBe(false);
+
+		// And nothing was claimed — all five are still loose, so the sweeper will
+		// take them if the reporter walks away.
+		for (const id of ids) {
+			const row = service.db.prepare('SELECT ticket_id FROM attachments WHERE id = ?').get(id) as
+				{ ticket_id: number | null } | undefined;
+			expect(row?.ticket_id, `${id} must still be unclaimed`).toBeNull();
+		}
+	});
+
+	it('keeps the typed report so nothing has to be written twice', async () => {
+		const ids = await idsFor(6);
+		const { out, response } = capture();
+		await service.handle(
+			formRequest({
+				kind: 'security',
+				summary: 'Something I would hate to type again',
+				detail: 'A long description that took real effort, which the refusal must give back.',
+				attachments: ids.join(',')
+			}),
+			response,
+			at('/support/submit')
+		);
+
+		expect(out.body).toContain('Something I would hate to type again');
+		expect(out.body).toContain('which the refusal must give back');
+		// The kind, too — a re-selected radio is a small thing to lose and an easy
+		// one to miss.
+		expect(out.body).toContain('<option value="security" selected>');
+	});
+
+	it('still accepts exactly the limit', async () => {
+		const ids = await idsFor(4);
+		const reference = await report(ids.join(','));
+		expect(reference, 'four is allowed').toBeTruthy();
+		expect(claimedOn(reference), 'and all four are stored').toBe(4);
+	});
+
+	it('refuses a reply carrying too many, which never went through validate', async () => {
+		const reference = await report();
+		const ids = await idsFor(5);
+
+		const { out, response } = capture();
+		await service.handle(
+			formRequest({ body: 'Here are the pictures you asked for.', attachments: ids.join(',') }),
+			response,
+			at(linkTo(reference, '/reply'))
+		);
+
+		expect(out.status).toBe(400);
+		expect(out.body).toContain('Four files at most');
+		expect(claimedOn(reference), 'a refused reply attaches nothing').toBe(0);
+		expect(
+			service.db
+				.prepare(
+					'SELECT COUNT(*) AS n FROM notes WHERE ticket_id = (SELECT id FROM tickets WHERE reference = ?)'
+				)
+				.get(reference),
+			'and writes no message'
+		).toMatchObject({ n: 0 });
 	});
 });

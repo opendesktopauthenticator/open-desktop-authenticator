@@ -177,7 +177,15 @@
 				);
 				return;
 			}
-			if (done.length >= MAX_FILES) {
+			// `done.length + inFlight`, not `done.length`.
+			//
+			// Every `upload()` in a batch reaches its first `await` before any of
+			// them finishes, so counting only completed uploads meant five files
+			// selected together all saw zero and all proceeded. The server then
+			// silently kept four and dropped the rest — the page showed six
+			// thumbnails and the report arrived with four, the two missing ones
+			// being whichever the server happened to slice off.
+			if (done.length + inFlight >= MAX_FILES) {
 				complain('Four files at most.');
 				return;
 			}

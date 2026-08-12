@@ -560,6 +560,21 @@ export class ImportService {
 		const touched = new Set<string>();
 		/** Accounts that did not exist before this commit. See `onAccountStored`. */
 		const freshlyStored = new Set<string>();
+		/**
+		 * Replacements whose recovery-critical secrets actually changed.
+		 *
+		 * A replace can bring a different `sharedSecret`, `identitySecret` or
+		 * revocation code — re-enrolling an account and importing the new maFile
+		 * does exactly that. The recovery file written at first import still held
+		 * the *old* ones and nothing rewrote it, so recovery restored secrets Steam
+		 * had already stopped accepting: the mechanism failed at the only moment it
+		 * is ever used.
+		 *
+		 * Tracked separately from `freshlyStored` because most replacements change
+		 * nothing that matters here, and a second backup for a renamed account
+		 * teaches people to ignore the pile.
+		 */
+		const secretsChanged = new Set<string>();
 
 		try {
 			await this.vault.mutate((draft) => {
@@ -623,7 +638,11 @@ export class ImportService {
 
 					if (index >= 0) {
 						const existing = draft.accounts[index] as Account;
-						draft.accounts[index] = mergeAccount(existing, parsed, steamId64, selection.adoptProxy);
+						const replacement = mergeAccount(existing, parsed, steamId64, selection.adoptProxy);
+						if (recoveryCriticalChange(existing, replacement)) {
+							secretsChanged.add(steamId64);
+						}
+						draft.accounts[index] = replacement;
 						outcomes.push({
 							stagingId: entry.id,
 							accountName: parsed.accountName,
@@ -666,7 +685,11 @@ export class ImportService {
 			// enrollment swallows it: the account is imported either way, and
 			// reporting a failure for something that worked would send the user round
 			// again.
-			if (freshlyStored.has(steamId64)) {
+			// Also for a replacement that changed the secrets: `writeRecoveryFile`
+			// refuses to overwrite and drops a timestamped sibling instead, so the
+			// previous enrollment's backup survives beside the new one. Two files and
+			// a clear choice beats one file that silently no longer works.
+			if (freshlyStored.has(steamId64) || secretsChanged.has(steamId64)) {
 				try {
 					this.onAccountStored(after);
 				} catch {
@@ -848,6 +871,20 @@ function newAccount(
  * keeps its stored value, and settings the user chose in the app — auto-confirm,
  * and the date the account was added — are not the import's to overwrite.
  */
+/**
+ * Whether a replacement invalidates the recovery file written for the old one.
+ *
+ * Only the three things recovery actually restores. An account renamed, a proxy
+ * adopted or a device id filled in leaves the existing backup perfectly usable.
+ */
+function recoveryCriticalChange(before: Account, after: Account): boolean {
+	return (
+		before.sharedSecret !== after.sharedSecret ||
+		before.identitySecret !== after.identitySecret ||
+		before.revocationCode !== after.revocationCode
+	);
+}
+
 function mergeAccount(
 	existing: Account,
 	parsed: ParsedMaFile,

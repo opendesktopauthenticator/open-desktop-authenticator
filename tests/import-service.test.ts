@@ -37,6 +37,10 @@ const PASS = 'a sufficiently long passphrase';
  * is the check doing its job: a secret that short could never produce a code.
  */
 const SECRET = 'ASNFZ4mrze8BI0VniavN7wEjRWc=';
+/* A second enrollment's secrets. Twenty bytes, like the first: a shorter
+   string is rejected as unusable before any of this is reached. */
+const SECOND_SECRET = 'ICEiIyQlJicoKSorLC0uLzAxMjM=';
+const SECOND_IDENTITY = 'c2Vjb25kLWlkZW50aXR5LXNlY3I=';
 const REPLACEMENT_SECRET = '/ty6mHZUMhD+3LqYdlQyEP7cupg=';
 /** The same twenty bytes as SECRET, written the way some tools write them. */
 const HEX_SECRET = '0123456789abcdef0123456789abcdef01234567';
@@ -163,6 +167,138 @@ describe('staging', () => {
 				return importing.commit([
 					{
 						stagingId: again.candidates[0]?.stagingId ?? '',
+						replaceExisting: true,
+						adoptProxy: false
+					}
+				]);
+			})
+			.then(() => {
+				expect(stored).toHaveLength(1);
+			});
+	});
+
+	it('writes a fresh one when a replacement changes the secrets', () => {
+		/*
+		 * The gap the two tests above left between them.
+		 *
+		 * One asserted that a new account gets a recovery file; the other that a
+		 * replace does not write a second one. Both were true and neither covered
+		 * the case that matters: re-enrolling an account gives it *different*
+		 * secrets, and importing that maFile replaced them in the vault while the
+		 * recovery file on disk still held the old ones.
+		 *
+		 * Nothing failed. Recovery simply restored secrets Steam had already
+		 * stopped accepting — the mechanism breaking at the only moment it is ever
+		 * used, silently, months after the import that caused it.
+		 */
+		const stored: Account[] = [];
+		const importing = new ImportService(vault, {
+			now: () => clock,
+			onAccountStored: (a) => stored.push(a)
+		});
+
+		const first = importing.stage([file()]);
+		return importing
+			.commit([
+				{
+					stagingId: first.candidates[0]?.stagingId ?? '',
+					replaceExisting: false,
+					adoptProxy: false
+				}
+			])
+			.then(() => {
+				// The same account, re-enrolled: new shared and identity secrets, new
+				// revocation code.
+				const reEnrolled = importing.stage([
+					file({
+						shared_secret: SECOND_SECRET,
+						identity_secret: SECOND_IDENTITY,
+						revocation_code: 'R54321'
+					})
+				]);
+				return importing.commit([
+					{
+						stagingId: reEnrolled.candidates[0]?.stagingId ?? '',
+						replaceExisting: true,
+						adoptProxy: false
+					}
+				]);
+			})
+			.then(() => {
+				expect(stored, 'the new secrets need a backup of their own').toHaveLength(2);
+				// And it carries what the vault now holds, not what it used to.
+				expect(stored[1]?.sharedSecret).toBe(SECOND_SECRET);
+				expect(stored[1]?.revocationCode).toBe('R54321');
+			});
+	});
+
+	it('writes a fresh one when a replacement brings a revocation code the first lacked', () => {
+		// The revocation code on its own, because it is the field that decides
+		// whether an account can be detached without Steam Support. A recovery file
+		// written before the code was known is missing the single most valuable
+		// thing in it, and the import that supplied it must produce a new one.
+		const stored: Account[] = [];
+		const importing = new ImportService(vault, {
+			now: () => clock,
+			onAccountStored: (a) => stored.push(a)
+		});
+
+		// The first file has no revocation code at all.
+		const withoutCode = file();
+		const parsed = JSON.parse(withoutCode.text) as Record<string, unknown>;
+		delete parsed.revocation_code;
+		withoutCode.text = JSON.stringify(parsed);
+
+		const first = importing.stage([withoutCode]);
+		return importing
+			.commit([
+				{
+					stagingId: first.candidates[0]?.stagingId ?? '',
+					replaceExisting: false,
+					adoptProxy: false
+				}
+			])
+			.then(() => {
+				expect(stored[0]?.revocationCode).toBeUndefined();
+				// The same secrets, but this time the file carries the code.
+				const withCode = importing.stage([file()]);
+				return importing.commit([
+					{
+						stagingId: withCode.candidates[0]?.stagingId ?? '',
+						replaceExisting: true,
+						adoptProxy: false
+					}
+				]);
+			})
+			.then(() => {
+				expect(stored, 'the code is worth a backup of its own').toHaveLength(2);
+				expect(stored[1]?.revocationCode).toBe('R12345');
+			});
+	});
+
+	it('does not write one for a replacement that only renames the account', () => {
+		// The other half of the same rule: a backup per re-import would pile up
+		// files and make the one that matters harder to find.
+		const stored: Account[] = [];
+		const importing = new ImportService(vault, {
+			now: () => clock,
+			onAccountStored: (a) => stored.push(a)
+		});
+
+		const first = importing.stage([file()]);
+		return importing
+			.commit([
+				{
+					stagingId: first.candidates[0]?.stagingId ?? '',
+					replaceExisting: false,
+					adoptProxy: false
+				}
+			])
+			.then(() => {
+				const renamed = importing.stage([file({ account_name: 'trader-renamed' })]);
+				return importing.commit([
+					{
+						stagingId: renamed.candidates[0]?.stagingId ?? '',
 						replaceExisting: true,
 						adoptProxy: false
 					}
