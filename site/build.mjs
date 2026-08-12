@@ -61,6 +61,7 @@ const escape = (s) =>
 /** The pages that appear in the header, in the order a newcomer needs them. */
 const NAV = [
 	'steam-desktop-authenticator',
+	'steam-inventory-stolen',
 	'download',
 	'verify',
 	'security',
@@ -234,6 +235,7 @@ ${page.body(SITE)}
 				<a href="/verify">Verify a download</a>
 				<a href="/security">Security</a>
 				<a href="/scam-clones">Scam clones</a>
+				<a href="/steam-inventory-stolen">What happened to us</a>
 				<a href="/what-is-a-mafile">What is a maFile</a>
 				<a href="/lost-authenticator">Lost your authenticator</a>
 				<a href="/alternatives">Alternatives compared</a>

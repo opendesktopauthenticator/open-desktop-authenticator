@@ -173,6 +173,7 @@ export const scamClones = {
 
 			<h2>Related</h2>
 			<ul class="plain next">
+				<li><a href="/steam-inventory-stolen">What this looked like when it happened to us</a></li>
 				<li><a href="/verify">How to verify a download</a></li>
 				<li><a href="/steam-desktop-authenticator">What SDA and maFiles are</a></li>
 				<li><a href="/support">Report a suspected clone site</a></li>

@@ -114,6 +114,11 @@ ${PROJECTS.map(
 				modified build their <code>.maFile</code>.
 			</p>
 			<p>
+				It also happened to one of us, before any of this existed.
+				<a href="/steam-inventory-stolen">That account is written up in full</a>, because
+				it is the most honest answer to why we bothered.
+			</p>
+			<p>
 				That is a solvable problem. Not by telling people to be careful, which has never
 				worked, but by making a version of the tool where the dangerous parts are
 				visible, the build is reproducible, and the site tells you how to check what you

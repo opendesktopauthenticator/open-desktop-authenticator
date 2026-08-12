@@ -11,11 +11,13 @@ import { scamClones, verify, security } from './safety.mjs';
 import { download, importFromSda, docs, faq, support, notFound } from './guides.mjs';
 import { mafile, lostAuthenticator, alternatives } from './answers.mjs';
 import owners from './owners.mjs';
+import story from './story.mjs';
 
 export const PAGES = [
 	home,
 	sda,
 	scamClones,
+	story,
 	verify,
 	security,
 	mafile,
