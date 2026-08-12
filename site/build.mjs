@@ -87,7 +87,7 @@ function head(page) {
 	// Skipped when the title already names the product, or the result reads
 	// "Open Desktop Authenticator download … · ODA" — the brand twice, in the one
 	// line a result has before it is truncated.
-	const namesTheProduct = /Open Desktop Authenticator|ODA/.test(page.title);
+	const namesTheProduct = /Open Desktop Authenticator|\bODA\b/.test(page.title);
 	const title =
 		page.slug === 'index' || namesTheProduct || page.title.length + suffix.length > 62
 			? page.title
