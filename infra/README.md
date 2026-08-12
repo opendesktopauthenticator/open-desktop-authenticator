@@ -54,17 +54,28 @@ is suspected — it is so the cost of being wrong is bounded before anyone needs
 it to be.
 
 **Setting the administrator passphrase.** There is no sign-up. On first run the
-service prints a one-time bootstrap link to its journal, so setting the
-passphrase requires access to the server:
+service prints a one-time setup token to its journal, so setting the passphrase
+requires access to the server:
 
 ```bash
-journalctl -u tickets | grep -o '/admin/bootstrap?token=[A-Za-z0-9_-]*' | tail -1
+journalctl -u tickets | grep -o 'setup token: [A-Za-z0-9_-]*' | tail -1
 ```
 
-Open that path on the site, choose a passphrase of 16 characters or more, and
-the token stops existing. There is no reset: losing the passphrase means
-deleting the row from `admins` in `/var/lib/tickets/tickets.db` and
-bootstrapping again.
+Open `/admin/bootstrap` on the site, paste the token into the form along with a
+passphrase of 16 characters or more, and the token stops existing.
+
+The token is a **form field, never a query parameter**, and that is deliberate.
+A secret in a URL is written to the nginx access log as part of `$request`,
+written again as the `$http_referer` of every subresource the page pulls, kept
+in browser history, and offered by autocomplete afterwards. The access log is
+mode 640 `www-data:adm` and is retained compressed for fourteen days, so a
+token that is still valid would outlive the minute it was needed for. A POST
+body appears in none of those places. The service refuses a token supplied in
+the query string even when it is the correct one, so the leaky path cannot come
+back by habit.
+
+There is no reset: losing the passphrase means deleting the row from `admins`
+in `/var/lib/tickets/tickets.db` and bootstrapping again.
 
 ## Monitoring, such as it is
 

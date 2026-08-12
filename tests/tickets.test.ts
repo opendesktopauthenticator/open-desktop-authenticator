@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 /**
@@ -143,17 +144,28 @@ describe('the admin view', () => {
 		expect(html).not.toMatch(/Reports<\/h1>/);
 	});
 
-	it('refuses bootstrap without the token', async () => {
+	it('will not create an administrator without the token', async () => {
+		// GET now renders a form that asks for the token, because the token is a
+		// form field rather than a query parameter — a secret in a URL ends up in
+		// the access log and in browser history. So the refusal moved to the POST.
 		let status = 0;
+		const chunks: string[] = [];
 		const response = {
 			headersSent: false,
 			writeHead(code: number) {
 				status = code;
 				return this;
 			},
-			end() {}
+			end(body: string) {
+				chunks.push(body ?? '');
+			}
 		};
-		await service.handleAdmin(request(), response, new URL('https://x/admin/bootstrap'));
+		const empty = Readable.from([Buffer.from('')]) as unknown as Record<string, unknown>;
+		empty.method = 'POST';
+		empty.headers = {};
+		empty.socket = { remoteAddress: '10.9.0.1' };
+		await service.handleAdmin(empty, response, new URL('https://x/admin/bootstrap'));
 		expect(status).toBe(403);
+		expect(chunks.join('')).not.toMatch(/Reports<\/h1>/);
 	});
 });

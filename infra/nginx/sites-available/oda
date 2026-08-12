@@ -181,6 +181,16 @@ server {
 
 		proxy_pass http://127.0.0.1:8787;
 		proxy_http_version 1.1;
+
+		# The service sets these too, so that it is still safe if it is ever reached
+		# directly. Behind nginx that means two copies of each on the wire, and two
+		# Referrer-Policy values is not merely untidy — the browser takes the last
+		# valid one, so which policy actually applies depends on header order rather
+		# than on either config saying so. nginx is the single authority here; the
+		# upstream's copies are dropped.
+		proxy_hide_header Cache-Control;
+		proxy_hide_header Referrer-Policy;
+		proxy_hide_header X-Content-Type-Options;
 		proxy_set_header Host              $host;
 		# The real client, which the service uses for its own rate limiting. Only
 		# meaningful because the Cloudflare real-IP block established it.

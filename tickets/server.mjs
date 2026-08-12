@@ -158,9 +158,19 @@ function validate(form) {
  * and never recoverable if lost — which for a single-maintainer tool is the
  * correct trade.
  */
-const SCRYPT = { N: 2 ** 15, r: 8, p: 1, keylen: 32 };
+// 128 * N * r is exactly 32 MiB at these parameters, which is also Node's
+// default `maxmem` — and the check rejects rather than rounds, so every call
+// threw and neither the bootstrap nor the sign-in could ever have completed.
+// The ceiling is raised rather than the cost lowered: the work factor is the
+// only thing standing between a stolen database and the passphrase.
+const SCRYPT = { N: 2 ** 15, r: 8, p: 1, keylen: 32, maxmem: 64 * 1024 * 1024 };
 const derive = (passphrase, salt) =>
-	scryptSync(passphrase, salt, SCRYPT.keylen, { N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p });
+	scryptSync(passphrase, salt, SCRYPT.keylen, {
+		N: SCRYPT.N,
+		r: SCRYPT.r,
+		p: SCRYPT.p,
+		maxmem: SCRYPT.maxmem
+	});
 
 /** Constant-time, and length-safe: timingSafeEqual throws on a length mismatch. */
 function sameSecret(a, b) {
@@ -174,6 +184,12 @@ const sessions = new Map();
 const SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
 
 function newSession() {
+	// Swept here rather than on a timer: `readSession` only drops a session when
+	// that exact one is presented again, so a session signed in and never
+	// returned to would sit in the map until the process restarted.
+	const now = Date.now();
+	for (const [id, session] of sessions) if (session.expires < now) sessions.delete(id);
+
 	const id = randomBytes(32).toString('base64url');
 	sessions.set(id, {
 		expires: Date.now() + SESSION_LIFETIME_MS,
@@ -213,8 +229,11 @@ function refreshBootstrap() {
 		return;
 	}
 	bootstrapToken = randomBytes(24).toString('base64url');
+	// Printed as a bare value, deliberately not as a clickable URL: a link invites
+	// pasting the secret into an address bar, and everything downstream of an
+	// address bar — the access log, browser history, autocomplete — keeps it.
 	process.stdout.write(
-		`no administrator configured — set one at /admin/bootstrap?token=${bootstrapToken}\n`
+		`no administrator configured — open /admin/bootstrap and paste this setup token: ${bootstrapToken}\n`
 	);
 }
 
@@ -253,7 +272,7 @@ function page({ title, body, noindex = true }) {
 	<title>${escape(title)} · ODA</title>
 	${noindex ? '<meta name="robots" content="noindex, nofollow">' : ''}
 	<link rel="icon" href="/favicon.ico" sizes="32x32">
-	<link rel="stylesheet" href="${styleHref()}">
+	<link rel="stylesheet" href="${escape(styleHref())}">
 </head>
 <body>
 	<header class="masthead"><div class="wrap">
@@ -534,6 +553,10 @@ function adminList(session, tickets) {
 		title: 'Admin',
 		body: `		<article>
 			<h1>Reports</h1>
+			<form method="post" action="/admin/logout" class="controls">
+				<input type="hidden" name="csrf" value="${escape(session.csrf)}">
+				<button type="submit" class="secondary">Sign out</button>
+			</form>
 			<p class="lede">${open.length} open, ${closed.length} closed.</p>
 			<h2>Open</h2>
 			${open.length ? `<ul class="projects">\n${open.map(row).join('\n')}\n</ul>` : '<p class="muted">Nothing open.</p>'}
@@ -568,15 +591,14 @@ async function handleAdmin(request, response, url) {
 				})
 			);
 		}
-		const token = url.searchParams.get('token') ?? '';
-		// Constant-time: this token is the only thing in front of the admin view.
-		if (!sameSecret(Buffer.from(token), Buffer.from(bootstrapToken))) {
-			return send(
-				response,
-				403,
-				page({ title: 'Refused', body: notice('callout-warn', ['Bad or missing token.']) })
-			);
-		}
+		// **The token is a form field, never a query parameter.** A secret in a URL
+		// is written to the nginx access log by `$request`, echoed into the log
+		// again as the `$http_referer` of every subresource the page pulls, kept in
+		// browser history, and offered by autocomplete forever after. That log is
+		// mode 640 root:adm, and `adm` contains unprivileged accounts — so a token
+		// that is still valid would be readable by someone who has no other way in,
+		// and reading it is enough to become the administrator. A POST body is in
+		// none of those places.
 		if (method === 'GET') {
 			return send(
 				response,
@@ -588,7 +610,12 @@ async function handleAdmin(request, response, url) {
 			<p class="lede">Chosen once, and never recoverable. There is no reset — losing it
 			means deleting the administrator row and bootstrapping again, which requires access
 			to this server.</p>
-			<form method="post" action="/admin/bootstrap?token=${escape(token)}">
+			<p>The setup token was printed to the service journal when it started with no
+			administrator configured. Read it on the server with
+			<code>journalctl -u tickets | grep "setup token"</code> and paste it below.</p>
+			<form method="post" action="/admin/bootstrap">
+				<label for="t">Setup token</label>
+				<input id="t" name="token" type="password" autocomplete="off" required>
 				<label for="p">Passphrase (16 characters or more)</label>
 				<input id="p" name="passphrase" type="password" autocomplete="new-password" required>
 				<div class="controls"><button type="submit">Set it</button></div>
@@ -597,7 +624,24 @@ async function handleAdmin(request, response, url) {
 				})
 			);
 		}
+		// Guessing is hopeless against 192 bits, but an unlimited guess rate is a
+		// free amplifier and there is no reason to offer one.
+		if (tooMany(`bootstrap:${client}`, 5, 15 * 60 * 1000)) {
+			return send(
+				response,
+				429,
+				page({ title: 'Too many', body: notice('callout-warn', ['Too many attempts. Wait fifteen minutes.']) })
+			);
+		}
 		const form = await readForm(request).catch(() => ({}));
+		// Constant-time: this token is the only thing in front of the admin view.
+		if (!sameSecret(Buffer.from(String(form.token ?? '')), Buffer.from(bootstrapToken))) {
+			return send(
+				response,
+				403,
+				page({ title: 'Refused', body: notice('callout-warn', ['Bad or missing token.']) })
+			);
+		}
 		const passphrase = String(form.passphrase ?? '');
 		if (passphrase.length < 16) {
 			return send(
@@ -644,11 +688,28 @@ async function handleAdmin(request, response, url) {
 			location: '/admin',
 			// Host-only, HTTPS-only, invisible to script, and never sent on a
 			// cross-site navigation — the cookie half of the CSRF defence.
-			'set-cookie': `admin=${id}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_LIFETIME_MS / 1000}`
+			// Scoped to /admin so the session identifier is not attached to every
+			// request for a stylesheet or an icon as well.
+			'set-cookie': `admin=${id}; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=${SESSION_LIFETIME_MS / 1000}`
 		});
 	}
 
 	const session = readSession(request);
+
+	// Signing out was missing entirely: the only way to end a session was to wait
+	// eight hours or restart the service. Someone who signs in on a machine they
+	// do not own needs a way to end it before they walk away from it.
+	if (url.pathname === '/admin/logout' && method === 'POST') {
+		// A POST with the session's own token, so another site cannot sign the
+		// administrator out by pointing them at a link.
+		if (session && sameSecret(Buffer.from(String((await readForm(request).catch(() => ({}))).csrf ?? '')), Buffer.from(session.csrf))) {
+			sessions.delete(session.id);
+		}
+		return send(response, 303, '', {
+			location: '/admin',
+			'set-cookie': 'admin=; Path=/admin; HttpOnly; Secure; SameSite=Strict; Max-Age=0'
+		});
+	}
 
 	if (url.pathname === '/admin' && method === 'GET') {
 		if (!session) {

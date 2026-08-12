@@ -55,6 +55,9 @@ export function handle(request: unknown, response: unknown, url: URL): Promise<u
 /** Admin routes. Resolves undefined when the path is not one of them. */
 export function handleAdmin(request: unknown, response: unknown, url: URL): Promise<unknown>;
 
+/** The sign-in page, optionally carrying a message. */
+export function loginPage(message?: string): string;
+
 /** Wrap a body in the site's layout. */
 export function page(options: { title: string; body: string; noindex?: boolean }): string;
 
