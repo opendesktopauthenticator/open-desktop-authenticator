@@ -57,6 +57,23 @@ server {
 	}
 }
 
+# www over TLS, redirecting to the apex.
+#
+# **Without this block nginx has no 443 server for www**, so it falls back to
+# the first 443 server it has — the apex — and serves every page a second time
+# under the wrong hostname. The canonical tag asks a crawler to ignore that; a
+# 301 means it never sees it. Verified before this existed: https://www/ was
+# returning 200 with the apex page.
+server {
+	listen 443 ssl http2;
+	listen [::]:443 ssl http2;
+	server_name www.opendesktopauthenticator.com;
+
+	include snippets/tls.conf;
+
+	return 301 https://opendesktopauthenticator.com$request_uri;
+}
+
 server {
 	# `http2 on;` as its own directive needs nginx 1.25.1; this is 1.24, where it
 	# is a listen parameter. The standalone form is not a warning, it is a hard
