@@ -483,9 +483,18 @@ export const support = {
 						       accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm">
 					</div>
 					<p class="hint">
-						Check the picture before you send it. A screenshot of the application can
-						have a code, an account name or a recovery code in the corner of it, and a
-						screen recording can have far more than you meant to include.
+						<strong>Check the picture before you choose it.</strong> A screenshot of
+						the application can have a code, an account name or a recovery code in the
+						corner of it, and a screen recording can have far more than you meant to
+						include. The check that refuses secrets in this form reads text — it
+						cannot see inside an image, so nothing here will catch a secret that is
+						only in a picture.
+					</p>
+					<p class="hint">
+						Files upload as soon as you choose them, so we can check the type and size
+						before you finish writing. <strong>Remove</strong> deletes our copy, not
+						just the thumbnail. Anything you never attach to a report is deleted
+						within two hours.
 					</p>
 					<ul class="attachments" data-list></ul>
 				</div>

@@ -84,8 +84,14 @@ describe('stored cross-site scripting', () => {
 		const reference = /ODA-[A-Z0-9]{4}-[A-Z0-9]{4}/.exec(first.out.body)?.[0];
 		expect(reference).toBeTruthy();
 
-		// Read it back through the page that renders it.
-		const view = get(`/support/ticket/${reference}`);
+		// Read it back through the page that renders it, following the whole link —
+		// the reference alone no longer opens a report.
+		const key = (
+			service.db
+				.prepare('SELECT access_key FROM tickets WHERE reference = ?')
+				.get(reference ?? '') as { access_key: string } | undefined
+		)?.access_key;
+		const view = get(`/support/ticket/${reference}?k=${encodeURIComponent(key ?? '')}`);
 		const second = capture();
 		await service.handle(view.request, second.response, view.url);
 		expect(second.out.status).toBe(200);
@@ -137,11 +143,16 @@ describe('what the public ticket page discloses', () => {
 		await service.handle(submit.request, first.response, submit.url);
 		const reference = /ODA-[A-Z0-9]{4}-[A-Z0-9]{4}/.exec(first.out.body)?.[0];
 
-		const view = get(`/support/ticket/${reference}`);
+		const key = (
+			service.db
+				.prepare('SELECT access_key FROM tickets WHERE reference = ?')
+				.get(reference ?? '') as { access_key: string } | undefined
+		)?.access_key;
+		const view = get(`/support/ticket/${reference}?k=${encodeURIComponent(key ?? '')}`);
 		const second = capture();
 		await service.handle(view.request, second.response, view.url);
 
-		// Anyone holding the reference can read the report. The address must not be
+		// Anyone holding the link can read the report. The address must not be
 		// part of that — it is for us to reply with, not for the page to publish.
 		expect(second.out.body).not.toContain('reporter@example.com');
 	});

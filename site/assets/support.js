@@ -111,9 +111,17 @@
 			carrier.value = done.map((a) => a.id).join(',');
 		};
 
+		/*
+		 * A failure the reader is told about.
+		 *
+		 * `role="alert"` because this appears after an action the person took and
+		 * they may not be looking at this part of the page — a rejected upload that
+		 * is only visible is a rejected upload somebody submits the form without.
+		 */
 		function complain(text) {
 			const p = document.createElement('p');
 			p.className = 'field-error';
+			p.setAttribute('role', 'alert');
 			p.textContent = text;
 			list.parentNode.insertBefore(p, list);
 			setTimeout(() => p.remove(), 8000);
@@ -195,7 +203,23 @@
 				const remove = document.createElement('button');
 				remove.type = 'button';
 				remove.textContent = 'Remove';
-				remove.addEventListener('click', () => {
+				remove.addEventListener('click', async () => {
+					// Tell the server first. Dropping the card and leaving the file on
+					// disk is what this button used to do, and a delete control that
+					// does not delete is worse than no button — somebody who spots
+					// their account name in a screenshot and pulls it back has to
+					// actually have pulled it back.
+					remove.disabled = true;
+					remove.textContent = 'Removing…';
+					try {
+						await fetch('/support/attach/' + encodeURIComponent(payload.id), {
+							method: 'DELETE'
+						});
+					} catch {
+						// The upload is unclaimed either way, so it is swept within two
+						// hours. Better to let the card go than to trap the person on a
+						// page insisting they retry.
+					}
 					const at = done.findIndex((a) => a.id === payload.id);
 					if (at >= 0) done.splice(at, 1);
 					sync();

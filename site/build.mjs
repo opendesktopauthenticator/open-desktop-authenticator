@@ -540,7 +540,6 @@ Policy: ${SITE.repo}/blob/main/SECURITY.md
 `
 );
 
-const today = new Date().toISOString().slice(0, 10);
 writeFileSync(
 	join(out, 'sitemap.xml'),
 	`<?xml version="1.0" encoding="UTF-8"?>
@@ -548,7 +547,12 @@ writeFileSync(
 ${PAGES.filter((p) => !p.noindex)
 	.map(
 		(p) =>
-			`\t<url><loc>${SITE.origin}/${p.slug === 'index' ? '' : p.slug}</loc><lastmod>${today}</lastmod></url>`
+			// The page's own review date, falling back to the site's — not the build
+			// date. Stamping every URL with today meant a deploy that changed one
+			// stylesheet told search engines all seventeen pages had been revised,
+			// which is a claim about freshness that was simply untrue and devalues
+			// the signal for the pages that genuinely had changed.
+			`\t<url><loc>${SITE.origin}/${p.slug === 'index' ? '' : p.slug}</loc><lastmod>${p.updated ?? SITE.updated}</lastmod></url>`
 	)
 	.join('\n')}
 </urlset>

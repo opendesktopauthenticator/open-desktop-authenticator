@@ -118,6 +118,20 @@ async function upload(payload: Buffer, headers = {}, ip?: string) {
 	return { out, id: parsed?.id };
 }
 
+/**
+ * The link a reporter actually holds.
+ *
+ * The reference stopped being enough to open a report when the capability was
+ * split out of it. That is the change under test elsewhere; here it just means
+ * the fixtures have to follow the whole link rather than half of it.
+ */
+function linkTo(reference: string, suffix = '') {
+	const row = service.db
+		.prepare('SELECT access_key FROM tickets WHERE reference = ?')
+		.get(reference) as { access_key: string } | undefined;
+	return `/support/ticket/${reference}${suffix}?k=${encodeURIComponent(row?.access_key ?? '')}`;
+}
+
 /** File a report, optionally claiming uploads, and return its reference. */
 async function report(attachments?: string, ip?: string) {
 	const { out, response } = capture();
@@ -233,7 +247,7 @@ describe('who may fetch a file', () => {
 		const reference = await report(id);
 
 		const { out, response } = capture();
-		await service.handle(getRequest(), response, at(`/support/ticket/${reference}/file/${id}`));
+		await service.handle(getRequest(), response, at(linkTo(reference, `/file/${id}`)));
 		expect(out.status).toBe(200);
 		expect(out.headers['content-type']).toBe('image/png');
 		expect(out.raw.subarray(0, 8)).toEqual(PNG.subarray(0, 8));
@@ -248,7 +262,7 @@ describe('who may fetch a file', () => {
 		const other = await report();
 
 		const { out, response } = capture();
-		await service.handle(getRequest(), response, at(`/support/ticket/${other}/file/${id}`));
+		await service.handle(getRequest(), response, at(linkTo(other, `/file/${id}`)));
 		expect(out.status).toBe(404);
 	});
 
@@ -256,7 +270,7 @@ describe('who may fetch a file', () => {
 		const { id } = await upload(JPEG);
 		const reference = await report();
 		const { out, response } = capture();
-		await service.handle(getRequest(), response, at(`/support/ticket/${reference}/file/${id}`));
+		await service.handle(getRequest(), response, at(linkTo(reference, `/file/${id}`)));
 		expect(out.status).toBe(404);
 	});
 
@@ -272,7 +286,7 @@ describe('who may fetch a file', () => {
 		const served = await service.handle(
 			getRequest(),
 			response,
-			at(`/support/ticket/${reference}/file/${evil}`)
+			at(linkTo(reference, `/file/${evil}`))
 		);
 
 		// The route pattern only matches 32 hex characters, so none of these are
@@ -298,7 +312,7 @@ describe('how a file is served back', () => {
 		const { id } = await upload(PNG);
 		const reference = await report(id);
 		const { out, response } = capture();
-		await service.handle(getRequest(), response, at(`/support/ticket/${reference}/file/${id}`));
+		await service.handle(getRequest(), response, at(linkTo(reference, `/file/${id}`)));
 
 		// nosniff: the browser must not go looking for a second opinion about
 		// what this is, which is how a polyglot would get interpreted as markup.
@@ -319,7 +333,7 @@ describe('how a file is served back', () => {
 		const { id } = await upload(Buffer.concat([PNG, Buffer.from('<script>alert(1)</script>')]));
 		const reference = await report(id);
 		const { out, response } = capture();
-		await service.handle(getRequest(), response, at(`/support/ticket/${reference}/file/${id}`));
+		await service.handle(getRequest(), response, at(linkTo(reference, `/file/${id}`)));
 		expect(out.headers['content-type']).toBe('image/png');
 		expect(out.headers['content-type']).not.toMatch(/html|xml|javascript/);
 	});
@@ -332,9 +346,9 @@ describe('claiming', () => {
 		const second = await report(id);
 
 		const a = capture();
-		await service.handle(getRequest(), a.response, at(`/support/ticket/${first}/file/${id}`));
+		await service.handle(getRequest(), a.response, at(linkTo(first, `/file/${id}`)));
 		const b = capture();
-		await service.handle(getRequest(), b.response, at(`/support/ticket/${second}/file/${id}`));
+		await service.handle(getRequest(), b.response, at(linkTo(second, `/file/${id}`)));
 
 		expect(a.out.status).toBe(200);
 		expect(b.out.status).toBe(404);
@@ -357,7 +371,7 @@ describe('claiming', () => {
 		let served = 0;
 		for (const id of ids) {
 			const { out, response } = capture();
-			await service.handle(getRequest(), response, at(`/support/ticket/${reference}/file/${id}`));
+			await service.handle(getRequest(), response, at(linkTo(reference, `/file/${id}`)));
 			if (out.status === 200) served += 1;
 		}
 		expect(served).toBe(4);

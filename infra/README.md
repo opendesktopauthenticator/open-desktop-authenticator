@@ -87,10 +87,37 @@ nobody renewed, a full disk, nginx serving errors, fail2ban having stopped.
 anyone the server is unreachable. That needs something outside it, which needs
 an account somebody has to create, so it remains undone rather than faked.
 
-`oda-backup.sh` writes a dated archive of the configuration that exists nowhere
-else — TLS keys, nginx, ufw, fail2ban, sshd — to `/var/backups/oda`, keeping a
-fortnight. It restores a box you have broken, not one you have lost; copying
-off-site needs a destination and a credential.
+`oda-backup.sh` writes two dated archives to `/var/backups/oda`:
+
+- **`config-*`** — TLS keys, nginx, ufw, fail2ban, sshd. Kept a fortnight.
+- **`tickets-*`** — the report database and its attachments. Kept 90 days, to
+  match the retention `/privacy` states: holding backups of deleted reports for
+  longer than the reports themselves would make that promise false.
+
+The ticket archive is the one that matters and it was **missing entirely** until
+an audit pointed it out — the backup covered the configuration, which is in this
+repository anyway, and left the only irreplaceable thing on the box with no copy
+at all. Configuration can be rebuilt in an afternoon; a report somebody sent
+about a stolen inventory cannot be rebuilt from anything.
+
+The database is snapshotted with `VACUUM INTO` rather than copied. SQLite runs in
+WAL mode, so a plain copy of `tickets.db` can miss the most recent commits — a
+backup that restores cleanly while being quietly short of the newest reports.
+
+**Both are local.** They restore a box you have broken, not one you have lost.
+Copying off-site needs a destination and a credential, which is the owner's
+decision. Verify a restore occasionally rather than trusting the archive exists:
+
+```bash
+tmp=$(mktemp -d)
+tar -xzf "$(ls -1t /var/backups/oda/tickets-*.tar.gz | head -1)" -C "$tmp"
+node -e "
+  const { DatabaseSync } = require('node:sqlite');
+  const db = new DatabaseSync(process.argv[1], { readOnly: true });
+  console.log(db.prepare('SELECT COUNT(*) n FROM tickets').get());
+" "$tmp/tickets.db"
+rm -rf "$tmp"
+```
 
 ## The origin is closed to everything but Cloudflare
 
@@ -117,10 +144,24 @@ The site itself is generated, not stored:
 
 ```bash
 node site/build.mjs                       # -> site/dist
-node site/verify.mjs                      # structure, metadata, links
-tar -czf - -C site/dist . | ssh root@HOST 'tar -xzf - -C /var/www/oda/public'
+node site/verify.mjs                      # structure, metadata, links, claims
+tar -czf /tmp/oda-site.tgz -C site/dist .
+scp /tmp/oda-site.tgz root@HOST:/tmp/
+ssh root@HOST '
+  mkdir -p /tmp/oda-new
+  tar -xzf /tmp/oda-site.tgz -C /tmp/oda-new
+  rsync -a --delete /tmp/oda-new/ /var/www/oda/public/
+  chown -R www-data:www-data /var/www/oda/public
+  rm -rf /tmp/oda-new /tmp/oda-site.tgz
+'
 node site/verify.mjs https://opendesktopauthenticator.com
 ```
+
+**`rsync --delete`, not `tar -x` over the top.** Extracting an archive on top of
+the live directory overwrites what is in it and removes nothing, so a page
+retired from the site stays served and indexable for ever. This is what the
+deploys actually do; the older single-line `tar` recipe that used to be
+documented here did not, and the documentation was the stale half.
 
 The second `verify` run is not the same check as the first. One reads the files;
 the other asks the server for them and inspects status codes, content types and

@@ -88,15 +88,32 @@ function page(out: { body: string }) {
 	].map((m) => ({ side: m[1] === 'message-us' ? 'us' : 'reporter', text: m[2] }));
 }
 
+/**
+ * The access key for a report, read the way the reporter's saved link carries it.
+ *
+ * The reference alone stopped opening a report when the capability was split out
+ * of it — that is the change, not a regression — so the tests have to follow the
+ * real link rather than guess at half of it.
+ */
+function keyFor(reference: string): string {
+	const row = service.db
+		.prepare('SELECT access_key FROM tickets WHERE reference = ?')
+		.get(reference) as { access_key: string } | undefined;
+	return row?.access_key ?? '';
+}
+
+const linkTo = (reference: string, suffix = '') =>
+	`/support/ticket/${reference}${suffix}?k=${encodeURIComponent(keyFor(reference))}`;
+
 async function view(reference: string) {
 	const { out, response } = capture();
-	await service.handle(get(), response, at(`/support/ticket/${reference}`));
+	await service.handle(get(), response, at(linkTo(reference)));
 	return out;
 }
 
 async function reply(reference: string, body: string, headers = {}) {
 	const { out, response } = capture();
-	await service.handle(post({ body }, headers), response, at(`/support/ticket/${reference}/reply`));
+	await service.handle(post({ body }, headers), response, at(linkTo(reference, '/reply')));
 	return out;
 }
 
@@ -204,9 +221,13 @@ describe('routing', () => {
 		// by a prefetch, a bookmark saved after a failed post, or a shared link.
 		const reference = await fileReport();
 		const { out, response } = capture();
-		await service.handle(get(), response, at(`/support/ticket/${reference}/reply`));
+		await service.handle(get(), response, at(linkTo(reference, '/reply')));
 		expect(out.status).toBe(303);
-		expect(out.headers.location).toBe(`/support/ticket/${reference}`);
+		// The key travels with the redirect. Sending somebody to the bare reference
+		// would land them on a 404, since the reference alone no longer opens a
+		// report — a redirect that strips the credential is just a broken link.
+		expect(out.headers.location).toBe(linkTo(reference));
+		expect(out.headers.location).toContain('?k=');
 		expect(out.body).not.toMatch(/<article/);
 	});
 

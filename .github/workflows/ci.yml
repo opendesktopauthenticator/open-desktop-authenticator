@@ -61,6 +61,17 @@ jobs:
       - name: Test
         run: npm test
 
+      # The website is deployed from this repository and was checked by nothing
+      # here — every fault the verifier catches (a broken internal link, a page
+      # claiming a release capability that does not exist, an SDA link with no
+      # warning on it) could reach production with CI green. The build throws on
+      # a bad donation address, so this covers that too.
+      - name: Build the website
+        run: node site/build.mjs
+
+      - name: Verify the website
+        run: node site/verify.mjs
+
   spike:
     name: spike (reference code)
     runs-on: ubuntu-latest

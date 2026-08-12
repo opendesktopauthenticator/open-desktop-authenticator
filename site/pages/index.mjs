@@ -13,6 +13,7 @@ import { mafile, lostAuthenticator, alternatives } from './answers.mjs';
 import owners from './owners.mjs';
 import story from './story.mjs';
 import { credits, donate } from './support-us.mjs';
+import { privacy } from './privacy.mjs';
 
 export const PAGES = [
 	home,
@@ -32,5 +33,6 @@ export const PAGES = [
 	owners,
 	credits,
 	donate,
+	privacy,
 	notFound
 ];

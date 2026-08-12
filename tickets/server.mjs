@@ -125,6 +125,21 @@ function addColumn(table, column, definition) {
 // Who wrote a message. Everything that existed before this column was from us.
 addColumn('notes', 'author', `TEXT NOT NULL DEFAULT 'us'`);
 
+/*
+ * The secret that opens a report, separate from the reference that names it.
+ *
+ * Added rather than replacing `reference`, because the two were one thing doing
+ * two jobs: a short, human-readable identifier, and the credential that lets
+ * anyone holding it read a stranger's report and their screenshots. Eight
+ * characters of a 26-letter alphabet is roughly 37.6 bits, which is fine for the
+ * first job and the wrong order of magnitude for the second.
+ *
+ * Nullable so an existing database opens without a migration step; every row
+ * written from here on has one, and the lookup treats a missing key as no access
+ * rather than as permission.
+ */
+addColumn('tickets', 'access_key', 'TEXT');
+
 const now = () => new Date().toISOString();
 
 /* ----------------------------------------------------------- attachments -- */
@@ -164,6 +179,22 @@ const SIZE = { image: 6 * 1024 * 1024, video: 20 * 1024 * 1024 };
 const MAX_FILES = 4;
 /** Long enough to finish writing a report, short enough not to be storage. */
 const UNCLAIMED_LIFETIME_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * How long a closed report is kept.
+ *
+ * Nothing deleted anything before this. Reports accumulated for ever, and so did
+ * the screenshots attached to them — other people's pictures of their own
+ * screens, held indefinitely by a project that tells everyone else to hold as
+ * little as possible. The privacy page could not describe a retention policy
+ * because there was not one.
+ *
+ * Ninety days after a report is resolved or declined is long enough to reopen an
+ * argument about whether it was really fixed, and short enough that the database
+ * is not a growing archive of strangers' screenshots. An open report is never
+ * deleted on a timer — it is still somebody's live problem.
+ */
+const CLOSED_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 
 const startsWith = (buffer, bytes, offset = 0) => bytes.every((b, i) => buffer[offset + i] === b);
 
@@ -210,6 +241,38 @@ function sweepUnclaimed() {
 		db.prepare('DELETE FROM attachments WHERE ticket_id IS NULL AND created_at < ?').run(cutoff);
 	}
 	sweepOrphans();
+	sweepClosed();
+}
+
+/**
+ * Delete reports that were closed long enough ago.
+ *
+ * `ON DELETE CASCADE` takes the notes and the attachment rows; the files are
+ * removed first, because SQLite has no idea the filesystem exists and a cascade
+ * would otherwise leave the pictures behind — which is the whole thing this is
+ * meant to prevent.
+ */
+function sweepClosed() {
+	const cutoff = new Date(Date.now() - CLOSED_RETENTION_MS).toISOString();
+	const done = db
+		.prepare("SELECT id FROM tickets WHERE status IN ('resolved', 'declined') AND updated_at < ?")
+		.all(cutoff);
+	if (!done.length) {
+		return 0;
+	}
+	const files = db.prepare('SELECT id FROM attachments WHERE ticket_id = ?');
+	for (const ticket of done) {
+		for (const file of files.all(ticket.id)) {
+			try {
+				rmSync(fileFor(file.id), { force: true });
+			} catch {
+				// Swept again by sweepOrphans once the row is gone.
+			}
+		}
+	}
+	return db
+		.prepare("DELETE FROM tickets WHERE status IN ('resolved', 'declined') AND updated_at < ?")
+		.run(cutoff).changes;
 }
 
 /**
@@ -545,6 +608,15 @@ const escape = (s) =>
  */
 const PUBLIC_DIR = process.env.TICKETS_PUBLIC ?? '/var/www/oda/public';
 
+/*
+ * The origin, fixed rather than taken from the Host header.
+ *
+ * Used to build the one absolute URL this service emits — the report link on the
+ * confirmation page. Reading it from the request would let a Host header decide
+ * where somebody's saved link points, which is how that class of bug starts.
+ */
+const SITE_ORIGIN = process.env.TICKETS_ORIGIN ?? 'https://opendesktopauthenticator.com';
+
 /**
  * Pull one hashed asset path out of a built page, remembering the answer.
  *
@@ -839,6 +911,21 @@ function originOk(request) {
 	}
 }
 
+/**
+ * The secret that actually opens a report.
+ *
+ * **The reference was doing this job and is not strong enough for it.** Eight
+ * characters from a 26-letter alphabet is about 37.6 bits — fine for naming a
+ * report out loud, the wrong order of magnitude for the thing that lets whoever
+ * holds it read a stranger's support thread and the screenshots on it. Rate
+ * limiting slows a search down; it does not make a short secret long.
+ *
+ * So the two jobs are separated. The reference stays exactly as it was, short
+ * and readable down a phone, and names the report in conversation. This is what
+ * authorises reading it: 32 bytes, carried in the link, never quoted back to us.
+ */
+const makeTicketKey = () => randomBytes(32).toString('base64url');
+
 /** A reference a person can read down a phone. No ambiguous characters. */
 function makeReference() {
 	const alphabet = '23456789BCDFGHJKMNPQRTVWXY';
@@ -926,14 +1013,41 @@ function retryForm(errors, form) {
 		</article>`;
 }
 
-function submitted(reference) {
+/**
+ * The confirmation, which is also the only time the link is ever shown.
+ *
+ * The whole link has to be saved, not the reference. The reference names the
+ * report when talking to us; the key in the link is what opens it, and we cannot
+ * send it again — there is no account to recover it from and, if no address was
+ * left, no way to reach the person at all.
+ *
+ * Said plainly and given its own box, because "keep this" buried in a sentence
+ * is how somebody ends up locked out of their own report.
+ */
+function submitted(reference, key) {
+	const link = `${SITE_ORIGIN}/support/ticket/${encodeURIComponent(reference)}?k=${encodeURIComponent(key)}`;
 	return page({
 		title: 'Report received',
 		body: `		<article>
 			<h1>Report received</h1>
-			<p class="lede">Your reference is <code>${escape(reference)}</code>. Keep it — it is
-			the only way to look this up again, and there is no account to recover it from.</p>
-			<p><a href="/support/ticket/${escape(reference)}">View this report</a> ·
+			<p class="lede">Your reference is <code>${escape(reference)}</code>. Quote that if you
+			write to us about it.</p>
+
+			<div class="callout callout-warn">
+				<h2>Save this link now</h2>
+				<p>
+					It is the only way back to this report, it is shown once, and we cannot send
+					it to you again. The reference on its own will not open it — that is
+					deliberate, so that a short code nobody can guess is not the only thing
+					standing between a stranger and your report.
+				</p>
+				<div class="wallet-address">
+					<code id="ticket-link">${escape(link)}</code>
+					<button type="button" class="secondary" data-copy="ticket-link">Copy</button>
+				</div>
+			</div>
+
+			<p><a href="${escape(link)}">Open the report</a> ·
 			<a href="/support">Report something else</a></p>
 		</article>`
 	});
@@ -970,12 +1084,15 @@ const bytesLabel = (n) =>
 const dayLabel = (iso) =>
 	new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 
-function attachmentList(reference, files) {
+function attachmentList(reference, key, files) {
 	if (!files.length) {
 		return '';
 	}
 	const item = (f, i) => {
-		const href = `/support/ticket/${encodeURIComponent(reference)}/file/${encodeURIComponent(f.id)}`;
+		// The key travels with every attachment URL as well. Without it the page
+		// would render and every picture on it would 404 — the images sit behind
+		// the same gate as the report, which is the point of the gate.
+		const href = `/support/ticket/${encodeURIComponent(reference)}/file/${encodeURIComponent(f.id)}?k=${encodeURIComponent(key)}`;
 		// A video gets a real player; an image gets a thumbnail that opens full size.
 		const preview = f.media_type.startsWith('video/')
 			? `<video controls preload="metadata" src="${escape(href)}"></video>`
@@ -1009,10 +1126,15 @@ function ticketView(ticket, notes, files, options = {}) {
 			'reporter',
 			ticket.created_at,
 			ticket.detail,
-			attachmentList(ticket.reference, opening)
+			attachmentList(ticket.reference, ticket.access_key, opening)
 		),
 		...notes.map((n) =>
-			message(n.author, n.created_at, n.body, attachmentList(ticket.reference, ofNote(n.id)))
+			message(
+				n.author,
+				n.created_at,
+				n.body,
+				attachmentList(ticket.reference, ticket.access_key, ofNote(n.id))
+			)
 		)
 	].join('\n');
 
@@ -1041,7 +1163,7 @@ ${thread}
 					? 'If this was closed too early, reply and it goes back into the queue.'
 					: 'Anything you forgot, or an answer to a question above.'
 			}</p>
-			<form class="form" method="post" action="/support/ticket/${escape(ticket.reference)}/reply">
+			<form class="form" method="post" action="/support/ticket/${escape(ticket.reference)}/reply?k=${encodeURIComponent(ticket.access_key)}">
 				<div class="field">
 					<label for="reply">Your message</label>
 					<textarea id="reply" name="body" rows="5" maxlength="4000" minlength="4" required
@@ -1055,6 +1177,10 @@ ${thread}
 						<input id="reply-files" type="file" multiple
 						       accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm">
 					</div>
+					<p class="hint">
+						Files upload as soon as you choose them; Remove deletes our copy. The
+						check that refuses secrets reads text and cannot see inside an image.
+					</p>
 					<ul class="attachments" data-list></ul>
 				</div>
 				<div class="controls"><button type="submit">Send</button></div>
@@ -1109,17 +1235,65 @@ async function handle(request, response, url) {
 		}
 		const reference = makeReference();
 		const stamp = now();
+		const accessKey = makeTicketKey();
 		const inserted = db
 			.prepare(
-				`INSERT INTO tickets (reference, kind, summary, detail, contact, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`
+				`INSERT INTO tickets (reference, access_key, kind, summary, detail, contact, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 			)
-			.run(reference, value.kind, value.summary, value.detail, value.contact, stamp, stamp);
+			.run(
+				reference,
+				accessKey,
+				value.kind,
+				value.summary,
+				value.detail,
+				value.contact,
+				stamp,
+				stamp
+			);
 		claimAttachments(Number(inserted.lastInsertRowid), null, form.attachments);
-		return send(response, 200, submitted(reference));
+		return send(response, 200, submitted(reference, accessKey));
 	}
 
 	/* ---- public: upload one screenshot or clip ---- */
+	/*
+	 * Take an upload back.
+	 *
+	 * "Remove" used to drop the card from the page and leave our copy on disk, so
+	 * a person who noticed their account name in the corner of a screenshot and
+	 * pulled it back had not actually pulled anything back. The button said the
+	 * file was gone and it was not, which is the one thing a delete control must
+	 * never do.
+	 *
+	 * Only unclaimed uploads can be withdrawn. Once an id is attached to a report
+	 * it belongs to that report, and a stranger who guessed one could otherwise
+	 * strip evidence off somebody else's — the id is unguessable, but "unguessable"
+	 * is the wrong thing to be relying on for a destructive operation.
+	 */
+	const withdraw = /^\/support\/attach\/([0-9a-f]{32})$/.exec(url.pathname);
+	if (withdraw && method === 'DELETE') {
+		if (!originOk(request)) {
+			return send(response, 403, JSON.stringify({ error: 'Not from this site.' }), {
+				'content-type': 'application/json'
+			});
+		}
+		const row = db
+			.prepare('SELECT id FROM attachments WHERE id = ? AND ticket_id IS NULL')
+			.get(withdraw[1]);
+		if (row) {
+			try {
+				rmSync(fileFor(row.id), { force: true });
+			} catch {
+				// Already gone is the state we wanted; the row still goes.
+			}
+			db.prepare('DELETE FROM attachments WHERE id = ? AND ticket_id IS NULL').run(row.id);
+		}
+		// 204 either way: whether it was already gone or never existed, the caller's
+		// desired state is "not stored", and distinguishing the two would tell an
+		// unauthenticated caller which ids are real.
+		return send(response, 204, '');
+	}
+
 	if (url.pathname === '/support/attach' && method === 'POST') {
 		// Answers here are JSON because only the page's own script calls it.
 		const json = (status, payload) =>
@@ -1153,14 +1327,34 @@ async function handle(request, response, url) {
 			url.pathname
 		);
 	if (onTicket) {
-		const ticket = db.prepare('SELECT * FROM tickets WHERE reference = ?').get(onTicket[1]);
+		/*
+		 * The reference names the report; the key opens it.
+		 *
+		 * Both are required, and the key is compared in constant time. Looking a
+		 * report up by reference alone is what made an eight-character string into
+		 * a bearer credential for somebody else's support thread and screenshots.
+		 *
+		 * A wrong or missing key is answered exactly like a reference that does not
+		 * exist. Distinguishing them would turn the short, guessable half into an
+		 * oracle for which reports are real.
+		 */
+		const found = db.prepare('SELECT * FROM tickets WHERE reference = ?').get(onTicket[1]);
+		const offered = url.searchParams.get('k') ?? '';
+		const ticket =
+			found &&
+			typeof found.access_key === 'string' &&
+			sameSecret(Buffer.from(offered), Buffer.from(found.access_key))
+				? found
+				: undefined;
 		if (!ticket) {
 			return send(
 				response,
 				404,
 				page({
 					title: 'Not found',
-					body: notice('callout-warn', ['No report with that reference.'])
+					body: notice('callout-warn', [
+						'No report with that reference, or the link is incomplete. Use the full link you were given — the reference on its own is not enough to open a report.'
+					])
 				})
 			);
 		}
@@ -1279,7 +1473,9 @@ async function handle(request, response, url) {
 				stamp,
 				ticket.id
 			);
-			return send(response, 303, '', { location: `/support/ticket/${ticket.reference}` });
+			return send(response, 303, '', {
+				location: `/support/ticket/${ticket.reference}?k=${encodeURIComponent(ticket.access_key)}`
+			});
 		}
 
 		/*
@@ -1292,7 +1488,9 @@ async function handle(request, response, url) {
 		 * all land there.
 		 */
 		if (onTicket[2] === '/reply' && method === 'GET') {
-			return send(response, 303, '', { location: `/support/ticket/${ticket.reference}` });
+			return send(response, 303, '', {
+				location: `/support/ticket/${ticket.reference}?k=${encodeURIComponent(ticket.access_key)}`
+			});
 		}
 
 		if (method === 'GET' && !onTicket[2]) {
@@ -1340,7 +1538,7 @@ function adminList(session, tickets, counts) {
 					<span class="status status-${escape(t.status)}">${escape(state.label)}</span>
 					${files ? `<span class="hint">${files} attachment${files === 1 ? '' : 's'}</span>` : ''}
 				</div>
-				<h3><a href="/support/ticket/${escape(t.reference)}">${escape(t.summary)}</a></h3>
+				<h3><a href="/support/ticket/${escape(t.reference)}?k=${encodeURIComponent(t.access_key ?? '')}">${escape(t.summary)}</a></h3>
 				<p class="hint">${escape(KIND_LABEL[t.kind] ?? t.kind)} · ${escape(dayLabel(t.created_at))}${
 					t.contact ? ` · reply to ${escape(t.contact)}` : ' · no reply address'
 				}</p>
@@ -1381,7 +1579,7 @@ function adminList(session, tickets, counts) {
 					? `<ul class="plain">${closed
 							.map(
 								(t) =>
-									`<li><a href="/support/ticket/${escape(t.reference)}">${escape(t.summary)}</a> — ${escape((STATUS[t.status] ?? STATUS.open).label)}</li>`
+									`<li><a href="/support/ticket/${escape(t.reference)}?k=${encodeURIComponent(t.access_key ?? '')}">${escape(t.summary)}</a> — ${escape((STATUS[t.status] ?? STATUS.open).label)}</li>`
 							)
 							.join('')}</ul>`
 					: '<p class="muted">Nothing closed yet.</p>'
@@ -1638,6 +1836,28 @@ if (process.env.TICKETS_NO_LISTEN !== '1') {
 	server.listen(PORT, '127.0.0.1', () => {
 		process.stdout.write(`tickets listening on 127.0.0.1:${PORT}\n`);
 	});
+
+	/*
+	 * Retention on a clock, not on traffic.
+	 *
+	 * The sweeps used to run only when somebody uploaded a file, which means a
+	 * quiet week was a week when nothing expired — the one period where holding
+	 * data past its retention is least excusable and least likely to be noticed.
+	 * A promise in a privacy policy that depends on strangers happening to visit
+	 * is not a promise.
+	 *
+	 * Hourly, and once at startup so a restart is not a way to skip a sweep.
+	 * `unref` so the timer never holds the process open on its own.
+	 */
+	const sweepAll = () => {
+		try {
+			sweepUnclaimed();
+		} catch (error) {
+			process.stderr.write(`retention sweep failed: ${error?.message}\n`);
+		}
+	};
+	sweepAll();
+	setInterval(sweepAll, 60 * 60 * 1000).unref();
 }
 
 export { handleAdmin, server, loginPage };

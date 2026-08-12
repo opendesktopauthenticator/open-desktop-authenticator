@@ -21,7 +21,13 @@ server {
 	}
 
 	location / {
-		return 301 http://opendesktopauthenticator.com$request_uri;
+		# Straight to HTTPS on the apex, not to plain HTTP on the apex.
+		#
+		# Redirecting to `http://` meant two hops for anyone typing the www name,
+		# and the first of them landed on cleartext — a redirect that goes via HTTP
+		# is a redirect an attacker on the network gets to answer, which is the
+		# whole reason HSTS exists on the second hop.
+		return 301 https://opendesktopauthenticator.com$request_uri;
 	}
 }
 
@@ -183,7 +189,16 @@ server {
 	#
 	# Regex locations match in order, so this has to precede the general block
 	# below or the general one would swallow it.
-	location = /support/attach {
+	# Matches the upload endpoint and the withdrawal of one upload by id.
+	#
+	# Was `location = /support/attach`, an exact match, so `DELETE
+	# /support/attach/<id>` fell past it to the static handler and answered 404 —
+	# the service's delete route was correct and unreachable, and every unit test
+	# passed because none of them goes through nginx. Only trying it against the
+	# live site found this.
+	# Quoted, because nginx parses an unquoted `{32}` as a block delimiter and
+	# refuses to load with "missing closing parenthesis".
+	location ~ "^/support/attach(/[0-9a-f]{32})?$" {
 		include snippets/security-headers.conf;
 		# Four files per report, and a person files few reports: 30/minute with a
 		# burst of 8 is unnoticeable to a human and useless for filling a disk.
