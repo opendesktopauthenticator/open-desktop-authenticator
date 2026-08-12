@@ -137,9 +137,16 @@ for (const [slug, html] of built) {
 		fail(slug, `is thin: ${words} words of visible text`);
 	}
 
-	// Anything left unwritten.
-	for (const marker of ['TODO', 'TKTK', 'Lorem ipsum', 'PLACEHOLDER', 'XXX']) {
-		if (html.includes(marker)) fail(slug, `contains the placeholder "${marker}"`);
+	// Anything left unwritten. Matched on word boundaries: a plain substring
+	// search flagged an example reference of the form ODA-XXXX-XXXX, which is
+	// documentation rather than an unfinished sentence.
+	for (const marker of ['TODO', 'TKTK', 'Lorem ipsum', 'PLACEHOLDER', 'FIXME']) {
+		// `\\b`, not `\b`: inside a template literal a single backslash-b is the
+		// backspace character, so the pattern becomes \x08TODO\x08 and matches
+		// nothing. This check silently passed everything until it was mutation-tested.
+		if (new RegExp(`\\b${marker}\\b`).test(html)) {
+			fail(slug, `contains the placeholder "${marker}"`);
+		}
 	}
 }
 

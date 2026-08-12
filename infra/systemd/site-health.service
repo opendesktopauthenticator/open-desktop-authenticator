@@ -1,0 +1,5 @@
+[Unit]
+Description=Check the things that fail quietly
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/site-health

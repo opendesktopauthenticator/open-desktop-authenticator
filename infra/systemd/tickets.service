@@ -1,0 +1,59 @@
+[Unit]
+Description=Issue tracker for opendesktopauthenticator.com
+After=network.target
+
+[Service]
+Type=simple
+User=tickets
+Group=tickets
+WorkingDirectory=/opt/tickets
+Environment=NODE_ENV=production
+Environment=PORT=8787
+Environment=TICKETS_DB=/var/lib/tickets/tickets.db
+ExecStart=/usr/bin/node /opt/tickets/server.mjs
+Restart=on-failure
+RestartSec=5s
+
+# --- what this process is allowed to be ------------------------------------
+#
+# It is the only executing thing on the domain, so it is fenced in hard. Most of
+# this is not because the code is suspected — it is because the cost of being
+# wrong should be bounded before anyone needs it to be.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+RemoveIPC=yes
+UMask=0077
+
+# The database directory is the only writable path in the filesystem.
+ReadWritePaths=/var/lib/tickets
+
+# Loopback only. It cannot reach the internet even if something told it to.
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressAllow=localhost
+IPAddressDeny=any
+
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Bounded, so a runaway cannot take the box down with it.
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

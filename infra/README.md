@@ -41,6 +41,46 @@ Both `sites-available` files need a symlink into `sites-enabled` to take effect.
   That address is redacted here as `ADMIN_IP_REDACTED`; the deployed file has
   the real one.
 
+## The ticket service
+
+`tickets/server.mjs` in this repository is deployed to `/opt/tickets` and run by
+`systemd/tickets.service` as an unprivileged user, listening on loopback only.
+It is the sole executing thing on the domain; everything else is a file on disk.
+
+The unit is the fence: `ProtectSystem=strict` with one writable path,
+`SystemCallFilter=@system-service`, `IPAddressDeny=any` with only localhost
+allowed, no new privileges, 256MB and 64 tasks. None of that is because the code
+is suspected — it is so the cost of being wrong is bounded before anyone needs
+it to be.
+
+**Setting the administrator passphrase.** There is no sign-up. On first run the
+service prints a one-time bootstrap link to its journal, so setting the
+passphrase requires access to the server:
+
+```bash
+journalctl -u tickets | grep -o '/admin/bootstrap?token=[A-Za-z0-9_-]*' | tail -1
+```
+
+Open that path on the site, choose a passphrase of 16 characters or more, and
+the token stops existing. There is no reset: losing the passphrase means
+deleting the row from `admins` in `/var/lib/tickets/tickets.db` and
+bootstrapping again.
+
+## Monitoring, such as it is
+
+`site-health.sh` runs every 15 minutes and logs to the journal under
+`site-health`. It catches the failures that happen quietly — a certificate
+nobody renewed, a full disk, nginx serving errors, fail2ban having stopped.
+
+**It is not uptime monitoring.** A check running on the server cannot tell
+anyone the server is unreachable. That needs something outside it, which needs
+an account somebody has to create, so it remains undone rather than faked.
+
+`oda-backup.sh` writes a dated archive of the configuration that exists nowhere
+else — TLS keys, nginx, ufw, fail2ban, sshd — to `/var/backups/oda`, keeping a
+fortnight. It restores a box you have broken, not one you have lost; copying
+off-site needs a destination and a credential.
+
 ## The origin is closed to everything but Cloudflare
 
 `cloudflare-only.sh` (deployed at `/usr/local/sbin/cloudflare-only`) restricts

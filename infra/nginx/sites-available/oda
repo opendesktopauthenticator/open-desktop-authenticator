@@ -165,6 +165,38 @@ server {
 		default_type application/octet-stream;
 	}
 
+	# --- the ticket service --------------------------------------------------
+	#
+	# The only proxied path on the domain. Everything else is a file on disk, and
+	# keeping it that way is why this block is as narrow as it is: three exact
+	# prefixes, not a catch-all.
+	#
+	# `tickets` is a 6-per-minute zone. Submitting a report is a human action a
+	# handful of times a day, so anything faster is a script, and the origin
+	# should refuse it before Node ever allocates for it.
+	location ~ ^/(support/submit|support/ticket/|admin) {
+		include snippets/security-headers.conf;
+		limit_req  zone=tickets burst=4 nodelay;
+		limit_conn perip 8;
+
+		proxy_pass http://127.0.0.1:8787;
+		proxy_http_version 1.1;
+		proxy_set_header Host              $host;
+		# The real client, which the service uses for its own rate limiting. Only
+		# meaningful because the Cloudflare real-IP block established it.
+		proxy_set_header X-Real-IP         $remote_addr;
+		proxy_set_header X-Forwarded-Proto https;
+		proxy_set_header Connection        "";
+
+		# A form post is small and quick, or it is not a form post.
+		client_max_body_size 32k;
+		proxy_read_timeout   15s;
+		proxy_connect_timeout 5s;
+
+		# Never cached, at any layer: these are per-person pages.
+		add_header Cache-Control "no-store" always;
+	}
+
 	location = /sitemap.xml {
 		include snippets/security-headers.conf;
 		add_header Cache-Control "public, max-age=3600";

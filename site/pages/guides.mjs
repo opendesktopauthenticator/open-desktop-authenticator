@@ -379,13 +379,43 @@ export const support = {
 				</p>
 			</div>
 
+			<form method="post" action="/support/submit">
+				<label for="kind">What is this about?</label>
+				<select id="kind" name="kind" required>
+					<option value="bug">A bug in the application</option>
+					<option value="documentation">Something on this site is wrong or missing</option>
+					<option value="clone-site">A suspected fake or clone download</option>
+					<option value="security">A security problem</option>
+					<option value="other">Something else</option>
+				</select>
+
+				<label for="summary">One line</label>
+				<input id="summary" name="summary" type="text" maxlength="140" minlength="8" required
+				       placeholder="Codes are rejected after importing from SDA">
+
+				<label for="detail">What happened</label>
+				<textarea id="detail" name="detail" rows="8" maxlength="4000" minlength="20" required
+				          placeholder="What you did, what you expected, what happened instead. Application version and operating system if it is a bug. For a clone site: the URL and where you found it."></textarea>
+
+				<label for="contact">Where to reply, if you want one (optional)</label>
+				<input id="contact" name="contact" type="text" maxlength="120"
+				       placeholder="An email address, or leave this blank">
+				<p class="hint">
+					No account is created either way. You get a reference you can use to check
+					back; leaving an address just means we can ask a follow-up question, which is
+					often the difference between a fixed bug and a closed one.
+				</p>
+
+				<div class="controls">
+					<button type="submit">Send the report</button>
+				</div>
+			</form>
+
 			<div class="callout">
-				<h2>The form is not live yet — but the channels are</h2>
 				<p>
-					The tracker is being built and will appear at this address. Nothing is
-					waiting on it. Ordinary bugs and documentation errors can go on the
-					<a href="${'https://github.com/opendesktopauthenticator/open-desktop-authenticator/issues'}" rel="noopener">public issue tracker</a>,
-					and security reports have a private route that works today — see below.
+					Reports containing what looks like a shared secret, an identity secret, a
+					revocation code or a private key are <strong>refused and not stored</strong>.
+					That is deliberate: the check is in the code, not just in the sentence above.
 				</p>
 			</div>
 
@@ -400,10 +430,9 @@ export const support = {
 			<h2>What happens to a report</h2>
 			<ol>
 				<li>
-					<strong>You get a reference.</strong> Submitting returns a code you can use to
-					check the report later. No account, no email address required — although
-					leaving one means we can ask a follow-up question, which is often the
-					difference between a fixed bug and a closed one.
+					<strong>You get a reference</strong> in the form <code>ODA-7K2M-B9QW</code>.
+					It is the only way to find the report again, so keep it — there is no account
+					to recover it from.
 				</li>
 				<li>
 					<strong>It is read.</strong> Reports are triaged rather than queued: anything
