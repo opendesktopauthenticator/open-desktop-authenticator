@@ -83,6 +83,25 @@ describe('the vault screen names its publisher', () => {
 		expect(html).toContain(branding.companyShort);
 	});
 
+	it('shows the company logo beside the words', () => {
+		// The words alone were the first version. A mark is what makes it read as a
+		// publisher's stamp rather than a line of small print, and it is the thing
+		// somebody recognises before they read anything.
+		const foot = /<footer class="app-foot"[^>]*>([\s\S]*?)<\/footer>/.exec(render([ACCOUNT]));
+		expect(foot?.[1]).toMatch(/<svg[^>]*class="powered-logo"/);
+		// Drawn inline rather than fetched: the renderer's policy allows
+		// `img-src 'self' data:` only, and an <img> here would be one more thing
+		// that can be missing at runtime while the code looks right.
+		expect(foot?.[1]).not.toMatch(/<img/);
+		expect(foot?.[1]).toMatch(/<path[^>]*fill="#00BE62"/);
+	});
+
+	it('does not announce the logo twice to a screen reader', () => {
+		// The company name is already in the text beside it.
+		const foot = /<footer class="app-foot"[^>]*>([\s\S]*?)<\/footer>/.exec(render([ACCOUNT]));
+		expect(foot?.[1]).toMatch(/<svg[^>]*aria-hidden="true"/);
+	});
+
 	it('is a control that opens About rather than dead text', () => {
 		const html = render([ACCOUNT]);
 		expect(html).toMatch(/<button[^>]*class="powered-mark"/);

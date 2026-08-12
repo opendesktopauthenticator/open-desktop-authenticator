@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { CompanyMark } from '../CompanyMark';
 import { Logo } from '../Logo';
 import { branding } from '../../shared/branding';
 import type { AccountSummary, CodesList, ExportResult } from '../../shared/ipc';
@@ -494,8 +495,11 @@ export function VaultHome({
 			*/}
 			<footer className="app-foot">
 				<button type="button" className="powered-mark" onClick={onAbout}>
-					<span className="powered-lead">Powered by</span>
-					<span className="powered-name">{branding.companyShort}</span>
+					<CompanyMark size={30} className="powered-logo" />
+					<span className="powered-words">
+						<span className="powered-lead">Powered by</span>
+						<span className="powered-name">{branding.companyShort}</span>
+					</span>
 				</button>
 			</footer>
 		</main>

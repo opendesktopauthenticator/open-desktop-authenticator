@@ -1649,9 +1649,11 @@ ul.plain li {
 
 .powered-mark {
 	display: inline-flex;
-	align-items: baseline;
-	gap: 7px;
-	padding: 7px 12px;
+	/* Centre, not baseline: the mark is a square and has no baseline to sit on,
+	   so baseline alignment dropped it below the words. */
+	align-items: center;
+	gap: 11px;
+	padding: 9px 15px;
 	background: none;
 	border: 1px solid transparent;
 	border-radius: 999px;
@@ -1666,17 +1668,39 @@ ul.plain li {
 	background: rgba(255, 255, 255, 0.03);
 }
 
+/* The logo keeps its own colours; only its opacity answers to the hover. */
+.powered-logo {
+	display: block;
+	border-radius: 6px;
+	/* Nearly full strength. At 0.75 on this background the mark read as a smudge
+	   rather than a logo, which is the opposite of the point of putting one here. */
+	opacity: 0.92;
+	transition: opacity 160ms ease;
+}
+.powered-mark:hover .powered-logo,
+.powered-mark:focus-visible .powered-logo {
+	opacity: 1;
+}
+
+/* Two lines beside the mark, so the pill stays short rather than wide. */
+.powered-words {
+	display: grid;
+	gap: 1px;
+	text-align: left;
+	line-height: 1.15;
+}
+
 .powered-lead {
-	font-size: 0.68rem;
-	letter-spacing: 0.1em;
+	font-size: 0.72rem;
+	letter-spacing: 0.11em;
 	text-transform: uppercase;
 	color: var(--faint, #71857a);
 }
 .powered-name {
-	font-size: 0.82rem;
-	font-weight: 680;
+	font-size: 1.02rem;
+	font-weight: 700;
 	letter-spacing: 0.03em;
-	color: var(--muted);
+	color: var(--text);
 }
 .powered-mark:hover .powered-name,
 .powered-mark:focus-visible .powered-name {
