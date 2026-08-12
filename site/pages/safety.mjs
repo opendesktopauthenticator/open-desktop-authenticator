@@ -51,6 +51,49 @@ export const scamClones = {
 				</li>
 			</ul>
 
+			<h2>&ldquo;My items are trade-locked, so I am safe&rdquo;</h2>
+			<div class="callout callout-warn">
+				<p>
+					<strong>This is the assumption that costs people the most</strong>, and it is
+					wrong. A trade hold stops items being <em>traded</em> away. It does not stop
+					them being <em>sold</em>.
+				</p>
+			</div>
+			<p>
+				When an attacker finds half an inventory under a trade hold, they do not wait it
+				out. They use the Community Market instead, and the sequence is always the same:
+			</p>
+			<ol class="signs">
+				<li>
+					<strong>Everything is listed on the Community Market and sold.</strong> Market
+					sales are not blocked by the trade holds that were protecting those items,
+					and the proceeds land in the account's Steam Wallet.
+				</li>
+				<li>
+					<strong>The wallet balance is spent on the attacker's own listings.</strong>
+					They have already listed near-worthless items at enormous prices. Your balance
+					buys them. The money moves to an account they control, and what you are left
+					holding is a handful of items genuinely worth a few cents.
+				</li>
+				<li>
+					<strong>Nothing can be reversed.</strong> Steam Wallet funds cannot be
+					withdrawn to a bank, and market purchases are not refundable. By the time the
+					emails arrive, the value has already left.
+				</li>
+			</ol>
+			<p>
+				It is worth being precise about what this means: <strong>the trade hold never
+				failed.</strong> It did exactly what it was designed to do, and the attacker
+				simply used a route it was never meant to cover. Anyone reassuring themselves
+				that a locked inventory makes a compromised authenticator survivable is
+				protecting against the wrong thing.
+			</p>
+			<p>
+				It also explains the timing. These thefts tend to arrive a couple of weeks after
+				the download rather than the same evening — long enough that nobody connects the
+				two, and long enough for a trade hold to look like it held.
+			</p>
+
 			<h2>The signs, in order of how much they tell you</h2>
 			<ol class="signs">
 				<li>
@@ -341,6 +384,28 @@ export const security = {
 					Steam, and the two get confused with expensive results.
 				</li>
 			</ul>
+
+			<h2>The honest caveat about automatic confirmation</h2>
+			<p>
+				Automatic confirmation can act on market listings. That is the same route
+				<a href="/scam-clones">a compromised account is emptied through</a> — everything
+				listed on the Community Market, the balance spent on the attacker's own
+				listings — and it would be dishonest to describe the feature without saying so.
+			</p>
+			<p>
+				The distinction is where the listing comes from. This application only ever
+				confirms what Steam is already asking about; it cannot raise a listing itself.
+				But if something else with access to your account can raise one — a stolen
+				session, a leaked Web API key, a trading bot you have authorised — then leaving
+				automatic confirmation on for market listings means this application will
+				approve it without showing you.
+			</p>
+			<p>
+				So: it is off unless you turn it on, it is set per account rather than globally,
+				and it is worth turning on only for accounts where the convenience is worth that
+				trade. If you are not listing in volume, leave it off and confirm by hand. The
+				<a href="/docs">Activity screen</a> records everything it did either way.
+			</p>
 
 			<h2>What this cannot protect you from</h2>
 			<div class="callout callout-warn">
