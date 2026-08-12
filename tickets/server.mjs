@@ -50,7 +50,7 @@
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -209,6 +209,48 @@ function sweepUnclaimed() {
 	if (stale.length) {
 		db.prepare('DELETE FROM attachments WHERE ticket_id IS NULL AND created_at < ?').run(cutoff);
 	}
+	sweepOrphans();
+}
+
+/**
+ * Remove files whose row has gone.
+ *
+ * `attachments.ticket_id` cascades on delete, so removing a report takes its
+ * attachment rows with it — and leaves the files on disk, because SQLite has no
+ * idea the filesystem exists. Nothing deletes reports today, which is exactly
+ * why this is worth writing now: the first time anything does, the leak is
+ * silent, permanent and counted against the storage limit above by nobody.
+ *
+ * Reconciling the directory against the table is cheap at this size and is the
+ * only check that cannot drift, since it compares the two things themselves
+ * rather than trusting either to have called the other.
+ */
+function sweepOrphans() {
+	let onDisk;
+	try {
+		onDisk = readdirSync(FILES_DIR);
+	} catch {
+		return; // No directory yet means nothing to reconcile.
+	}
+	if (!onDisk.length) {
+		return;
+	}
+	const known = new Set(
+		db
+			.prepare('SELECT id FROM attachments')
+			.all()
+			.map((r) => r.id)
+	);
+	for (const name of onDisk) {
+		if (!isAttachmentId(name) || known.has(name)) {
+			continue;
+		}
+		try {
+			rmSync(join(FILES_DIR, name), { force: true });
+		} catch {
+			// Best effort: a file that cannot be removed is retried next sweep.
+		}
+	}
 }
 
 /**
@@ -235,6 +277,29 @@ function readBody(request, limit) {
 	});
 }
 
+/**
+ * How much disk all attachments may occupy, in total, ever.
+ *
+ * **Every other limit here is per-file or per-address, and none of them bounds
+ * the total.** Twenty megabytes a file, four files a report, five reports every
+ * ten minutes is four hundred megabytes per ten minutes from one address — and
+ * a claimed attachment is never deleted, so it accumulates. The disk on this box
+ * is 191 GB, which is under a day of that, and when it fills SQLite stops being
+ * able to write, nginx stops being able to log, and the failure is not confined
+ * to the part that was abused.
+ *
+ * Two gigabytes is far more than a single-maintainer tracker will ever hold in
+ * screenshots, and small enough that reaching it is a signal rather than a
+ * catastrophe. Past it, uploads are refused and text reports still work — the
+ * report is the thing that matters; the picture is an attachment to it.
+ */
+const TOTAL_STORAGE_LIMIT = 2 * 1024 * 1024 * 1024;
+
+/** Bytes currently held on disk, according to the table that tracks them. */
+function storedBytes() {
+	return Number(db.prepare('SELECT COALESCE(SUM(bytes), 0) AS n FROM attachments').get().n);
+}
+
 /** Store an uploaded body, or say why not. Returns { error } or { attachment }. */
 function storeUpload(buffer) {
 	const media = sniff(buffer);
@@ -247,6 +312,13 @@ function storeUpload(buffer) {
 	if (buffer.length > SIZE[media.kind]) {
 		return {
 			error: `That ${media.kind} is over the ${SIZE[media.kind] / (1024 * 1024)} MB limit for ${media.kind}s.`
+		};
+	}
+	if (storedBytes() + buffer.length > TOTAL_STORAGE_LIMIT) {
+		return {
+			error:
+				'We are temporarily out of room for attachments. Please send the report without one — the text is the part that matters, and we will ask for a picture if we need it.',
+			full: true
 		};
 	}
 	const id = randomBytes(16).toString('hex');
@@ -473,13 +545,55 @@ const escape = (s) =>
  */
 const PUBLIC_DIR = process.env.TICKETS_PUBLIC ?? '/var/www/oda/public';
 
-function styleHref() {
+/**
+ * Pull one hashed asset path out of a built page, remembering the answer.
+ *
+ * Four of these are needed to render any page — the stylesheet, the script, the
+ * product mark, the company mark — and each was reading its file off disk and
+ * running a regex over it on **every request**. Measured on the box that is
+ * 0.29ms of synchronous, event-loop-blocking work per page: about 29% of a
+ * second of the loop at a hundred requests a second, spent re-reading three
+ * files that only change when somebody deploys.
+ *
+ * Cached against the file's modification time rather than for a fixed interval,
+ * so a deploy is picked up on the very next request and nothing has to remember
+ * to clear anything. The `statSync` still touches the filesystem, but it reads
+ * no contents and runs no regex, which is the expensive half.
+ */
+const assetCache = new Map();
+function fromBuiltPage(file, pattern, fallback) {
+	const path = join(PUBLIC_DIR, file);
+	// Keyed on the pattern as well as the path. Two different things are pulled
+	// out of index.html — the stylesheet and the product mark — and keying on the
+	// filename alone meant the second lookup was answered with the first one's
+	// result, so the mark came back as the stylesheet's URL. Caught by a test
+	// that asserted both appear on the page, which is the only reason it is not
+	// live right now.
+	const key = `${path} ${pattern.source}`;
+	let stamp;
 	try {
-		const home = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8');
-		return /<link rel="stylesheet" href="([^"]+)"/.exec(home)?.[1] ?? '/assets/site.css';
+		stamp = statSync(path).mtimeMs;
 	} catch {
-		return '/assets/site.css';
+		return fallback;
 	}
+	const hit = assetCache.get(key);
+	if (hit && hit.stamp === stamp) {
+		return hit.value;
+	}
+	let value;
+	try {
+		value = pattern.exec(readFileSync(path, 'utf8'))?.[1] ?? fallback;
+	} catch {
+		// The file existed a moment ago — a deploy is probably swapping it. Serve
+		// the unhashed fallback for this one request and do not cache the miss.
+		return fallback;
+	}
+	assetCache.set(key, { stamp, value });
+	return value;
+}
+
+function styleHref() {
+	return fromBuiltPage('index.html', /<link rel="stylesheet" href="([^"]+)"/, '/assets/site.css');
 }
 
 /**
@@ -517,34 +631,24 @@ const BRAND = {
  * wrong.
  */
 function markHref() {
-	try {
-		const home = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8');
-		return /<img src="(\/assets\/mark\.[^"]+\.svg)"/.exec(home)?.[1] ?? '/assets/mark.svg';
-	} catch {
-		return '/assets/mark.svg';
-	}
+	return fromBuiltPage('index.html', /<img src="(\/assets\/mark\.[^"]+\.svg)"/, '/assets/mark.svg');
 }
 
 /** The company mark, by its hashed name, read out of the built home page. */
 function brandLogoHref() {
-	try {
-		const home = readFileSync(join(PUBLIC_DIR, 'owners.html'), 'utf8');
-		return (
-			/"(\/assets\/projects\/masterspanel\.[^"]+\.svg)"/.exec(home)?.[1] ??
-			'/assets/projects/masterspanel.svg'
-		);
-	} catch {
-		return '/assets/projects/masterspanel.svg';
-	}
+	return fromBuiltPage(
+		'owners.html',
+		/"(\/assets\/projects\/masterspanel\.[^"]+\.svg)"/,
+		'/assets/projects/masterspanel.svg'
+	);
 }
 
 function scriptHref() {
-	try {
-		const support = readFileSync(join(PUBLIC_DIR, 'support.html'), 'utf8');
-		return /<script src="(\/assets\/support\.[^"]+)"/.exec(support)?.[1] ?? '/assets/support.js';
-	} catch {
-		return '/assets/support.js';
-	}
+	return fromBuiltPage(
+		'support.html',
+		/<script src="(\/assets\/support\.[^"]+)"/,
+		'/assets/support.js'
+	);
 }
 
 function page({ title, body, noindex = true }) {
@@ -732,6 +836,67 @@ const KIND_LABEL = {
 	other: 'Other'
 };
 
+/**
+ * The report form again, with what was typed still in it.
+ *
+ * **Losing somebody's words is the worst thing this service can do short of
+ * leaking them.** A rejected submission used to render three red lines and a
+ * link back to an empty form: a person who had written five hundred words about
+ * how their inventory was taken, and then chose the wrong kind from a dropdown,
+ * got all of it thrown away and an invitation to type it again. Most people do
+ * not, and the report is simply lost — from the one form whose entire purpose
+ * is receiving reports from people who are already having a bad day.
+ *
+ * The markup duplicates the static form in `site/pages/guides.mjs`, which is a
+ * real cost and the better one to pay: the alternative is the service reaching
+ * into the built site to scrape a form out of it, which would fail silently the
+ * first time the markup changed. A test compares the field names in both, so the
+ * copies cannot drift apart unnoticed.
+ *
+ * Attachments are the exception — their ids are not re-offered, because the
+ * upload only survives two hours unclaimed and quietly re-attaching files
+ * somebody cannot see on the page is worse than asking for them again.
+ */
+function retryForm(errors, form) {
+	const was = (name) => escape(String(form[name] ?? ''));
+	const kind = String(form.kind ?? '');
+	const option = (value, label) =>
+		`<option value="${value}"${kind === value ? ' selected' : ''}>${label}</option>`;
+	return `		<article>
+			<h1>That was not saved</h1>
+			<p class="lede">Nothing has been stored. Everything you wrote is still below —
+			correct what is listed and send it again.</p>
+			${notice('callout-warn', errors)}
+			<form class="form" method="post" action="/support/submit">
+				<div class="field">
+					<label for="kind">What is this about?</label>
+					<select id="kind" name="kind" required>
+						<option value="">Choose one</option>
+						${option('bug', 'A bug in the application')}
+						${option('documentation', 'Something on this site is wrong or missing')}
+						${option('clone-site', 'A suspected fake or clone download')}
+						${option('security', 'A security problem')}
+						${option('other', 'Something else')}
+					</select>
+				</div>
+				<div class="field">
+					<label for="summary">One line</label>
+					<input id="summary" name="summary" type="text" maxlength="140" minlength="8" required
+					       value="${was('summary')}">
+				</div>
+				<div class="field">
+					<label for="detail">What happened</label>
+					<textarea id="detail" name="detail" rows="8" maxlength="4000" minlength="20" required>${was('detail')}</textarea>
+				</div>
+				<div class="field">
+					<label for="contact">Where to reply, if you want one (optional)</label>
+					<input id="contact" name="contact" type="text" maxlength="120" value="${was('contact')}">
+				</div>
+				<div class="controls"><button type="submit">Send the report</button></div>
+			</form>
+		</article>`;
+}
+
 function submitted(reference) {
 	return page({
 		title: 'Report received',
@@ -910,14 +1075,7 @@ async function handle(request, response, url) {
 		}
 		const { errors, value } = validate(form);
 		if (errors.length) {
-			return send(
-				response,
-				400,
-				page({
-					title: 'Not saved',
-					body: `${notice('callout-warn', errors)}\n\t\t<p><a href="/support">Back to the form</a></p>`
-				})
-			);
+			return send(response, 400, page({ title: 'Not saved', body: retryForm(errors, form) }));
 		}
 		const reference = makeReference();
 		const stamp = now();

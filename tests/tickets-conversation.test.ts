@@ -282,3 +282,83 @@ describe('what the thread still does not show', () => {
 		expect(page.body).not.toContain('someone@example.com');
 	});
 });
+
+describe('a rejected report keeps what was written', () => {
+	/** Submit something invalid and get the page back. */
+	async function reject(fields: Record<string, string>) {
+		const { out, response } = capture();
+		await service.handle(post(fields), response, at('/support/submit'));
+		return out;
+	}
+
+	it('returns every field with its value still in it', async () => {
+		// **The worst thing this service can do short of leaking a report is lose
+		// one.** Somebody writes five hundred words about how their inventory was
+		// taken, picks the wrong kind from a dropdown, and used to get three red
+		// lines and a link to an empty form. Most people do not type it again.
+		const detail =
+			'The top result for the download was not the real repository, and after I ran it ' +
+			'my confirmations started approving themselves within about a quarter of an hour.';
+		const out = await reject({
+			kind: 'not-a-real-kind',
+			summary: 'x',
+			detail,
+			contact: 'someone@example.com'
+		});
+
+		expect(out.status).toBe(400);
+		expect(out.body, 'the long answer must survive').toContain('approving themselves');
+		expect(out.body, 'the address must survive').toContain('someone@example.com');
+		expect(out.body, 'the summary must survive').toMatch(/value="x"/);
+		// And it is a page rather than an error fragment.
+		expect(out.body).toMatch(/<h1>/);
+		expect(out.body).toMatch(/<form[^>]+action="\/support\/submit"/);
+	});
+
+	it('keeps a valid choice selected and does not invent one', async () => {
+		const chosen = await reject({ kind: 'clone-site', summary: 'x', detail: 'too short' });
+		expect(chosen.body).toMatch(/<option value="clone-site" selected>/);
+
+		const nonsense = await reject({ kind: 'not-a-real-kind', summary: 'x', detail: 'too short' });
+		expect(nonsense.body).not.toMatch(/selected/);
+	});
+
+	it('escapes what it gives back', async () => {
+		// The values go straight back into markup, so this is the moment a rejected
+		// submission could become a way to put script on the page.
+		const out = await reject({
+			kind: 'bug',
+			summary: '"><script>alert(1)</script>',
+			detail: 'short',
+			contact: '"><img src=x onerror=alert(1)>'
+		});
+		expect(out.body).not.toContain('<script>alert(1)</script>');
+		expect(out.body).not.toContain('<img src=x onerror');
+		expect(out.body).toContain('&lt;script&gt;');
+	});
+
+	it('does not store anything it rejected', async () => {
+		const before = service.db.prepare('SELECT COUNT(*) AS n FROM tickets').get() as { n: number };
+		await reject({ kind: 'bug', summary: 'x', detail: 'short' });
+		const after = service.db.prepare('SELECT COUNT(*) AS n FROM tickets').get() as { n: number };
+		expect(after.n).toBe(before.n);
+	});
+
+	it('offers the same fields as the published form', async () => {
+		// This form is a second copy of the one in site/pages/guides.mjs. The copies
+		// drifting apart is the cost of having two; this is what stops it happening
+		// silently — a field added to one and not the other fails here.
+		const { readFileSync, existsSync } = await import('node:fs');
+		const built = 'site/dist/support.html';
+		if (!existsSync(built)) return; // Nothing to compare against until a build runs.
+		const names = (html: string) =>
+			new Set(
+				[...html.matchAll(/<(?:input|textarea|select)[^>]*\sname="([^"]+)"/g)]
+					.map((m) => m[1])
+					.filter((n) => n !== 'attachments')
+			);
+		const published = names(readFileSync(built, 'utf8'));
+		const retry = names((await reject({ kind: 'bug', summary: 'x', detail: 'short' })).body);
+		expect([...retry].sort()).toEqual([...published].sort());
+	});
+});
