@@ -20,10 +20,20 @@
  * returns a reference, and that reference is the only thing needed to see it
  * again.
  *
- * **No file uploads.** The single most likely thing anyone would attach to a
- * report about this application is a `.maFile`, which is the one file that must
- * never be sent anywhere. Refusing uploads entirely is the only way to be sure
- * we never receive one.
+ * **Uploads, but only pictures of the problem.** This refused files entirely at
+ * first, on the grounds that the single most likely thing anyone would attach to
+ * a report about this application is a `.maFile` — the one file that must never
+ * be sent anywhere. That reasoning was sound and the conclusion was still wrong:
+ * a screenshot is often the whole report, and somebody who cannot attach one
+ * describes a dialog from memory instead.
+ *
+ * So the rule became narrower rather than absolute. A file is identified by its
+ * own leading bytes and must be a PNG, JPEG, GIF, WebP, MP4 or WebM; nothing
+ * else is stored, the declared type is never believed, and a `.maFile` — being
+ * JSON — matches none of those signatures and is refused as a matter of format
+ * rather than of policy. What is stored is served back only through the report
+ * that owns it, as the type it actually is, with `nosniff` and a sandboxed
+ * content security policy so it can never be a way to run something here.
  *
  * **No email sending.** Notification needs SMTP credentials and a mail
  * reputation, and neither exists yet. The admin view is polled instead, which
@@ -40,7 +50,7 @@
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -78,9 +88,195 @@ db.exec(`
 		salt     BLOB NOT NULL,
 		verifier BLOB NOT NULL
 	);
+	/*
+	 * An uploaded screenshot or clip.
+	 *
+	 * ticket_id is null between the upload and the submission that claims it,
+	 * which is the window a person spends still typing. Anything left unclaimed is
+	 * swept, so an upload endpoint cannot be used as free anonymous storage.
+	 *
+	 * The id is the filename on disk. Nothing the uploader sends is ever used to
+	 * build a path - not the filename, not the declared type, nothing.
+	 */
+	CREATE TABLE IF NOT EXISTS attachments (
+		id         TEXT PRIMARY KEY,
+		ticket_id  INTEGER REFERENCES tickets(id) ON DELETE CASCADE,
+		note_id    INTEGER REFERENCES notes(id) ON DELETE CASCADE,
+		media_type TEXT NOT NULL,
+		bytes      INTEGER NOT NULL,
+		created_at TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS attachments_ticket ON attachments(ticket_id);
 `);
 
+/**
+ * Add a column that older databases do not have yet.
+ *
+ * The box runs whatever is in the repository, so a deploy can meet a database
+ * made by the previous version. `ADD COLUMN` is not idempotent, hence the check.
+ */
+function addColumn(table, column, definition) {
+	const existing = db.prepare(`PRAGMA table_info(${table})`).all();
+	if (!existing.some((c) => c.name === column)) {
+		db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+	}
+}
+
+// Who wrote a message. Everything that existed before this column was from us.
+addColumn('notes', 'author', `TEXT NOT NULL DEFAULT 'us'`);
+
 const now = () => new Date().toISOString();
+
+/* ----------------------------------------------------------- attachments -- */
+
+/**
+ * What may be uploaded, decided by looking at the bytes.
+ *
+ * **The declared content type is not consulted for anything.** It is a string
+ * chosen by whoever is uploading, so it can say `image/png` over a payload that
+ * is not one. The type recorded and later served is the one these signatures
+ * identify, which means a file can only ever be served back as what it actually
+ * is.
+ *
+ * SVG is deliberately absent. It is an image everywhere else in a product and a
+ * script host here: an `<svg>` can carry `<script>` and event handlers, and
+ * serving one from this origin would hand an attacker exactly the execution the
+ * rest of this service is built to deny. GIF, PNG, JPEG, WebP, MP4 and WebM
+ * have no such interpretation.
+ */
+const MEDIA = [
+	{ type: 'image/png', kind: 'image', magic: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a] },
+	{ type: 'image/jpeg', kind: 'image', magic: [0xff, 0xd8, 0xff] },
+	{ type: 'image/gif', kind: 'image', magic: [0x47, 0x49, 0x46, 0x38] },
+	// RIFF....WEBP — the four size bytes in between are skipped.
+	{ type: 'image/webp', kind: 'image', magic: [0x52, 0x49, 0x46, 0x46], at8: [0x57, 0x45, 0x42, 0x50] },
+	// An ISO base media file: the box type at offset 4 is 'ftyp'.
+	{ type: 'video/mp4', kind: 'video', at4: [0x66, 0x74, 0x79, 0x70] },
+	{ type: 'video/webm', kind: 'video', magic: [0x1a, 0x45, 0xdf, 0xa3] }
+];
+
+const SIZE = { image: 6 * 1024 * 1024, video: 20 * 1024 * 1024 };
+const MAX_FILES = 4;
+/** Long enough to finish writing a report, short enough not to be storage. */
+const UNCLAIMED_LIFETIME_MS = 2 * 60 * 60 * 1000;
+
+const startsWith = (buffer, bytes, offset = 0) =>
+	bytes.every((b, i) => buffer[offset + i] === b);
+
+/** The media type these bytes actually are, or undefined. */
+function sniff(buffer) {
+	if (buffer.length < 16) {
+		return undefined;
+	}
+	for (const entry of MEDIA) {
+		if (entry.magic && !startsWith(buffer, entry.magic)) continue;
+		if (entry.at4 && !startsWith(buffer, entry.at4, 4)) continue;
+		if (entry.at8 && !startsWith(buffer, entry.at8, 8)) continue;
+		if (entry.magic || entry.at4) return entry;
+	}
+	return undefined;
+}
+
+const FILES_DIR = process.env.TICKETS_FILES ?? join(dirname(DB_PATH), 'attachments');
+
+/** Ids are ours and hex, so a path can never be built out of a request. */
+const isAttachmentId = (value) => /^[0-9a-f]{32}$/.test(String(value));
+
+const fileFor = (id) => {
+	if (!isAttachmentId(id)) {
+		throw new Error('refusing to build a path from an untrusted id');
+	}
+	return join(FILES_DIR, id);
+};
+
+/** Drop uploads nobody ever attached to a report, from disk and from the table. */
+function sweepUnclaimed() {
+	const cutoff = new Date(Date.now() - UNCLAIMED_LIFETIME_MS).toISOString();
+	const stale = db
+		.prepare('SELECT id FROM attachments WHERE ticket_id IS NULL AND created_at < ?')
+		.all(cutoff);
+	for (const row of stale) {
+		try {
+			rmSync(fileFor(row.id), { force: true });
+		} catch {
+			// A file already gone is the state we wanted; the row still goes.
+		}
+	}
+	if (stale.length) {
+		db.prepare('DELETE FROM attachments WHERE ticket_id IS NULL AND created_at < ?').run(cutoff);
+	}
+}
+
+/**
+ * Read a request body of unknown length, refusing early rather than late.
+ *
+ * The cap is enforced as chunks arrive, so an oversized upload is dropped after
+ * one chunk over the line instead of after the sender has finished sending it.
+ */
+function readBody(request, limit) {
+	return new Promise((resolve, reject) => {
+		let size = 0;
+		const chunks = [];
+		request.on('data', (chunk) => {
+			size += chunk.length;
+			if (size > limit) {
+				reject(new Error('too large'));
+				request.destroy();
+				return;
+			}
+			chunks.push(chunk);
+		});
+		request.on('end', () => resolve(Buffer.concat(chunks)));
+		request.on('error', reject);
+	});
+}
+
+/** Store an uploaded body, or say why not. Returns { error } or { attachment }. */
+function storeUpload(buffer) {
+	const media = sniff(buffer);
+	if (!media) {
+		return {
+			error: 'That file is not a kind we accept. Screenshots as PNG, JPEG, GIF or WebP; video as MP4 or WebM.'
+		};
+	}
+	if (buffer.length > SIZE[media.kind]) {
+		return {
+			error: `That ${media.kind} is over the ${SIZE[media.kind] / (1024 * 1024)} MB limit for ${media.kind}s.`
+		};
+	}
+	const id = randomBytes(16).toString('hex');
+	mkdirSync(FILES_DIR, { recursive: true });
+	// 0o600: readable by the service account and nothing else. These are other
+	// people's screenshots and some of them will contain more than intended.
+	writeFileSync(fileFor(id), buffer, { mode: 0o600 });
+	db.prepare(
+		'INSERT INTO attachments (id, ticket_id, media_type, bytes, created_at) VALUES (?, NULL, ?, ?, ?)'
+	).run(id, media.type, buffer.length, now());
+	return { attachment: { id, type: media.type, kind: media.kind, bytes: buffer.length } };
+}
+
+/**
+ * Attach uploads to the report that referenced them.
+ *
+ * Only unclaimed, recent rows can be claimed, so an id that has been seen on
+ * someone else's report cannot be pinned to a second one.
+ */
+function claimAttachments(ticketId, noteId, raw) {
+	const ids = String(raw ?? '')
+		.split(',')
+		.map((s) => s.trim())
+		.filter(isAttachmentId)
+		.slice(0, MAX_FILES);
+	const cutoff = new Date(Date.now() - UNCLAIMED_LIFETIME_MS).toISOString();
+	const claim = db.prepare(
+		'UPDATE attachments SET ticket_id = ?, note_id = ? WHERE id = ? AND ticket_id IS NULL AND created_at >= ?'
+	);
+	let claimed = 0;
+	for (const id of ids) {
+		claimed += claim.run(ticketId, noteId, id, cutoff).changes;
+	}
+	return claimed;
+}
 
 /* ------------------------------------------------------------ validation -- */
 
@@ -118,33 +314,41 @@ function validate(form) {
 		if (value.length > max) errors.push(`The ${name} must be under ${max} characters.`);
 	}
 
-	/*
-	 * Refuse anything that looks like a Steam secret.
-	 *
-	 * The form says not to paste one; people will anyway, in a panic, because
-	 * they think it will help. Storing it would make this database worth
-	 * attacking, and we would have collected the exact thing the whole product
-	 * exists to keep people from handing over. So it is rejected at the door and
-	 * never written.
-	 */
-	const haystack = `${summary}\n${detail}`;
-	const secrets = [
-		[/"?shared_secret"?\s*[:=]/i, 'a shared_secret'],
-		[/"?identity_secret"?\s*[:=]/i, 'an identity_secret'],
-		[/"?revocation_code"?\s*[:=]|\bR\d{5}\b/i, 'a revocation code'],
-		[/-----BEGIN [A-Z ]*PRIVATE KEY-----/, 'a private key'],
-		[/"?steamid"?\s*[:=]\s*"?7656119\d{10}/i, 'a maFile']
-	];
-	for (const [pattern, what] of secrets) {
-		if (pattern.test(haystack)) {
-			errors.push(
-				`That looks like it contains ${what}. Nothing here needs one — describe it instead. The report has not been saved.`
-			);
-			break;
-		}
-	}
+	errors.push(...secretsIn(`${summary}\n${detail}`));
 
 	return { errors, value: { kind, summary, detail, contact: contact || null } };
+}
+
+/**
+ * Refuse anything that looks like a Steam secret.
+ *
+ * The form says not to paste one; people will anyway, in a panic, because they
+ * think it will help. Storing it would make this database worth attacking, and
+ * we would have collected the exact thing the whole product exists to keep
+ * people from handing over. So it is rejected at the door and never written.
+ *
+ * Shared with the reply route rather than living inside `validate`: somebody who
+ * has just been asked a follow-up question is the single most likely person to
+ * paste a secret in answer to it, and a check that only guarded the first
+ * message would have missed exactly that.
+ */
+const SECRETS = [
+	[/"?shared_secret"?\s*[:=]/i, 'a shared_secret'],
+	[/"?identity_secret"?\s*[:=]/i, 'an identity_secret'],
+	[/"?revocation_code"?\s*[:=]|\bR\d{5}\b/i, 'a revocation code'],
+	[/-----BEGIN [A-Z ]*PRIVATE KEY-----/, 'a private key'],
+	[/"?steamid"?\s*[:=]\s*"?7656119\d{10}/i, 'a maFile']
+];
+
+function secretsIn(text) {
+	for (const [pattern, what] of SECRETS) {
+		if (pattern.test(text)) {
+			return [
+				`That looks like it contains ${what}. Nothing here needs one — describe it instead. The report has not been saved.`
+			];
+		}
+	}
+	return [];
 }
 
 /* ----------------------------------------------------------------- admin -- */
@@ -254,12 +458,38 @@ const escape = (s) =>
  * with the content and a stale reference would leave these pages unstyled while
  * still returning 200 — a failure nothing would notice.
  */
+/*
+ * Where the built site lives.
+ *
+ * Configurable rather than hardcoded because the previous hardcoded path meant
+ * these pages could only ever be styled on the box itself — run them anywhere
+ * else, including a local check before a deploy, and every one of them rendered
+ * as unstyled markup while still returning 200.
+ */
+const PUBLIC_DIR = process.env.TICKETS_PUBLIC ?? '/var/www/oda/public';
+
 function styleHref() {
 	try {
-		const home = readFileSync('/var/www/oda/public/index.html', 'utf8');
+		const home = readFileSync(join(PUBLIC_DIR, 'index.html'), 'utf8');
 		return /<link rel="stylesheet" href="([^"]+)"/.exec(home)?.[1] ?? '/assets/site.css';
 	} catch {
 		return '/assets/site.css';
+	}
+}
+
+/**
+ * The attachment script, by its hashed name, read out of the built support page.
+ *
+ * Same reasoning as the stylesheet: the name changes with the content, and a
+ * stale reference here would mean the reply form silently loses its file picker
+ * while still rendering perfectly.
+ */
+function scriptHref() {
+	try {
+		const support = readFileSync(join(PUBLIC_DIR, 'support.html'), 'utf8');
+		return /<script src="(\/assets\/support\.[^"]+)"/.exec(support)?.[1] ?? '/assets/support.js';
+	} catch {
+		return '/assets/support.js';
 	}
 }
 
@@ -273,6 +503,7 @@ function page({ title, body, noindex = true }) {
 	${noindex ? '<meta name="robots" content="noindex, nofollow">' : ''}
 	<link rel="icon" href="/favicon.ico" sizes="32x32">
 	<link rel="stylesheet" href="${escape(styleHref())}">
+	<script src="${escape(scriptHref())}" defer></script>
 </head>
 <body>
 	<header class="masthead"><div class="wrap">
@@ -410,27 +641,115 @@ function submitted(reference) {
 	});
 }
 
-function ticketView(ticket, notes) {
+/**
+ * What each state means, in words rather than a database token.
+ *
+ * "open" tells somebody nothing about whether a person has looked. The
+ * distinction that matters to the person waiting is between *received* and
+ * *someone is on it*, so the states carry that and the page says which.
+ */
+const STATUS = {
+	open: { label: 'Received', says: 'Filed and waiting to be picked up.' },
+	assigned: { label: 'Being looked at', says: 'A maintainer has this open and is working through it.' },
+	waiting: { label: 'Waiting on you', says: 'We have asked something below and cannot go further until you answer.' },
+	resolved: { label: 'Resolved', says: 'Closed as done. Reply below if it is not.' },
+	declined: { label: 'Declined', says: 'Closed without a change. The reason is below.' }
+};
+const STATUSES = Object.keys(STATUS);
+
+const bytesLabel = (n) =>
+	n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
+
+/** A day, spelled out — "12 August 2026" reads unambiguously in every country. */
+const dayLabel = (iso) =>
+	new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+
+function attachmentList(reference, files) {
+	if (!files.length) {
+		return '';
+	}
+	const item = (f, i) => {
+		const href = `/support/ticket/${encodeURIComponent(reference)}/file/${encodeURIComponent(f.id)}`;
+		// A video gets a real player; an image gets a thumbnail that opens full size.
+		const preview = f.media_type.startsWith('video/')
+			? `<video controls preload="metadata" src="${escape(href)}"></video>`
+			: `<a href="${escape(href)}"><img src="${escape(href)}" alt="Attachment ${i + 1} on report ${escape(reference)}" loading="lazy"></a>`;
+		return `<li class="attachment">${preview}
+					<span class="meta"><span>${escape(f.media_type.split('/')[1].toUpperCase())}</span><span class="bytes">${escape(bytesLabel(f.bytes))}</span></span>
+				</li>`;
+	};
+	return `<ul class="attachments">${files.map(item).join('')}</ul>`;
+}
+
+function message(who, when, body, extra = '') {
+	const mine = who === 'us';
+	return `<li class="message ${mine ? 'message-us' : 'message-reporter'}">
+				<div class="message-head">
+					<span class="message-who">${mine ? 'Open Desktop Authenticator' : 'You'}</span>
+					<time class="message-when" datetime="${escape(when)}">${escape(dayLabel(when))}</time>
+				</div>
+				<p>${escape(body).replace(/\n/g, '<br>')}</p>
+				${extra}
+			</li>`;
+}
+
+function ticketView(ticket, notes, files, options = {}) {
+	const state = STATUS[ticket.status] ?? STATUS.open;
+	const ofNote = (id) => files.filter((f) => f.note_id === id);
+	const opening = files.filter((f) => f.note_id === null);
+
+	const thread = [
+		message('reporter', ticket.created_at, ticket.detail, attachmentList(ticket.reference, opening)),
+		...notes.map((n) =>
+			message(n.author, n.created_at, n.body, attachmentList(ticket.reference, ofNote(n.id)))
+		)
+	].join('\n');
+
+	const closed = ticket.status === 'resolved' || ticket.status === 'declined';
+
 	return page({
 		title: `Report ${ticket.reference}`,
 		body: `		<article>
-			<h1>Report ${escape(ticket.reference)}</h1>
-			<p class="lede">${escape(KIND_LABEL[ticket.kind] ?? ticket.kind)} —
-			<strong>${escape(ticket.status)}</strong></p>
-			<h2>${escape(ticket.summary)}</h2>
-			<p>${escape(ticket.detail).replace(/\n/g, '<br>')}</p>
-			<p class="reviewed">Opened <time datetime="${escape(ticket.created_at)}">${escape(ticket.created_at.slice(0, 10))}</time>.</p>
-			${
-				notes.length
-					? `<h2>Replies</h2>${notes
-							.map(
-								(n) =>
-									`<div class="callout"><p>${escape(n.body).replace(/\n/g, '<br>')}</p>
-									<p class="reviewed">${escape(n.created_at.slice(0, 10))}</p></div>`
-							)
-							.join('')}`
-					: '<p class="muted">No reply yet.</p>'
-			}
+			<div class="ticket-head">
+				<span class="ticket-ref">${escape(ticket.reference)}</span>
+				<span class="status status-${escape(ticket.status)}">${escape(state.label)}</span>
+			</div>
+			<h1>${escape(ticket.summary)}</h1>
+			<p class="lede">${escape(state.says)}</p>
+			<p class="hint">${escape(KIND_LABEL[ticket.kind] ?? ticket.kind)} · opened ${escape(dayLabel(ticket.created_at))}</p>
+
+			<ul class="thread">
+${thread}
+			</ul>
+
+			${options.notice ?? ''}
+
+			<h2>${closed ? 'Reopen this' : 'Add something'}</h2>
+			<p>${
+				closed
+					? 'If this was closed too early, reply and it goes back into the queue.'
+					: 'Anything you forgot, or an answer to a question above.'
+			}</p>
+			<form class="form" method="post" action="/support/ticket/${escape(ticket.reference)}/reply">
+				<div class="field">
+					<label for="reply">Your message</label>
+					<textarea id="reply" name="body" rows="5" maxlength="4000" minlength="4" required
+					          placeholder="Add anything that would help."></textarea>
+				</div>
+				<div class="field" data-attach hidden>
+					<label for="reply-files">Add a screenshot or a clip</label>
+					<div class="dropzone" data-dropzone tabindex="0" role="button">
+						<strong>Drop files here, or choose them</strong>
+						<p class="hint">PNG, JPEG, GIF or WebP up to 6&nbsp;MB. MP4 or WebM up to 20&nbsp;MB.</p>
+						<input id="reply-files" type="file" multiple
+						       accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm">
+					</div>
+					<ul class="attachments" data-list></ul>
+				</div>
+				<div class="controls"><button type="submit">Send</button></div>
+			</form>
+
+			<p class="hint">Keep the reference ${escape(ticket.reference)} — it is the only way back to this page.</p>
 		</article>`
 	});
 }
@@ -485,17 +804,50 @@ async function handle(request, response, url) {
 		}
 		const reference = makeReference();
 		const stamp = now();
-		db.prepare(
-			`INSERT INTO tickets (reference, kind, summary, detail, contact, created_at, updated_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?)`
-		).run(reference, value.kind, value.summary, value.detail, value.contact, stamp, stamp);
+		const inserted = db
+			.prepare(
+				`INSERT INTO tickets (reference, kind, summary, detail, contact, created_at, updated_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`
+			)
+			.run(reference, value.kind, value.summary, value.detail, value.contact, stamp, stamp);
+		claimAttachments(Number(inserted.lastInsertRowid), null, form.attachments);
 		return send(response, 200, submitted(reference));
 	}
 
-	/* ---- public: look a report up by reference ---- */
-	const ref = /^\/support\/ticket\/(ODA-[A-Z0-9]{4}-[A-Z0-9]{4})$/.exec(url.pathname);
-	if (ref && method === 'GET') {
-		const ticket = db.prepare('SELECT * FROM tickets WHERE reference = ?').get(ref[1]);
+	/* ---- public: upload one screenshot or clip ---- */
+	if (url.pathname === '/support/attach' && method === 'POST') {
+		// Answers here are JSON because only the page's own script calls it.
+		const json = (status, payload) =>
+			send(response, status, JSON.stringify(payload), { 'content-type': 'application/json' });
+
+		if (!originOk(request)) {
+			return json(403, { error: 'That upload did not come from this site.' });
+		}
+		// Four files per report, and a person does not file many reports. Twelve in
+		// ten minutes is generous for one person and useless as a way to fill a disk.
+		if (tooMany(`attach:${client}`, 12, 10 * 60 * 1000)) {
+			return json(429, { error: 'Too many uploads from this address. Try again shortly.' });
+		}
+		sweepUnclaimed();
+
+		// One byte over the largest thing we accept is enough to reject on.
+		const body = await readBody(request, SIZE.video + 1024).catch(() => undefined);
+		if (!body) {
+			return json(413, { error: 'That file is larger than we accept.' });
+		}
+		const result = storeUpload(body);
+		if (result.error) {
+			return json(415, { error: result.error });
+		}
+		return json(200, result.attachment);
+	}
+
+	/* ---- public: a report, and everything on it ---- */
+	const onTicket = /^\/support\/ticket\/(ODA-[A-Z0-9]{4}-[A-Z0-9]{4})(\/reply|\/file\/([0-9a-f]{32}))?$/.exec(
+		url.pathname
+	);
+	if (onTicket) {
+		const ticket = db.prepare('SELECT * FROM tickets WHERE reference = ?').get(onTicket[1]);
 		if (!ticket) {
 			return send(
 				response,
@@ -506,14 +858,116 @@ async function handle(request, response, url) {
 				})
 			);
 		}
-		const notes = db.prepare('SELECT * FROM notes WHERE ticket_id = ? ORDER BY id').all(ticket.id);
-		return send(response, 200, ticketView(ticket, notes));
+
+		/*
+		 * An attachment, served only through the report it belongs to.
+		 *
+		 * The reference is the capability for the whole page, so a file on it is
+		 * reachable on exactly the same terms — no more, and no less. Asking for a
+		 * real id under the wrong reference is a 404, so ids cannot be walked.
+		 */
+		if (onTicket[3] && method === 'GET') {
+			const file = db
+				.prepare('SELECT * FROM attachments WHERE id = ? AND ticket_id = ?')
+				.get(onTicket[3], ticket.id);
+			if (!file) {
+				return send(response, 404, page({ title: 'Not found', body: notice('callout-warn', ['No such file.']) }));
+			}
+			let bytes;
+			try {
+				bytes = readFileSync(fileFor(file.id));
+			} catch {
+				return send(response, 404, page({ title: 'Not found', body: notice('callout-warn', ['No such file.']) }));
+			}
+			response.writeHead(200, {
+				// The type recorded from the file's own bytes, never a string the
+				// uploader chose, and `nosniff` so the browser does not go looking
+				// for a second opinion.
+				'content-type': file.media_type,
+				'content-length': bytes.length,
+				'x-content-type-options': 'nosniff',
+				// Belt and braces: even if something got past the signature check,
+				// this response may load nothing, run nothing and reach nowhere.
+				//
+				// nginx adds the site policy to this response as well, so two
+				// content security policies arrive. Unlike two Referrer-Policy
+				// values — where the browser picks one and the order decides which —
+				// multiple policies are each enforced in full, so the effective
+				// result is the intersection and therefore this stricter one. That
+				// is the wanted outcome, so the upstream copy is deliberately not
+				// hidden in the proxy block the way the others are.
+				'content-security-policy': "default-src 'none'; sandbox; frame-ancestors 'none'",
+				'content-disposition': `inline; filename="${ticket.reference}-${file.id.slice(0, 8)}.${file.media_type.split('/')[1]}"`,
+				'cross-origin-resource-policy': 'same-origin',
+				'referrer-policy': 'same-origin',
+				// Somebody else's screenshot is not for a shared cache to hold.
+				'cache-control': 'private, no-store'
+			});
+			return response.end(bytes);
+		}
+
+		/* ---- the reporter adds to their own report ---- */
+		if (onTicket[2] === '/reply' && method === 'POST') {
+			if (!originOk(request)) {
+				return send(
+					response,
+					403,
+					page({ title: 'Refused', body: notice('callout-warn', ['That form was not submitted from this site.']) })
+				);
+			}
+			if (tooMany(`reply:${client}`, 10, 10 * 60 * 1000)) {
+				return send(
+					response,
+					429,
+					page({ title: 'Too many', body: notice('callout-warn', ['Too many messages. Try again shortly.']) })
+				);
+			}
+			const form = await readForm(request).catch(() => ({}));
+			const body = String(form.body ?? '').trim();
+			if (body.length < 4 || body.length > 4000) {
+				return send(
+					response,
+					400,
+					page({ title: 'Not sent', body: notice('callout-warn', ['A message needs between 4 and 4000 characters.']) })
+				);
+			}
+			// The same refusal the first message gets. Somebody who has been asked a
+			// follow-up question is exactly the person most likely to paste a secret
+			// in answer to it.
+			const leaked = secretsIn(body);
+			if (leaked.length) {
+				return send(response, 400, page({ title: 'Not sent', body: notice('callout-warn', leaked) }));
+			}
+			const stamp = now();
+			const note = db
+				.prepare('INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)')
+				.run(ticket.id, body, 'reporter', stamp);
+			claimAttachments(ticket.id, Number(note.lastInsertRowid), form.attachments);
+			// A reply from the reporter moves a closed report back into the queue,
+			// and a "waiting on you" one back to us. Nobody should have to file a
+			// second report to answer a question on the first.
+			const next = ticket.status === 'assigned' ? 'assigned' : 'open';
+			db.prepare('UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?').run(
+				next,
+				stamp,
+				ticket.id
+			);
+			return send(response, 303, '', { location: `/support/ticket/${ticket.reference}` });
+		}
+
+		if (method === 'GET') {
+			const notes = db.prepare('SELECT * FROM notes WHERE ticket_id = ? ORDER BY id').all(ticket.id);
+			const files = db
+				.prepare('SELECT * FROM attachments WHERE ticket_id = ? ORDER BY created_at, id')
+				.all(ticket.id);
+			return send(response, 200, ticketView(ticket, notes, files));
+		}
 	}
 
 	return undefined;
 }
 
-export { handle, makeReference, originOk, tooMany, page };
+export { handle, makeReference, originOk, tooMany, page, sniff, storeUpload, fileFor, STATUSES };
 
 /* ----------------------------------------------------------------- admin -- */
 
@@ -532,23 +986,38 @@ function loginPage(message) {
 	});
 }
 
-function adminList(session, tickets) {
-	const row = (t) => `			<li class="project">
+function adminList(session, tickets, counts) {
+	const row = (t) => {
+		const state = STATUS[t.status] ?? STATUS.open;
+		const files = counts.get(t.id) ?? 0;
+		return `			<li class="message">
+				<div class="ticket-head">
+					<span class="ticket-ref">${escape(t.reference)}</span>
+					<span class="status status-${escape(t.status)}">${escape(state.label)}</span>
+					${files ? `<span class="hint">${files} attachment${files === 1 ? '' : 's'}</span>` : ''}
+				</div>
 				<h3><a href="/support/ticket/${escape(t.reference)}">${escape(t.summary)}</a></h3>
-				<span class="domain">${escape(t.reference)} · ${escape(KIND_LABEL[t.kind] ?? t.kind)} · ${escape(t.created_at.slice(0, 10))}</span>
-				<form method="post" action="/admin/ticket/${t.id}">
+				<p class="hint">${escape(KIND_LABEL[t.kind] ?? t.kind)} · ${escape(dayLabel(t.created_at))}${
+					t.contact ? ` · reply to ${escape(t.contact)}` : ' · no reply address'
+				}</p>
+				<form class="form" method="post" action="/admin/ticket/${t.id}">
 					<input type="hidden" name="csrf" value="${escape(session.csrf)}">
-					<label for="note-${t.id}">Reply (the reporter can read this)</label>
-					<textarea id="note-${t.id}" name="note" rows="2" maxlength="2000"></textarea>
+					<div class="field">
+						<label for="note-${t.id}">Reply (the reporter can read this)</label>
+						<textarea id="note-${t.id}" name="note" rows="3" maxlength="2000"
+						          placeholder="Answer, or ask for what is missing."></textarea>
+					</div>
 					<div class="controls">
-						<button type="submit" name="status" value="resolved">Resolve</button>
-						<button type="submit" name="status" value="open" class="secondary">Keep open</button>
+						<button type="submit" name="status" value="assigned">I am on it</button>
+						<button type="submit" name="status" value="waiting" class="secondary">Need more from them</button>
+						<button type="submit" name="status" value="resolved" class="secondary">Resolve</button>
 						<button type="submit" name="status" value="declined" class="secondary">Decline</button>
 					</div>
 				</form>
 			</li>`;
-	const open = tickets.filter((t) => t.status === 'open');
-	const closed = tickets.filter((t) => t.status !== 'open');
+	};
+	const live = tickets.filter((t) => !['resolved', 'declined'].includes(t.status));
+	const closed = tickets.filter((t) => ['resolved', 'declined'].includes(t.status));
 	return page({
 		title: 'Admin',
 		body: `		<article>
@@ -557,16 +1026,16 @@ function adminList(session, tickets) {
 				<input type="hidden" name="csrf" value="${escape(session.csrf)}">
 				<button type="submit" class="secondary">Sign out</button>
 			</form>
-			<p class="lede">${open.length} open, ${closed.length} closed.</p>
+			<p class="lede">${live.length} open, ${closed.length} closed.</p>
 			<h2>Open</h2>
-			${open.length ? `<ul class="projects">\n${open.map(row).join('\n')}\n</ul>` : '<p class="muted">Nothing open.</p>'}
+			${live.length ? `<ul class="thread">\n${live.map(row).join('\n')}\n</ul>` : '<p class="muted">Nothing open.</p>'}
 			<h2>Closed</h2>
 			${
 				closed.length
 					? `<ul class="plain">${closed
 							.map(
 								(t) =>
-									`<li><a href="/support/ticket/${escape(t.reference)}">${escape(t.summary)}</a> — ${escape(t.status)}</li>`
+									`<li><a href="/support/ticket/${escape(t.reference)}">${escape(t.summary)}</a> — ${escape((STATUS[t.status] ?? STATUS.open).label)}</li>`
 							)
 							.join('')}</ul>`
 					: '<p class="muted">Nothing closed yet.</p>'
@@ -716,7 +1185,13 @@ async function handleAdmin(request, response, url) {
 			return send(response, 200, loginPage());
 		}
 		const tickets = db.prepare('SELECT * FROM tickets ORDER BY id DESC LIMIT 200').all();
-		return send(response, 200, adminList(session, tickets));
+		const counts = new Map(
+			db
+				.prepare('SELECT ticket_id, COUNT(*) AS n FROM attachments WHERE ticket_id IS NOT NULL GROUP BY ticket_id')
+				.all()
+				.map((r) => [r.ticket_id, r.n])
+		);
+		return send(response, 200, adminList(session, tickets, counts));
 	}
 
 	const act = /^\/admin\/ticket\/(\d+)$/.exec(url.pathname);
@@ -735,9 +1210,7 @@ async function handleAdmin(request, response, url) {
 				})
 			);
 		}
-		const status = ['open', 'resolved', 'declined'].includes(String(form.status))
-			? String(form.status)
-			: 'open';
+		const status = STATUSES.includes(String(form.status)) ? String(form.status) : 'open';
 		const note = String(form.note ?? '')
 			.trim()
 			.slice(0, 2000);
@@ -748,9 +1221,10 @@ async function handleAdmin(request, response, url) {
 			Number(act[1])
 		);
 		if (note) {
-			db.prepare('INSERT INTO notes (ticket_id, body, created_at) VALUES (?, ?, ?)').run(
+			db.prepare('INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)').run(
 				Number(act[1]),
 				note,
+				'us',
 				stamp
 			);
 		}

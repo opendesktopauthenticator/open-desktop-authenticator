@@ -114,7 +114,14 @@ describe('stored cross-site scripting', () => {
 		const { out, response } = capture();
 		await service.handle(view.request, response, view.url);
 		expect(out.status).toBe(404);
-		expect(out.body).not.toMatch(/<script/i);
+
+		// The layout carries exactly one script: our own attachment helper, by its
+		// hashed name. Anything else in the document is something that got in.
+		const scripts = out.body.match(/<script[^>]*>/gi) ?? [];
+		expect(scripts).toHaveLength(1);
+		expect(scripts[0]).toMatch(/src="\/assets\/support\.[^"]*js"/);
+		// And no inline script body anywhere, which the CSP would refuse anyway.
+		expect(out.body).not.toMatch(/<script[^>]*>[^<]/i);
 	});
 });
 

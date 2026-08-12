@@ -1,0 +1,248 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Readable } from 'node:stream';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+/**
+ * A report as a conversation rather than a receipt.
+ *
+ * The reporter could previously only read. That is the wrong shape for what
+ * this is actually for: somebody who has just lost an inventory writes in a
+ * hurry, remembers the important detail ten minutes later, and has nowhere to
+ * put it but a second report. These cover the two halves that fixes — the
+ * reporter can add to their own thread, and the thread says who said what.
+ */
+
+let service: typeof import('../tickets/server.mjs', { with: { 'resolution-mode': 'import' } });
+let files: string;
+
+beforeAll(async () => {
+	files = mkdtempSync(join(tmpdir(), 'oda-convo-'));
+	process.env.TICKETS_DB = ':memory:';
+	process.env.TICKETS_NO_LISTEN = '1';
+	process.env.TICKETS_FILES = files;
+	service = await import('../tickets/server.mjs');
+});
+
+afterAll(() => {
+	service.server?.close?.();
+	rmSync(files, { recursive: true, force: true });
+});
+
+let nth = 0;
+const someAddress = () => {
+	nth += 1;
+	return `172.${(nth >> 16) & 255}.${(nth >> 8) & 255}.${nth & 255}`;
+};
+
+function capture() {
+	const out = { status: 0, body: '', headers: {} as Record<string, string> };
+	const response = {
+		headersSent: false,
+		writeHead(status: number, headers: Record<string, string>) {
+			out.status = status;
+			out.headers = headers ?? {};
+			return this;
+		},
+		end(body: string) {
+			out.body = typeof body === 'string' ? body : '';
+		}
+	};
+	return { out, response };
+}
+
+const at = (p: string) => new URL(`https://opendesktopauthenticator.com${p}`);
+
+function post(fields: Record<string, string>, headers: Record<string, string> = {}) {
+	const request = Readable.from([
+		Buffer.from(new URLSearchParams(fields).toString())
+	]) as unknown as Record<string, unknown>;
+	request.method = 'POST';
+	request.headers = { origin: 'https://opendesktopauthenticator.com', ...headers };
+	request.socket = { remoteAddress: someAddress() };
+	return request;
+}
+
+const get = () => ({ method: 'GET', headers: {}, socket: { remoteAddress: someAddress() } });
+
+async function fileReport(over: Record<string, string> = {}) {
+	const { out, response } = capture();
+	await service.handle(
+		post({
+			kind: 'bug',
+			summary: 'Something went wrong while importing',
+			detail: 'The import finished but every code it produced afterwards was refused by Steam.',
+			...over
+		}),
+		response,
+		at('/support/submit')
+	);
+	return /ODA-[A-Z0-9]{4}-[A-Z0-9]{4}/.exec(out.body)?.[0] as string;
+}
+
+/** Split a rendered thread into its messages, each with the side that sent it. */
+function page(out: { body: string }) {
+	return [...out.body.matchAll(/<li class="message (message-us|message-reporter)">([\s\S]*?)<\/li>/g)].map(
+		(m) => ({ side: m[1] === 'message-us' ? 'us' : 'reporter', text: m[2] })
+	);
+}
+
+async function view(reference: string) {
+	const { out, response } = capture();
+	await service.handle(get(), response, at(`/support/ticket/${reference}`));
+	return out;
+}
+
+async function reply(reference: string, body: string, headers = {}) {
+	const { out, response } = capture();
+	await service.handle(post({ body }, headers), response, at(`/support/ticket/${reference}/reply`));
+	return out;
+}
+
+/** Act as the maintainer, without going through the sign-in flow. */
+function asUs(reference: string, note: string, status: string) {
+	const ticket = service.db
+		.prepare('SELECT * FROM tickets WHERE reference = ?')
+		.get(reference) as { id: number };
+	service.db
+		.prepare('INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)')
+		.run(ticket.id, note, 'us', new Date().toISOString());
+	service.db.prepare('UPDATE tickets SET status = ? WHERE id = ?').run(status, ticket.id);
+}
+
+describe('the reporter can add to their own report', () => {
+	it('accepts a reply and shows it in the thread', async () => {
+		const reference = await fileReport();
+		expect((await reply(reference, 'I forgot to say: this only happens after a reboot.')).status).toBe(303);
+
+		const page = await view(reference);
+		expect(page.body).toContain('only happens after a reboot');
+	});
+
+	it('marks who said what', async () => {
+		// The whole point of the thread. "Has a human seen this" is the question,
+		// and a page where every message looks the same cannot answer it.
+		const reference = await fileReport();
+		await reply(reference, 'Adding a detail I left out of the first message.');
+		asUs(reference, 'Thanks — that narrows it down. Which version are you on?', 'assigned');
+
+		// Each message is checked against its own text, not merely counted. Simply
+		// asserting that both classes appear somewhere on the page passes even when
+		// every message is attributed to the wrong side, which is the exact bug
+		// worth catching here.
+		const [opening, followUp, ours, ...rest] = page(await view(reference));
+		expect(rest).toHaveLength(0);
+		expect(opening).toBeDefined();
+		expect(followUp).toBeDefined();
+		expect(ours).toBeDefined();
+
+		// The opening report is from the person who filed it.
+		expect(opening?.side).toBe('reporter');
+		expect(opening?.text).toContain('every code it produced');
+		// Then their follow-up.
+		expect(followUp?.side).toBe('reporter');
+		expect(followUp?.text).toContain('Adding a detail');
+		// Then ours, named.
+		expect(ours?.side).toBe('us');
+		expect(ours?.text).toContain('Which version are you on');
+		expect(ours?.text).toContain('Open Desktop Authenticator');
+	});
+
+	it('refuses a reply posted from another site', async () => {
+		const reference = await fileReport();
+		const out = await reply(reference, 'A reply that did not come from here.', {
+			origin: 'https://evil.example'
+		});
+		expect(out.status).toBe(403);
+	});
+
+	it('refuses a reply to a reference that does not exist', async () => {
+		const out = await reply('ODA-2222-3333', 'Talking to nobody.');
+		expect(out.status).toBe(404);
+	});
+
+	it.each([
+		['too short', 'ok'],
+		['too long', 'x'.repeat(4001)]
+	])('refuses a reply that is %s', async (_what, body) => {
+		const reference = await fileReport();
+		expect((await reply(reference, body)).status).toBe(400);
+	});
+
+	it('refuses a reply containing a secret', async () => {
+		// **The check that most needed to exist here.** Somebody answering "which
+		// account is it?" is the single most likely person to paste the wrong
+		// thing, and a guard that only covered the first message would have missed
+		// exactly that moment.
+		const reference = await fileReport();
+		const out = await reply(reference, 'Here it is: "shared_secret": "abcdefgh12345678=="');
+		expect(out.status).toBe(400);
+		expect(out.body).toMatch(/has not been saved/i);
+
+		// And nothing was written.
+		const page = await view(reference);
+		expect(page.body).not.toContain('abcdefgh12345678');
+	});
+
+	it('escapes a reply before rendering it', async () => {
+		const reference = await fileReport();
+		await reply(reference, 'Try this: <img src=x onerror=alert(1)> and <script>alert(2)</script>');
+		const page = await view(reference);
+		expect(page.body).not.toContain('<img src=x onerror');
+		expect(page.body).not.toContain('<script>alert(2)</script>');
+		expect(page.body).toContain('&lt;img');
+	});
+});
+
+describe('status', () => {
+	it('says a person has it, not just that it is open', async () => {
+		const reference = await fileReport();
+		let page = await view(reference);
+		expect(page.body).toContain('Received');
+
+		asUs(reference, 'Picked this up.', 'assigned');
+		page = await view(reference);
+		expect(page.body).toContain('Being looked at');
+		expect(page.body).toContain('status-assigned');
+	});
+
+	it('puts a resolved report back in the queue when the reporter replies', async () => {
+		// Closing something the reporter disagrees with should not force them to
+		// file a second report, which would arrive with none of the context.
+		const reference = await fileReport();
+		asUs(reference, 'Closing this as fixed in 1.2.', 'resolved');
+		expect((await view(reference)).body).toContain('Resolved');
+
+		await reply(reference, 'It is still happening on 1.2, unfortunately.');
+		const page = await view(reference);
+		expect(page.body).toContain('Received');
+		expect(page.body).not.toContain('status-resolved');
+	});
+
+	it('leaves an assigned report assigned when the reporter answers', async () => {
+		// Somebody is already working on it; a reply is the answer they asked for,
+		// not a reason to drop it back into the unclaimed pile.
+		const reference = await fileReport();
+		asUs(reference, 'Which version are you on?', 'assigned');
+		await reply(reference, 'Version 1.2.0 on Windows 11.');
+		expect((await view(reference)).body).toContain('Being looked at');
+	});
+
+	it('offers to reopen rather than to add, once closed', async () => {
+		const reference = await fileReport();
+		asUs(reference, 'Not something we will change.', 'declined');
+		const page = await view(reference);
+		expect(page.body).toContain('Reopen this');
+		expect(page.body).toContain('Declined');
+	});
+});
+
+describe('what the thread still does not show', () => {
+	it('keeps the reporter’s contact address off the page', async () => {
+		const reference = await fileReport({ contact: 'someone@example.com' });
+		await reply(reference, 'A follow-up message on this report.');
+		const page = await view(reference);
+		expect(page.body).not.toContain('someone@example.com');
+	});
+});

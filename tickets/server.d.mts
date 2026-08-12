@@ -49,6 +49,23 @@ export function derive(passphrase: string, salt: Buffer): Buffer;
 /** Regenerate the one-time bootstrap token, or clear it once an admin exists. */
 export function refreshBootstrap(): void;
 
+/** What a buffer's leading bytes say it is, or undefined if it is not accepted. */
+export function sniff(
+	buffer: Buffer
+): { type: string; kind: 'image' | 'video' } | undefined;
+
+/** Store an uploaded body, or explain why it was refused. */
+export function storeUpload(buffer: Buffer): {
+	error?: string;
+	attachment?: { id: string; type: string; kind: string; bytes: number };
+};
+
+/** The path on disk for an attachment id. Throws on anything we did not generate. */
+export function fileFor(id: string): string;
+
+/** The statuses a report can be in. */
+export const STATUSES: string[];
+
 /** Public routes. Resolves undefined when the path is not one of them. */
 export function handle(request: unknown, response: unknown, url: URL): Promise<unknown>;
 

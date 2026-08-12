@@ -140,6 +140,12 @@ function head(page) {
 	<meta name="msapplication-TileImage" content="${asset('mstile-150.png')}">
 
 	<link rel="stylesheet" href="${asset('site.css')}">
+	<!--
+		Script only where a page asks for one. Everything here works without it;
+		the one script that exists adds file attachments to the support form, and
+		putting it on all sixteen pages would mean fifteen requests for nothing.
+	-->
+	${page.script ? `<script src="${asset(page.script)}" defer></script>` : ''}
 	${page.structuredData ? `<script type="application/ld+json">${JSON.stringify(page.structuredData(SITE))}</script>` : ''}
 	<script type="application/ld+json">${JSON.stringify(breadcrumbs(page))}</script>`.trim();
 }

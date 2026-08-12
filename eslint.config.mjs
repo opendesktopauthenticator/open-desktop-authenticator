@@ -15,7 +15,18 @@ import globals from 'globals';
  */
 export default tseslint.config(
 	{
-		ignores: ['out/**', 'dist/**', 'node_modules/**', 'spike/**', 'coverage/**']
+		// `site/dist/**` is generated; `site/assets/*.js` is browser script that
+		// ships as-is rather than through the TypeScript project, so the
+		// type-checked rules have no program to check it against.
+		ignores: [
+			'out/**',
+			'dist/**',
+			'site/dist/**',
+			'site/assets/**/*.js',
+			'node_modules/**',
+			'spike/**',
+			'coverage/**'
+		]
 	},
 
 	js.configs.recommended,

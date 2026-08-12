@@ -357,6 +357,8 @@ const FAQ_ITEMS = [
 export const support = {
 	slug: 'support',
 	navTitle: 'Support',
+	// Reveals the attachment field and uploads the files. The form works without it.
+	script: 'support.js',
 	title: 'Report a problem',
 	description:
 		'Report a bug, a documentation error, or a suspected fake Steam authenticator site. Tracked, answered, and resolvable without an account.',
@@ -379,32 +381,72 @@ export const support = {
 				</p>
 			</div>
 
-			<form method="post" action="/support/submit">
-				<label for="kind">What is this about?</label>
-				<select id="kind" name="kind" required>
-					<option value="bug">A bug in the application</option>
-					<option value="documentation">Something on this site is wrong or missing</option>
-					<option value="clone-site">A suspected fake or clone download</option>
-					<option value="security">A security problem</option>
-					<option value="other">Something else</option>
-				</select>
+			<!--
+				Deliberately not multipart. Files are uploaded one at a time to
+				/support/attach and referenced here by id, so this stays a plain
+				urlencoded post that works with script disabled — and so the server
+				never has to parse multipart, which is a notoriously sharp thing to
+				hand-roll and the last place this project wants a parser bug.
+			-->
+			<form class="form" method="post" action="/support/submit">
+				<div class="field">
+					<label for="kind">What is this about?</label>
+					<select id="kind" name="kind" required>
+						<option value="bug">A bug in the application</option>
+						<option value="documentation">Something on this site is wrong or missing</option>
+						<option value="clone-site">A suspected fake or clone download</option>
+						<option value="security">A security problem</option>
+						<option value="other">Something else</option>
+					</select>
+				</div>
 
-				<label for="summary">One line</label>
-				<input id="summary" name="summary" type="text" maxlength="140" minlength="8" required
-				       placeholder="Codes are rejected after importing from SDA">
+				<div class="field">
+					<label for="summary">One line</label>
+					<input id="summary" name="summary" type="text" maxlength="140" minlength="8" required
+					       placeholder="Codes are rejected after importing from SDA">
+				</div>
 
-				<label for="detail">What happened</label>
-				<textarea id="detail" name="detail" rows="8" maxlength="4000" minlength="20" required
-				          placeholder="What you did, what you expected, what happened instead. Application version and operating system if it is a bug. For a clone site: the URL and where you found it."></textarea>
+				<div class="field">
+					<label for="detail">What happened</label>
+					<textarea id="detail" name="detail" rows="8" maxlength="4000" minlength="20" required
+					          placeholder="What you did, what you expected, what happened instead. Application version and operating system if it is a bug. For a clone site: the URL and where you found it."></textarea>
+				</div>
 
-				<label for="contact">Where to reply, if you want one (optional)</label>
-				<input id="contact" name="contact" type="text" maxlength="120"
-				       placeholder="An email address, or leave this blank">
-				<p class="hint">
-					No account is created either way. You get a reference you can use to check
-					back; leaving an address just means we can ask a follow-up question, which is
-					often the difference between a fixed bug and a closed one.
-				</p>
+				<!--
+					Attachments are revealed by /assets/support.js. Without script there is
+					no way to upload, so the control stays hidden rather than sitting there
+					inert and taking a click that does nothing.
+				-->
+				<div class="field" data-attach hidden>
+					<label for="files">Screenshots or a short video (optional)</label>
+					<div class="dropzone" data-dropzone tabindex="0" role="button"
+					     aria-describedby="files-hint">
+						<strong>Drop files here, or choose them</strong>
+						<p class="hint" id="files-hint">
+							PNG, JPEG, GIF or WebP up to 6&nbsp;MB. MP4 or WebM up to 20&nbsp;MB.
+							Four files at most.
+						</p>
+						<input id="files" type="file" multiple
+						       accept="image/png,image/jpeg,image/gif,image/webp,video/mp4,video/webm">
+					</div>
+					<p class="hint">
+						Check the picture before you send it. A screenshot of the application can
+						have a code, an account name or a recovery code in the corner of it, and a
+						screen recording can have far more than you meant to include.
+					</p>
+					<ul class="attachments" data-list></ul>
+				</div>
+
+				<div class="field">
+					<label for="contact">Where to reply, if you want one (optional)</label>
+					<input id="contact" name="contact" type="text" maxlength="120"
+					       placeholder="An email address, or leave this blank">
+					<p class="hint">
+						No account is created either way. You get a reference you can use to check
+						back; leaving an address just means we can ask a follow-up question, which is
+						often the difference between a fixed bug and a closed one.
+					</p>
+				</div>
 
 				<div class="controls">
 					<button type="submit">Send the report</button>

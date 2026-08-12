@@ -174,6 +174,44 @@ server {
 	# `tickets` is a 6-per-minute zone. Submitting a report is a human action a
 	# handful of times a day, so anything faster is a script, and the origin
 	# should refuse it before Node ever allocates for it.
+	# Uploads, kept apart from every other proxied path.
+	#
+	# It is the only place on the domain that accepts a body worth more than a
+	# form post, so it is the only place `client_max_body_size` is raised — and it
+	# is raised here rather than on the parent so that a large body posted at any
+	# other path is still refused by nginx before it reaches Node.
+	#
+	# Regex locations match in order, so this has to precede the general block
+	# below or the general one would swallow it.
+	location = /support/attach {
+		include snippets/security-headers.conf;
+		# Four files per report, and a person files few reports: 30/minute with a
+		# burst of 8 is unnoticeable to a human and useless for filling a disk.
+		limit_req  zone=uploads burst=8 nodelay;
+		limit_conn perip 8;
+
+		proxy_pass http://127.0.0.1:8787;
+		proxy_http_version 1.1;
+		proxy_set_header Host              $host;
+		proxy_set_header X-Real-IP         $remote_addr;
+		proxy_set_header X-Forwarded-Proto https;
+		proxy_set_header Connection        "";
+
+		proxy_hide_header Cache-Control;
+		proxy_hide_header Referrer-Policy;
+		proxy_hide_header X-Content-Type-Options;
+
+		# One byte over the largest thing the service accepts. The service checks
+		# again; this is so an oversized body dies at the edge rather than after a
+		# proxy hop.
+		client_max_body_size 21m;
+		client_body_timeout  60s;
+		proxy_read_timeout   60s;
+		proxy_request_buffering on;
+
+		add_header Cache-Control "no-store" always;
+	}
+
 	location ~ ^/(support/submit|support/ticket/|admin) {
 		include snippets/security-headers.conf;
 		limit_req  zone=tickets burst=4 nodelay;
