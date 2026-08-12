@@ -267,10 +267,17 @@ export const verify = {
 
 			<h2>Going further: build it yourself</h2>
 			<p>
-				The strongest check available is not to trust our binary at all. The source is
-				public and the build is reproducible: clone the tag, build it, and compare your
-				artifact's hash with the published one. If they match, the binary on the release
-				page contains exactly the source you just read.
+				The strongest check available is not to trust our binary at all: clone the tag,
+				build it yourself, and run only what you compiled. The source is public, so that
+				is possible today.
+			</p>
+			<p>
+				<strong>Comparing your build's hash against ours is not yet meaningful.</strong>
+				Getting identical bytes from the same source — a reproducible build — takes
+				deliberate work on toolchains and timestamps that this project has not finished.
+				Until it is done, a mismatch would tell you nothing, and we would rather say so
+				than let you draw a false conclusion from it. The
+				<a href="/download">download page</a> tracks the state of that work.
 			</p>
 
 			<h2>Related</h2>
@@ -448,8 +455,10 @@ export const security = {
 			<p>
 				Privately, please, rather than as a public issue. Two routes, both live:
 				<a href="${'https://github.com/opendesktopauthenticator/open-desktop-authenticator/security/advisories/new'}" rel="noopener">GitHub
-				private vulnerability reporting</a>, which is preferred, or
-				<strong>security@opendesktopauthenticator.com</strong>.
+				private vulnerability reporting</a>, which is preferred, or email — the address
+				is in <a href="/.well-known/security.txt">security.txt</a> rather than on this
+				page, so that it is somewhere a researcher looks first and a scraper does
+				not.
 				<a href="/support#security-reports">What we commit to</a> is written down:
 				acknowledgement in 72 hours, an assessment in 7 days, a fix or a dated plan in
 				30 for a confirmed high or critical.

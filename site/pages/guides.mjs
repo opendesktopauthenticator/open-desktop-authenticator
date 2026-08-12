@@ -31,15 +31,43 @@ export const download = {
 				inventory. Sending them to the genuine original instead is worth more
 				than keeping them on a page with no build on it.
 			-->
+			<h2>What to use today</h2>
+			<p>
+				In order, and the first one is the right answer for most people:
+			</p>
+			<ol class="signs">
+				<li>
+					<strong>Steam's official mobile authenticator.</strong> Maintained by the
+					people who run the service, impossible to counterfeit on a search results
+					page, and a lost phone is recoverable rather than fatal. If you are here
+					because you searched for a desktop authenticator, this is still probably what
+					you want.
+				</li>
+				<li>
+					<strong>The original Steam Desktop Authenticator, if you understand what you
+					are taking on.</strong> Its own README says it is
+					${s.sda.notice}, and its authors' position is that
+					${s.sda.authorsAdvice}. That is their assessment of their own software and it
+					deserves more weight than ours. Unmaintained software that holds a Steam Guard
+					secret does not get safer with time. If you use it anyway, take it from
+					<a href="${s.sda.repo}" rel="noopener">github.com/${s.sda.author}/SteamDesktopAuthenticator</a>
+					and nowhere else — not a mirror, not a lookalike domain, not a sponsored
+					result.
+				</li>
+				<li>
+					<strong>This project, once there is a release to check.</strong> There is not
+					one yet, and recommending our own unreleased software over a working option
+					would be the same mistake in the other direction.
+				</li>
+			</ol>
 			<div class="origin-note">
 				<p>
-					<strong>Need one today?</strong> Use the original Steam Desktop Authenticator
-					by ${s.sda.author}. It is the software this project succeeds, it works, and
-					<a href="${s.sda.repo}" rel="noopener">github.com/${s.sda.author}/SteamDesktopAuthenticator</a>
-					is its only official source — not a mirror, not a lookalike domain, not a
-					sponsored result.
+					We would rather lose you to Valve's app than have you install something
+					abandoned on our recommendation. Sending people to unmaintained security
+					software while leaving out its author's own warning is the behaviour this
+					site exists to complain about.
 				</p>
-				<a class="button" href="${s.sda.releases}" rel="noopener">Original SDA releases →</a>
+				<a class="button button-quiet" href="${s.sda.repo}" rel="noopener">Read SDA's own notice →</a>
 			</div>
 
 			<h2>Why the page exists anyway</h2>
@@ -343,8 +371,9 @@ const FAQ_ITEMS = [
 	{
 		q: 'How do I know this is not itself a scam?',
 		plain:
-			'Do not take our word for it. The source is public, builds are reproducible from that source, and every release is published with checksums and a signature so you can confirm the binary matches the code.',
-		a: `<p>Do not take our word for it — that is the entire design. The source is public and the build is reproducible from it, so you can compile the code yourself and check that the result matches the binary we publish, byte for byte. Every release carries checksums and a signature. <a href="/verify">The steps are here</a>, and they work whether or not you trust us.</p>
+			'Do not take our word for it. The source is public and can be built and run today, the publisher is a registered company, and there is no download yet — so the honest answer includes what is not finished.',
+		a: `<p>Do not take our word for it — that is the entire design. Here is what you can check <strong>today</strong>: the source is public and you can build and run it yourself; the publisher is a named, registered company you can look up; and the site tells you <a href="/verify">how to check any download</a>, ours or anyone else's.</p>
+			<p>And here is what is <strong>not</strong> finished, because a page that only lists the reassuring half is doing the thing it warns you about. There is no public release yet. Release signatures and published checksums arrive with it. Reproducible builds — compiling the tag yourself and getting byte-for-byte identical output — are further out still. <a href="/download">The download page tracks each of those</a>, and the site refuses to build if any page here claims one of them before it is true.</p>
 			<p>We would rather you were sceptical of us and safe than trusting and robbed.</p>`
 	},
 	{
@@ -537,8 +566,13 @@ export const support = {
 					not depend on an address staying monitored.
 				</li>
 				<li>
-					<strong>security@opendesktopauthenticator.com</strong> — read, if you would
-					rather not use GitHub.
+					<strong>By email</strong>, if you would rather not use GitHub. The address is
+					published in
+					<a href="/.well-known/security.txt">our security.txt</a>, which is the
+					standard place to look for it and the one place we keep it. It is
+					deliberately not printed on this page: an address in HTML is harvested within
+					days, and a security contact buried under spam is a security contact that
+					misses the report that mattered.
 				</li>
 			</ul>
 			<p>

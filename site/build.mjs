@@ -88,7 +88,23 @@ export const SITE = {
 	sda: {
 		author: 'Jessecar96',
 		repo: 'https://github.com/Jessecar96/SteamDesktopAuthenticator',
-		releases: 'https://github.com/Jessecar96/SteamDesktopAuthenticator/releases'
+		releases: 'https://github.com/Jessecar96/SteamDesktopAuthenticator/releases',
+		/*
+		 * SDA's own status, in its own words.
+		 *
+		 * This site sent people to SDA on the grounds that "it works", and omitted
+		 * the notice at the top of its README: no longer supported, no further
+		 * updates, and its authors' own view that using it puts an account at risk.
+		 * Recommending abandoned security software while leaving out the author's
+		 * warning is precisely the failure this domain exists to complain about,
+		 * and it is worse coming from us than from a stranger.
+		 *
+		 * Kept here so every page that mentions SDA gets the same caveat from one
+		 * place, and so it can be corrected everywhere if that status ever changes.
+		 */
+		unsupported: true,
+		notice: 'no longer supported and will not receive any more updates',
+		authorsAdvice: "Steam's official mobile app is what its authors now tell people to use"
 	},
 
 	/*
@@ -109,6 +125,34 @@ export const SITE = {
 	reviews: {
 		profile: 'https://www.trustpilot.com/review/opendesktopauthenticator.com',
 		write: 'https://www.trustpilot.com/evaluate/opendesktopauthenticator.com'
+	},
+
+	/*
+	 * What the release pipeline can actually do today.
+	 *
+	 * **Every status claim on the site renders from this object**, because the
+	 * alternative had already failed: five pages described reproducible builds,
+	 * published checksums and signatures in the present tense while GitHub had
+	 * zero releases and the backlog listed GPG signing and reproducible-build
+	 * hardening as deferred. Each sentence was written when it was a fair
+	 * description of the intent, and none of them was revisited.
+	 *
+	 * That is a bad failure for any project and a disqualifying one here. This
+	 * site's entire argument is that a stranger should verify claims rather than
+	 * believe them — so a claim of ours that cannot be verified is not marketing
+	 * overreach, it is the exact behaviour the domain exists to warn people about.
+	 *
+	 * Flip a flag when the thing is genuinely true, and every page follows.
+	 */
+	release: {
+		/** A signed public build exists and can be downloaded. */
+		published: false,
+		/** Artifacts are listed with SHA-256 checksums on the release page. */
+		checksums: false,
+		/** The checksum file carries a signature from a published key. */
+		signed: false,
+		/** Anyone can rebuild the tag and get the same bytes. Deferred (§P3). */
+		reproducible: false
 	},
 
 	/** The company behind this, and the other things it runs. */
@@ -343,7 +387,8 @@ ${page.body(SITE)}
 					${escape(SITE.sda.author)}? It lives at
 					<a href="${SITE.sda.repo}" rel="noopener">github.com/${escape(SITE.sda.author)}/SteamDesktopAuthenticator</a>
 					— that repository is the only official source for it, and any other site
-					offering "SDA" is not it.
+					offering "SDA" is not it. Note that it is
+					${escape(SITE.sda.notice)}; ${escape(SITE.sda.authorsAdvice)}.
 				</p>
 				<a class="powered" href="${SITE.brand.url}" rel="noopener">
 					<img src="${SITE.brand.logo}" alt="" width="28" height="28" loading="lazy">

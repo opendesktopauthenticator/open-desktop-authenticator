@@ -298,9 +298,11 @@ export const alternatives = {
 			<h2>Open Desktop Authenticator — this project</h2>
 			<p>
 				An independent implementation built around one idea: you should not have to
-				trust us. Public source, reproducible builds, published checksums, no
-				self-updating, and <a href="/security">a documented security model that includes
-				what it cannot protect you from</a>.
+				trust us. Public source, built in public CI, no self-updating, and
+				<a href="/security">a documented security model that includes what it cannot
+				protect you from</a>. Checksums, release signatures and reproducible builds are
+				required before the first release rather than done —
+				<a href="/download">the download page says where each one stands</a>.
 			</p>
 			<p>
 				<strong>Choose it if:</strong> you want a desktop authenticator and you want to

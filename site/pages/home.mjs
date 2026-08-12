@@ -99,9 +99,11 @@ export default {
 			<p>
 				We think the answer is a tool where the dangerous parts are visible.
 				<a href="/security">Everything in this application that touches a secret</a> is
-				readable in the open, the builds are reproducible from that source, and the
-				site tells you <a href="/verify">how to check that what you downloaded is what
-				we published</a>.
+				readable in the open, it is built in public CI from that source, and the site
+				tells you <a href="/verify">how to check a download against what was
+				published</a>. Reproducible builds — where you compile the tag yourself and get
+				the same bytes — are the goal and are not finished; the
+				<a href="/download">download page</a> tracks what is actually done.
 			</p>
 
 			<h2>What it does</h2>
@@ -164,8 +166,11 @@ export default {
 			<ul class="plain">
 				<li>
 					<strong>It does not send your secrets anywhere.</strong> There is no account
-					to create, no server of ours to sync with, and no telemetry. The application
-					talks to Steam and to nothing else.
+					to create, no server of ours to sync with, and no telemetry. It talks to
+					Steam, and — while the update check is on — asks GitHub's public releases
+					page whether a newer version exists, which is the same question any visitor
+					to that page asks. GitHub sees an IP address and that the application is
+					running. Nothing about you or your accounts is sent to anyone, including us.
 				</li>
 				<li>
 					<strong>It does not update itself.</strong> It will tell you a newer version

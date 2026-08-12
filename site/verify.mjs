@@ -18,6 +18,9 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
+// The same object the pages render from, so the check compares against the
+// single source of truth rather than a second copy of it.
+import { SITE } from './build.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dist = join(here, 'dist');
@@ -30,6 +33,13 @@ const origin = process.argv[2];
  * — but they are still verified to exist rather than waved through.
  */
 const ROOT_FILES = new Set([
+	/*
+	 * Built at the root, served from /.well-known by an nginx alias, so the file
+	 * on disk and the URL do not share a path. Listed explicitly rather than
+	 * resolved by guesswork — the pages link the URL, and the URL is what has to
+	 * work.
+	 */
+	'/.well-known/security.txt',
 	'/favicon.ico',
 	'/apple-touch-icon.png',
 	'/apple-touch-icon-precomposed.png',
@@ -109,7 +119,9 @@ for (const [slug, html] of built) {
 	// is exactly the failure this whole set was added to fix.
 	for (const [, href] of html.matchAll(/href="(\/[^"#?]*)"/g)) {
 		if (href.startsWith('/assets/') || ROOT_FILES.has(href)) {
-			if (!existsSync(join(dist, href))) fail(slug, `links to ${href}, which was not built`);
+			// The alias above is the one URL whose file lives elsewhere on disk.
+			const onDisk = href === '/.well-known/security.txt' ? '/security.txt' : href;
+			if (!existsSync(join(dist, onDisk))) fail(slug, `links to ${href}, which was not built`);
 			continue;
 		}
 		const target = href === '/' ? 'index' : href.slice(1);
@@ -221,6 +233,90 @@ for (const [slug, html] of built) {
 	// the link rather than beside it.
 	if (!/<a class="powered"[^>]*>[\s\S]*?<img[\s\S]*?<\/a>/.test(html)) {
 		fail(slug, 'has no followable "powered by" mark in the footer');
+	}
+}
+
+/*
+ * No page may claim a capability the release pipeline does not have.
+ *
+ * This is the check the site most needed and did not have. Five pages described
+ * reproducible builds, published checksums and release signatures in the present
+ * tense while there were no releases at all — each sentence true as a statement
+ * of intent when written, none revisited, and nothing anywhere comparing the
+ * claims against reality.
+ *
+ * Phrasing is matched rather than meaning, so this is not proof of honesty. It
+ * is a tripwire: the specific present-tense forms that were actually wrong now
+ * fail the build until the corresponding flag is true.
+ */
+const CLAIMS = [
+	{
+		flag: 'reproducible',
+		says: 'reproducible builds exist today',
+		patterns: [
+			/builds are reproducible/i,
+			/the build is reproducible/i,
+			/builds? reproducible from that source/i,
+			/compare (?:your|the) (?:build|result)[^.]{0,40}byte for byte/i
+		]
+	},
+	{
+		flag: 'checksums',
+		says: 'every release carries checksums',
+		patterns: [/every release (?:carries|is published with) checksums/i]
+	},
+	{
+		flag: 'signed',
+		says: 'releases are signed',
+		patterns: [/every release[^.]{0,60}signature/i, /releases are signed/i]
+	},
+	{
+		flag: 'published',
+		says: 'a build is available',
+		patterns: [/download (?:the|our) (?:latest|signed) (?:build|release)/i]
+	}
+];
+
+for (const [slug, html] of built) {
+	const words = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+	for (const claim of CLAIMS) {
+		if (SITE.release[claim.flag]) {
+			continue;
+		}
+		for (const pattern of claim.patterns) {
+			const hit = pattern.exec(words);
+			if (hit) {
+				fail(
+					slug,
+					`states that ${claim.says}, which SITE.release.${claim.flag} says is not true yet — "${hit[0].slice(0, 60)}"`
+				);
+			}
+		}
+	}
+}
+
+/*
+ * A page that sends somebody to SDA must repeat SDA's own warning.
+ *
+ * The download page recommended it because "it works", omitting the notice at
+ * the top of its README: no longer supported, no further updates, and its
+ * authors now telling people to use Steam's app instead. Pointing readers at
+ * abandoned security software while leaving out its author's warning is the
+ * behaviour this domain exists to complain about, and this site was doing it.
+ *
+ * Keyed on the link rather than on phrasing. The first version of this check
+ * looked for "use the original SDA", which the corrected page no longer says —
+ * so it matched nothing and passed everything, including the footer that sends
+ * every visitor there from all eighteen pages. If a page carries the address,
+ * it carries the caveat.
+ */
+for (const [slug, html] of built) {
+	if (!html.includes(SITE.sda.repo) && !html.includes(SITE.sda.releases)) {
+		continue;
+	}
+	const words = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+	if (SITE.sda.unsupported && !words.includes(SITE.sda.notice)) {
+		fail(slug, `links people to SDA without saying it is ${SITE.sda.notice}`);
 	}
 }
 

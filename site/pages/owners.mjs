@@ -129,7 +129,7 @@ ${PROJECTS.map(
 			<p>
 				That is a solvable problem. Not by telling people to be careful, which has never
 				worked, but by making a version of the tool where the dangerous parts are
-				visible, the build is reproducible, and the site tells you how to check what you
+				visible, the source is public, and the site tells you how to check what you
 				downloaded. Whether they use ours or somebody else's matters less than whether
 				they verify it.
 			</p>

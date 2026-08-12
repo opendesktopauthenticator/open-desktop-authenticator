@@ -32,16 +32,31 @@ export default {
 				screens down. Somebody who reads one sentence and leaves should still
 				leave with the right link.
 			-->
+			<div class="callout callout-warn">
+				<h2>Before anything else: SDA is no longer maintained</h2>
+				<p>
+					Its own README states that it is ${s.sda.notice}, and
+					${s.sda.authorsAdvice}. That is the project's own assessment of its own
+					software, and it matters more than any opinion on this page.
+					<strong>Steam's official mobile authenticator is the right answer for most
+					people</strong>, and this page will not pretend otherwise.
+				</p>
+				<p>
+					The rest of this page explains what SDA is, what it stores and why searching
+					for it is dangerous — because tens of thousands of people are still running
+					it, still looking for it, and still being handed counterfeits when they do.
+				</p>
+			</div>
+
 			<div class="origin-note">
 				<p>
-					<strong>The official SDA is at
+					<strong>If you are going to use it regardless, the only real home is
 					<a href="${s.sda.repo}" rel="noopener">github.com/${s.sda.author}/SteamDesktopAuthenticator</a>.</strong>
-					It is written by ${s.sda.author} and that repository is its only real home.
 					Everything else calling itself SDA — a lookalike domain, a "mirror", an
 					installer from a forum post, a sponsored search result — is somebody else's
 					software with somebody else's motives.
 				</p>
-				<a class="button" href="${s.sda.releases}" rel="noopener">Official releases →</a>
+				<a class="button button-quiet" href="${s.sda.repo}" rel="noopener">The real repository →</a>
 			</div>
 
 			<h2>What Steam Guard actually is</h2>
