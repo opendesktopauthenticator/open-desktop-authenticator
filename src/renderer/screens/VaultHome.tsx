@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Logo } from '../Logo';
+import { branding } from '../../shared/branding';
 import type { AccountSummary, CodesList, ExportResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
@@ -476,6 +477,27 @@ export function VaultHome({
 					})}
 				</ul>
 			)}
+
+			{/*
+				The publisher, on the screen people actually sit on.
+
+				The About screen carries the full account of who builds this, but a
+				person has to go looking for it — and the complaint that started this
+				was that the application named its publisher nowhere you would see it.
+				A mark at the foot of the list is where a desktop application usually
+				says this, and it costs one line of a screen nobody scrolls to the
+				bottom of twice.
+
+				Deliberately quiet: the codes are the reason this window is open, and
+				branding that competed with them would be the wrong trade. It is a
+				button rather than a link because it opens a screen inside the app.
+			*/}
+			<footer className="app-foot">
+				<button type="button" className="powered-mark" onClick={onAbout}>
+					<span className="powered-lead">Powered by</span>
+					<span className="powered-name">{branding.companyShort}</span>
+				</button>
+			</footer>
 		</main>
 	);
 }

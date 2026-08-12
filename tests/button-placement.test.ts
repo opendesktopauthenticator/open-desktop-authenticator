@@ -26,8 +26,16 @@ import { describe, expect, it } from 'vitest';
 
 const screensDir = join(__dirname, '..', 'src', 'renderer', 'screens');
 
-/** The containers a button may sit in, each with a spacing rule behind it. */
-const ALLOWED = /^<(div|header|form|section) className="(controls|row|flags|empty)"/;
+/**
+ * The containers a button may sit in, each with a spacing rule behind it.
+ *
+ * `app-foot` joined the list when the publisher mark was added under the account
+ * list. It qualifies on the same terms as the rest — it is a flex container with
+ * its own padding and top margin — and the rule below checks that spacing still
+ * exists, so admitting it here does not weaken what this file is asserting.
+ */
+const ALLOWED =
+	/^<(div|header|form|section|footer) className="(controls|row|flags|empty|app-foot)"/;
 
 const indentOf = (line: string) => line.length - line.replace(/^\t+/, '').length;
 
@@ -106,5 +114,9 @@ describe('button placement', () => {
 		expect(css).toMatch(/input \+ \.controls[\s\S]{0,200}margin-top: 20px/);
 		expect(css).toMatch(/p \+ \.controls/);
 		expect(css).toMatch(/\.checkbox \+ \.controls/);
+		// The foot is only an allowed home for a button while it carries spacing of
+		// its own; without this the entry above would be a hole rather than a rule.
+		expect(css).toMatch(/\.app-foot\s*\{[\s\S]{0,200}padding:/);
+		expect(css).toMatch(/\.app-foot\s*\{[\s\S]{0,200}margin-top:/);
 	});
 });

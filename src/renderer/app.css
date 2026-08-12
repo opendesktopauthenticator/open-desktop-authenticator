@@ -1631,3 +1631,54 @@ ul.plain li {
 .shell a:focus-visible {
 	color: var(--mint-pale);
 }
+
+/*
+ * The publisher mark at the foot of the vault.
+ *
+ * Right-aligned and low-contrast on purpose. This screen exists to show codes
+ * and the codes are what the eye should land on; a brand that competed with
+ * them would be the wrong trade on a tool somebody opens twenty times a day.
+ * It brightens on hover, so it reads as reachable without advertising itself.
+ */
+.app-foot {
+	display: flex;
+	justify-content: flex-end;
+	padding: 6px 2px 2px;
+	margin-top: 4px;
+}
+
+.powered-mark {
+	display: inline-flex;
+	align-items: baseline;
+	gap: 7px;
+	padding: 7px 12px;
+	background: none;
+	border: 1px solid transparent;
+	border-radius: 999px;
+	cursor: pointer;
+	transition:
+		border-color 160ms ease,
+		background-color 160ms ease;
+}
+.powered-mark:hover,
+.powered-mark:focus-visible {
+	border-color: var(--line-strong, rgba(147, 168, 158, 0.3));
+	background: rgba(255, 255, 255, 0.03);
+}
+
+.powered-lead {
+	font-size: 0.68rem;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--faint, #71857a);
+}
+.powered-name {
+	font-size: 0.82rem;
+	font-weight: 680;
+	letter-spacing: 0.03em;
+	color: var(--muted);
+}
+.powered-mark:hover .powered-name,
+.powered-mark:focus-visible .powered-name {
+	color: var(--mint);
+}
