@@ -12,6 +12,7 @@ import { download, importFromSda, docs, faq, support, notFound } from './guides.
 import { mafile, lostAuthenticator, alternatives } from './answers.mjs';
 import owners from './owners.mjs';
 import story from './story.mjs';
+import { credits, donate } from './support-us.mjs';
 
 export const PAGES = [
 	home,
@@ -29,5 +30,7 @@ export const PAGES = [
 	faq,
 	support,
 	owners,
+	credits,
+	donate,
 	notFound
 ];

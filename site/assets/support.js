@@ -21,6 +21,43 @@
 (() => {
 	'use strict';
 
+	/*
+	 * Copy a donation address to the clipboard.
+	 *
+	 * A button rather than "select it yourself", because a hand-typed payment
+	 * address is a lost payment and a partial selection is worse — it fails
+	 * silently in some wallets and succeeds into somebody else's in others. The
+	 * text stays visible in full so it can still be read and compared, which the
+	 * page asks people to do afterwards.
+	 */
+	document.querySelectorAll('[data-copy]').forEach((button) => {
+		button.addEventListener('click', async () => {
+			const target = document.getElementById(button.getAttribute('data-copy'));
+			if (!target) return;
+			const value = target.textContent.trim();
+			const say = (text) => {
+				button.textContent = text;
+				setTimeout(() => {
+					button.textContent = 'Copy';
+				}, 2200);
+			};
+			try {
+				await navigator.clipboard.writeText(value);
+				say('Copied — now check it');
+			} catch {
+				// Clipboard access can be refused outright. Selecting the text is a
+				// worse outcome than copying it, and a much better one than a button
+				// that appears to have worked.
+				const range = document.createRange();
+				range.selectNodeContents(target);
+				const sel = window.getSelection();
+				sel.removeAllRanges();
+				sel.addRange(range);
+				say('Selected — copy it');
+			}
+		});
+	});
+
 	const LIMITS = { image: 6 * 1024 * 1024, video: 20 * 1024 * 1024 };
 	const MAX_FILES = 4;
 

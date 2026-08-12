@@ -831,6 +831,128 @@ main.has-hero {
 	padding: 10px 18px;
 }
 
+/* ------------------------------------------------------------------ give -- */
+
+/* Three ways to pay somebody else, side by side and equally weighted. */
+.give {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+	gap: 12px;
+	margin: 24px 0;
+}
+.give-card {
+	display: grid;
+	gap: 4px;
+	padding: 16px 18px;
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius);
+	background: var(--panel);
+	text-decoration: none;
+	transition:
+		border-color 160ms var(--ease),
+		background-color 160ms var(--ease),
+		transform 160ms var(--ease);
+}
+.give-card:hover {
+	border-color: var(--mint);
+	background: var(--panel-hi);
+	transform: translateY(-2px);
+}
+.give-what {
+	font-weight: 660;
+	color: var(--text);
+}
+.give-card:hover .give-what {
+	color: var(--mint);
+}
+.give-detail {
+	font-family: var(--font-small);
+	font-size: 0.85rem;
+	color: var(--muted);
+}
+
+/*
+ * A payment address, displayed to be read rather than merely to be copied.
+ *
+ * The full string is always visible and never truncated with an ellipsis: the
+ * page asks people to compare the first and last four characters after pasting,
+ * and it cannot ask that while hiding the middle. Monospace and a generous line
+ * height because these get compared character by character.
+ */
+.wallets {
+	display: grid;
+	gap: 14px;
+	margin: 24px 0;
+	padding: 0;
+	list-style: none;
+}
+.wallet {
+	padding: 18px 20px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+}
+.wallet-head {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 10px;
+}
+.wallet-asset {
+	font-family: var(--font-display);
+	font-size: 1.05rem;
+	font-weight: 660;
+	color: var(--text);
+}
+.wallet-chain {
+	font-family: var(--font-small);
+	font-size: 0.85rem;
+	color: var(--mint-pale);
+}
+.wallet .hint {
+	margin: 6px 0 12px;
+}
+.wallet-address {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 10px;
+}
+.wallet-address code {
+	flex: 1 1 320px;
+	min-width: 0;
+	padding: 11px 13px;
+	background: #05080b;
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius-sm);
+	color: var(--mint-pale);
+	font-size: 0.84rem;
+	line-height: 1.7;
+	/* `anywhere`, not `break-word`: this must never widen its container, and a
+	   payment address has no word boundaries to break on politely. */
+	overflow-wrap: anywhere;
+	user-select: all;
+}
+.wallet-address button {
+	flex: 0 0 auto;
+	font-family: inherit;
+	font-size: 0.9rem;
+	font-weight: 640;
+	padding: 11px 18px;
+	border-radius: var(--radius-sm);
+	border: 1px solid var(--line-strong);
+	background: transparent;
+	color: var(--text);
+	cursor: pointer;
+	transition:
+		border-color 160ms var(--ease),
+		color 160ms var(--ease);
+}
+.wallet-address button:hover {
+	border-color: var(--mint);
+	color: var(--mint);
+}
+
 /* ------------------------------------------------------------------ forms -- */
 
 /*

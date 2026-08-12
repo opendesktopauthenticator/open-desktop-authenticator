@@ -31,6 +31,20 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
 import { rootIcons, hashedIcons, manifest } from './icons.mjs';
+import { checkAddresses } from './addresses.mjs';
+
+/*
+ * Refuse to build a site with a bad payment address on it.
+ *
+ * Thrown rather than reported, and checked before anything is written, because
+ * every other fault on this site can be corrected after the fact. A wrong
+ * address cannot: the money is gone the moment somebody trusts the page. If the
+ * checksums do not verify, there should be no output at all.
+ */
+const badAddresses = checkAddresses();
+if (badAddresses.length) {
+	throw new Error(`refusing to build with unverified donation addresses:\n  ${badAddresses.join('\n  ')}`);
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const out = join(here, 'dist');
@@ -95,7 +109,8 @@ const NAV = [
 	'security',
 	'docs',
 	'owners',
-	'support'
+	'support',
+	'donate'
 ];
 
 /**
@@ -282,6 +297,8 @@ ${page.body(SITE)}
 				<a href="/faq">FAQ</a>
 				<a href="/owners">Who we are</a>
 				<a href="/support">Report a problem</a>
+				<a href="/credits">Credits</a>
+				<a href="/donate">Donate</a>
 				<a href="${SITE.repo}" rel="noopener">Source code</a>
 			</nav>
 
