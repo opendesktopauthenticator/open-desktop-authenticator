@@ -103,6 +103,44 @@ export default {
 				The risk is in how you get one.
 			</p>
 
+			<h2>Looking for the Steam Desktop Authenticator download?</h2>
+			<div class="callout callout-warn">
+				<p>
+					<strong>Get it from the project's own repository, and nowhere else.</strong>
+					SDA is released on GitHub by its authors. Any other site offering a
+					&ldquo;Steam Desktop Authenticator download&rdquo; — an installer, a zip, a
+					mirror, a &ldquo;fixed&rdquo; or &ldquo;updated&rdquo; build — is not the
+					project, whatever the page looks like.
+				</p>
+			</div>
+			<p>
+				If you take one thing from this page, take the two minutes to check what you
+				downloaded before you open a <code>.maFile</code> with it:
+			</p>
+			<ol class="signs">
+				<li>
+					<strong>Confirm the address.</strong> Releases live on the same repository as
+					the source. A download page that has no source attached to it has nothing
+					tying the file to the project.
+				</li>
+				<li>
+					<strong>Compare the checksum</strong> against the one published on the release
+					page — not one printed beside the download by whoever served it.
+					<a href="/verify">The exact commands are here</a>, and they work for any
+					project, not just ours.
+				</li>
+				<li>
+					<strong>Never enter a maFile, password or API key into a web page</strong>
+					offering to check, repair or convert it.
+				</li>
+			</ol>
+			<p>
+				We publish <a href="/">an independent alternative</a> and would rather you used
+				it, but not at the cost of being unclear here: <strong>using SDA safely is
+				better than using anything unsafely.</strong> If SDA is what you want, get it
+				from its own releases and verify it.
+			</p>
+
 			<h2>Why searching for "steam desktop authenticator download" is the dangerous part</h2>
 			<p>
 				SDA is distributed as source and as releases on its project page. The name,

@@ -119,6 +119,12 @@ for (const [slug, html] of built) {
 	// Images need alt text, even when the right alt text is empty.
 	for (const [tag] of html.matchAll(/<img [^>]*>/g)) {
 		if (!/\balt=/.test(tag)) fail(slug, `has an <img> with no alt attribute: ${tag.slice(0, 60)}`);
+		// Explicit dimensions, or the page reflows when the image arrives and the
+		// reader loses their place. Cumulative layout shift is the one Core Web
+		// Vital a static site with no scripts can still fail.
+		if (!/\bwidth=/.test(tag) || !/\bheight=/.test(tag)) {
+			fail(slug, `has an <img> with no width/height: ${tag.slice(0, 70)}`);
+		}
 	}
 
 	// Thin pages were the thing to avoid, so measure it rather than assume it.

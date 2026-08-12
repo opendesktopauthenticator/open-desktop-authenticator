@@ -135,7 +135,7 @@ export const lostAuthenticator = {
 	navTitle: 'Lost access',
 	title: 'Lost your Steam authenticator?',
 	description:
-		'Lost your Steam Guard authenticator? The order to try things in, with or without a revocation code, and what Steam Support can and cannot do for you.',
+		'Lost Steam authenticator? The order to try things in, with or without a revocation code, and what Steam Support can and cannot do for you.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'HowTo',
@@ -241,9 +241,9 @@ export const lostAuthenticator = {
 export const alternatives = {
 	slug: 'alternatives',
 	navTitle: 'Alternatives',
-	title: 'Steam authenticator options compared',
+	title: 'Steam authenticator alternatives to SDA, compared',
 	description:
-		'Steam Mobile, Steam Desktop Authenticator and Open Desktop Authenticator compared honestly — including where the right answer is not ours.',
+		'Steam authenticator alternatives compared honestly: Steam Mobile, SDA and Open Desktop Authenticator — including where the right answer is not ours.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'Article',
@@ -255,7 +255,7 @@ export const alternatives = {
 	}),
 	body: () => `
 		<article>
-			<h1>Steam authenticator options compared</h1>
+			<h1>Steam authenticator alternatives to SDA, compared</h1>
 			<p class="lede">
 				Three realistic options, and the honest case for each — including the one where
 				the answer is not us. We would rather you chose correctly than chose ours.

@@ -16,6 +16,8 @@ const PROJECTS = [
 		domain: 'masterspanel.com',
 		logo: '/assets/projects/masterspanel.svg',
 		alt: 'Master Panel',
+		w: 40,
+		h: 40,
 		blurb:
 			'A trading platform for CS2 and CS:GO skins. The largest of these projects, and where most of what we know about how Steam accounts actually get compromised was learned.'
 	},
@@ -24,6 +26,8 @@ const PROJECTS = [
 		domain: 'buysteamaccounts.com',
 		logo: '/assets/projects/buysteamaccounts.svg',
 		alt: 'BuySteamAccounts',
+		w: 150,
+		h: 40,
 		blurb:
 			'A marketplace for Steam accounts aimed at CS2 traders. Handling accounts at volume is what makes authenticator hygiene a daily operational problem rather than an abstract one.'
 	},
@@ -32,6 +36,8 @@ const PROJECTS = [
 		domain: 'exactpic.com',
 		logo: '/assets/projects/exactpic.svg',
 		alt: 'ExactPic',
+		w: 40,
+		h: 40,
 		blurb:
 			'Fixes photos rejected by online forms — compress, resize and convert, entirely in the browser. Unrelated to Steam, and built on the same principle: the work happens on your machine, not on a server of ours.'
 	},
@@ -40,6 +46,8 @@ const PROJECTS = [
 		domain: 'opendesktopauthenticator.com',
 		logo: '/assets/mark.svg',
 		alt: 'Open Desktop Authenticator',
+		w: 40,
+		h: 40,
 		blurb:
 			'This project. Free, open source, and the only one of the four that holds anything as sensitive as a Steam Guard shared secret — which is why it is the one built to be checked rather than trusted.'
 	}
@@ -95,7 +103,7 @@ export default {
 ${PROJECTS.map(
 	(p) => `				<li class="project">
 					<div class="project-plate">
-						<img src="${p.logo}" alt="${p.alt}" loading="lazy">
+						<img src="${p.logo}" alt="${p.alt}" width="${p.w}" height="${p.h}" loading="lazy">
 					</div>
 					<h3>${p.name}</h3>
 					<span class="domain">${p.domain}</span>
