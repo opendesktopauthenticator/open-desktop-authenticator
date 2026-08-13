@@ -12,7 +12,14 @@ export default {
 				'@id': `${s.origin}/#org`,
 				name: s.publisher,
 				url: s.origin,
-				sameAs: [s.repo]
+				// The publisher's other authoritative presences: its own company site
+				// and the source repository. `sameAs` is how a search engine ties the
+				// three references to one entity — the same website → company → source
+				// chain a suspicious human walks, expressed for a machine. The company
+				// site is deliberately included even though this schema lives on the
+				// product domain: it corroborates that MASTERPANEL LLC is a real
+				// organisation with a footprint beyond this one site.
+				sameAs: [s.brand.url, s.repo]
 			},
 			{
 				'@type': 'SoftwareApplication',
