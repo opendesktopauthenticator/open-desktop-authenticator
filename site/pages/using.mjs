@@ -304,7 +304,7 @@ export const withoutPhone = {
 	title: 'Steam Guard without a smartphone',
 	updated: '2026-08-14',
 	description:
-		'Valve requires a phone for the mobile authenticator. What that means for desktop tools, and what a phone number is still needed for afterwards.',
+		'Steam’s official authenticator needs Android or iOS, but a phone number is optional. What desktop tools change, and what you lose without SMS recovery.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
