@@ -16,7 +16,7 @@ export const privacy = {
 	navTitle: 'Privacy',
 	title: 'What this site stores, and for how long',
 	description:
-		'Everything Open Desktop Authenticator’s website and support system hold: report text, attachments, logs, retention periods, and how to have a report deleted.',
+		'What this website and its support system hold: report text, attachments, logs, retention periods, and how to have a report deleted.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'WebPage',

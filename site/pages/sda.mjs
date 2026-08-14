@@ -1,5 +1,6 @@
 export default {
 	slug: 'steam-desktop-authenticator',
+	updated: '2026-08-14',
 	navTitle: 'About SDA',
 	title: 'Steam Desktop Authenticator (SDA), explained',
 	description:
@@ -158,10 +159,17 @@ export default {
 					tying the file to the project.
 				</li>
 				<li>
-					<strong>Compare the checksum</strong> against the one published on the release
-					page — not one printed beside the download by whoever served it.
+					<strong>Compare a checksum only against one published separately</strong> —
+					never one printed beside the download by whoever served it, which proves
+					nothing about a file that same person could have replaced.
 					<a href="/verify">The exact commands are here</a>, and they work for any
-					project, not just ours.
+					project.
+					<span class="hint">
+						Worth knowing before you go looking: SDA's own release does not publish a
+						checksum for its zip. That is not a sign of a fake — it is simply not
+						offered, so for SDA the address is the check that matters, and the only
+						address is the ${s.sda.author} repository linked above.
+					</span>
 				</li>
 				<li>
 					<strong>Never enter a maFile, password or API key into a web page</strong>
@@ -226,8 +234,10 @@ export default {
 					<h3>This project</h3>
 					<p>
 						An independent, open-source alternative, written to be checkable: public
-						source, reproducible builds, published checksums, and no self-updating.
-						<a href="/download">Not yet released</a>.
+						source, builds produced in public CI, and no self-updating. Published
+						checksums and reproducible builds are commitments for the first release
+						rather than things you can check today —
+						<a href="/download">the download page tracks where each one stands</a>.
 					</p>
 				</section>
 			</div>

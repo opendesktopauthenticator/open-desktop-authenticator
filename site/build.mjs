@@ -376,6 +376,18 @@ ${page.body(SITE)}
 				<a href="/support">Report a problem</a>
 				<a href="/credits">Credits</a>
 				<a href="/donate">Donate</a>
+				<!--
+					Privacy was reachable from nowhere at all.
+
+					Not the navigation, not this footer, not one in-content link on any
+					of the twenty-seven pages — the only references to it anywhere were
+					its own canonical tag and the sitemap. Which meant the page
+					describing what we keep, and for how long, could not be found by
+					anybody who wanted to know, including from the support form that
+					collects the data it describes. A privacy policy nobody can reach is
+					a document, not a disclosure.
+				-->
+				<a href="/privacy">Privacy</a>
 				<a href="${SITE.repo}" rel="noopener">Source code</a>
 			</nav>
 

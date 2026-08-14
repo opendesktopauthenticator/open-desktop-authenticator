@@ -77,8 +77,9 @@ export const confirmationsOnDesktop = {
 				By holding the identity secret and signing in as you. It imports the secret
 				from a <a href="/what-is-a-mafile">maFile</a>, or receives it when the
 				authenticator is first created, then produces the same signatures the phone
-				does. Steam cannot tell the difference and does not try to — a valid
-				signature is a valid signature.
+				does. Steam accepts any request carrying valid authenticator cryptography and
+				a valid session — it is not checking whether a phone or a PC produced it,
+				though it can of course observe how a client behaves.
 			</p>
 			<p>
 				Which is the honest framing of "approve confirmations on PC": not a
@@ -220,10 +221,11 @@ export const mobileVsDesktop = {
 					sends sign-in notifications for each — which is more than it usually gets
 					credit for.
 				</dd>
-				<dt>It cannot be left running</dt>
+				<dt>It is less likely to sit unattended</dt>
 				<dd>
-					A phone in your pocket is not a machine sitting unattended with your trade
-					authority loaded into it.
+					A phone in your pocket spends far less time logged in and idle than the
+					desktop you trade from. That is a difference of habit rather than of
+					design, and it is most of why it matters.
 				</dd>
 			</dl>
 
@@ -496,8 +498,11 @@ export const openMafile = {
 					<strong>Reading it is safe. Uploading it is not.</strong> Do not paste the
 					contents into a website, a Discord bot, a pastebin, an AI chat, or a support
 					form — <a href="/support">including ours</a>. Anyone who receives that text
-					can generate your codes and approve your trades from then until the
-					authenticator is detached from the account entirely.
+					can generate your Steam Guard codes from then until the authenticator is
+					detached from the account entirely — the shared secret never expires. If
+					the file also carries usable session tokens they may be able to approve
+					trades immediately; if not, they need to sign in first, and holding your
+					codes is a long way towards being able to.
 				</p>
 			</div>
 
@@ -505,8 +510,8 @@ export const openMafile = {
 			<p>
 				"Opening" a maFile in an authenticator is a much larger act than reading it.
 				You are handing a program the authority to act as your account — permanently,
-				because <a href="/what-is-a-mafile">these secrets never expire</a>. Steam
-				cannot tell that program apart from you.
+				because <a href="/what-is-a-mafile">these secrets never expire</a>. To Steam
+				the requests it signs carry the same cryptography yours would.
 			</p>
 			<p>
 				So the question is not whether the software can read the format. It is whether

@@ -88,7 +88,15 @@ for (const [slug, html] of built) {
 
 	const description = /<meta name="description" content="([^"]*)"/.exec(html)?.[1] ?? '';
 	if (description.length < 70) fail(slug, `description is only ${description.length} chars`);
-	if (description.length > 165) fail(slug, `description is ${description.length} chars, over 165`);
+	// 155, not the 165 this used to allow.
+	//
+	// 165 is roughly where a description is truncated outright; 155 is where it
+	// starts being truncated in practice, because the cut is made on pixel width
+	// rather than characters and a description full of wide letters loses its
+	// ending sooner. Six pages sat in the gap between the two — long enough to
+	// have their last clause cut off in a result, short enough that the checker
+	// called them fine.
+	if (description.length > 155) fail(slug, `description is ${description.length} chars, over 155`);
 
 	const canonical = /<link rel="canonical" href="([^"]*)"/.exec(html)?.[1];
 	const expected = `https://opendesktopauthenticator.com/${path}`;
@@ -297,6 +305,44 @@ const CLAIMS = [
 	}
 ];
 
+/*
+ * The same capabilities again, written as bare noun phrases.
+ *
+ * **The third time this tripwire has been outflanked by grammar.** It was
+ * written to catch sentences — "builds are reproducible" — then had to learn
+ * instructions, because `gpg --verify` asserted nothing and implied everything.
+ * This is the remaining form: a list of nouns. Two pages described the project
+ * as "public source, reproducible builds, published checksums" while
+ * SITE.release marked both of those false, and every pattern above read straight
+ * past them, because nothing in that phrase is a claim in the grammatical sense.
+ * It is still a claim to the person reading it, which is the only sense that
+ * matters.
+ *
+ * A bare match cannot be the test, though: half the site legitimately discusses
+ * these things precisely to say they are NOT done, and a checker that forbade
+ * the words would forbid the honesty as well. So the rule is proximity — the
+ * phrase is allowed when a qualifier sits near it, and fails when it is offered
+ * as a plain statement of fact.
+ */
+const UNBUILT_CAPABILITY = [
+	{ flag: 'reproducible', phrase: /reproducible builds?/gi },
+	{ flag: 'checksums', phrase: /published checksums|checksums (?:are|is) published/gi },
+	{ flag: 'signed', phrase: /signed (?:builds?|releases?)/gi }
+];
+
+/**
+ * Words that turn a capability into an intention.
+ *
+ * Deliberately generous. A false negative here is a sentence that was honest
+ * anyway; a false positive is a build failure on truthful copy, which teaches
+ * whoever hits it to weaken the check.
+ */
+const QUALIFIER =
+	/not yet|not finished|not done|are the goal|is the goal|remains? a goal|arrive with|required before|further out|planned|deferred|will be|when there is|no public release|before the first release|has not|cannot yet|once there is|in the meantime|tracks? (?:where|each)/i;
+
+/** How far either side of the phrase a qualifier may sit and still count. */
+const QUALIFIER_WINDOW = 200;
+
 for (const [slug, html] of built) {
 	const words = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 	for (const claim of CLAIMS) {
@@ -309,6 +355,27 @@ for (const [slug, html] of built) {
 				fail(
 					slug,
 					`states that ${claim.says}, which SITE.release.${claim.flag} says is not true yet — "${hit[0].slice(0, 60)}"`
+				);
+			}
+		}
+	}
+
+	for (const { flag, phrase } of UNBUILT_CAPABILITY) {
+		if (SITE.release[flag]) {
+			continue;
+		}
+		phrase.lastIndex = 0;
+		let hit;
+		while ((hit = phrase.exec(words)) !== null) {
+			const around = words.slice(
+				Math.max(0, hit.index - QUALIFIER_WINDOW),
+				hit.index + hit[0].length + QUALIFIER_WINDOW
+			);
+			if (!QUALIFIER.test(around)) {
+				fail(
+					slug,
+					`offers "${hit[0]}" as a present fact, which SITE.release.${flag} says is not true yet — ` +
+						'say when it arrives, or drop it'
 				);
 			}
 		}
@@ -337,6 +404,39 @@ for (const [slug, html] of built) {
 	const words = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 	if (SITE.sda.unsupported && !words.includes(SITE.sda.notice)) {
 		fail(slug, `links people to SDA without saying it is ${SITE.sda.notice}`);
+	}
+}
+
+/*
+ * Every page must be reachable from another page.
+ *
+ * `/privacy` was not. Not the navigation, not the footer, not one link in the
+ * body of any of the twenty-six others — its only appearances anywhere were its
+ * own canonical tag and a line in the sitemap. So the page describing what this
+ * site keeps, and for how long, could be found by a crawler and by nobody else,
+ * including from the support form that collects the very data it describes.
+ *
+ * The link-target check above is the mirror of this one and had been there from
+ * the start: it catches a link pointing at a page that does not exist. Nothing
+ * caught a page that exists with nothing pointing at it, which is the same
+ * broken relationship seen from the other end.
+ *
+ * The sitemap deliberately does not count. A page only a search engine can find
+ * is not reachable in any sense a reader would recognise.
+ */
+{
+	const linkedTo = new Set();
+	for (const [, html] of built) {
+		for (const [, href] of html.matchAll(/href="(\/[^"#?]*)"/g)) {
+			linkedTo.add(href === '/' ? 'index' : href.slice(1));
+		}
+	}
+	for (const page of PAGES) {
+		// 404 is served by nginx on a miss and is deliberately linked from nowhere.
+		if (page.slug === 'index' || page.slug === '404') continue;
+		if (!linkedTo.has(page.slug)) {
+			fail(page.slug, 'exists but nothing links to it — unreachable except through the sitemap');
+		}
 	}
 }
 

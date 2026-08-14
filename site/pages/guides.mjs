@@ -7,7 +7,7 @@ export const download = {
 	navTitle: 'Download',
 	title: 'Open Desktop Authenticator download and release status',
 	description:
-		'Release status for Open Desktop Authenticator. No public build has been published yet. What exists, what is left, and how to build from source in the meantime.',
+		'Release status for Open Desktop Authenticator. No public build yet: what exists, what is left, and how to build from source in the meantime.',
 	body: (s) => `
 		<article>
 			<h1>Download</h1>
@@ -118,6 +118,7 @@ ${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
 
 export const importFromSda = {
 	slug: 'import-from-sda',
+	updated: '2026-08-14',
 	navTitle: 'Import',
 	title: 'Import maFiles from SDA',
 	description:
@@ -221,10 +222,11 @@ export const importFromSda = {
 
 export const docs = {
 	slug: 'docs',
+	updated: '2026-08-14',
 	navTitle: 'Docs',
 	title: 'Documentation: setup, codes, confirmations and backups',
 	description:
-		'Guides for Open Desktop Authenticator: setting up a vault, adding accounts, confirmations, automatic confirmation, backups, recovery codes and troubleshooting.',
+		'Guides for Open Desktop Authenticator: setting up a vault, adding accounts, confirmations, backups, recovery codes and troubleshooting.',
 	body: () => `
 		<article>
 			<h1>Documentation</h1>
@@ -309,7 +311,7 @@ export const docs = {
 			<dl class="defs">
 				<dt>Steam rejects the codes</dt>
 				<dd>
-					Almost always the clock. Codes are generated from the current time, so a
+					The device clock is Valve's first documented check. Codes are generated from the current time, so a
 					machine more than about half a minute out produces codes Steam will not
 					accept. The application checks its clock against Steam's and warns you when
 					it could not. <a href="/steam-guard-code-not-working">The full
@@ -331,6 +333,7 @@ export const docs = {
 
 export const faq = {
 	slug: 'faq',
+	updated: '2026-08-14',
 	navTitle: 'FAQ',
 	title: 'FAQ: Steam Guard codes, maFiles and security',
 	description:
@@ -372,7 +375,7 @@ export const faq = {
 					require our software, and most are solved on Steam itself.
 				</p>
 				<ul class="plain next">
-					<li><a href="/steam-guard-code-not-working">My codes are being refused</a> — almost always the clock</li>
+					<li><a href="/steam-guard-code-not-working">My codes are being refused</a> — start with the clock</li>
 					<li><a href="/move-steam-authenticator-new-phone">Moving to a new phone</a> — and the two-day versus fifteen-day difference</li>
 					<li><a href="/steam-revocation-code">Finding my recovery code</a> — the R-code, and where it still is</li>
 					<li><a href="/lost-authenticator">I have lost access completely</a></li>
@@ -432,8 +435,9 @@ const FAQ_ITEMS = [
 	},
 	{
 		q: 'Which platforms does it run on?',
-		plain: 'Windows 10 and 11 are the primary targets. Linux is supported.',
-		a: `<p>Windows 10 and 11 are the primary targets. Linux is supported. There is no macOS build planned at present.</p>`
+		plain:
+			'The source targets Windows 10 and 11 as the primary platforms, with Linux supported. There is no public build to install yet.',
+		a: `<p>The source targets Windows 10 and 11 as the primary platforms, and Linux is supported. macOS is deferred rather than planned — see <a href="/download">the release status</a>, since there is no public build to install on any of them yet.</p>`
 	}
 ];
 
@@ -524,7 +528,7 @@ export const support = {
 						Files upload as soon as you choose them, so we can check the type and size
 						before you finish writing. <strong>Remove</strong> deletes our copy, not
 						just the thumbnail. Anything you never attach to a report is deleted
-						within two hours.
+						within two hours. <a href="/privacy">What we keep, and for how long</a>.
 					</p>
 					<ul class="attachments" data-list></ul>
 				</div>

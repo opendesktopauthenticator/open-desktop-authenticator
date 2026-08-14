@@ -58,7 +58,7 @@ export default {
 	navTitle: 'Who we are',
 	title: 'Who builds Open Desktop Authenticator',
 	description:
-		'Open Desktop Authenticator is published by MASTERPANEL LLC. Who we are, what else we build, and why a Steam trading company wrote an open-source authenticator.',
+		'Open Desktop Authenticator is published by MASTERPANEL LLC. Who we are, and why a Steam trading company wrote an open-source authenticator.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'Organization',

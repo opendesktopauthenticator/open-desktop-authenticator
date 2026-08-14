@@ -70,7 +70,7 @@ export const credits = {
 	navTitle: 'Credits',
 	title: 'The work this is built on, and how to pay for it',
 	description:
-		'This project runs on DoctorMcKay’s open-source Steam libraries. What each one does, why an independent Steam authenticator needs them, and how to donate to him.',
+		'This project runs on DoctorMcKay’s open-source Steam libraries. What each one does, why we need them, and how to donate to the person who wrote them.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'Article',

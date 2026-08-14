@@ -32,11 +32,17 @@ export const codeNotWorking = {
 	/*
 	 * TechArticle *and* FAQPage, in one graph.
 	 *
-	 * The troubleshooting list below is a question cluster whether or not it is
-	 * punctuated as one, and every answer declared here is visible on the page —
-	 * which is the condition Google attaches to FAQ markup. Declaring it is what
-	 * makes these eligible for the "people also ask" surface, where long-tail
-	 * queries like this one actually land.
+	 * **This earns no Google rich result, and the comment that used to sit here
+	 * claimed it did.** Google restricted FAQ rich results to health and
+	 * government sites in 2023 and deprecated them outright in May 2026, so the
+	 * "people also ask eligibility" this was added for does not exist. Written
+	 * down rather than quietly corrected, because the mistake is instructive: the
+	 * markup was added on a recalled fact that was two years stale.
+	 *
+	 * It stays because FAQPage remains valid Schema.org, unused structured data
+	 * is harmless, and non-Google consumers — other engines, assistants, anything
+	 * reading the graph — can still use it. Every answer declared here is visible
+	 * on the page, which was the right discipline regardless of who reads it.
 	 */
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
@@ -146,9 +152,8 @@ export const codeNotWorking = {
 				<dt>Too many attempts</dt>
 				<dd>
 					After a run of failures Steam will stop accepting attempts for a while.
-					Valve does not publish the exact duration, so the useful advice is simply
-					to stop retrying and come back later — repeated attempts are what keep the
-					limit alive.
+					Valve does not publish how long, so the only sound advice is to stop
+					retrying and come back later rather than to guess at a number.
 				</dd>
 				<dt>The authenticator was moved or re-added since</dt>
 				<dd>
@@ -341,9 +346,17 @@ export const revocationCode = {
 			<p>
 				The recovery code detaches the authenticator from your account
 				<em>without the device the authenticator is on</em>. Dead phone, wiped disk,
-				stolen laptop — it works from any browser, because it proves something you
-				knew rather than something you hold. That is its entire purpose. It has no
-				other power: it does not generate codes and it cannot approve anything.
+				stolen laptop — it proves something you knew rather than something you hold,
+				which is why it survives losing the hardware.
+			</p>
+			<p>
+				It is not a master key on its own, and it is worth being exact about that.
+				Removal happens <strong>inside an authenticated Steam session</strong> — you
+				go through Steam's recovery pages as the account owner and supply the code
+				there. Steam's own API works the same way: the removal call takes an access
+				token <em>and</em> the code. So the code is one of two things a removal needs,
+				not the whole of it. It also has no other power: it does not generate codes
+				and it cannot approve a trade.
 			</p>
 
 			<h2>Where to find yours</h2>

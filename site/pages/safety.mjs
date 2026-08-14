@@ -187,10 +187,11 @@ ${reviewAsk(s, { got: 'Did this help you spot a fake before you ran it?' })}
 
 export const verify = {
 	slug: 'verify',
+	updated: '2026-08-14',
 	navTitle: 'Verify',
 	title: 'How to verify a download is genuine',
 	description:
-		'Check a release against its published SHA-256 checksum and signature on Windows and Linux, and confirm the build matches the public source. Commands you can copy.',
+		'Check a download against its published SHA-256 checksum on Windows and Linux, and confirm where the bytes came from. Commands you can copy.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'HowTo',
@@ -347,6 +348,7 @@ ${reviewAsk(s, { got: 'Did these steps help you check a download?' })}
 
 export const security = {
 	slug: 'security',
+	updated: '2026-08-14',
 	navTitle: 'Security',
 	title: 'Security model: how your Steam secrets are stored',
 	description:

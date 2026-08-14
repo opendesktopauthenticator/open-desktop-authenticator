@@ -19,6 +19,7 @@
 
 export const mafile = {
 	slug: 'what-is-a-mafile',
+	updated: '2026-08-14',
 	navTitle: 'maFiles',
 	title: 'What is a .maFile?',
 	description:
@@ -243,6 +244,7 @@ export const lostAuthenticator = {
 
 export const alternatives = {
 	slug: 'alternatives',
+	updated: '2026-08-14',
 	navTitle: 'Alternatives',
 	title: 'Steam authenticator alternatives to SDA, compared',
 	description:

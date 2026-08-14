@@ -19,6 +19,7 @@
 
 export default {
 	slug: 'steam-inventory-stolen',
+	updated: '2026-08-14',
 	navTitle: 'Our story',
 	title: 'A fake SDA download emptied my Steam inventory',
 	description:
@@ -145,9 +146,11 @@ export default {
 			<p>
 				So <a href="/">this application</a> is built to be checked rather than trusted:
 				<a href="${'https://github.com/opendesktopauthenticator/open-desktop-authenticator'}" rel="noopener">public source</a>,
-				reproducible builds, published checksums, and
+				builds produced in public CI, and
 				<a href="/security">a security page that says what it cannot protect you from</a>.
-				It cannot update itself, because that is the same door left open.
+				Published checksums and reproducible builds are required before the first
+				release rather than done — <a href="/download">the download page says where each
+				one stands</a>. It cannot update itself, because that is the same door left open.
 			</p>
 			<p>
 				If you use something else, use something else. Just
