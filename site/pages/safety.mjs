@@ -337,6 +337,7 @@ export const verify = {
 			<h2>Related</h2>
 			<ul class="plain next">
 				<li><a href="/scam-clones">What a counterfeit build does</a></li>
+				<li><a href="/approve-steam-confirmations-desktop">What approving confirmations really delegates</a></li>
 				<li><a href="/security">The security model</a></li>
 			</ul>
 

@@ -124,6 +124,7 @@ export const mafile = {
 			<h2>Related</h2>
 			<ul class="plain next">
 				<li><a href="/steam-desktop-authenticator">Steam Desktop Authenticator explained</a></li>
+				<li><a href="/how-to-open-mafile">How to open one safely</a></li>
 				<li><a href="/encrypted-mafile">Encrypted maFiles, and the manifest they need</a></li>
 				<li><a href="/import-from-sda">Importing maFiles into this application</a></li>
 				<li><a href="/lost-authenticator">If you have lost access to your authenticator</a></li>
@@ -336,6 +337,7 @@ export const alternatives = {
 
 			<h2>Related</h2>
 			<ul class="plain next">
+				<li><a href="/steam-mobile-vs-desktop-authenticator">Mobile app or desktop: an honest comparison</a></li>
 				<li><a href="/steam-desktop-authenticator">Steam Desktop Authenticator explained</a></li>
 				<li><a href="/verify">How to verify any download</a></li>
 				<li><a href="/download">Our release status</a></li>
