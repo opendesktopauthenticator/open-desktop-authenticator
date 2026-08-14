@@ -95,7 +95,7 @@ export const codeNotWorking = {
 		]
 	}),
 	body: (s) => `
-		<article class="guide">
+		<article class="guide numbered">
 			<h1>Steam Guard code not working? Check the clock</h1>
 			<p class="lede">
 				When Steam refuses code after code, the first thing to check is not the code.
@@ -496,7 +496,7 @@ export const revocationCode = {
 		mainEntityOfPage: `${s.origin}/steam-revocation-code`
 	}),
 	body: (s) => `
-		<article class="guide">
+		<article class="guide numbered">
 			<h1>Steam recovery code: what the R-code does</h1>
 			<p class="lede">
 				It looks like <code>R12345</code>. Valve calls it your <strong>recovery
@@ -574,14 +574,36 @@ export const revocationCode = {
 			</ul>
 
 			<h2>How do I use it to remove an authenticator?</h2>
-			<p>
-				Steam's help pages, under the option for no longer having access to your
-				authenticator — enter the code and the authenticator is removed; then set up a
-				fresh one. Removing an authenticator carries a
-				<a href="/move-steam-authenticator-new-phone">fifteen-day trade and Market
-				restriction</a>, which is why transferring is the better path when you still
-				can. Nothing legitimate bypasses it.
-			</p>
+			<ol class="steps">
+				<li>
+					<strong>Go to Steam's own help site</strong>
+					<p>
+						Not a search result, not a link somebody sent you. Choose the option for
+						no longer having access to your authenticator.
+					</p>
+				</li>
+				<li>
+					<strong>Enter the recovery code</strong>
+					<p>The authenticator is detached from the account.</p>
+				</li>
+				<li>
+					<strong>Set up a fresh authenticator</strong>
+					<p>
+						Whichever you intend to use from now on — and write down the new recovery
+						code, because the old one is gone with the old authenticator.
+					</p>
+				</li>
+			</ol>
+			<div class="callout callout-warn">
+				<p>
+					<strong>Removing costs fifteen days.</strong> A removal carries a
+					<a href="/move-steam-authenticator-new-phone">fifteen-day trade and Market
+					restriction</a>, which is why
+					<a href="/move-steam-authenticator-new-phone">transferring is the better path
+					whenever you still can</a> — that one costs two. Steam Support cannot lift
+					the restriction and nothing legitimate bypasses it.
+				</p>
+			</div>
 
 			<div class="callout callout-warn">
 				<p>
@@ -678,7 +700,7 @@ export const encryptedMafile = {
 		mainEntityOfPage: `${s.origin}/encrypted-mafile`
 	}),
 	body: (s) => `
-		<article class="guide">
+		<article class="guide numbered">
 			<h1>Encrypted maFiles: the password, and the manifest</h1>
 			<p class="lede">
 				You have a <code>.maFile</code>, something is asking for a password, and
@@ -725,11 +747,39 @@ export const encryptedMafile = {
 				</p>
 			</div>
 ${manifestDiagram()}
-			<p>
-				This is the most common way people lock themselves out while believing they
-				made a backup: the <code>.maFile</code> went to the USB stick, the manifest
-				stayed behind, and the machine was wiped.
+			<p class="pull">
+				This is the most common way people lock themselves out
+				<em>while believing they made a backup</em>: the <code>.maFile</code> went to
+				the USB stick, the manifest stayed behind, and the machine was wiped.
 			</p>
+			<p>If that is where you are, work through these in order before assuming it is lost:</p>
+			<ol class="steps">
+				<li>
+					<strong>Look for the original folder, not the file</strong>
+					<p>
+						Old drive, old user profile, an SDA folder in a previous Windows
+						installation, a full-disk image. You need the <code>manifest.json</code>
+						that lived beside this maFile.
+					</p>
+				</li>
+				<li>
+					<strong>Check every other backup you made</strong>
+					<p>
+						Cloud sync, an old external disk, a zip of the whole SDA directory. A
+						folder-level copy from any date has the manifest in it; a file-level copy
+						never will.
+					</p>
+				</li>
+				<li>
+					<strong>If the manifest is genuinely gone, stop trying to open it</strong>
+					<p>
+						No tool can recover the parameters, and every site offering to is after
+						the file. Move to
+						<a href="/lost-authenticator">account recovery</a> instead — that path
+						still works without the file.
+					</p>
+				</li>
+			</ol>
 
 			<h2>Why does it only say the passphrase is wrong?</h2>
 			<p>

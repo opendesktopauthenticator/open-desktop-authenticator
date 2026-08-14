@@ -2284,7 +2284,13 @@ article.guide {
 article.guide > h2 {
 	margin-top: 58px;
 }
-article.guide > h2::before {
+/*
+ * Opt-in, because three of these guides number their own headings — four
+ * alternative routes out of a lost authenticator, five steps to open a file.
+ * An automatic counter on top of those produced "03" above "1. No phone and no
+ * number", numbering the same list twice with two different numbers.
+ */
+article.numbered > h2::before {
 	counter-increment: sec;
 	content: counter(sec, decimal-leading-zero);
 	display: block;

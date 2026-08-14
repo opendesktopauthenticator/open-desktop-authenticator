@@ -39,7 +39,7 @@ export const confirmationsOnDesktop = {
 		mainEntityOfPage: `${s.origin}/approve-steam-confirmations-desktop`
 	}),
 	body: (s) => `
-		<article class="guide">
+		<article class="guide numbered">
 			<h1>How Steam trade confirmations work on desktop</h1>
 			<p class="lede">
 				Every trade and every Market listing needs a second approval after you click
@@ -107,16 +107,34 @@ export const confirmationsOnDesktop = {
 				a valid session — it is not checking whether a phone or a PC produced it,
 				though it can of course observe how a client behaves.
 			</p>
-			<p>
-				Which is the honest framing of "approve confirmations on PC": not a
-				convenience feature, but moving trade authority from a device you carry to a
-				machine that is often left running. Be precise about the limit, though: the
-				identity secret cannot sign in to Steam. A program that also holds a usable
-				session or refresh token can act immediately; one holding only the secrets
-				needs an authentication route first. The <code>shared_secret</code> supplies
-				the second factor, not the password — so it closes half the gap, not all of
-				it.
+			<p class="pull">
+				That is the honest framing of "approve confirmations on PC": not a convenience
+				feature, but moving trade authority from a device you carry to a machine that
+				is often <em>left running</em>.
 			</p>
+			<p>
+				It is worth being exact about what somebody gains by stealing that file,
+				because both the panic and the shrug are wrong:
+			</p>
+			<ul class="check">
+				<li class="no">
+					<strong>The identity secret cannot sign in to Steam.</strong> On its own it
+					signs confirmations and nothing else.
+				</li>
+				<li class="no">
+					<strong>The shared secret is not your password.</strong> It supplies the
+					second factor, so it closes half the gap rather than all of it.
+				</li>
+				<li class="yes">
+					<strong>A usable session or refresh token changes that.</strong> A file
+					carrying one lets a thief act immediately, with no sign-in step at all.
+				</li>
+				<li class="yes">
+					<strong>The secrets do not expire.</strong> A password can be changed in a
+					minute; a copied secret keeps working until the authenticator is detached
+					from the account.
+				</li>
+			</ul>
 
 			<h2>Why would anyone want confirmations on a PC?</h2>
 			<ul>
@@ -201,7 +219,7 @@ export const mobileVsDesktop = {
 		mainEntityOfPage: `${s.origin}/steam-mobile-vs-desktop-authenticator`
 	}),
 	body: (s) => `
-		<article class="guide">
+		<article class="guide numbered">
 			<h1>Steam mobile app or a desktop authenticator?</h1>
 			<p class="lede">
 				We build a desktop authenticator, so treat this page with the suspicion it
@@ -711,11 +729,30 @@ export const openMafile = {
 
 			<h2>3. What opens a .maFile?</h2>
 			<p>
-				Notepad on Windows, or any code editor. Do not double-click the file and let
-				Windows pick something; choose the editor deliberately with
-				<strong>Open with</strong>. What you should see is JSON — curly braces and
-				quoted field names.
+				Anything that reads plain text. What matters more is what you deliberately do
+				not use — and double-clicking counts as not choosing, because Windows will
+				pick something for you.
 			</p>
+			<ul class="check">
+				<li class="yes">
+					<strong>Notepad, or any code editor.</strong> Use <strong>Open with</strong>
+					and pick it yourself. You should see JSON — curly braces and quoted field
+					names.
+				</li>
+				<li class="no">
+					<strong>Not an online JSON viewer, formatter or "maFile decoder".</strong>
+					Pasting the contents into a web page hands over the secrets, whatever the
+					page promises about not storing them.
+				</li>
+				<li class="no">
+					<strong>Not an AI chat, a Discord bot or a pastebin.</strong> Same file,
+					same consequence, and now it is in somebody's logs.
+				</li>
+				<li class="no">
+					<strong>Not a tool that offers to "repair" or "convert" it.</strong> There is
+					nothing to convert. A maFile is already text.
+				</li>
+			</ul>
 
 			<h2>4. Is mine encrypted or readable?</h2>
 			<dl class="defs">
