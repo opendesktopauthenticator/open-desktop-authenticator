@@ -212,6 +212,7 @@ export const importFromSda = {
 			<h2>Related</h2>
 			<ul class="plain next">
 				<li><a href="/steam-desktop-authenticator">What is actually inside a maFile</a></li>
+				<li><a href="/encrypted-mafile">Encrypted maFiles: the password and the manifest</a></li>
 				<li><a href="/security">How they are stored once imported</a></li>
 				<li><a href="/docs">Full documentation</a></li>
 			</ul>

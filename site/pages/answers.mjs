@@ -124,6 +124,7 @@ export const mafile = {
 			<h2>Related</h2>
 			<ul class="plain next">
 				<li><a href="/steam-desktop-authenticator">Steam Desktop Authenticator explained</a></li>
+				<li><a href="/encrypted-mafile">Encrypted maFiles, and the manifest they need</a></li>
 				<li><a href="/import-from-sda">Importing maFiles into this application</a></li>
 				<li><a href="/lost-authenticator">If you have lost access to your authenticator</a></li>
 			</ul>
@@ -231,6 +232,7 @@ export const lostAuthenticator = {
 
 			<h2>Related</h2>
 			<ul class="plain next">
+				<li><a href="/steam-revocation-code">The revocation code, in detail</a></li>
 				<li><a href="/what-is-a-mafile">What is inside a maFile</a></li>
 				<li><a href="/security">How this application stores and protects secrets</a></li>
 				<li><a href="/scam-clones">Why "recovery tools" are the wrong search</a></li>
