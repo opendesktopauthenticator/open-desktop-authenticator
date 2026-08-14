@@ -206,7 +206,7 @@ export const confirmationsOnDesktop = {
 			<ul class="link-cards">
 				<li>
 					<a href="/security"><b>Where the secrets live</b>
-					<span>What this application stores, and what ever reaches the network.</span></a>
+					<span>What this application stores, and what reaches the network.</span></a>
 				</li>
 				<li>
 					<a href="/steam-mobile-vs-desktop-authenticator"><b>Mobile app or desktop</b>
@@ -289,7 +289,7 @@ export const mobileVsDesktop = {
 						</tr>
 						<tr>
 							<th scope="row">Account recovery</th>
-							<td>SMS and in-app routes through Valve</td>
+							<td>Steam's recovery flow; SMS when a phone number is linked</td>
 							<td>
 								Your backup or recovery code; Steam's own options may also remain
 								available if a number is linked
@@ -365,7 +365,8 @@ export const mobileVsDesktop = {
 				</dd>
 				<dt>It is less likely to sit unattended</dt>
 				<dd>
-					A phone in your pocket spends far less time logged in and idle than the
+					A phone in your pocket generally spends less time physically unattended and
+					accessible than the
 					desktop you trade from. That is a difference of habit rather than of
 					design, and it is most of why it matters.
 				</dd>
@@ -541,8 +542,9 @@ export const withoutPhone = {
 
 			<h2>Question 1: does the authenticator have to run on a phone?</h2>
 			<p>
-				<strong>No.</strong> An authenticator is a secret plus a clock, and a desktop
-				can hold both — that is what
+				<strong>No.</strong> Generating login codes requires a secret and the correct
+				time, so that function can run on a desktop; trade confirmations additionally
+				require the identity secret and an authenticated session. That is what
 				<a href="/steam-desktop-authenticator">desktop authenticators</a> are, and
 				they have existed for years. But note this is a
 				<a href="/steam-mobile-vs-desktop-authenticator">move, not an addition</a>:
@@ -563,7 +565,7 @@ export const withoutPhone = {
 				</p>
 			</div>
 			<p>
-				So a number is no longer a hard requirement for attaching an authenticator.
+				So a number is not a hard requirement in Valve's current setup flow for attaching an authenticator.
 				Steam still asks for one first, and still recommends it — Valve's step for
 				entering a number explains why, since it is what lets you recover the account
 				by text later. But there is a documented way past it.
@@ -589,7 +591,8 @@ export const withoutPhone = {
 			<ul class="check">
 				<li class="yes">
 					<strong>You keep the authenticator itself.</strong> Codes and trade
-					confirmations work exactly the same either way.
+					confirmations continue to work without SMS, provided the authenticator
+					secrets and session remain valid.
 				</li>
 				<li class="yes">
 					<strong>You keep the recovery code.</strong> It still detaches the
@@ -600,8 +603,9 @@ export const withoutPhone = {
 					locked-out account is the one that texts you, and there is nowhere to text.
 				</li>
 				<li class="no">
-					<strong>You lose the simplest phone-to-phone transfer.</strong> Moving to a
-					new handset takes a longer path.
+					<strong>You lose Valve's documented SMS-based phone-to-phone transfer
+					path.</strong> An alternative may require authenticator removal,
+					re-enrolment or Steam Support.
 				</li>
 			</ul>
 			<div class="callout callout-warn">
@@ -714,7 +718,7 @@ export const openMafile = {
 					to read it. Uploading an unencrypted maFile exposes the authenticator secret
 					itself. An encrypted one should not be uploaded either: it is sensitive
 					backup material, and it may become readable if its matching
-					<code>manifest.json</code> or passphrase is exposed later. There is no
+					<code>manifest.json</code> and passphrase are exposed later. There is no
 					legitimate reason for a website to see either.
 				</p>
 			</div>
@@ -750,8 +754,8 @@ export const openMafile = {
 			<h2>2. Why should I copy it first?</h2>
 			<p>
 				Copy the file somewhere else and work on the copy. A maFile is frequently the
-				only surviving record of an authenticator, and a text editor that helpfully
-				saves a change can corrupt the JSON. Never edit the original.
+				only surviving record of an authenticator, and a text editor that saves a
+				change can corrupt the file. Never edit the original.
 			</p>
 
 			<h2>3. What opens a .maFile?</h2>
@@ -771,7 +775,7 @@ export const openMafile = {
 					<strong>Not an online JSON viewer, formatter or "maFile decoder".</strong>
 					Never upload either type. Pasting an unencrypted maFile into a web page
 					exposes its secrets; uploading an encrypted one exposes sensitive backup
-					material that may become readable if its matching manifest or passphrase is
+					material that may become readable if its matching manifest and passphrase are
 					later obtained — whatever the page promises about not storing anything.
 				</li>
 				<li class="no">

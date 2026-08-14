@@ -204,7 +204,7 @@ ${timeWindowDiagram()}
 				</dd>
 				<dt>Too many attempts</dt>
 				<dd>
-					After a run of failures Steam will stop accepting attempts for a while.
+					After a run of failures Steam may temporarily rate-limit repeated attempts for a while.
 					Valve does not publish how long, so the only sound advice is to stop
 					retrying and come back later rather than to guess at a number.
 				</dd>
@@ -526,8 +526,8 @@ export const revocationCode = {
 			<p>
 				The recovery code detaches the authenticator from your account
 				<em>without the device the authenticator is on</em>. Dead phone, wiped disk,
-				stolen laptop — it proves something you knew rather than something you hold,
-				which is why it survives losing the hardware.
+				stolen laptop — it is a recovery secret stored separately from the
+				authenticator, so it can still work after the device is gone.
 			</p>
 			<p>
 				It is not a master key on its own, and it is worth being exact about that.
