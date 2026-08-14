@@ -541,7 +541,7 @@ export const revocationCode = {
 
 			<h2>Where do I find my Steam recovery code?</h2>
 			<p>
-				It is shown once when the authenticator is created, and most people never
+				It is shown once when the authenticator is created, and many people never
 				look at it again — but <strong>it is not gone if you still have a working
 				authenticator</strong>. Valve's answer to "I didn't save my recovery code" is
 				direct:
@@ -753,7 +753,7 @@ export const encryptedMafile = {
 			</div>
 ${manifestDiagram()}
 			<p class="pull">
-				This is the most common way people lock themselves out
+				This is a common way people lock themselves out
 				<em>while believing they made a backup</em>: the <code>.maFile</code> went to
 				the USB stick, the manifest stayed behind, and the machine was wiped.
 			</p>

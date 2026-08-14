@@ -99,6 +99,14 @@ export const confirmationsOnDesktop = {
 					key stops being usable once its moment passes.
 				</li>
 			</ol>
+			<p class="hint">
+				Valve documents the confirmation feature but not this wire format. The tag
+				behaviour above matches the long-standing open implementation in
+				<a href="https://github.com/DoctorMcKay/node-steamcommunity/wiki/SteamCommunity" rel="noopener">DoctorMcKay's
+				node-steamcommunity</a>, one of the libraries
+				<a href="/credits">this project is built on</a>, and our own
+				implementation follows it.
+			</p>
 			<p>
 				That third property is easy to miss and worth knowing about, because it is
 				what stops a captured request being reused as an approval later. The reason
@@ -669,7 +677,8 @@ export const withoutPhone = {
 export const openMafile = {
 	slug: 'how-to-open-mafile',
 	guide: true,
-	sourced: "Checked against SDA's published format and source code",
+	sourced: (s) =>
+		`Checked against <a href="${s.sda.repo}" rel="noopener">SDA's source code</a> and on-disk file format`,
 	navTitle: 'Opening a maFile',
 	title: 'How to open a Steam maFile safely',
 	updated: '2026-08-14',
@@ -754,17 +763,21 @@ export const openMafile = {
 			<ul class="check">
 				<li class="yes">
 					<strong>Notepad, or any code editor.</strong> Use <strong>Open with</strong>
-					and pick it yourself. You should see JSON — curly braces and quoted field
-					names.
+					and pick it yourself. An unencrypted maFile shows JSON — curly braces and
+					quoted field names; an encrypted one shows a long block of base64
+					ciphertext.
 				</li>
 				<li class="no">
 					<strong>Not an online JSON viewer, formatter or "maFile decoder".</strong>
-					Pasting the contents into a web page hands over the secrets, whatever the
-					page promises about not storing them.
+					Never upload either type. Pasting an unencrypted maFile into a web page
+					exposes its secrets; uploading an encrypted one exposes sensitive backup
+					material that may become readable if its matching manifest or passphrase is
+					later obtained — whatever the page promises about not storing anything.
 				</li>
 				<li class="no">
-					<strong>Not an AI chat, a Discord bot or a pastebin.</strong> Same file,
-					same consequence, and now it is in somebody's logs.
+					<strong>Not an AI chat, a Discord bot or a pastebin.</strong> An unencrypted
+					file exposes live secrets immediately; an encrypted one is still sensitive
+					backup material. Either way it is now in somebody's logs.
 				</li>
 				<li class="no">
 					<strong>Not a tool that offers to "repair" or "convert" it.</strong> There is
@@ -810,8 +823,9 @@ export const openMafile = {
 					The <code>shared_secret</code> on its own does not hand over the password.
 					But a maFile carrying a still-usable session or refresh token may allow
 					account actions immediately, and even without one, the second factor stops
-					being an obstacle — the part you cannot change afterwards the way you can
-					change a password.
+					being an obstacle. A compromised <code>shared_secret</code> cannot be fixed
+					by changing your password — it takes removing or replacing the
+					authenticator.
 				</p>
 			</div>
 

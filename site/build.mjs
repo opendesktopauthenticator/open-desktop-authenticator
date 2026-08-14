@@ -344,7 +344,13 @@ function layout(page) {
 		body = jumpList(
 			body.replace(
 				'</h1>',
-				`</h1>\n${guideMeta(iso, formatDate(iso), readingMinutes(body), page.sourced)}`
+				`</h1>\n${guideMeta(
+					iso,
+					formatDate(iso),
+					readingMinutes(body),
+					// A page whose sourcing line carries a link needs SITE to build it.
+					typeof page.sourced === 'function' ? page.sourced(SITE) : page.sourced
+				)}`
 			)
 		);
 	}
