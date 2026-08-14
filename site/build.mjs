@@ -342,7 +342,10 @@ function layout(page) {
 	let body = anchorHeadings(page.body(SITE));
 	if (page.guide) {
 		body = jumpList(
-			body.replace('</h1>', `</h1>\n${guideMeta(iso, formatDate(iso), readingMinutes(body))}`)
+			body.replace(
+				'</h1>',
+				`</h1>\n${guideMeta(iso, formatDate(iso), readingMinutes(body), page.sourced)}`
+			)
 		);
 	}
 

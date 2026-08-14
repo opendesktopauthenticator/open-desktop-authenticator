@@ -61,14 +61,23 @@ export function readingMinutes(html) {
  * date is part of the claim — advice about Steam's current setup flow is worth
  * knowing the age of — so it moves to the top, next to how long the page takes
  * and what it is sourced from.
+ *
+ * `sourced` is per-page and deliberately not defaulted away. The first version
+ * printed "Checked against Valve's own documentation" on all eight guides,
+ * which was false on two of them: Valve does not document SDA's file format or
+ * its encryption, and those pages are checked against SDA's own source. A
+ * sourcing claim that is wrong is worse than no sourcing claim, because it is
+ * the line a careful reader uses to decide whether to trust the rest.
  */
-export function guideMeta(iso, formatted, minutes) {
+export const SOURCED_DEFAULT = "Checked against Valve's own documentation";
+
+export function guideMeta(iso, formatted, minutes, sourced = SOURCED_DEFAULT) {
 	return `		<div class="guide-meta">
 			<span>Reviewed <time datetime="${iso}">${formatted}</time></span>
 			<span class="dot" aria-hidden="true"></span>
 			<span>${minutes} min read</span>
 			<span class="dot" aria-hidden="true"></span>
-			<span class="sourced">Checked against Valve's own documentation</span>
+			<span class="sourced">${sourced}</span>
 		</div>`;
 }
 

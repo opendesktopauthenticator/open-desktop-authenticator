@@ -110,12 +110,12 @@ export const codeNotWorking = {
 					A Steam Guard code is computed from the current time, so a device whose
 					clock is wrong produces codes for the wrong thirty-second window and Steam
 					refuses every one. <strong>Turn on automatic date, time and time zone on
-					the device generating the codes, then sync.</strong> That fixes the large
-					majority of refused codes in under a minute.
+					the device generating the codes, then sync.</strong> Synchronising the clock
+					often fixes time-related code failures in under a minute.
 				</p>
 				<p>
-					If the clock is already correct, the cause is further down — and it is
-					usually the account, not the code.
+					If the clock is already correct, check that the code belongs to the account
+					you are signing into — then work down the causes below.
 				</p>
 			</div>
 
@@ -321,7 +321,7 @@ export const moveAuthenticator = {
 				There is a right way and an expensive way to do this, and the difference is
 				thirteen days of not being able to trade. Transferring costs a two-day
 				restriction. Removing the authenticator and adding a new one costs fifteen.
-				Most people reach for the second without realising the first exists.
+				It is easy to remove and re-enrol without realising that Steam provides a shorter transfer route.
 			</p>
 
 			<div class="callout callout-warn">
@@ -468,7 +468,8 @@ ${tradeHoldDiagram()}
 				</li>
 				<li>
 					<a href="/steam-guard-code-not-working"><b>Codes refused after the move</b>
-					<span>Almost always the clock on the new device. Fixed in about a minute.</span></a>
+					<span>Check the clock, the selected account, and whether the old secret was
+					replaced.</span></a>
 				</li>
 				<li>
 					<a href="/lost-authenticator"><b>Lost access entirely</b>
@@ -662,8 +663,8 @@ export const revocationCode = {
 				creates an authenticator it does not treat the account as active until the
 				code has been shown and you have confirmed it is written down — at the one
 				moment the code exists and nothing is yet at risk. That ceremony exists
-				because every horror story on <a href="/lost-authenticator">the lost-access
-				page</a> begins with "I never wrote it down".
+				because many preventable cases on <a href="/lost-authenticator">the lost-access
+				page</a> begin with "I never wrote it down".
 			</p>
 
 			<h2>Related</h2>
@@ -687,6 +688,8 @@ export const revocationCode = {
 export const encryptedMafile = {
 	slug: 'encrypted-mafile',
 	guide: true,
+	// Valve documents none of this. The format and the crypto are SDA's.
+	sourced: `Checked against <a href="${SDA_ENCRYPTOR}" rel="noopener">SDA's published source code</a>`,
 	navTitle: 'Encrypted maFiles',
 	title: 'Encrypted maFiles: the password, and the manifest',
 	updated: '2026-08-14',
@@ -737,9 +740,9 @@ export const encryptedMafile = {
 			<h2>Why won't my encrypted maFile open on another machine?</h2>
 			<p>
 				SDA does not keep everything needed for decryption inside the maFile itself.
-				The salt and initialisation vector — parameters the passphrase is combined
-				with — live in <code>manifest.json</code> in the same folder, keyed by
-				account. The practical rule:
+				<code>manifest.json</code>, in the same folder and keyed by account, stores
+				the salt used to derive the encryption key from your passphrase and the
+				initialisation vector used by AES-CBC. The practical rule:
 			</p>
 			<div class="callout">
 				<p>
@@ -768,15 +771,17 @@ ${manifestDiagram()}
 					<strong>Check every other backup you made</strong>
 					<p>
 						Cloud sync, an old external disk, a zip of the whole SDA directory. A
-						folder-level copy from any date has the manifest in it; a file-level copy
-						never will.
+						complete backup of the <code>maFiles</code> folder from the same SDA
+						installation should include the matching manifest; a backup containing
+						only the individual <code>.maFile</code> will not.
 					</p>
 				</li>
 				<li>
 					<strong>If the manifest is genuinely gone, stop trying to open it</strong>
 					<p>
-						No tool can recover the parameters, and every site offering to is after
-						the file. Move to
+						No tool can reconstruct a missing random salt and initialisation vector
+						from the ciphertext alone, so treat any website claiming guaranteed
+						recovery as unsafe. Move to
 						<a href="/lost-authenticator">account recovery</a> instead — that path
 						still works without the file.
 					</p>

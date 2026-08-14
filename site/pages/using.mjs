@@ -25,6 +25,8 @@ const VALVE = {
 export const confirmationsOnDesktop = {
 	slug: 'approve-steam-confirmations-desktop',
 	guide: true,
+	// Valve documents the feature; the wire protocol is from open implementations.
+	sourced: 'Checked against Valve documentation and current Steam protocol implementations',
 	navTitle: 'Confirmations on PC',
 	title: 'How Steam trade confirmations work on desktop',
 	updated: '2026-08-14',
@@ -256,9 +258,9 @@ export const mobileVsDesktop = {
 					Valve can offer.
 				</p>
 				<p>
-					A desktop authenticator earns its place in two situations: confirming
-					listings in volume, where tapping a phone forty times is the actual
-					problem, and having no usable Android or iOS device at all.
+					A desktop authenticator is mainly useful for bulk confirmations, managing
+					several accounts side by side, controlling your own backups, or operating
+					without the official mobile app.
 				</p>
 			</div>
 
@@ -280,7 +282,10 @@ export const mobileVsDesktop = {
 						<tr>
 							<th scope="row">Account recovery</th>
 							<td>SMS and in-app routes through Valve</td>
-							<td>Recovery code only</td>
+							<td>
+								Your backup or recovery code; Steam's own options may also remain
+								available if a number is linked
+							</td>
 						</tr>
 						<tr>
 							<th scope="row">Confirming many trades</th>
@@ -306,9 +311,8 @@ export const mobileVsDesktop = {
 				</table>
 			</div>
 			<p class="hint">
-				The honest summary of that table: the mobile app is better at everything except
-				bulk confirmations and running without a phone. If neither of those is your
-				problem, the app is the answer.
+				The honest summary of that table: the mobile app is the safest default for most
+				people. A desktop tool is a specialist option for the specific workflows above.
 			</p>
 
 			<h2>Can I use the Steam app and a desktop authenticator together?</h2>
@@ -515,14 +519,15 @@ export const withoutPhone = {
 					Two separate questions get tangled together here.
 					<strong>Valve's official authenticator app does require an Android or iOS
 					device</strong> — there is no official desktop version of it. But a
-					<strong>phone number is optional in Valve's current setup flow</strong>,
-					and an authenticator itself is only a secret plus a clock, so other
-					software can hold one.
+					<strong>phone number is optional in Valve's current setup flow</strong>.
+					Generating Steam Guard login codes needs a secret and the correct time, so
+					that part can run on a desktop; trade confirmations additionally need an
+					identity secret and an authenticated Steam session.
 				</p>
 				<p>
-					Skipping the phone number is supported, and it costs you the SMS recovery
-					route. That makes your recovery code the thing standing between a bad day
-					and a support ticket.
+					Skipping the phone number removes SMS recovery, which makes a working
+					<a href="/encrypted-mafile">backup of the authenticator</a> and the
+					<a href="/steam-revocation-code">recovery code</a> especially important.
 				</p>
 			</div>
 
@@ -664,6 +669,7 @@ export const withoutPhone = {
 export const openMafile = {
 	slug: 'how-to-open-mafile',
 	guide: true,
+	sourced: "Checked against SDA's published format and source code",
 	navTitle: 'Opening a maFile',
 	title: 'How to open a Steam maFile safely',
 	updated: '2026-08-14',
@@ -707,9 +713,10 @@ export const openMafile = {
 			<div class="answer">
 				<span class="eyebrow">Short answer</span>
 				<p>
-					<strong>Any plain text editor opens a maFile</strong> — Notepad, VS Code,
-					anything that reads JSON. There is nothing to install and nothing to
-					convert. Work on a copy, not the original.
+					<strong>Any plain-text editor can display a maFile</strong> — Notepad, VS
+					Code, anything. An unencrypted one contains JSON; an encrypted one shows
+					base64 ciphertext. There is nothing to install and nothing to convert. Work
+					on a copy, not the original.
 				</p>
 				<p>
 					The danger is not opening it. It is
@@ -794,13 +801,17 @@ export const openMafile = {
 					and documents folders are often synced to cloud storage, so where you put
 					that copy matters. Do not paste the
 					contents into a website, a Discord bot, a pastebin, an AI chat, or a support
-					form — <a href="/support">including ours</a>. If the
+					form — <a href="/support">including ours</a>. Pasting an unencrypted maFile
+					hands over its secrets; an encrypted one is still sensitive backup material
+					and should not be uploaded either. If the
 					<code>shared_secret</code> is readable in what you paste, whoever receives
 					it can generate your Steam Guard codes from then until the authenticator is
 					detached from the account entirely — the secret does not expire on its own.
-					That is not the whole account by itself: they would still need your
-					password. But it removes the second factor as an obstacle, which is the
-					part you cannot change afterwards the way you can change a password.
+					The <code>shared_secret</code> on its own does not hand over the password.
+					But a maFile carrying a still-usable session or refresh token may allow
+					account actions immediately, and even without one, the second factor stops
+					being an obstacle — the part you cannot change afterwards the way you can
+					change a password.
 				</p>
 			</div>
 
