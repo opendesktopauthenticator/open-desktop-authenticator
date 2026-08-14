@@ -113,9 +113,21 @@ export const privacy = {
 			<dl class="defs">
 				<dt>Cloudflare</dt>
 				<dd>
-					Sits in front of this site and terminates TLS, so it sees requests to it. We
-					run no analytics product — not Cloudflare's, not anybody's — and there is no
-					tracking script on any page here.
+					Sits in front of this site and terminates TLS, so it sees requests to it.
+				</dd>
+				<dt>Google Analytics</dt>
+				<dd>
+					<strong>This site runs Google Analytics 4</strong> to count visits and see
+					which pages people arrive on. It sets cookies in your browser and sends
+					Google your IP address, the page you are reading, and general device and
+					referrer information. We use it to learn which guides are worth writing more
+					of — not to identify anyone, and we never send it anything you type.
+					<strong>The application itself contains no analytics of any kind</strong>;
+					this is the website only, and nothing here touches your Steam accounts, your
+					maFiles or your secrets. If you would rather not be counted, any content
+					blocker or Google's own
+					<a href="https://tools.google.com/dlpage/gaoptout" rel="noopener">opt-out
+					add-on</a> stops it, and the site works identically without it.
 				</dd>
 				<dt>GitHub</dt>
 				<dd>
@@ -126,8 +138,9 @@ export const privacy = {
 				</dd>
 				<dt>Nobody else</dt>
 				<dd>
-					No advertising network, no analytics vendor, no third-party fonts or scripts,
-					and nothing sold or shared. <a href="/donate">Donations are cryptocurrency
+					No advertising network, no third-party fonts, and nothing sold or shared.
+					Google Analytics, described above, is the only third-party script on the
+					site. <a href="/donate">Donations are cryptocurrency
 					only</a> partly for this reason — taking cards would mean a payment processor
 					holding donor names against a project whose whole argument is that it holds
 					nothing.

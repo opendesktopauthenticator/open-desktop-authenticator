@@ -70,6 +70,8 @@ export const SITE = {
 	 * changes is telling search engines something false about its freshness.
 	 */
 	updated: '2026-08-12',
+	/** GA4 measurement ID. Referenced by head() and by the CSP host allowlist. */
+	analyticsId: 'G-G0GE9H5VR7',
 	repo: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator',
 
 	/*
@@ -267,6 +269,18 @@ function head(page) {
 		putting it on all sixteen pages would mean fifteen requests for nothing.
 	-->
 	${page.script ? `<script src="${asset(page.script)}" defer></script>` : ''}
+	<!--
+		Google Analytics 4. The loader is the only third-party script on the site;
+		the configuration beside it is served from our own origin so the content
+		security policy never has to allow inline execution. See assets/analytics.js.
+
+		No integrity attribute, deliberately: gtag.js is generated per request and
+		Google publishes no stable hash for it, so subresource integrity would pin
+		a body that changes and break measurement on Google's next deploy. The
+		trust here rests on TLS and the CSP host allowlist instead.
+	-->
+	<script async src="https://www.googletagmanager.com/gtag/js?id=${SITE.analyticsId}"></script>
+	<script src="${asset('analytics.js')}" defer></script>
 	${page.structuredData ? `<script type="application/ld+json">${JSON.stringify(page.structuredData(SITE))}</script>` : ''}
 	<script type="application/ld+json">${JSON.stringify(breadcrumbs(page))}</script>`.trim();
 }
