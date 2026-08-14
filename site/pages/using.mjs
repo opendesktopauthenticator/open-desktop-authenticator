@@ -2,29 +2,34 @@
  * Pages for somebody choosing an authenticator, or working out how to use one.
  *
  * The rescue pages in rescues.mjs catch people mid-accident. These catch them
- * earlier — deciding, or trying to do a thing they have not done before — which
- * is a different register: less urgency, more comparison, and a much stronger
+ * earlier — deciding, or trying something they have not done before — which is
+ * a different register: less urgency, more comparison, and a much stronger
  * obligation to be even-handed.
  *
- * **The comparison page recommends Steam's own app for most readers.** That is
- * not modesty for its own sake; it is true, and a comparison that concludes in
- * favour of whoever wrote it is worth nothing to the person reading it. The
- * readers for whom a desktop authenticator is genuinely the better answer can
- * recognise themselves from an honest description of the trade, and the rest
- * are better served elsewhere. A page that sends them there is doing its job.
+ * **The comparison page recommends Steam's own app for most readers**, and
+ * describes it accurately rather than conveniently. An earlier draft implied the
+ * mobile app handles one account at a time; Valve documents the opposite, and
+ * understating a competitor is the same failure as overstating yourself. The
+ * readers a desktop authenticator genuinely suits can recognise themselves from
+ * an honest description of the trade, and the rest are better served elsewhere.
  */
+
+/** Valve's own pages, cited wherever this makes a claim about Steam's behaviour. */
+const VALVE = {
+	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31'
+};
 
 export const confirmationsOnDesktop = {
 	slug: 'approve-steam-confirmations-desktop',
 	navTitle: 'Confirmations on PC',
-	title: 'Approving Steam trade confirmations from your PC',
+	title: 'How Steam trade confirmations work on desktop',
 	updated: '2026-08-14',
 	description:
-		'How Steam trade and market confirmations are actually signed, what it means to approve them from a desktop, and the risk that comes with letting software do it.',
+		'What actually signs a Steam trade confirmation, why desktop tools can do it, and the two questions to ask any software you let approve trades.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
-		headline: 'Approving Steam trade confirmations from your PC',
+		headline: 'How Steam trade confirmations work on desktop',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
 		dateModified: '2026-08-14',
@@ -32,41 +37,56 @@ export const confirmationsOnDesktop = {
 	}),
 	body: (s) => `
 		<article>
-			<h1>Approving Steam trade confirmations from your PC</h1>
+			<h1>How Steam trade confirmations work on desktop</h1>
 			<p class="lede">
 				Every trade and every Market listing needs a second approval after you click
-				accept. Steam's own answer is the phone in your pocket. It is not the only
-				thing that can do it — and understanding why explains both the appeal and the
-				danger of doing it on a desktop.
+				accept. Steam's own answer is the phone in your pocket — but it is not the
+				only thing that can sign one, and understanding what a confirmation actually
+				is explains both the appeal and the risk of moving that job to a desktop.
 			</p>
 
 			<h2>What a confirmation actually is</h2>
 			<p>
-				When you accept a trade, Steam does not simply take your word for it. It
-				creates a pending confirmation and waits for something holding your
-				authenticator's <code>identity_secret</code> to sign it. That signature is the
-				approval. The phone app signs it when you tap accept; nothing else about the
-				tap matters.
+				When you accept a trade, Steam creates a pending confirmation and waits for a
+				correctly signed request to approve it. Three things have to come together
+				before that request is valid:
 			</p>
+			<ol>
+				<li>
+					<strong>The identity secret</strong> from your authenticator, used to
+					compute an HMAC.
+				</li>
+				<li>
+					<strong>An authenticated Steam session</strong> — a live login for the
+					account, not just the secret.
+				</li>
+				<li>
+					<strong>A key minted for that exact operation and moment</strong>: the HMAC
+					covers the current Steam-corrected time and a tag naming the action, so a
+					key made for <em>listing</em> confirmations cannot be replayed to
+					<em>accept</em> one.
+				</li>
+			</ol>
 			<p>
-				Which leads to the fact that governs this entire page:
-				<strong>anything holding the identity secret can approve your trades, whether
-				or not you are watching.</strong> That is not a flaw in Steam's design — it is
-				the design. The secret <em>is</em> the authority.
+				That third property is easy to miss and worth knowing about, because it is
+				what stops a captured request being reused as an approval later.
 			</p>
 
 			<h2>So how does a desktop tool do it?</h2>
 			<p>
-				By holding that same secret. A desktop authenticator imports it from a
-				<a href="/what-is-a-mafile">maFile</a> or receives it when the authenticator is
-				first created, then signs confirmations the same way the phone does. Steam
-				cannot tell the difference and does not try to — a valid signature is a valid
-				signature.
+				By holding the identity secret and signing in as you. It imports the secret
+				from a <a href="/what-is-a-mafile">maFile</a>, or receives it when the
+				authenticator is first created, then produces the same signatures the phone
+				does. Steam cannot tell the difference and does not try to — a valid
+				signature is a valid signature.
 			</p>
 			<p>
-				This is why the honest framing of "approve confirmations on PC" is not a
-				convenience feature. It is a transfer of authority from a device you carry to
-				a machine that is often left running.
+				Which is the honest framing of "approve confirmations on PC": not a
+				convenience feature, but moving trade authority from a device you carry to a
+				machine that is often left running. The secret alone is not quite enough —
+				but a program holding your secret can usually sign in whenever it likes, so
+				the practical distance between "holds the secret" and "can approve your
+				trades" is short.
 			</p>
 
 			<h2>Why people want it anyway</h2>
@@ -76,9 +96,9 @@ export const confirmationsOnDesktop = {
 					phone is genuinely miserable. On a desktop they can be reviewed as a list.
 				</li>
 				<li>
-					<strong>Several accounts.</strong> Switching the phone app between accounts
-					for each confirmation is slow enough that people stop checking properly,
-					which is its own security problem.
+					<strong>Several accounts at once.</strong> The Steam app
+					<a href="${VALVE.guard}" rel="noopener">does hold multiple accounts</a>, but
+					it shows one at a time; a desktop screen can show them side by side.
 				</li>
 				<li>
 					<strong>No usable phone.</strong> A broken handset does not have to stop
@@ -86,7 +106,7 @@ export const confirmationsOnDesktop = {
 				</li>
 			</ul>
 
-			<h2>The question to ask any tool that offers this</h2>
+			<h2>The two questions to ask any tool that offers this</h2>
 			<p>
 				Not "can it approve confirmations" — they all can, or they would not be
 				offering. Ask <strong>what it will approve without asking you</strong>, and
@@ -98,13 +118,23 @@ export const confirmationsOnDesktop = {
 				automatic <em>trades</em> — the setting that can move items out of an account
 				with nobody watching — requires typing a confirmation phrase rather than
 				clicking a toggle. Nothing is approved at all while the vault is locked, and
-				the vault locks on idle and on suspend. The secrets themselves stay
+				the vault locks on idle and on suspend. The secrets stay
 				<a href="/security">encrypted on disk and never leave the machine</a>.
 			</p>
 			<p>
 				A tool that cannot answer those two questions clearly is asking you to hand
 				over trade authority on trust alone.
 			</p>
+
+			<div class="callout">
+				<p>
+					<strong>Looking for the steps rather than the explanation?</strong> There is
+					no public build of ${s.short} to give you steps for yet —
+					<a href="/download">the release status is here</a>, stated plainly rather
+					than implied. This page explains the mechanism so the eventual instructions
+					make sense, and so you can judge any other tool offering the same thing.
+				</p>
+			</div>
 
 			<h2>Related</h2>
 			<ul class="plain next">
@@ -144,11 +174,21 @@ export const mobileVsDesktop = {
 				<p>
 					<strong>Use the official Steam Mobile app if it works for you.</strong> It is
 					made by Valve, it recovers through your phone number when things go wrong,
-					and there is no file for anyone to steal. For the large majority of Steam
-					accounts that is simply the correct answer, and no feature below outweighs
-					it.
+					and it holds the secret in storage you never have to manage. For the large
+					majority of Steam accounts that is simply the correct answer, and no feature
+					below outweighs it.
 				</p>
 			</div>
+
+			<h2>This is a choice, not a combination</h2>
+			<p>
+				Worth settling first, because it is widely misunderstood: Valve states that
+				<a href="${VALVE.guard}" rel="noopener">an account "can only be on one
+				authenticator ... at a time"</a>. Moving to a desktop tool means the phone app
+				stops being your authenticator, and moving back means the reverse. Anything
+				describing them as running side by side is describing an unsupported
+				arrangement, not a feature.
+			</p>
 
 			<h2>Where the mobile app is genuinely better</h2>
 			<dl class="defs">
@@ -156,20 +196,29 @@ export const mobileVsDesktop = {
 				<dd>
 					This is the big one. Lose your phone and Steam can text the number on the
 					account to get you back. Lose a desktop authenticator's file with no backup
-					and your route back is the <a href="/steam-revocation-code">revocation
+					and your route back is the <a href="/steam-revocation-code">recovery
 					code</a> or a support ticket that takes days.
 				</dd>
-				<dt>Nothing to steal</dt>
+				<dt>Nothing for you to mislay</dt>
 				<dd>
-					The secret never exists as a file you could accidentally upload, sync to
-					cloud storage, or hand to the wrong program. A desktop authenticator's
-					entire risk model starts with the fact that it does.
+					The secret lives in the app's own storage — there is no user-managed file to
+					copy to the wrong place, sync to cloud storage, or hand to the wrong
+					program. A desktop authenticator's entire risk model starts with the fact
+					that such a file exists.
 				</dd>
 				<dt>It is official</dt>
 				<dd>
 					No third party between you and Valve. Every desktop option, ours included,
 					asks you to trust somebody else with the most sensitive thing on the
 					account.
+				</dd>
+				<dt>Modern sign-in</dt>
+				<dd>
+					The app can approve logins by notification and by QR code, so there is often
+					no code to type at all. It also
+					<a href="${VALVE.guard}" rel="noopener">holds several accounts at once</a> and
+					sends sign-in notifications for each — which is more than it usually gets
+					credit for.
 				</dd>
 				<dt>It cannot be left running</dt>
 				<dd>
@@ -180,12 +229,11 @@ export const mobileVsDesktop = {
 
 			<h2>Where a desktop authenticator is genuinely better</h2>
 			<dl class="defs">
-				<dt>Many accounts</dt>
+				<dt>Many accounts, side by side</dt>
 				<dd>
-					Switching the phone app between accounts for every code and every
-					confirmation is slow enough that people start rushing the checks. Several
-					accounts side by side on one screen is not merely faster, it is more
-					careful.
+					The app holds multiple accounts but shows one at a time. On a desktop they
+					can be visible together, which for someone managing several is not merely
+					faster but easier to check carefully.
 				</dd>
 				<dt>Trading volume</dt>
 				<dd>
@@ -195,7 +243,8 @@ export const mobileVsDesktop = {
 				<dt>No smartphone, or no wish to use one</dt>
 				<dd>
 					Some people do not have a suitable handset; some will not install the app.
-					<a href="/steam-guard-without-phone">This is the page for that.</a>
+					<a href="/steam-guard-without-phone">This is the page for that</a> — and it
+					is more complicated than it sounds.
 				</dd>
 				<dt>Backups you control</dt>
 				<dd>
@@ -219,9 +268,9 @@ export const mobileVsDesktop = {
 				particular corner of the internet.
 			</p>
 			<p>
-				You can also do both: the secret is the same either way, so an account can be
-				held on the phone and imported to a desktop tool as well. Two copies mean two
-				places it could leak from — and also two places it can be recovered from.
+				Whichever way you go, moving between them costs something: switching carries a
+				<a href="/move-steam-authenticator-new-phone">trade and Market restriction</a>,
+				so it is worth deciding once rather than experimenting.
 			</p>
 
 			<h2>Where ${s.short} stands today</h2>
@@ -238,7 +287,7 @@ export const mobileVsDesktop = {
 			<ul class="plain next">
 				<li><a href="/alternatives">Every desktop option, compared</a></li>
 				<li><a href="/security">How this one stores secrets</a></li>
-				<li><a href="/steam-desktop-authenticator">Steam Desktop Authenticator, explained</a></li>
+				<li><a href="/steam-guard-code-not-working">If codes stop being accepted</a></li>
 			</ul>
 		</article>`
 };
@@ -249,7 +298,7 @@ export const withoutPhone = {
 	title: 'Steam Guard without a smartphone',
 	updated: '2026-08-14',
 	description:
-		'Whether you can run Steam Guard with no smartphone, what Steam still needs a phone number for, and when it sends the setup code by email instead.',
+		'Valve requires a phone for the mobile authenticator. What that means for desktop tools, and what a phone number is still needed for afterwards.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
@@ -263,65 +312,76 @@ export const withoutPhone = {
 		<article>
 			<h1>Steam Guard without a smartphone</h1>
 			<p class="lede">
-				Short answer: yes, the authenticator itself can live on a PC instead of a
-				phone. But "without a phone" hides two different questions, and Steam treats
-				them very differently.
+				Two different questions hide inside this one, and mixing them up is why the
+				answers you find online contradict each other. One is about the device that
+				generates codes. The other is about the phone number on your account — and
+				those have very different answers.
 			</p>
 
-			<h2>The two questions</h2>
-			<ol>
-				<li>
-					<strong>Can the authenticator run somewhere other than a smartphone?</strong>
-					Yes. The authenticator is a secret plus a clock, and a desktop can hold both
-					— that is what <a href="/steam-desktop-authenticator">desktop
-					authenticators</a> are.
-				</li>
-				<li>
-					<strong>Can the account have no phone number at all?</strong> Mostly no, and
-					this is where people get stuck. Steam generally wants a confirmed phone
-					number on the account before it will attach an authenticator.
-				</li>
-			</ol>
+			<div class="callout callout-warn">
+				<p>
+					<strong>Valve's supported answer is that a phone is required.</strong> The
+					official mobile authenticator needs a supported phone, and Steam expects a
+					confirmed phone number on the account. Anything on this page about working
+					around that describes unofficial software and undocumented behaviour, not a
+					supported configuration.
+				</p>
+			</div>
 
-			<h2>What Steam asks for at setup</h2>
+			<h2>Question 1: does the authenticator have to run on a phone?</h2>
 			<p>
-				When something asks Steam to add an authenticator, Steam usually texts a
-				confirmation code to the number on the account. If there is no confirmed
-				number, Steam commonly refuses outright, with an error that amounts to
-				<em>add and verify a phone number first</em>. Adding a number is done on Steam
-				itself — no third-party tool can do it for you, and any offering to should be
-				closed immediately.
+				<strong>No.</strong> An authenticator is a secret plus a clock, and a desktop
+				can hold both — that is what
+				<a href="/steam-desktop-authenticator">desktop authenticators</a> are, and
+				they have existed for years. But note this is a
+				<a href="/steam-mobile-vs-desktop-authenticator">move, not an addition</a>:
+				Steam allows one authenticator on an account at a time.
+			</p>
+
+			<h2>Question 2: can the account have no phone number at all?</h2>
+			<p>
+				<strong>Usually not, and you should plan on needing one.</strong> When
+				software asks Steam to attach an authenticator, Steam normally wants a
+				confirmed number on the account and texts a code to it. Without one, the
+				common outcome is a flat refusal telling you to add and verify a number
+				first. Adding a number is done on Steam itself — no third-party tool can do
+				it for you, and any offering to should be closed immediately.
 			</p>
 			<p>
-				There is a real exception, and it is not widely documented:
-				<strong>some accounts with no phone still enrol, and Steam sends the activation
-				code by email instead.</strong> We know because our own enrollment handles both
-				— it decides which one to expect from Steam's response rather than assuming SMS,
-				and a live run against an account without a phone confirmed the email path
-				works. Whether your account gets it appears to be Steam's call, not something
-				you can request.
+				There is a documented-nowhere exception we have seen in practice: some
+				accounts without a phone still complete enrolment, and Steam delivers the
+				activation code <strong>by email</strong> instead. Our own enrolment handles
+				both, deciding which to expect from Steam's response rather than assuming
+				SMS, and a live run against an account with no phone confirmed the email path
+				works.
+			</p>
+			<p>
+				<strong>Do not plan around it.</strong> One confirmed instance is not a
+				feature: it is undocumented, appears to depend on the account, and Valve could
+				change it tomorrow without telling anyone. Treat it as a pleasant surprise if
+				it happens to you, and assume the refusal otherwise.
 			</p>
 
 			<h2>The recovery problem this creates</h2>
 			<div class="callout callout-warn">
 				<p>
-					<strong>A phone number is the easiest way back into a locked-out account.</strong>
-					Without one, losing your authenticator means the
-					<a href="/steam-revocation-code">revocation code</a> or a Steam Support
-					ticket that takes days. If you are deliberately running without a phone
-					number, writing the revocation code down stops being good practice and
-					becomes the only thing standing between you and support.
+					<strong>A phone number is the easiest way back into a locked-out
+					account.</strong> Without one, losing your authenticator means the
+					<a href="/steam-revocation-code">recovery code</a> or a Steam Support ticket
+					that takes days. If you are deliberately running without a number, writing
+					the recovery code down stops being good practice and becomes the only thing
+					standing between you and support.
 				</p>
 			</div>
 
-			<h2>If you have a phone but will not install the app</h2>
+			<h2>The configuration that actually works well</h2>
 			<p>
-				A common and reasonable position — the number stays on the account for
-				recovery, and the codes come from your PC. This is the configuration a desktop
-				authenticator suits best: you keep Steam's easy recovery path <em>and</em> the
-				convenience of codes and
-				<a href="/approve-steam-confirmations-desktop">confirmations on the machine you
-				are already using</a>.
+				If you have a phone but will not install the app — a common and reasonable
+				position — keep the number on the account for recovery and let a desktop tool
+				generate the codes. You keep Steam's easy recovery path <em>and</em> get codes
+				and <a href="/approve-steam-confirmations-desktop">confirmations</a> on the
+				machine you are already using. That is the setup a desktop authenticator suits
+				best, and it sidesteps everything difficult above.
 			</p>
 
 			<h2>What you are taking on</h2>
@@ -346,40 +406,62 @@ export const withoutPhone = {
 export const openMafile = {
 	slug: 'how-to-open-mafile',
 	navTitle: 'Opening a maFile',
-	title: 'How to open a .maFile safely',
+	title: 'How to open a Steam maFile safely',
 	updated: '2026-08-14',
 	description:
-		'A maFile is plain JSON you can read in Notepad. How to inspect one safely, and why loading it into a tool is a much bigger decision than reading it.',
+		'A maFile is plain JSON you can read in Notepad. How to inspect one safely, where the folder lives, and why no online file viewer should ever see it.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'HowTo',
 		name: 'Open and inspect a Steam maFile safely',
 		publisher: { '@type': 'Organization', name: s.publisher },
 		step: [
+			{ '@type': 'HowToStep', name: 'Find the maFiles folder beside the SDA program' },
 			{ '@type': 'HowToStep', name: 'Copy the file before touching it' },
 			{ '@type': 'HowToStep', name: 'Open the copy in a plain text editor' },
-			{ '@type': 'HowToStep', name: 'Check whether it is readable or encrypted' },
-			{ '@type': 'HowToStep', name: 'Decide what may actually load it' }
+			{ '@type': 'HowToStep', name: 'Check whether it is readable or encrypted' }
 		]
 	}),
 	body: (s) => `
 		<article>
-			<h1>How to open a <code>.maFile</code> safely</h1>
+			<h1>How to open a Steam <code>.maFile</code> safely</h1>
 			<p class="lede">
 				There is no special program needed to look inside one. A maFile is a small
 				text file, and a text editor will show you everything in it. The care required
 				is not technical — it is about what you do with the file afterwards.
 			</p>
 
-			<h2>1. Work on a copy</h2>
+			<div class="callout callout-warn">
+				<p>
+					<strong>Never use an online file viewer or converter on a real
+					maFile.</strong> Search results for this file extension are full of
+					"open any file online" sites that ask you to upload it. Uploading a maFile
+					hands over the authenticator itself. There is no legitimate reason for a
+					website to see one.
+				</p>
+			</div>
+
+			<h2>1. Find it</h2>
 			<p>
-				Before anything else, copy the file somewhere else and work on the copy. A
-				maFile is frequently the only surviving record of an authenticator, and a text
-				editor that helpfully saves a change to it can corrupt the JSON. Never edit
-				the original.
+				SDA is a portable program, so its <code>maFiles</code> folder sits
+				<strong>beside the SDA executable</strong> — wherever you unzipped it —
+				<em>not</em> inside your Steam installation and not in Program Files. If you
+				are hunting for it, search your drive for the <code>maFiles</code> folder
+				rather than for the file itself.
+			</p>
+			<p class="hint">
+				Unrelated file, same-looking extension: Autodesk Maya uses <code>.ma</code>.
+				If a file opens as 3D scene data, you have the wrong one.
 			</p>
 
-			<h2>2. Open the copy in a plain text editor</h2>
+			<h2>2. Work on a copy</h2>
+			<p>
+				Copy the file somewhere else and work on the copy. A maFile is frequently the
+				only surviving record of an authenticator, and a text editor that helpfully
+				saves a change can corrupt the JSON. Never edit the original.
+			</p>
+
+			<h2>3. Open the copy in a plain text editor</h2>
 			<p>
 				Notepad on Windows, or any code editor. Do not double-click the file and let
 				Windows pick something; choose the editor deliberately with
@@ -387,7 +469,7 @@ export const openMafile = {
 				quoted field names.
 			</p>
 
-			<h2>3. Work out which kind you have</h2>
+			<h2>4. Work out which kind you have</h2>
 			<dl class="defs">
 				<dt>Readable field names</dt>
 				<dd>
@@ -419,7 +501,7 @@ export const openMafile = {
 				</p>
 			</div>
 
-			<h2>4. The decision that actually matters</h2>
+			<h2>5. The decision that actually matters</h2>
 			<p>
 				"Opening" a maFile in an authenticator is a much larger act than reading it.
 				You are handing a program the authority to act as your account — permanently,

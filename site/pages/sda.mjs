@@ -247,6 +247,8 @@ export default {
 			<ul class="plain next">
 				<li><a href="/scam-clones">How the fake SDA sites work</a></li>
 				<li><a href="/what-is-a-mafile">What is inside a maFile</a></li>
+				<li><a href="/steam-guard-code-not-working">If SDA's codes are being refused</a></li>
+				<li><a href="/encrypted-mafile">Encrypted maFiles and the manifest</a></li>
 				<li><a href="/alternatives">How the options compare</a></li>
 				<li><a href="/lost-authenticator">If you have already lost access</a></li>
 				<li><a href="/verify">Verifying that a download is genuine</a></li>

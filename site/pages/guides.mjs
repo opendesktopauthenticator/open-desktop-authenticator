@@ -312,7 +312,8 @@ export const docs = {
 					Almost always the clock. Codes are generated from the current time, so a
 					machine more than about half a minute out produces codes Steam will not
 					accept. The application checks its clock against Steam's and warns you when
-					it could not.
+					it could not. <a href="/steam-guard-code-not-working">The full
+					walkthrough, including the fixes on Windows and phone, is here.</a>
 				</dd>
 				<dt>An imported account cannot confirm trades</dt>
 				<dd>
@@ -353,6 +354,34 @@ export const faq = {
 				${item.a}
 			</section>`
 			).join('')}
+
+			<!--
+				The troubleshooting hub.
+
+				Put here rather than in the navigation deliberately. These pages answer
+				Steam problems rather than questions about this application, so they do
+				not belong in a nav bar aimed at someone evaluating the product — but
+				they were reachable only from the sitemap, which for the busiest of them
+				meant no internal link at all. A reader who arrives at the FAQ with a
+				broken authenticator is exactly the person they are for.
+			-->
+			<section class="faq-item">
+				<h2>Common Steam Guard problems</h2>
+				<p>
+					Answers to the Steam problems people arrive here with. None of these
+					require our software, and most are solved on Steam itself.
+				</p>
+				<ul class="plain next">
+					<li><a href="/steam-guard-code-not-working">My codes are being refused</a> — almost always the clock</li>
+					<li><a href="/move-steam-authenticator-new-phone">Moving to a new phone</a> — and the two-day versus fifteen-day difference</li>
+					<li><a href="/steam-revocation-code">Finding my recovery code</a> — the R-code, and where it still is</li>
+					<li><a href="/lost-authenticator">I have lost access completely</a></li>
+					<li><a href="/steam-guard-without-phone">Doing this without a smartphone</a></li>
+					<li><a href="/how-to-open-mafile">Opening a maFile safely</a>, and <a href="/encrypted-mafile">when it is encrypted</a></li>
+					<li><a href="/approve-steam-confirmations-desktop">How trade confirmations work</a></li>
+					<li><a href="/steam-mobile-vs-desktop-authenticator">Mobile app or desktop?</a></li>
+				</ul>
+			</section>
 		</article>`
 };
 
