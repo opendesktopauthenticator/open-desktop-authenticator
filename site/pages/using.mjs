@@ -88,8 +88,9 @@ export const confirmationsOnDesktop = {
 				machine that is often left running. Be precise about the limit, though: the
 				identity secret cannot sign in to Steam. A program that also holds a usable
 				session or refresh token can act immediately; one holding only the secrets
-				still needs an authentication route first — which, if it also has your
-				<code>shared_secret</code>, it is a long way towards having.
+				needs an authentication route first. The <code>shared_secret</code> supplies
+				the second factor, not the password — so it closes half the gap, not all of
+				it.
 			</p>
 
 			<h2>Why would anyone want confirmations on a PC?</h2>
@@ -176,8 +177,9 @@ export const mobileVsDesktop = {
 			<div class="callout">
 				<p>
 					<strong>Use the official Steam Mobile app if it works for you.</strong> It is
-					made by Valve, it recovers through your phone number when things go wrong,
-					and it holds the secret in storage you never have to manage. For the large
+					made by Valve, it holds the secret in storage you never have to manage, and
+					if you link a phone number it gains an SMS recovery and transfer route
+					nothing else offers. For the large
 					majority of Steam accounts that is simply the correct answer, and no feature
 					below outweighs it.
 				</p>
@@ -197,9 +199,9 @@ export const mobileVsDesktop = {
 			<dl class="defs">
 				<dt>Recovery</dt>
 				<dd>
-					This is the big one. Lose your phone and Steam can text the number on the
-					account to get you back. Lose a desktop authenticator's file with no backup
-					and your route back is the <a href="/steam-revocation-code">recovery
+					This is the big one, provided you linked a number: lose the phone and Steam
+					can text you to get you back in. Lose a desktop authenticator's file with no
+					backup and your route is the <a href="/steam-revocation-code">recovery
 					code</a> or a support ticket that takes days.
 				</dd>
 				<dt>Nothing for you to mislay</dt>
@@ -299,14 +301,19 @@ export const mobileVsDesktop = {
 
 			<h3>Can I go back to the phone app afterwards?</h3>
 			<p>
-				Yes. It is the same operation in reverse and carries the same cost, so it is
-				not a one-way door — just not a free one.
+				Yes, and it is not a one-way door — but do not assume it is the cheap path.
+				Steam's documented two-day transfer covers moving between devices running
+				Steam's own app; coming back from an unofficial desktop tool may instead mean
+				removing the authenticator and enrolling again, which is the fifteen-day
+				route. Budget for fifteen unless you have confirmed otherwise.
 			</p>
 
 			<h3>What if I lose the computer?</h3>
 			<p>
 				The same question as losing the phone, with a different answer: a vault file
-				you backed up restores the accounts, and no backup means the
+				you backed up restores the secrets, so codes work again immediately —
+				confirmations may still need you to sign in, since a stored session expires
+				even when a secret does not. No backup means the
 				<a href="/steam-revocation-code">recovery code</a> or Steam Support. This is
 				the question to answer <em>before</em> you switch, not after.
 			</p>
@@ -353,8 +360,7 @@ export const withoutPhone = {
 				Two different questions hide inside this one, and mixing them up is why the
 				answers you find online contradict each other. One is about the device that
 				generates codes. The other is about the phone number on your account — and
-				the second answer changed recently, which is why most of what you will read
-				about it is wrong.
+				the second has an answer most people do not expect.
 			</p>
 
 			<div class="callout callout-warn">
@@ -379,8 +385,9 @@ export const withoutPhone = {
 
 			<h2>Question 2: can the account have no phone number at all?</h2>
 			<p>
-				<strong>Yes, and this changed — most articles you will find on the subject
-				are out of date.</strong> Valve's own setup walkthrough now says so directly:
+				<strong>Yes.</strong> Valve's current setup walkthrough documents an
+				enrolment path for people without access to a phone number, and says so
+				directly:
 			</p>
 			<div class="callout">
 				<p>
@@ -398,9 +405,10 @@ export const withoutPhone = {
 			<p>
 				This matches what we see. Our own enrolment decides from Steam's response
 				whether to expect the activation code by SMS or by email rather than assuming
-				SMS, and a live run against an account with no phone confirmed the email
-				path. That behaviour used to look like an undocumented quirk; Valve now
-				documents the option that produces it.
+				SMS, and one live run against an account with no phone — in August 2026 —
+				completed with the code delivered by email. That is a single observed account
+				flow rather than a guarantee, but it is consistent with the documented path
+				above.
 			</p>
 			<p>
 				Adding a number, if you decide you want one, is done on Steam itself — no
@@ -477,7 +485,7 @@ export const openMafile = {
 	title: 'How to open a Steam maFile safely',
 	updated: '2026-08-14',
 	description:
-		'A maFile is plain JSON you can read in Notepad. How to inspect one safely, where the folder lives, and why no online file viewer should ever see it.',
+		'An unencrypted maFile is JSON you can read in Notepad; encrypted ones need the SDA passphrase and manifest.json. How to inspect one safely.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'HowTo',
@@ -561,7 +569,10 @@ export const openMafile = {
 
 			<div class="callout callout-warn">
 				<p>
-					<strong>Reading it is safe. Uploading it is not.</strong> Do not paste the
+					<strong>Opening a copy in a text editor does not run anything — but the
+					contents are still live secrets.</strong> Editors keep recent-file history
+					and documents folders are often synced to cloud storage, so where you put
+					that copy matters. Do not paste the
 					contents into a website, a Discord bot, a pastebin, an AI chat, or a support
 					form — <a href="/support">including ours</a>. Anyone who receives that text
 					can generate your Steam Guard codes from then until the authenticator is

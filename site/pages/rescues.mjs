@@ -21,8 +21,13 @@ import { timeWindowDiagram, tradeHoldDiagram, manifestDiagram } from '../diagram
 /** Valve's own pages, cited wherever this makes a claim about Steam's behaviour. */
 const VALVE = {
 	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31',
-	restrictions: 'https://help.steampowered.com/en/faqs/view/451E-96B3-D194-50FC'
+	restrictions: 'https://help.steampowered.com/en/faqs/view/451E-96B3-D194-50FC',
+	transfer: 'https://help.steampowered.com/en/faqs/view/29A9-9EEE-09F0-75F9'
 };
+
+/** SDA's own encryption implementation — these are source-level claims. */
+const SDA_ENCRYPTOR =
+	'https://github.com/Jessecar96/SteamDesktopAuthenticator/blob/master/Steam%20Desktop%20Authenticator/FileEncryptor.cs';
 
 export const codeNotWorking = {
 	slug: 'steam-guard-code-not-working',
@@ -188,16 +193,20 @@ ${timeWindowDiagram()}
 			<h3>The code screen never appears, or no code arrives by email</h3>
 			<p>
 				That is a different problem from a code being refused: nothing was generated
-				to reject. Check the address on the account and the spam folder, and give it
-				time — Valve's own guidance allows for email taking a while. Requesting more
-				codes in quick succession makes it worse rather than better.
+				to reject. Check the address on the account and the spam folder first. For an
+				<strong>emailed</strong> code, Valve's guidance is to allow up to thirty
+				minutes and then sign in again to request another. For an
+				<strong>SMS</strong> code the advice is the opposite — Steam stops sending
+				after too many requests in a row, so asking repeatedly delays it further.
 			</p>
 
 			<h3>Codes work for one account but not another</h3>
 			<p>
-				Almost always the wrong account selected, since the clock is shared and
-				cannot be right for one and wrong for another. If both are genuinely refused
-				on the same device, the clock is the common factor after all.
+				First check the correct account is selected — the clock is shared, so it
+				cannot be right for one account and wrong for another. If the account is
+				right, the authenticator for that one may have been moved, replaced or
+				enrolled again with a different secret, which leaves your copy generating
+				codes for a secret Steam has replaced.
 			</p>
 
 			<h3>Codes worked yesterday and stopped today with no changes</h3>
@@ -209,8 +218,9 @@ ${timeWindowDiagram()}
 
 			<h2>Can a desktop authenticator avoid this entirely?</h2>
 			<p>
-				A desktop authenticator cannot assume the PC's clock is right — desktop
-				clocks drift more than phones, which sync aggressively. So ${s.name} asks
+				A desktop authenticator cannot assume the PC's clock is right — a desktop
+				clock can drift or simply be misconfigured, and unlike a phone nothing
+				necessarily corrects it. So ${s.name} asks
 				Steam's own servers what time it is and computes codes against
 				<em>Steam's</em> clock, not the machine's. A drifted PC clock then stops
 				mattering, because the code is computed in the window Steam is actually
@@ -266,7 +276,7 @@ export const moveAuthenticator = {
 				</p>
 			</div>
 
-			<h2>How long is the trade hold after moving an authenticator?</h2>
+			<h2>How long are the trade restrictions after moving or replacing it?</h2>
 			<table class="grid">
 				<thead>
 					<tr><th>What you do</th><th>Restriction</th></tr>
@@ -299,9 +309,11 @@ ${tradeHoldDiagram()}
 			<h2>1. You still have the old authenticator — transfer it</h2>
 			<p>
 				This is the two-day path, and the one to use if you possibly can. Install the
-				Steam Mobile app on the new phone and sign in. Then on the new device, open
-				the <strong>Steam Guard</strong> page and choose
-				<strong>Move Authenticator</strong>. Confirm on the old device when asked.
+				Steam Mobile app on the new phone and sign in; confirm that sign-in using the
+				authenticator you still have. Then on the new device open the
+				<strong>Steam Guard</strong> page, choose <strong>Move Authenticator</strong>,
+				and enter the code Steam texts you.
+				<a href="${VALVE.transfer}" rel="noopener">Valve's walkthrough is here.</a>
 			</p>
 
 			<h2>2. Old phone gone, number still yours</h2>
@@ -391,8 +403,8 @@ export const revocationCode = {
 			<h1>Steam recovery code: what the R-code does</h1>
 			<p class="lede">
 				It looks like <code>R12345</code>. Valve calls it your <strong>recovery
-				code</strong>; SDA and every maFile call the same thing
-				<code>revocation_code</code>. It is the difference between fixing a lost
+				code</strong>; SDA and the maFile format call the same field
+				<code>revocation_code</code>, though not every exported file contains one. It is the difference between fixing a lost
 				authenticator in five minutes and spending days proving your identity to
 				Steam Support.
 			</p>
@@ -437,8 +449,9 @@ export const revocationCode = {
 			<ul>
 				<li>
 					<strong>Inside a maFile.</strong> If the authenticator was ever held by a
-					desktop tool, a typical file carries a <code>revocation_code</code> field —
-					though not every one does, which is its own problem.
+					desktop tool, a typical file carries a <code>revocation_code</code> field.
+					Any surviving copy that included it still preserves it — but a maFile
+					exported without one never had it to keep.
 					<a href="/what-is-a-mafile">Any surviving copy</a> — an old machine, an old
 					backup — carries it too.
 				</li>
@@ -622,9 +635,11 @@ ${manifestDiagram()}
 
 			<h3>Can I decrypt it without SDA?</h3>
 			<p>
-				Yes — the format is AES-256-CBC with PBKDF2 and the parameters are in the
-				manifest, so any tool implementing that can read it, ours included. That is
-				also the reason to be careful which tool you hand it to.
+				Yes, but not by any tool that merely "supports AES". It has to implement
+				<a href="${SDA_ENCRYPTOR}" rel="noopener">SDA's exact scheme</a> — the same
+				PBKDF2 parameters, a 32-byte key, CBC mode, PKCS#7 padding, and the manifest
+				mapping that tells it which salt and IV belong to which account. Ours does.
+				That specificity is also the reason to be careful which tool you hand it to.
 			</p>
 
 			<h2>What if I have lost the passphrase completely?</h2>

@@ -49,34 +49,31 @@ ${svg}
  */
 export const timeWindowDiagram = () =>
 	figure(
-		'Two timelines. Steam is inside the window beginning at 10:00:30 and computes code 4B7KP. A device whose clock is ninety seconds slow is still inside the previous window and computes 9QW2M, so Steam refuses it.',
-		`					<!-- Steam's timeline -->
-					<text x="0" y="26" class="dg-label">Steam's clock</text>
-					<line x1="0" y1="52" x2="640" y2="52" class="dg-line" stroke-width="1.5" />
-					<g>
-						<rect x="120" y="38" width="120" height="28" rx="6" class="dg-fill-panel" />
-						<rect x="240" y="38" width="120" height="28" rx="6" class="dg-key" fill="none" stroke-width="1.5" />
-						<text x="128" y="57" class="dg-text">10:00:00</text>
-						<text x="248" y="57" class="dg-strong">10:00:30 → 4B7KP</text>
-					</g>
+		'At one instant, Steam’s clock reads 10:00:30 and computes the code for the window beginning 10:00:30. A device ninety seconds slow reads 09:59:00 and computes the code for the window beginning 09:59:00. Two different windows, two different codes, so Steam refuses the one it is given.',
+		`					<text x="0" y="22" class="dg-label">The same instant, two clocks</text>
 
-					<!-- The device's timeline, shifted late -->
-					<text x="0" y="118" class="dg-label">Your device, 90 seconds slow</text>
-					<line x1="0" y1="144" x2="640" y2="144" class="dg-line" stroke-width="1.5" />
-					<g>
-						<rect x="120" y="130" width="120" height="28" rx="6" class="dg-bad" fill="none" stroke-width="1.5" />
-						<rect x="240" y="130" width="120" height="28" rx="6" class="dg-fill-panel" />
-						<text x="128" y="149" class="dg-strong">09:58:30 → 9QW2M</text>
-						<text x="248" y="149" class="dg-text">10:00:00</text>
-					</g>
+					<!-- Steam -->
+					<rect x="0" y="42" width="270" height="96" rx="10" class="dg-fill-panel" />
+					<text x="20" y="70" class="dg-label">Steam's clock</text>
+					<text x="20" y="98" class="dg-strong">10:00:30</text>
+					<text x="20" y="122" class="dg-text">window 10:00:30 – 10:01:00</text>
+					<text x="176" y="98" class="dg-strong">4B7KP</text>
 
-					<!-- The mismatch -->
-					<text x="380" y="100" class="dg-text">Different window,</text>
-					<text x="380" y="118" class="dg-text">different code — refused.</text>`,
-		`The secret is identical on both sides. Only the window differs. Steam is checking
-				the code for <strong>10:00:30</strong> while a device ninety seconds behind is still
-				producing the one for the window before it — so every code is valid, and every code
-				is wrong.`
+					<!-- Your device -->
+					<rect x="370" y="42" width="270" height="96" rx="10" class="dg-bad" fill="none" stroke-width="1.5" />
+					<text x="390" y="70" class="dg-label">Your device, 90 seconds slow</text>
+					<text x="390" y="98" class="dg-strong">09:59:00</text>
+					<text x="390" y="122" class="dg-text">window 09:59:00 – 09:59:30</text>
+					<text x="546" y="98" class="dg-strong">9QW2M</text>
+
+					<!-- The gap between them -->
+					<line x1="270" y1="90" x2="370" y2="90" class="dg-line" stroke-width="2" />
+					<text x="286" y="82" class="dg-label">90 seconds</text>
+
+					<text x="0" y="176" class="dg-text">Different window, different code — so the one you type is refused.</text>`,
+		`Both devices hold the identical secret. Only the window differs, and the window is
+				half the calculation — so a clock ninety seconds out produces a code that is
+				perfectly valid for a moment Steam is no longer checking.`
 	);
 
 /**
@@ -129,8 +126,8 @@ export const manifestDiagram = () =>
 					<text x="476" y="100" class="dg-label">all three needed</text>
 					<line x1="430" y1="73" x2="460" y2="73" class="dg-line" stroke-width="2" />
 
-					<text x="0" y="156" class="dg-text">Copy only the .maFile and you have kept the locked box</text>
-					<text x="0" y="176" class="dg-text">and left the key behind.</text>`,
+					<text x="0" y="156" class="dg-text">Copy only the .maFile and you keep the locked box without</text>
+					<text x="0" y="176" class="dg-text">the parameters needed to unlock it.</text>`,
 		`SDA splits the two halves deliberately, which is why an encrypted maFile copied on
 				its own cannot be opened even with the right passphrase. Copy the whole
 				<code>maFiles</code> folder, never the single file.`
