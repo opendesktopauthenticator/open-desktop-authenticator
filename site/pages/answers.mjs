@@ -155,8 +155,8 @@ export const lostAuthenticator = {
 			<h1>Lost your Steam authenticator?</h1>
 			<p class="lede">
 				A dead phone, a wiped machine, a deleted folder. This page is the order to try
-				things in, from the option that takes a minute to the one that takes days. Work
-				down it — do not skip to the bottom.
+				things in, from the option that takes a minute to the one that hands the
+				problem to Steam Support. Work down it — do not skip to the bottom.
 			</p>
 
 			<div class="callout callout-warn">
@@ -202,7 +202,8 @@ export const lostAuthenticator = {
 			<p>
 				Then it is Steam Support, through a help request to remove the authenticator.
 				Expect to prove ownership: purchase history, payment details, the original email
-				address, when the account was created. It takes days rather than minutes, and it
+				address, when the account was created. It is slower than the routes above
+				because Steam verifies ownership before detaching a second factor, and it
 				generally works if the account is genuinely yours.
 			</p>
 			<p>

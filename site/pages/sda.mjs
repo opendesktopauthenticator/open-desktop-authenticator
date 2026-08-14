@@ -91,8 +91,8 @@ export default {
 					<a href="/steam-revocation-code">recovery code</a>. It is shown during setup
 					and can be retrieved again while the authenticator is still accessible. It is how
 					you detach the authenticator if you lose the device. If you do not have it
-					and you lose your authenticator, recovering the account means Steam Support
-					and a wait measured in days.
+					and you lose your authenticator, recovering the account means going through
+					Steam Support and proving ownership.
 				</dd>
 			</dl>
 

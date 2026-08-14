@@ -18,7 +18,8 @@
 const VALVE = {
 	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31',
 	setup: 'https://help.steampowered.com/en/faqs/view/6891-E071-C9D9-0134',
-	holds: 'https://help.steampowered.com/en/faqs/view/34A1-EA3F-83ED-54AB'
+	holds: 'https://help.steampowered.com/en/faqs/view/34A1-EA3F-83ED-54AB',
+	confirmations: 'https://help.steampowered.com/en/faqs/view/2E6E-A02C-5581-8904'
 };
 
 export const confirmationsOnDesktop = {
@@ -64,6 +65,14 @@ export const confirmationsOnDesktop = {
 
 			<h2>What actually approves a Steam trade confirmation?</h2>
 			<p>
+				Valve documents the feature itself on
+				<a href="${VALVE.confirmations}" rel="noopener">Trade and Market
+				Confirmations</a>: confirmations are the final step before a trade completes or
+				a Market listing goes up, delivered through the mobile app if you have one and
+				by email if you do not. What follows is what has to be true for one of those
+				approvals to be accepted.
+			</p>
+			<p>
 				When you accept a trade, Steam creates a pending confirmation and waits for a
 				correctly signed request to approve it. Three things have to come together
 				before that request is valid:
@@ -83,9 +92,9 @@ export const confirmationsOnDesktop = {
 					<a href="/steam-guard-code-not-working">Steam-corrected time</a> followed by
 					a short tag naming the action — one tag for fetching the list, a different
 					one for allowing, another for cancelling. Change either half and the
-					signature changes, so a key made for <em>listing</em> confirmations is not a
-					valid signature for <em>accepting</em> one, and a captured key stops being
-					usable once its moment passes.
+					signature changes, so a key generated for <em>fetching the confirmation
+					list</em> is not valid for <em>accepting</em> a confirmation, and a captured
+					key stops being usable once its moment passes.
 				</li>
 			</ol>
 			<p>
@@ -319,7 +328,7 @@ export const mobileVsDesktop = {
 					This is the big one, provided you linked a number: lose the phone and Steam
 					can text you to get you back in. Lose a desktop authenticator's file with no
 					backup and your route is the <a href="/steam-revocation-code">recovery
-					code</a> or a support ticket that takes days.
+					code</a> or Steam Support.
 				</dd>
 				<dt>Nothing for you to mislay</dt>
 				<dd>
@@ -585,10 +594,10 @@ export const withoutPhone = {
 			<div class="callout callout-warn">
 				<p>
 					<strong>So the recovery code stops being good practice and starts being the
-					plan.</strong> Without a number, losing your authenticator means the
-					<a href="/steam-revocation-code">recovery code</a> or a Steam Support ticket
-					that takes days — the difference between a few minutes of self-service and
-					a support queue.
+					plan.</strong> Without a phone number, your self-service fallbacks are a
+					working backup of the authenticator or the
+					<a href="/steam-revocation-code">recovery code</a>. Without either, the
+					remaining route is Steam Support.
 				</p>
 			</div>
 
@@ -686,10 +695,12 @@ export const openMafile = {
 			<div class="callout callout-warn">
 				<p>
 					<strong>Never use an online file viewer or converter on a real
-					maFile.</strong> Search results for this file extension are full of
-					"open any file online" sites that ask you to upload it. Uploading a maFile
-					hands over the authenticator itself. There is no legitimate reason for a
-					website to see one.
+					maFile.</strong> Some generic online file viewers ask you to upload the file
+					to read it. Uploading an unencrypted maFile exposes the authenticator secret
+					itself. An encrypted one should not be uploaded either: it is sensitive
+					backup material, and it may become readable if its matching
+					<code>manifest.json</code> or passphrase is exposed later. There is no
+					legitimate reason for a website to see either.
 				</p>
 			</div>
 

@@ -501,9 +501,9 @@ export const revocationCode = {
 			<p class="lede">
 				It looks like <code>R12345</code>. Valve calls it your <strong>recovery
 				code</strong>; SDA and the maFile format call the same field
-				<code>revocation_code</code>, though not every exported file contains one. It is the difference between fixing a lost
-				authenticator in five minutes and spending days proving your identity to
-				Steam Support.
+				<code>revocation_code</code>, though not every exported file contains one. It
+				can be the difference between completing recovery yourself and having to prove
+				account ownership to Steam Support.
 			</p>
 
 			<div class="answer">
@@ -516,8 +516,8 @@ export const revocationCode = {
 				</p>
 				<p>
 					It is not a login code and not a second password. On its own it cannot open
-					your account — and without it, losing your authenticator means Steam Support
-					and a wait measured in days.
+					your account — and without it, losing your authenticator means asking Steam
+					Support to remove it, and proving the account is yours first.
 				</p>
 			</div>
 
@@ -645,8 +645,10 @@ export const revocationCode = {
 
 			<h3>What if I never wrote it down and the device is gone?</h3>
 			<p>
-				Then it is Steam Support, and <a href="/lost-authenticator">the lost-access
-				page</a> is the order to work through. It takes days by design.
+				Then Steam Support is the remaining route, and
+				<a href="/lost-authenticator">the lost-access page</a> is the order to work
+				through. Steam will verify account ownership before removing the
+				authenticator.
 			</p>
 
 			<h2>How should I store it so this does not happen again?</h2>
