@@ -16,6 +16,8 @@
  * and linked. Where Valve does not, this says so instead of guessing.
  */
 
+import { timeWindowDiagram, tradeHoldDiagram, manifestDiagram } from '../diagrams.mjs';
+
 /** Valve's own pages, cited wherever this makes a claim about Steam's behaviour. */
 const VALVE = {
 	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31',
@@ -96,7 +98,7 @@ export const codeNotWorking = {
 				other causes in the order worth working through.
 			</p>
 
-			<h2>Why the time breaks the code</h2>
+			<h2>Why does a wrong clock break the code?</h2>
 			<p>
 				A Steam Guard code is not random. It is computed from two ingredients: a
 				secret your authenticator holds, and the current time, rounded to a
@@ -113,7 +115,9 @@ export const codeNotWorking = {
 				arithmetic applies to any device generating codes, including a PC.
 			</p>
 
-			<h2>Fix it on Windows</h2>
+${timeWindowDiagram()}
+
+			<h2>How do I fix the time on Windows?</h2>
 			<ol>
 				<li>Open <strong>Settings → Time &amp; language → Date &amp; time</strong>.</li>
 				<li>Turn on <strong>Set time automatically</strong> and <strong>Set time zone
@@ -127,7 +131,7 @@ export const codeNotWorking = {
 				the one codes are computed from — is hours off.
 			</p>
 
-			<h2>Fix it on a phone</h2>
+			<h2>How do I fix the time on a phone?</h2>
 			<p>
 				<strong>Android:</strong> Settings → System → Date &amp; time → automatic
 				date, time and zone on. <strong>iPhone:</strong> Settings → General → Date
@@ -135,7 +139,7 @@ export const codeNotWorking = {
 				notices the change.
 			</p>
 
-			<h2>Still refused? The rest, in order</h2>
+			<h2>My clock is right and codes are still refused. What else?</h2>
 			<dl class="defs">
 				<dt>The wrong account</dt>
 				<dd>
@@ -167,7 +171,43 @@ export const codeNotWorking = {
 				</dd>
 			</dl>
 
-			<h2>How this application sidesteps the whole problem</h2>
+			<h2>Related problems people hit at the same time</h2>
+			<p>
+				These are different failures that arrive looking identical, so they are worth
+				ruling out before you conclude the authenticator is broken.
+			</p>
+
+			<h3>Steam says "invalid credentials" rather than a bad code</h3>
+			<p>
+				That message is usually about the password, not the code — Steam checks them
+				in that order, so a mistyped password never gets as far as the code. Reset the
+				password if you are unsure, and note that a password reset carries its own
+				trading restriction.
+			</p>
+
+			<h3>The code screen never appears, or no code arrives by email</h3>
+			<p>
+				That is a different problem from a code being refused: nothing was generated
+				to reject. Check the address on the account and the spam folder, and give it
+				time — Valve's own guidance allows for email taking a while. Requesting more
+				codes in quick succession makes it worse rather than better.
+			</p>
+
+			<h3>Codes work for one account but not another</h3>
+			<p>
+				Almost always the wrong account selected, since the clock is shared and
+				cannot be right for one and wrong for another. If both are genuinely refused
+				on the same device, the clock is the common factor after all.
+			</p>
+
+			<h3>Codes worked yesterday and stopped today with no changes</h3>
+			<p>
+				Something changed even if you did not change it: a clock that drifted past
+				the tolerance, a time-zone update, or an authenticator added elsewhere. Work
+				down this page in order — the first two cost a minute to rule out.
+			</p>
+
+			<h2>Can a desktop authenticator avoid this entirely?</h2>
 			<p>
 				A desktop authenticator cannot assume the PC's clock is right — desktop
 				clocks drift more than phones, which sync aggressively. So ${s.name} asks
@@ -226,7 +266,7 @@ export const moveAuthenticator = {
 				</p>
 			</div>
 
-			<h2>What each path costs</h2>
+			<h2>How long is the trade hold after moving an authenticator?</h2>
 			<table class="grid">
 				<thead>
 					<tr><th>What you do</th><th>Restriction</th></tr>
@@ -253,6 +293,8 @@ export const moveAuthenticator = {
 				Restrictions</a>. Steam Support cannot lift any of them, and nothing legitimate
 				shortens them.
 			</p>
+
+${tradeHoldDiagram()}
 
 			<h2>1. You still have the old authenticator — transfer it</h2>
 			<p>
@@ -288,7 +330,7 @@ export const moveAuthenticator = {
 				<a href="/lost-authenticator">The full recovery order is here</a>.
 			</p>
 
-			<h2>Planning ahead</h2>
+			<h2>I am getting a new phone soon. What should I do now?</h2>
 			<p>
 				If you know a new phone is coming and you are <em>keeping the number</em>,
 				there is nothing to do in advance — transfer it once the phone arrives. If you
@@ -296,7 +338,7 @@ export const moveAuthenticator = {
 				working, while the cheap path is still open to you.
 			</p>
 
-			<h2>Tired of doing this every phone?</h2>
+			<h2>Can I stop doing this every time I change phone?</h2>
 			<p>
 				There is a second way to hold a Steam authenticator: in a file on a machine
 				you control, rather than inside one phone. That is what
@@ -355,7 +397,7 @@ export const revocationCode = {
 				Steam Support.
 			</p>
 
-			<h2>What it actually does</h2>
+			<h2>What does the recovery code actually do?</h2>
 			<p>
 				The recovery code detaches the authenticator from your account
 				<em>without the device the authenticator is on</em>. Dead phone, wiped disk,
@@ -372,7 +414,7 @@ export const revocationCode = {
 				and it cannot approve a trade.
 			</p>
 
-			<h2>Where to find yours</h2>
+			<h2>Where do I find my Steam recovery code?</h2>
 			<p>
 				It is shown once when the authenticator is created, and most people never
 				look at it again — but <strong>it is not gone if you still have a working
@@ -407,7 +449,7 @@ export const revocationCode = {
 				</li>
 			</ul>
 
-			<h2>Using it</h2>
+			<h2>How do I use it to remove an authenticator?</h2>
 			<p>
 				Steam's help pages, under the option for no longer having access to your
 				authenticator — enter the code and the authenticator is removed; then set up a
@@ -429,7 +471,38 @@ export const revocationCode = {
 				</p>
 			</div>
 
-			<h2>Keeping the next one</h2>
+			<h2>Common questions about the recovery code</h2>
+
+			<h3>Is the recovery code the same as a backup code?</h3>
+			<p>
+				No, and confusing them is common. A <strong>backup code</strong> is a one-use
+				replacement for a login code — it gets you signed in. The <strong>recovery
+				code</strong> does not sign you in at all; it is used to detach the
+				authenticator from the account. Different jobs, different moments.
+			</p>
+
+			<h3>Does the recovery code ever change?</h3>
+			<p>
+				It belongs to the authenticator, not to the account — so it stays the same for
+				as long as that authenticator does, and a new one comes with a new code. If
+				you have written down a code from an authenticator you have since replaced,
+				what you are holding is a relic.
+			</p>
+
+			<h3>Can someone steal my account with the recovery code alone?</h3>
+			<p>
+				Not on its own — removal happens inside an authenticated session, so they
+				would need account access as well. It is still one of the two halves, which
+				is exactly why it should not be stored beside the other.
+			</p>
+
+			<h3>What if I never wrote it down and the device is gone?</h3>
+			<p>
+				Then it is Steam Support, and <a href="/lost-authenticator">the lost-access
+				page</a> is the order to work through. It takes days by design.
+			</p>
+
+			<h2>How should I store it so this does not happen again?</h2>
 			<p>
 				Write it on paper, keep the paper somewhere the device is not, and check it is
 				still readable when you think of it. A code stored only on the device it
@@ -478,7 +551,7 @@ export const encryptedMafile = {
 				it actually wants, and the second file it cannot work without.
 			</p>
 
-			<h2>Which password it wants</h2>
+			<h2>Which password does an encrypted maFile want?</h2>
 			<p>
 				<strong>The encryption passphrase set inside SDA, on the machine that made
 				the file.</strong> Not your Steam password, not your Windows password, not
@@ -487,7 +560,7 @@ export const encryptedMafile = {
 				it may be theirs rather than yours.
 			</p>
 
-			<h2>The file that has to travel with it</h2>
+			<h2>Why won't my encrypted maFile open on another machine?</h2>
 			<p>
 				SDA does not keep everything needed for decryption inside the maFile itself.
 				The salt and initialisation vector — parameters the passphrase is combined
@@ -501,13 +574,14 @@ export const encryptedMafile = {
 					whole <code>maFiles</code> folder, never the one file.
 				</p>
 			</div>
+${manifestDiagram()}
 			<p>
 				This is the most common way people lock themselves out while believing they
 				made a backup: the <code>.maFile</code> went to the USB stick, the manifest
 				stayed behind, and the machine was wiped.
 			</p>
 
-			<h2>Why the error messages are so unhelpful</h2>
+			<h2>Why does it only say the passphrase is wrong?</h2>
 			<p>
 				SDA derives a key from your passphrase with PBKDF2 and encrypts with
 				<strong>AES-256-CBC</strong> — a mode with no authentication tag. That
@@ -529,7 +603,31 @@ export const encryptedMafile = {
 				mathematics genuinely does not know.
 			</p>
 
-			<h2>If the passphrase is genuinely gone</h2>
+			<h2>Other things that look like a passphrase problem</h2>
+
+			<h3>How do I tell whether a maFile is encrypted at all?</h3>
+			<p>
+				Open a copy in a text editor. Readable field names like
+				<code>shared_secret</code> mean it is not encrypted and nothing is being asked
+				of you. One long unbroken run of base64 means it is.
+				<a href="/how-to-open-mafile">The full walkthrough is here.</a>
+			</p>
+
+			<h3>I have the manifest but it still will not open</h3>
+			<p>
+				Check the manifest belongs to <em>these</em> files. It is keyed by SteamID, so
+				a manifest from a different SDA installation will be present, valid JSON, and
+				completely wrong for the file you are opening.
+			</p>
+
+			<h3>Can I decrypt it without SDA?</h3>
+			<p>
+				Yes — the format is AES-256-CBC with PBKDF2 and the parameters are in the
+				manifest, so any tool implementing that can read it, ours included. That is
+				also the reason to be careful which tool you hand it to.
+			</p>
+
+			<h2>What if I have lost the passphrase completely?</h2>
 			<p>
 				Then the file's contents are unreachable. That is what encryption is for, and
 				anything claiming to crack it is either lying or describing a guessing attack

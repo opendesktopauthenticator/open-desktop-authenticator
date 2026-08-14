@@ -46,7 +46,7 @@ export const confirmationsOnDesktop = {
 				is explains both the appeal and the risk of moving that job to a desktop.
 			</p>
 
-			<h2>What a confirmation actually is</h2>
+			<h2>What actually approves a Steam trade confirmation?</h2>
 			<p>
 				When you accept a trade, Steam creates a pending confirmation and waits for a
 				correctly signed request to approve it. Three things have to come together
@@ -73,7 +73,7 @@ export const confirmationsOnDesktop = {
 				what stops a captured request being reused as an approval later.
 			</p>
 
-			<h2>So how does a desktop tool do it?</h2>
+			<h2>How can a desktop program approve them?</h2>
 			<p>
 				By holding the identity secret and signing in as you. It imports the secret
 				from a <a href="/what-is-a-mafile">maFile</a>, or receives it when the
@@ -92,7 +92,7 @@ export const confirmationsOnDesktop = {
 				<code>shared_secret</code>, it is a long way towards having.
 			</p>
 
-			<h2>Why people want it anyway</h2>
+			<h2>Why would anyone want confirmations on a PC?</h2>
 			<ul>
 				<li>
 					<strong>Volume.</strong> Confirming forty Market listings one at a time on a
@@ -109,7 +109,7 @@ export const confirmationsOnDesktop = {
 				</li>
 			</ul>
 
-			<h2>The two questions to ask any tool that offers this</h2>
+			<h2>Is it safe to let software approve my trades?</h2>
 			<p>
 				Not "can it approve confirmations" — they all can, or they would not be
 				offering. Ask <strong>what it will approve without asking you</strong>, and
@@ -183,7 +183,7 @@ export const mobileVsDesktop = {
 				</p>
 			</div>
 
-			<h2>This is a choice, not a combination</h2>
+			<h2>Can I use the Steam app and a desktop authenticator together?</h2>
 			<p>
 				Worth settling first, because it is widely misunderstood: Valve states that
 				<a href="${VALVE.guard}" rel="noopener">an account "can only be on one
@@ -193,7 +193,7 @@ export const mobileVsDesktop = {
 				arrangement, not a feature.
 			</p>
 
-			<h2>Where the mobile app is genuinely better</h2>
+			<h2>When is Steam's mobile app the better choice?</h2>
 			<dl class="defs">
 				<dt>Recovery</dt>
 				<dd>
@@ -231,7 +231,7 @@ export const mobileVsDesktop = {
 				</dd>
 			</dl>
 
-			<h2>Where a desktop authenticator is genuinely better</h2>
+			<h2>When is a desktop authenticator the better choice?</h2>
 			<dl class="defs">
 				<dt>Many accounts, side by side</dt>
 				<dd>
@@ -257,7 +257,7 @@ export const mobileVsDesktop = {
 				</dd>
 			</dl>
 
-			<h2>The decision, stated plainly</h2>
+			<h2>So which should I use?</h2>
 			<p>
 				If you have a working smartphone, trade occasionally, and run one account:
 				<strong>use the mobile app.</strong> Nothing here should talk you out of it.
@@ -278,6 +278,38 @@ export const mobileVsDesktop = {
 				enrolling again, which is the
 				<a href="/move-steam-authenticator-new-phone">fifteen-day path</a> — so it is
 				worth deciding once rather than experimenting.</p>
+
+			<h2>Questions that decide it either way</h2>
+
+			<h3>Is a desktop authenticator against Steam's rules?</h3>
+			<p>
+				Valve supports its own app and does not endorse third-party authenticators,
+				so anything else is unofficial by definition — you are choosing to hold the
+				secret yourself. Desktop tools have existed for years and work because the
+				cryptography is the same, not because they are sanctioned.
+			</p>
+
+			<h3>What happens to my items while I switch?</h3>
+			<p>
+				A restriction on trading and the Market, and the length depends on the route:
+				two days for Steam's own transfer, fifteen if the authenticator is removed and
+				re-added. <a href="/move-steam-authenticator-new-phone">The two paths are set
+				out here.</a>
+			</p>
+
+			<h3>Can I go back to the phone app afterwards?</h3>
+			<p>
+				Yes. It is the same operation in reverse and carries the same cost, so it is
+				not a one-way door — just not a free one.
+			</p>
+
+			<h3>What if I lose the computer?</h3>
+			<p>
+				The same question as losing the phone, with a different answer: a vault file
+				you backed up restores the accounts, and no backup means the
+				<a href="/steam-revocation-code">recovery code</a> or Steam Support. This is
+				the question to answer <em>before</em> you switch, not after.
+			</p>
 
 			<h2>Where ${s.short} stands today</h2>
 			<p>
@@ -375,7 +407,7 @@ export const withoutPhone = {
 				third-party tool can do it for you.
 			</p>
 
-			<h2>The recovery problem this creates</h2>
+			<h2>What do I lose by not having a phone number?</h2>
 			<div class="callout callout-warn">
 				<p>
 					<strong>A phone number is the easiest way back into a locked-out
@@ -388,7 +420,7 @@ export const withoutPhone = {
 				</p>
 			</div>
 
-			<h2>The configuration that actually works well</h2>
+			<h2>What if I have a phone but will not install the app?</h2>
 			<p>
 				If you have a phone but will not install the app — a common and reasonable
 				position — keep the number on the account for recovery and let a desktop tool
@@ -398,7 +430,29 @@ export const withoutPhone = {
 				best, and it sidesteps everything difficult above.
 			</p>
 
-			<h2>What you are taking on</h2>
+			<h2>Related questions about phone numbers</h2>
+
+			<h3>Can I remove the phone number after adding an authenticator?</h3>
+			<p>
+				Removing it is done on Steam, and it costs you the SMS recovery route — which
+				is usually the fastest way back into a locked-out account. Worth keeping
+				unless you have a specific reason not to.
+			</p>
+
+			<h3>Can two accounts share one phone number?</h3>
+			<p>
+				<a href="${VALVE.guard}" rel="noopener">Valve says yes</a> — the same number
+				may be used on multiple accounts.
+			</p>
+
+			<h3>Does a landline or VoIP number work?</h3>
+			<p>
+				Steam sends codes by SMS, so a number that cannot receive text messages is not
+				useful for this, and Valve documents blocking some VoIP numbers outright. If
+				the number is the obstacle, the no-number option above is the cleaner route.
+			</p>
+
+			<h2>What am I taking on with a desktop authenticator?</h2>
 			<p>
 				Honestly: responsibility for a file. On a phone the secret is sealed inside an
 				app; on a PC it is data you can back up, and equally data you can leak.
@@ -455,7 +509,7 @@ export const openMafile = {
 				</p>
 			</div>
 
-			<h2>1. Find it</h2>
+			<h2>1. Where is the maFiles folder?</h2>
 			<p>
 				SDA is a portable program, so its <code>maFiles</code> folder sits
 				<strong>beside the SDA executable</strong> — wherever you unzipped it —
@@ -468,14 +522,14 @@ export const openMafile = {
 				If a file opens as 3D scene data, you have the wrong one.
 			</p>
 
-			<h2>2. Work on a copy</h2>
+			<h2>2. Why should I copy it first?</h2>
 			<p>
 				Copy the file somewhere else and work on the copy. A maFile is frequently the
 				only surviving record of an authenticator, and a text editor that helpfully
 				saves a change can corrupt the JSON. Never edit the original.
 			</p>
 
-			<h2>3. Open the copy in a plain text editor</h2>
+			<h2>3. What opens a .maFile?</h2>
 			<p>
 				Notepad on Windows, or any code editor. Do not double-click the file and let
 				Windows pick something; choose the editor deliberately with
@@ -483,7 +537,7 @@ export const openMafile = {
 				quoted field names.
 			</p>
 
-			<h2>4. Work out which kind you have</h2>
+			<h2>4. Is mine encrypted or readable?</h2>
 			<dl class="defs">
 				<dt>Readable field names</dt>
 				<dd>
@@ -518,7 +572,7 @@ export const openMafile = {
 				</p>
 			</div>
 
-			<h2>5. The decision that actually matters</h2>
+			<h2>5. Is it safe to load it into an authenticator?</h2>
 			<p>
 				"Opening" a maFile in an authenticator is a much larger act than reading it.
 				You are handing a program the authority to act as your authenticator

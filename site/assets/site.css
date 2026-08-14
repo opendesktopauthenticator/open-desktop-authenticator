@@ -450,6 +450,97 @@ ol.signs > li {
 	margin: 15px 0;
 }
 
+/* --------------------------------------------------------------- diagrams -- */
+
+/*
+ * Explanatory figures.
+ *
+ * These pages had no images at all, which for "why is my code refused" is a
+ * genuine gap: the reader is trying to match what is on their screen against
+ * prose. Screenshots of Steam and Windows are not ours to publish and would go
+ * stale with every interface change, so the diagrams here explain the mechanism
+ * instead — the part that does not change and that nobody else illustrates.
+ *
+ * Inline SVG rather than image files: no extra request, no layout shift, it
+ * inherits the page's own colours in both themes, and the text inside it is
+ * real text that a screen reader and a search engine can both read.
+ */
+figure.diagram {
+	margin: 28px 0;
+	padding: 22px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+	/*
+	 * Scrolls rather than shrinks.
+	 *
+	 * A 640-unit viewBox rendered into a 360px phone is scaled to about 0.40,
+	 * which turns 14px labels into 5px ones — present, technically responsive,
+	 * and completely unreadable. Below the floor the figure scrolls sideways
+	 * inside its own box instead, which keeps the type legible and keeps the
+	 * page itself from scrolling horizontally.
+	 */
+	overflow-x: auto;
+}
+figure.diagram svg {
+	display: block;
+	width: 100%;
+	min-width: 540px;
+	height: auto;
+	overflow: visible;
+}
+figure.diagram figcaption {
+	margin-top: 16px;
+	padding-top: 14px;
+	border-top: 1px solid var(--line);
+	color: var(--muted);
+	font-size: 0.92rem;
+	line-height: 1.55;
+}
+/* The parts of a diagram, named so the SVG carries no literal colours. */
+.dg-line {
+	stroke: var(--line-strong);
+}
+.dg-key {
+	stroke: var(--mint);
+}
+.dg-bad {
+	stroke: var(--danger);
+}
+.dg-warn {
+	stroke: var(--warn);
+}
+.dg-fill-panel {
+	fill: var(--panel-hi);
+}
+.dg-fill-key {
+	fill: var(--mint);
+}
+.dg-fill-bad {
+	fill: var(--danger);
+}
+.dg-fill-warn {
+	fill: var(--warn);
+}
+.dg-text {
+	fill: var(--body);
+	font-size: 14px;
+	font-family: inherit;
+}
+.dg-label {
+	fill: var(--muted);
+	font-size: 12.5px;
+	font-family: inherit;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+.dg-strong {
+	fill: var(--text);
+	font-size: 15px;
+	font-weight: 600;
+	font-family: inherit;
+}
+
 /* --------------------------------------------------------------- surfaces -- */
 
 .callout {
