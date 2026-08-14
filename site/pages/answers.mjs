@@ -135,6 +135,9 @@ export const mafile = {
 
 export const lostAuthenticator = {
 	slug: 'lost-authenticator',
+	// Edited 14 Aug (UTC) to drop the unsupported Support durations. Without
+	// this the page inherits SITE.updated and advertises a stale lastmod.
+	updated: '2026-08-14',
 	navTitle: 'Lost access',
 	title: 'Lost your Steam authenticator?',
 	description:
