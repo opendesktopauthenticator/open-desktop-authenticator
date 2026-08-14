@@ -16,7 +16,8 @@
 
 /** Valve's own pages, cited wherever this makes a claim about Steam's behaviour. */
 const VALVE = {
-	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31'
+	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31',
+	setup: 'https://help.steampowered.com/en/faqs/view/6891-E071-C9D9-0134'
 };
 
 export const confirmationsOnDesktop = {
@@ -320,16 +321,17 @@ export const withoutPhone = {
 				Two different questions hide inside this one, and mixing them up is why the
 				answers you find online contradict each other. One is about the device that
 				generates codes. The other is about the phone number on your account — and
-				those have very different answers.
+				the second answer changed recently, which is why most of what you will read
+				about it is wrong.
 			</p>
 
 			<div class="callout callout-warn">
 				<p>
-					<strong>Valve's supported answer is that a phone is required.</strong> The
-					official mobile authenticator needs a supported phone, and Steam expects a
-					confirmed phone number on the account. Anything on this page about working
-					around that describes unofficial software and undocumented behaviour, not a
-					supported configuration.
+					<strong>Two different things, and only one of them is required.</strong>
+					Valve's official mobile authenticator runs on a supported Android or iOS
+					device, so without one of those the official app is not an option. A
+					<em>phone number</em>, however, is no longer mandatory — Valve's own setup
+					guide includes a way to skip it. The rest of this page separates the two.
 				</p>
 			</div>
 
@@ -345,37 +347,44 @@ export const withoutPhone = {
 
 			<h2>Question 2: can the account have no phone number at all?</h2>
 			<p>
-				<strong>Usually not, and you should plan on needing one.</strong> When
-				software asks Steam to attach an authenticator, Steam normally wants a
-				confirmed number on the account and texts a code to it. Without one, the
-				common outcome is a flat refusal telling you to add and verify a number
-				first. Adding a number is done on Steam itself — no third-party tool can do
-				it for you, and any offering to should be closed immediately.
+				<strong>Yes, and this changed — most articles you will find on the subject
+				are out of date.</strong> Valve's own setup walkthrough now says so directly:
+			</p>
+			<div class="callout">
+				<p>
+					<a href="${VALVE.setup}" rel="noopener">"if you do not have a phone number,
+					you can still add the authenticator. To do this, select the link <strong>I
+					don't have access to a phone number</strong> below the Next button."</a>
+				</p>
+			</div>
+			<p>
+				So a number is no longer a hard requirement for attaching an authenticator.
+				Steam still asks for one first, and still recommends it — Valve's step for
+				entering a number explains why, since it is what lets you recover the account
+				by text later. But there is a documented way past it.
 			</p>
 			<p>
-				There is a documented-nowhere exception we have seen in practice: some
-				accounts without a phone still complete enrolment, and Steam delivers the
-				activation code <strong>by email</strong> instead. Our own enrolment handles
-				both, deciding which to expect from Steam's response rather than assuming
-				SMS, and a live run against an account with no phone confirmed the email path
-				works.
+				This matches what we see. Our own enrolment decides from Steam's response
+				whether to expect the activation code by SMS or by email rather than assuming
+				SMS, and a live run against an account with no phone confirmed the email
+				path. That behaviour used to look like an undocumented quirk; Valve now
+				documents the option that produces it.
 			</p>
 			<p>
-				<strong>Do not plan around it.</strong> One confirmed instance is not a
-				feature: it is undocumented, appears to depend on the account, and Valve could
-				change it tomorrow without telling anyone. Treat it as a pleasant surprise if
-				it happens to you, and assume the refusal otherwise.
+				Adding a number, if you decide you want one, is done on Steam itself — no
+				third-party tool can do it for you.
 			</p>
 
 			<h2>The recovery problem this creates</h2>
 			<div class="callout callout-warn">
 				<p>
 					<strong>A phone number is the easiest way back into a locked-out
-					account.</strong> Without one, losing your authenticator means the
+					account.</strong> Skipping it is supported, but it costs you the SMS
+					recovery route and the simplest phone-to-phone transfer. Without a number,
+					losing your authenticator means the
 					<a href="/steam-revocation-code">recovery code</a> or a Steam Support ticket
-					that takes days. If you are deliberately running without a number, writing
-					the recovery code down stops being good practice and becomes the only thing
-					standing between you and support.
+					that takes days — so writing that code down stops being good practice and
+					becomes the only thing standing between you and support.
 				</p>
 			</div>
 
@@ -512,9 +521,10 @@ export const openMafile = {
 			<h2>5. The decision that actually matters</h2>
 			<p>
 				"Opening" a maFile in an authenticator is a much larger act than reading it.
-				You are handing a program the authority to act as your account — permanently,
-				because <a href="/what-is-a-mafile">these secrets never expire</a>. To Steam
-				the requests it signs carry the same cryptography yours would.
+				You are handing a program the authority to act as your authenticator
+				indefinitely — <a href="/what-is-a-mafile">these secrets do not expire on their
+				own</a>, and stop working only when the authenticator is removed or replaced.
+				To Steam the requests it signs carry the same cryptography yours would.
 			</p>
 			<p>
 				So the question is not whether the software can read the format. It is whether

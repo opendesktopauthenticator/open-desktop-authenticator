@@ -220,8 +220,9 @@ export const moveAuthenticator = {
 				<p>
 					<strong>Use only Steam's mobile app or Steam's own help site.</strong> The
 					supported transfer happens in the app; the fallbacks below run on Steam's
-					website. No third-party service is involved in any of them, and anything
-					offering to move a Steam authenticator for you is collecting accounts.
+					website. No third-party service is needed for any of them — so never give
+					your password, an SMS code or your recovery code to something claiming it
+					has to perform the transfer for you.
 				</p>
 			</div>
 
@@ -333,7 +334,7 @@ export const revocationCode = {
 	title: 'Steam recovery code: what the R-code does',
 	updated: '2026-08-14',
 	description:
-		'The R-code Valve now calls your recovery code is the only self-service way to remove a Steam authenticator, and it is still findable in the app.',
+		'The R-code Valve calls your recovery code removes a Steam authenticator when the device is gone — and it is still retrievable while the app works.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
@@ -394,7 +395,8 @@ export const revocationCode = {
 			<ul>
 				<li>
 					<strong>Inside a maFile.</strong> If the authenticator was ever held by a
-					desktop tool, the file carries a <code>revocation_code</code> field.
+					desktop tool, a typical file carries a <code>revocation_code</code> field —
+					though not every one does, which is its own problem.
 					<a href="/what-is-a-mafile">Any surviving copy</a> — an old machine, an old
 					backup — carries it too.
 				</li>
@@ -530,8 +532,8 @@ export const encryptedMafile = {
 			<h2>If the passphrase is genuinely gone</h2>
 			<p>
 				Then the file's contents are unreachable. That is what encryption is for, and
-				anything claiming to crack it is either lying or describing a brute-force run
-				that only works on short passphrases. The account itself is not lost, though.
+				anything claiming to crack it is either lying or describing a guessing attack
+				that only succeeds against weak or predictable passphrases. The account itself is not lost, though.
 				In order:
 			</p>
 			<ol>

@@ -201,8 +201,9 @@ export default {
 			<ol>
 				<li>A site that looks like a product page, often with a stolen screenshot.</li>
 				<li>
-					A download that is an installer or a zip rather than a link to a release
-					page with checksums.
+					A file served directly by an unrelated website, rather than a link to the
+					official ${s.sda.author} release page. SDA itself ships as a zip, so the
+					archive is not the warning sign — who is handing it to you is.
 				</li>
 				<li>
 					A build that works. It really does generate codes — that is the point,
@@ -243,8 +244,8 @@ export default {
 					<p>
 						An independent, open-source alternative, written to be checkable: public
 						source, builds produced in public CI, and no self-updating. Published
-						checksums and reproducible builds are commitments for the first release
-						rather than things you can check today —
+						checksums and release signatures are commitments for the first public release;
+						reproducible builds are a later goal and are not claimed yet —
 						<a href="/download">the download page tracks where each one stands</a>.
 					</p>
 				</section>
