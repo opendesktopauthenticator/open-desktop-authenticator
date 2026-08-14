@@ -218,9 +218,10 @@ export const moveAuthenticator = {
 
 			<div class="callout callout-warn">
 				<p>
-					<strong>Every step here happens inside Steam's own app.</strong> No
-					third-party tool can move a Steam authenticator for you, and anything
-					offering to is collecting accounts.
+					<strong>Use only Steam's mobile app or Steam's own help site.</strong> The
+					supported transfer happens in the app; the fallbacks below run on Steam's
+					website. No third-party service is involved in any of them, and anything
+					offering to move a Steam authenticator for you is collecting accounts.
 				</p>
 			</div>
 
@@ -271,9 +272,11 @@ export const moveAuthenticator = {
 			<h2>3. No phone and no number — the recovery code</h2>
 			<p>
 				The <a href="/steam-revocation-code">recovery code</a> removes the
-				authenticator without needing any device. This is the fifteen-day path,
-				because removing an authenticator is what it is — but it works from any
-				browser when nothing else will.
+				authenticator without needing the old device. You use it through Steam's
+				browser-based recovery process, after signing in or otherwise proving the
+				account is yours — the code is one half of that, not the whole of it. This is
+				the fifteen-day path, because removing an authenticator is what it is, but it
+				works when nothing else will.
 			</p>
 
 			<h2>4. None of the above — Steam Support</h2>
@@ -300,10 +303,19 @@ export const moveAuthenticator = {
 				secret lives in a <a href="/what-is-a-mafile">maFile</a> you can back up
 				yourself. It is a real trade-off rather than a free win: a file can be stolen
 				in ways a phone cannot, which is why ours keeps it
-				<a href="/security">encrypted and offline</a>. And note that Steam allows only
-				one authenticator on an account at a time, so this is a move rather than an
+				<a href="/security">encrypted and offline</a>. Steam allows only one
+				authenticator on an account at a time, so this is a move rather than an
 				addition — <a href="/steam-mobile-vs-desktop-authenticator">the comparison is
 				here</a>.
+			</p>
+			<div class="callout callout-warn">
+				<p>
+					<strong>Budget for fifteen days, not two, when a desktop tool is
+					involved.</strong> The two-day restriction is documented for Steam's own
+					<em>Move Authenticator</em> flow between devices running Steam's app.
+					Moving to or from an unofficial desktop authenticator may instead require
+					removing the authenticator and enrolling again, which is the fifteen-day
+					path. Assume the longer one unless you have tested the specific route.
 			</p>
 
 			<h2>Related</h2>
@@ -405,10 +417,13 @@ export const revocationCode = {
 
 			<div class="callout callout-warn">
 				<p>
-					<strong>Treat the code like a key, because it is one.</strong> Anyone holding
-					it can strip Steam Guard from your account. Never paste it into a site that
-					is not Steam's own, and <a href="/support">never into a support form</a> —
-					including ours. Nobody legitimate asks for it.
+					<strong>Treat the code as sensitive.</strong> Anyone who has both your
+					recovery code <em>and</em> authenticated access to your account may be able
+					to remove the authenticator — it is one half of a pair, not a standalone
+					master key, which is exactly why it should never travel alongside the
+					other half. Never paste it into a site that is not Steam's own, and
+					<a href="/support">never into a support form</a> — including ours. Nobody
+					legitimate asks for it.
 				</p>
 			</div>
 
@@ -494,10 +509,10 @@ export const encryptedMafile = {
 			<p>
 				SDA derives a key from your passphrase with PBKDF2 and encrypts with
 				<strong>AES-256-CBC</strong> — a mode with no authentication tag. That
-				matters: an authenticated cipher can tell you plainly that the key was wrong,
-				and an unauthenticated one cannot. What you get instead is a padding error,
-				or occasionally plausible-looking rubbish, and those look identical whether
-				the real problem is
+				matters: an authenticated cipher would at least detect reliably that
+				<em>something</em> was wrong, though not which thing. Without one you get a
+				padding error, or occasionally plausible-looking rubbish, and those look
+				identical whether the real problem is
 			</p>
 			<ul>
 				<li>a wrong passphrase,</li>

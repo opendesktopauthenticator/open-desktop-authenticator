@@ -414,7 +414,7 @@ const FAQ_ITEMS = [
 		plain:
 			'The vault cannot be opened. There is no reset and no recovery, because either would be a back door. Recovery files written at enrollment use the passphrase in force at the time.',
 		a: `<p>The vault cannot be opened. There is no reset, no master key and no support process that gets around it, because every one of those would be a back door into everyone else's vault too.</p>
-			<p>What you do have is the recovery file written when each account was enrolled, and your revocation codes. This is why the application insists you write them down.</p>`
+			<p>What you do have is the recovery file written when each account was enrolled, and your recovery codes — the <code>R</code> codes Valve now calls by that name, stored as <code>revocation_code</code> in a maFile. This is why the application insists you write them down.</p>`
 	},
 	{
 		q: 'Does it work without an internet connection?',

@@ -84,10 +84,11 @@ export const confirmationsOnDesktop = {
 			<p>
 				Which is the honest framing of "approve confirmations on PC": not a
 				convenience feature, but moving trade authority from a device you carry to a
-				machine that is often left running. The secret alone is not quite enough —
-				but a program holding your secret can usually sign in whenever it likes, so
-				the practical distance between "holds the secret" and "can approve your
-				trades" is short.
+				machine that is often left running. Be precise about the limit, though: the
+				identity secret cannot sign in to Steam. A program that also holds a usable
+				session or refresh token can act immediately; one holding only the secrets
+				still needs an authentication route first — which, if it also has your
+				<code>shared_secret</code>, it is a long way towards having.
 			</p>
 
 			<h2>Why people want it anyway</h2>
@@ -270,10 +271,12 @@ export const mobileVsDesktop = {
 				particular corner of the internet.
 			</p>
 			<p>
-				Whichever way you go, moving between them costs something: switching carries a
-				<a href="/move-steam-authenticator-new-phone">trade and Market restriction</a>,
-				so it is worth deciding once rather than experimenting.
-			</p>
+				Whichever way you go, moving is not free. Steam's own phone-to-phone transfer
+				carries a two-day trade and Market restriction. A move involving an unofficial
+				desktop authenticator may instead require removing the authenticator and
+				enrolling again, which is the
+				<a href="/move-steam-authenticator-new-phone">fifteen-day path</a> — so it is
+				worth deciding once rather than experimenting.</p>
 
 			<h2>Where ${s.short} stands today</h2>
 			<p>

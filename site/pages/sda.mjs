@@ -13,6 +13,9 @@ export default {
 			'An explanation of Steam Desktop Authenticator, maFiles, and the risks of downloading it from search results.',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
+		// The head carried a modified time and the Article object did not, so the
+		// two disagreed about whether this page had ever been revised.
+		dateModified: '2026-08-14',
 		mainEntityOfPage: `${s.origin}/steam-desktop-authenticator`
 	}),
 	body: (s) => `
@@ -44,8 +47,9 @@ export default {
 				</p>
 				<p>
 					The rest of this page explains what SDA is, what it stores and why searching
-					for it is dangerous — because tens of thousands of people are still running
-					it, still looking for it, and still being handed counterfeits when they do.
+					for it is dangerous — because many people still run it, still
+					search for it, and are still handed counterfeits when they do. We have no
+					usage figures for somebody else's software and will not invent any.
 				</p>
 			</div>
 
@@ -71,8 +75,9 @@ export default {
 					The seed for the five-character login codes. It is a time-based one-time
 					password: your device and Steam both hash the secret together with the
 					current thirty-second window, and get the same answer without ever talking
-					to each other. Anyone holding this secret can generate your login codes
-					forever.
+					to each other. Anyone holding this secret can generate your login
+					codes for as long as that authenticator stays on the account — it does not
+					expire on its own, and only removing or replacing it stops them.
 				</dd>
 				<dt><code>identity_secret</code></dt>
 				<dd>
@@ -82,7 +87,9 @@ export default {
 				</dd>
 				<dt>The revocation code</dt>
 				<dd>
-					A short code, usually shown once, in the form <code>R12345</code>. It is how
+					A short code in the form <code>R12345</code>, which Valve now calls your
+					<a href="/steam-revocation-code">recovery code</a>. It is shown during setup
+					and can be retrieved again while the authenticator is still accessible. It is how
 					you detach the authenticator if you lose the device. If you do not have it
 					and you lose your authenticator, recovering the account means Steam Support
 					and a wait measured in days.
@@ -92,8 +99,9 @@ export default {
 			<h2>What a maFile is</h2>
 			<p>
 				SDA stores each account in a file named after the SteamID with a
-				<code>.maFile</code> extension. It is JSON, and it contains all three of the
-				items above plus the session tokens. In other words: <strong>a maFile is the
+				<code>.maFile</code> extension. It is JSON, and a typical one carries the
+				authenticator secrets and account metadata above, and may also hold session
+				data that has not expired. In other words: <strong>a maFile is the
 				account's second factor, in a file, on disk.</strong>
 			</p>
 			<p>
@@ -105,10 +113,10 @@ export default {
 			</p>
 			<div class="callout">
 				<p>
-					<strong>The practical consequence:</strong> treat a maFile exactly as you
-					would treat the password to the account, because it is worth more. A
-					password can be changed. A shared secret that someone else has copied works
-					until you detach the authenticator entirely.
+					<strong>The practical consequence:</strong> treat a maFile as at least as
+					sensitive as the password and the second factor combined, because that is
+					what it is. A password can be changed in a minute. A shared secret somebody
+					else has copied keeps working until you detach the authenticator entirely.
 				</p>
 			</div>
 
@@ -186,8 +194,8 @@ export default {
 			<h2>Why searching for "steam desktop authenticator download" is the dangerous part</h2>
 			<p>
 				SDA is distributed as source and as releases on its project page. The name,
-				however, is generic enough that a great many other sites rank for it, and a
-				meaningful share of them exist to hand you a modified build. The pattern is
+				however, is generic enough that a great many other sites rank for it, and some
+				of them distribute unofficial or modified builds. The pattern is
 				consistent and worth recognising:
 			</p>
 			<ol>
