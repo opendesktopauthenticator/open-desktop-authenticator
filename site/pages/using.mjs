@@ -17,7 +17,8 @@
 /** Valve's own pages, cited wherever this makes a claim about Steam's behaviour. */
 const VALVE = {
 	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31',
-	setup: 'https://help.steampowered.com/en/faqs/view/6891-E071-C9D9-0134'
+	setup: 'https://help.steampowered.com/en/faqs/view/6891-E071-C9D9-0134',
+	holds: 'https://help.steampowered.com/en/faqs/view/34A1-EA3F-83ED-54AB'
 };
 
 export const confirmationsOnDesktop = {
@@ -54,23 +55,32 @@ export const confirmationsOnDesktop = {
 			</p>
 			<ol>
 				<li>
-					<strong>The identity secret</strong> from your authenticator, used to
-					compute an HMAC.
+					<strong>The identity secret</strong> from your authenticator. It is used as
+					the HMAC key — not as data sent anywhere — so it never leaves your machine.
 				</li>
 				<li>
 					<strong>An authenticated Steam session</strong> — a live login for the
 					account, not just the secret.
 				</li>
 				<li>
-					<strong>A key minted for that exact operation and moment</strong>: the HMAC
-					covers the current Steam-corrected time and a tag naming the action, so a
-					key made for <em>listing</em> confirmations cannot be replayed to
-					<em>accept</em> one.
+					<strong>A key minted for that exact operation and moment</strong>. The
+					message being signed is the current
+					<a href="/steam-guard-code-not-working">Steam-corrected time</a> followed by
+					a short tag naming the action — one tag for fetching the list, a different
+					one for allowing, another for cancelling. Change either half and the
+					signature changes, so a key made for <em>listing</em> confirmations is not a
+					valid signature for <em>accepting</em> one, and a captured key stops being
+					usable once its moment passes.
 				</li>
 			</ol>
 			<p>
 				That third property is easy to miss and worth knowing about, because it is
-				what stops a captured request being reused as an approval later.
+				what stops a captured request being reused as an approval later. The reason
+				Steam demands any of this is the same reason it applies holds: Valve documents
+				that accounts without a mobile authenticator get
+				<a href="${VALVE.holds}" rel="noopener">trade holds of up to 15 days</a> on
+				items leaving the account, and confirmations are what an authenticator buys you
+				instead of that wait.
 			</p>
 
 			<h2>How can a desktop program approve them?</h2>
@@ -178,10 +188,10 @@ export const mobileVsDesktop = {
 				<p>
 					<strong>Use the official Steam Mobile app if it works for you.</strong> It is
 					made by Valve, it holds the secret in storage you never have to manage, and
-					if you link a phone number it gains an SMS recovery and transfer route
-					nothing else offers. For the large
-					majority of Steam accounts that is simply the correct answer, and no feature
-					below outweighs it.
+					if you link a phone number it gains SMS recovery and transfer routes that run
+					through Valve's own account systems — something no third-party tool is in a
+					position to provide. For the large majority of Steam accounts that is simply
+					the correct answer, and no feature below outweighs it.
 				</p>
 			</div>
 
@@ -368,8 +378,8 @@ export const withoutPhone = {
 					<strong>Two different things, and only one of them is required.</strong>
 					Valve's official mobile authenticator runs on a supported Android or iOS
 					device, so without one of those the official app is not an option. A
-					<em>phone number</em>, however, is no longer mandatory — Valve's own setup
-					guide includes a way to skip it. The rest of this page separates the two.
+					<em>phone number</em>, however, is optional in Valve's current setup flow —
+					its own guide includes a way to skip that step. The rest of this page separates the two.
 				</p>
 			</div>
 
@@ -424,7 +434,8 @@ export const withoutPhone = {
 					losing your authenticator means the
 					<a href="/steam-revocation-code">recovery code</a> or a Steam Support ticket
 					that takes days — so writing that code down stops being good practice and
-					becomes the only thing standing between you and support.
+					becomes the difference between a few minutes of self-service and a support
+					queue.
 				</p>
 			</div>
 
@@ -503,8 +514,10 @@ export const openMafile = {
 			<h1>How to open a Steam <code>.maFile</code> safely</h1>
 			<p class="lede">
 				There is no special program needed to look inside one. A maFile is a small
-				text file, and a text editor will show you everything in it. The care required
-				is not technical — it is about what you do with the file afterwards.
+				text file, and a text editor opens it — showing either readable fields or, if
+				it was encrypted, a block of base64 you will need the passphrase and manifest
+				to make sense of. The care required is not technical — it is about what you do
+				with the file afterwards.
 			</p>
 
 			<div class="callout callout-warn">
@@ -574,12 +587,13 @@ export const openMafile = {
 					and documents folders are often synced to cloud storage, so where you put
 					that copy matters. Do not paste the
 					contents into a website, a Discord bot, a pastebin, an AI chat, or a support
-					form — <a href="/support">including ours</a>. Anyone who receives that text
-					can generate your Steam Guard codes from then until the authenticator is
-					detached from the account entirely — the shared secret never expires. If
-					the file also carries usable session tokens they may be able to approve
-					trades immediately; if not, they need to sign in first, and holding your
-					codes is a long way towards being able to.
+					form — <a href="/support">including ours</a>. If the
+					<code>shared_secret</code> is readable in what you paste, whoever receives
+					it can generate your Steam Guard codes from then until the authenticator is
+					detached from the account entirely — the secret does not expire on its own.
+					That is not the whole account by itself: they would still need your
+					password. But it removes the second factor as an obstacle, which is the
+					part you cannot change afterwards the way you can change a password.
 				</p>
 			</div>
 

@@ -184,10 +184,14 @@ ${timeWindowDiagram()}
 
 			<h3>Steam says "invalid credentials" rather than a bad code</h3>
 			<p>
-				That message is usually about the password, not the code — Steam checks them
-				in that order, so a mistyped password never gets as far as the code. Reset the
-				password if you are unsure, and note that a password reset carries its own
-				trading restriction.
+				It does not prove the code was wrong. Steam checks the password first, so a
+				mistyped password never gets as far as the code. Re-enter the account name and
+				password carefully — and before reaching for account recovery, know what it
+				costs: <a href="${VALVE.restrictions}" rel="noopener">resetting a forgotten
+				password restricts trading and the Market for 5 days</a>, or 30 if the account
+				has been inactive for more than two months. <em>Changing</em> a password you
+				still know, from Steam's settings, carries no such restriction. Those are two
+				different operations and only one of them is expensive.
 			</p>
 
 			<h3>The code screen never appears, or no code arrives by email</h3>
@@ -268,11 +272,11 @@ export const moveAuthenticator = {
 
 			<div class="callout callout-warn">
 				<p>
-					<strong>Use only Steam's mobile app or Steam's own help site.</strong> The
-					supported transfer happens in the app; the fallbacks below run on Steam's
-					website. No third-party service is needed for any of them — so never give
-					your password, an SMS code or your recovery code to something claiming it
-					has to perform the transfer for you.
+					<strong>Every path below runs through Steam's own mobile app or Steam's
+					official help site, and nothing else.</strong> No third-party service is
+					needed for any of them — so never give your password, an SMS code or your
+					recovery code to something claiming it has to perform the transfer for
+					you.
 				</p>
 			</div>
 
@@ -337,8 +341,10 @@ ${tradeHoldDiagram()}
 			<h2>4. None of the above — Steam Support</h2>
 			<p>
 				A help request to remove the authenticator, with proof the account is yours:
-				purchase history, the original email, payment details. It takes days by
-				design — the delay is what stops a thief doing the same thing quickly.
+				purchase history, the original email, payment details. Expect it to take
+				time: Steam has to satisfy itself that the account is yours before detaching
+				its second factor — the same check that stops somebody else asking on your
+				behalf.
 				<a href="/lost-authenticator">The full recovery order is here</a>.
 			</p>
 
@@ -450,10 +456,9 @@ export const revocationCode = {
 				<li>
 					<strong>Inside a maFile.</strong> If the authenticator was ever held by a
 					desktop tool, a typical file carries a <code>revocation_code</code> field.
-					Any surviving copy that included it still preserves it — but a maFile
-					exported without one never had it to keep.
-					<a href="/what-is-a-mafile">Any surviving copy</a> — an old machine, an old
-					backup — carries it too.
+					<a href="/what-is-a-mafile">Any surviving copy</a> that included the field
+					still preserves it — an old machine, an old backup — but a maFile exported
+					without one never had it to keep.
 				</li>
 				<li>
 					<strong>Screenshots and notes.</strong> The setup screen told you to save it,
@@ -478,9 +483,10 @@ export const revocationCode = {
 					recovery code <em>and</em> authenticated access to your account may be able
 					to remove the authenticator — it is one half of a pair, not a standalone
 					master key, which is exactly why it should never travel alongside the
-					other half. Never paste it into a site that is not Steam's own, and
-					<a href="/support">never into a support form</a> — including ours. Nobody
-					legitimate asks for it.
+					other half. Enter it only where Steam's own site or app asks for it, in the
+					recovery and authenticator-removal flows it belongs to — never into another
+					website, never to a person who contacts you, and
+					<a href="/support">never into a support form</a>, including ours.
 				</p>
 			</div>
 
@@ -622,7 +628,7 @@ ${manifestDiagram()}
 			<p>
 				Open a copy in a text editor. Readable field names like
 				<code>shared_secret</code> mean it is not encrypted and nothing is being asked
-				of you. One long unbroken run of base64 means it is.
+				of you. One long unbroken run of base64 usually means it is encrypted.
 				<a href="/how-to-open-mafile">The full walkthrough is here.</a>
 			</p>
 
