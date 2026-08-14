@@ -33,6 +33,7 @@ import { PAGES } from './pages/index.mjs';
 import { rootIcons, hashedIcons, manifest } from './icons.mjs';
 import { checkAddresses } from './addresses.mjs';
 import { escape, reviewAsk } from './markup.mjs';
+import { anchorHeadings, readingMinutes, guideMeta, jumpList } from './guide-kit.mjs';
 
 // Re-exported so pages may take it from either module without a second import.
 export { reviewAsk };
@@ -330,6 +331,21 @@ function layout(page) {
 		return `<a href="/${target.slug}"${current ? ' aria-current="page"' : ''}>${escape(target.navTitle ?? target.title)}</a>`;
 	}).join('\n\t\t\t\t');
 
+	/*
+	 * Guides get their furniture generated here rather than written into each
+	 * page: heading ids and anchors always, and for a guide the byline row and a
+	 * contents list built from the headings that survived editing. Doing it at
+	 * this point means it applies to every existing page and to the next one
+	 * without anybody remembering to add it.
+	 */
+	const iso = page.updated ?? SITE.updated;
+	let body = anchorHeadings(page.body(SITE));
+	if (page.guide) {
+		body = jumpList(
+			body.replace('</h1>', `</h1>\n${guideMeta(iso, formatDate(iso), readingMinutes(body))}`)
+		);
+	}
+
 	return `<!doctype html>
 <html lang="en">
 <head>
@@ -337,6 +353,7 @@ function layout(page) {
 </head>
 <body>
 	<a class="skip" href="#main">Skip to content</a>
+	<div class="progress" aria-hidden="true"></div>
 	<header class="masthead">
 		<div class="wrap">
 			<a class="brand" href="/">
@@ -352,8 +369,8 @@ function layout(page) {
 	<main id="main" class="wrap${page.hero ? ' has-hero' : ''}">
 ${page.hero ? page.hero(SITE) : ''}
 ${trail(page)}
-${page.body(SITE)}
-		<p class="reviewed">Last reviewed <time datetime="${page.updated ?? SITE.updated}">${formatDate(page.updated ?? SITE.updated)}</time>.</p>
+${body}
+		<p class="reviewed">Last reviewed <time datetime="${iso}">${formatDate(iso)}</time>.</p>
 	</main>
 
 	<footer class="site-foot">

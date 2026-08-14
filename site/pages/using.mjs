@@ -23,6 +23,7 @@ const VALVE = {
 
 export const confirmationsOnDesktop = {
 	slug: 'approve-steam-confirmations-desktop',
+	guide: true,
 	navTitle: 'Confirmations on PC',
 	title: 'How Steam trade confirmations work on desktop',
 	updated: '2026-08-14',
@@ -38,7 +39,7 @@ export const confirmationsOnDesktop = {
 		mainEntityOfPage: `${s.origin}/approve-steam-confirmations-desktop`
 	}),
 	body: (s) => `
-		<article>
+		<article class="guide">
 			<h1>How Steam trade confirmations work on desktop</h1>
 			<p class="lede">
 				Every trade and every Market listing needs a second approval after you click
@@ -46,6 +47,20 @@ export const confirmationsOnDesktop = {
 				only thing that can sign one, and understanding what a confirmation actually
 				is explains both the appeal and the risk of moving that job to a desktop.
 			</p>
+
+			<div class="answer">
+				<span class="eyebrow">Short answer</span>
+				<p>
+					A desktop tool approves confirmations by holding your
+					<code>identity_secret</code> and signing each request with it, exactly as
+					the phone does. <strong>It needs a live Steam session as well as the
+					secret</strong> — the secret alone cannot sign in.
+				</p>
+				<p>
+					That is why an authenticator file is worth protecting like the account
+					itself, and why nothing here should ever be pasted into a website.
+				</p>
+			</div>
 
 			<h2>What actually approves a Steam trade confirmation?</h2>
 			<p>
@@ -151,16 +166,26 @@ export const confirmationsOnDesktop = {
 			</div>
 
 			<h2>Related</h2>
-			<ul class="plain next">
-				<li><a href="/security">Where the secrets live, and what reaches the network</a></li>
-				<li><a href="/steam-mobile-vs-desktop-authenticator">Mobile app or desktop: an honest comparison</a></li>
-				<li><a href="/what-is-a-mafile">What the identity secret is, and what else a maFile holds</a></li>
+			<ul class="link-cards">
+				<li>
+					<a href="/security"><b>Where the secrets live</b>
+					<span>What this application stores, and what ever reaches the network.</span></a>
+				</li>
+				<li>
+					<a href="/steam-mobile-vs-desktop-authenticator"><b>Mobile app or desktop</b>
+					<span>An honest comparison, including when the answer is the phone.</span></a>
+				</li>
+				<li>
+					<a href="/what-is-a-mafile"><b>The identity secret</b>
+					<span>What signs a confirmation, and what else sits in the same file.</span></a>
+				</li>
 			</ul>
 		</article>`
 };
 
 export const mobileVsDesktop = {
 	slug: 'steam-mobile-vs-desktop-authenticator',
+	guide: true,
 	navTitle: 'Mobile or desktop',
 	title: 'Steam mobile app or a desktop authenticator?',
 	updated: '2026-08-14',
@@ -176,7 +201,7 @@ export const mobileVsDesktop = {
 		mainEntityOfPage: `${s.origin}/steam-mobile-vs-desktop-authenticator`
 	}),
 	body: (s) => `
-		<article>
+		<article class="guide">
 			<h1>Steam mobile app or a desktop authenticator?</h1>
 			<p class="lede">
 				We build a desktop authenticator, so treat this page with the suspicion it
@@ -194,6 +219,70 @@ export const mobileVsDesktop = {
 					the correct answer, and no feature below outweighs it.
 				</p>
 			</div>
+
+			<div class="answer">
+				<span class="eyebrow">Short answer</span>
+				<p>
+					<strong>Use Steam's official mobile app unless you have a specific reason
+					not to.</strong> It is Valve's own, it needs no file management from you,
+					and with a phone number attached it has recovery routes nothing outside
+					Valve can offer.
+				</p>
+				<p>
+					A desktop authenticator earns its place in two situations: confirming
+					listings in volume, where tapping a phone forty times is the actual
+					problem, and having no usable Android or iOS device at all.
+				</p>
+			</div>
+
+			<div class="tbl">
+				<table>
+					<thead>
+						<tr>
+							<th scope="col">&nbsp;</th>
+							<th scope="col">Steam Mobile app</th>
+							<th scope="col">A desktop authenticator</th>
+						</tr>
+					</thead>
+					<tbody>
+						<tr>
+							<th scope="row">Who makes it</th>
+							<td>Valve</td>
+							<td>Third parties, including us</td>
+						</tr>
+						<tr>
+							<th scope="row">Account recovery</th>
+							<td>SMS and in-app routes through Valve</td>
+							<td>Recovery code only</td>
+						</tr>
+						<tr>
+							<th scope="row">Confirming many trades</th>
+							<td>One tap each, on a phone</td>
+							<td>A list and one button</td>
+						</tr>
+						<tr>
+							<th scope="row">Needs a phone</th>
+							<td>Yes — Android or iOS</td>
+							<td>No</td>
+						</tr>
+						<tr>
+							<th scope="row">Who holds the secret</th>
+							<td>The app, in storage you never see</td>
+							<td>A file on your disk, which you must protect and back up</td>
+						</tr>
+						<tr>
+							<th scope="row">If you lose the device</th>
+							<td>Valve's own recovery flow</td>
+							<td>Your backup, or the recovery code</td>
+						</tr>
+					</tbody>
+				</table>
+			</div>
+			<p class="hint">
+				The honest summary of that table: the mobile app is better at everything except
+				bulk confirmations and running without a phone. If neither of those is your
+				problem, the app is the answer.
+			</p>
 
 			<h2>Can I use the Steam app and a desktop authenticator together?</h2>
 			<p>
@@ -339,16 +428,26 @@ export const mobileVsDesktop = {
 			</p>
 
 			<h2>Related</h2>
-			<ul class="plain next">
-				<li><a href="/alternatives">Every desktop option, compared</a></li>
-				<li><a href="/security">How this one stores secrets</a></li>
-				<li><a href="/steam-guard-code-not-working">If codes stop being accepted</a></li>
+			<ul class="link-cards">
+				<li>
+					<a href="/alternatives"><b>Every desktop option, compared</b>
+					<span>What each one is, who maintains it, and what it asks of you.</span></a>
+				</li>
+				<li>
+					<a href="/security"><b>How this one stores secrets</b>
+					<span>The encryption, the threat model, and what it does not protect against.</span></a>
+				</li>
+				<li>
+					<a href="/steam-guard-code-not-working"><b>If codes stop being accepted</b>
+					<span>Usually the clock. About a minute to fix, whichever tool you use.</span></a>
+				</li>
 			</ul>
 		</article>`
 };
 
 export const withoutPhone = {
 	slug: 'steam-guard-without-phone',
+	guide: true,
 	navTitle: 'Without a phone',
 	title: 'Steam Guard without a smartphone',
 	updated: '2026-08-14',
@@ -364,7 +463,7 @@ export const withoutPhone = {
 		mainEntityOfPage: `${s.origin}/steam-guard-without-phone`
 	}),
 	body: (s) => `
-		<article>
+		<article class="guide">
 			<h1>Steam Guard without a smartphone</h1>
 			<p class="lede">
 				Two different questions hide inside this one, and mixing them up is why the
@@ -380,6 +479,23 @@ export const withoutPhone = {
 					device, so without one of those the official app is not an option. A
 					<em>phone number</em>, however, is optional in Valve's current setup flow —
 					its own guide includes a way to skip that step. The rest of this page separates the two.
+				</p>
+			</div>
+
+			<div class="answer">
+				<span class="eyebrow">Short answer</span>
+				<p>
+					Two separate questions get tangled together here.
+					<strong>Valve's official authenticator app does require an Android or iOS
+					device</strong> — there is no official desktop version of it. But a
+					<strong>phone number is optional in Valve's current setup flow</strong>,
+					and an authenticator itself is only a secret plus a clock, so other
+					software can hold one.
+				</p>
+				<p>
+					Skipping the phone number is supported, and it costs you the SMS recovery
+					route. That makes your recovery code the thing standing between a bad day
+					and a support ticket.
 				</p>
 			</div>
 
@@ -426,16 +542,35 @@ export const withoutPhone = {
 			</p>
 
 			<h2>What do I lose by not having a phone number?</h2>
+			<p>
+				Skipping the number is supported and the account works normally. What changes
+				is what happens on the day something goes wrong:
+			</p>
+			<ul class="check">
+				<li class="yes">
+					<strong>You keep the authenticator itself.</strong> Codes and trade
+					confirmations work exactly the same either way.
+				</li>
+				<li class="yes">
+					<strong>You keep the recovery code.</strong> It still detaches the
+					authenticator, and it does not depend on a phone number.
+				</li>
+				<li class="no">
+					<strong>You lose SMS recovery.</strong> The quickest route back into a
+					locked-out account is the one that texts you, and there is nowhere to text.
+				</li>
+				<li class="no">
+					<strong>You lose the simplest phone-to-phone transfer.</strong> Moving to a
+					new handset takes a longer path.
+				</li>
+			</ul>
 			<div class="callout callout-warn">
 				<p>
-					<strong>A phone number is the easiest way back into a locked-out
-					account.</strong> Skipping it is supported, but it costs you the SMS
-					recovery route and the simplest phone-to-phone transfer. Without a number,
-					losing your authenticator means the
+					<strong>So the recovery code stops being good practice and starts being the
+					plan.</strong> Without a number, losing your authenticator means the
 					<a href="/steam-revocation-code">recovery code</a> or a Steam Support ticket
-					that takes days — so writing that code down stops being good practice and
-					becomes the difference between a few minutes of self-service and a support
-					queue.
+					that takes days — the difference between a few minutes of self-service and
+					a support queue.
 				</p>
 			</div>
 
@@ -482,16 +617,26 @@ export const withoutPhone = {
 			</p>
 
 			<h2>Related</h2>
-			<ul class="plain next">
-				<li><a href="/steam-mobile-vs-desktop-authenticator">Mobile app or desktop?</a></li>
-				<li><a href="/steam-revocation-code">The code that gets you back in</a></li>
-				<li><a href="/lost-authenticator">If you are already locked out</a></li>
+			<ul class="link-cards">
+				<li>
+					<a href="/steam-revocation-code"><b>The code that gets you back in</b>
+					<span>Without a phone number this is your recovery route. Know where it is.</span></a>
+				</li>
+				<li>
+					<a href="/steam-mobile-vs-desktop-authenticator"><b>Mobile app or desktop</b>
+					<span>The trade-offs side by side, with no thumb on the scale.</span></a>
+				</li>
+				<li>
+					<a href="/lost-authenticator"><b>If you are already locked out</b>
+					<span>Every way back in, in the order worth trying them.</span></a>
+				</li>
 			</ul>
 		</article>`
 };
 
 export const openMafile = {
 	slug: 'how-to-open-mafile',
+	guide: true,
 	navTitle: 'Opening a maFile',
 	title: 'How to open a Steam maFile safely',
 	updated: '2026-08-14',
@@ -510,7 +655,7 @@ export const openMafile = {
 		]
 	}),
 	body: (s) => `
-		<article>
+		<article class="guide">
 			<h1>How to open a Steam <code>.maFile</code> safely</h1>
 			<p class="lede">
 				There is no special program needed to look inside one. A maFile is a small
@@ -527,6 +672,20 @@ export const openMafile = {
 					"open any file online" sites that ask you to upload it. Uploading a maFile
 					hands over the authenticator itself. There is no legitimate reason for a
 					website to see one.
+				</p>
+			</div>
+
+			<div class="answer">
+				<span class="eyebrow">Short answer</span>
+				<p>
+					<strong>Any plain text editor opens a maFile</strong> — Notepad, VS Code,
+					anything that reads JSON. There is nothing to install and nothing to
+					convert. Work on a copy, not the original.
+				</p>
+				<p>
+					The danger is not opening it. It is
+					<strong>where the contents go afterwards</strong>: never into a website, a
+					Discord bot, a pastebin, an AI chat, or a support form.
 				</p>
 			</div>
 
@@ -616,10 +775,19 @@ export const openMafile = {
 			</p>
 
 			<h2>Related</h2>
-			<ul class="plain next">
-				<li><a href="/what-is-a-mafile">What a maFile is, field by field</a></li>
-				<li><a href="/encrypted-mafile">When it is encrypted</a></li>
-				<li><a href="/import-from-sda">Importing one into this application</a></li>
+			<ul class="link-cards">
+				<li>
+					<a href="/what-is-a-mafile"><b>A maFile, field by field</b>
+					<span>What each value does, and which ones are the account itself.</span></a>
+				</li>
+				<li>
+					<a href="/encrypted-mafile"><b>When it is encrypted</b>
+					<span>The passphrase, the manifest, and why one without the other fails.</span></a>
+				</li>
+				<li>
+					<a href="/import-from-sda"><b>Importing one</b>
+					<span>Bringing accounts into this application, and exporting them back out.</span></a>
+				</li>
 			</ul>
 		</article>`
 };

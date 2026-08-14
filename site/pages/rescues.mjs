@@ -31,6 +31,7 @@ const SDA_ENCRYPTOR =
 
 export const codeNotWorking = {
 	slug: 'steam-guard-code-not-working',
+	guide: true,
 	navTitle: 'Codes not working',
 	title: 'Steam Guard code not working? Check the clock',
 	updated: '2026-08-14',
@@ -94,7 +95,7 @@ export const codeNotWorking = {
 		]
 	}),
 	body: (s) => `
-		<article>
+		<article class="guide">
 			<h1>Steam Guard code not working? Check the clock</h1>
 			<p class="lede">
 				When Steam refuses code after code, the first thing to check is not the code.
@@ -102,6 +103,36 @@ export const codeNotWorking = {
 				first. This page explains why, fixes it in about a minute, then covers the
 				other causes in the order worth working through.
 			</p>
+
+			<div class="answer">
+				<span class="eyebrow">Short answer</span>
+				<p>
+					A Steam Guard code is computed from the current time, so a device whose
+					clock is wrong produces codes for the wrong thirty-second window and Steam
+					refuses every one. <strong>Turn on automatic date, time and time zone on
+					the device generating the codes, then sync.</strong> That fixes the large
+					majority of refused codes in under a minute.
+				</p>
+				<p>
+					If the clock is already correct, the cause is further down — and it is
+					usually the account, not the code.
+				</p>
+			</div>
+
+			<ul class="stat-strip">
+				<li>
+					<b>30<small> sec</small></b>
+					<span>How long one code is valid. Miss the window and it is simply the wrong answer.</span>
+				</li>
+				<li>
+					<b>~1<small> min</small></b>
+					<span>What the clock fix takes, start to finish, on Windows or a phone.</span>
+				</li>
+				<li class="cost">
+					<b>5<small> days</small></b>
+					<span>Trading restriction if you reset a forgotten password chasing this. Check the clock first.</span>
+				</li>
+			</ul>
 
 			<h2>Why does a wrong clock break the code?</h2>
 			<p>
@@ -123,17 +154,30 @@ export const codeNotWorking = {
 ${timeWindowDiagram()}
 
 			<h2>How do I fix the time on Windows?</h2>
-			<ol>
-				<li>Open <strong>Settings → Time &amp; language → Date &amp; time</strong>.</li>
-				<li>Turn on <strong>Set time automatically</strong> and <strong>Set time zone
-				automatically</strong>.</li>
-				<li>Press <strong>Sync now</strong>. If it fails, check the connection and try
-				again.</li>
+			<ol class="steps">
+				<li>
+					<strong>Open the date and time settings</strong>
+					<p>Settings → Time &amp; language → Date &amp; time.</p>
+				</li>
+				<li>
+					<strong>Turn both switches on</strong>
+					<p>
+						<em>Set time automatically</em> and <em>Set time zone automatically</em>.
+						The second one matters as much as the first.
+					</p>
+				</li>
+				<li>
+					<strong>Press Sync now</strong>
+					<p>
+						If it fails, check the connection and try again. Then generate a fresh
+						code — an old one on screen was computed before the fix.
+					</p>
+				</li>
 			</ol>
-			<p>
-				The sneaky version is a wrong time <em>zone</em> with a right-looking local
-				time: the clock on the wall reads correctly while the underlying UTC time —
-				the one codes are computed from — is hours off.
+			<p class="pull">
+				The version that fools people is a wrong time <em>zone</em> with a
+				right-looking clock: the wall time reads correctly while the underlying UTC
+				time — the one codes are actually computed from — is hours out.
 			</p>
 
 			<h2>How do I fix the time on a phone?</h2>
@@ -233,16 +277,26 @@ ${timeWindowDiagram()}
 			</p>
 
 			<h2>Related</h2>
-			<ul class="plain next">
-				<li><a href="/what-is-a-mafile">What is a maFile?</a></li>
-				<li><a href="/lost-authenticator">Lost access to the authenticator entirely?</a></li>
-				<li><a href="/steam-desktop-authenticator">Steam Desktop Authenticator, explained</a></li>
+			<ul class="link-cards">
+				<li>
+					<a href="/lost-authenticator"><b>Lost the authenticator entirely</b>
+					<span>The recovery routes in order, and what each one costs in days.</span></a>
+				</li>
+				<li>
+					<a href="/what-is-a-mafile"><b>What is inside a maFile</b>
+					<span>Every field explained, and which ones are the account itself.</span></a>
+				</li>
+				<li>
+					<a href="/steam-desktop-authenticator"><b>Steam Desktop Authenticator</b>
+					<span>What SDA is, and why searching for the download is the risky part.</span></a>
+				</li>
 			</ul>
 		</article>`
 };
 
 export const moveAuthenticator = {
 	slug: 'move-steam-authenticator-new-phone',
+	guide: true,
 	navTitle: 'New phone',
 	title: 'Move your Steam authenticator to a new phone',
 	updated: '2026-08-14',
@@ -261,7 +315,7 @@ export const moveAuthenticator = {
 		]
 	}),
 	body: () => `
-		<article>
+		<article class="guide">
 			<h1>Move your Steam authenticator to a new phone</h1>
 			<p class="lede">
 				There is a right way and an expensive way to do this, and the difference is
@@ -280,26 +334,53 @@ export const moveAuthenticator = {
 				</p>
 			</div>
 
+			<div class="answer">
+				<span class="eyebrow">Short answer</span>
+				<p>
+					If the old authenticator still works, use <strong>Move Authenticator</strong>
+					inside the Steam Mobile app. That is the supported transfer and it costs a
+					two-day trade restriction.
+				</p>
+				<p>
+					Removing the authenticator and enrolling again instead costs
+					<strong>fifteen days</strong> — the same end state, thirteen extra days of
+					not trading. Which path you are on is decided before you start.
+				</p>
+			</div>
+
 			<h2>How long are the trade restrictions after moving or replacing it?</h2>
-			<table class="grid">
-				<thead>
-					<tr><th>What you do</th><th>Restriction</th></tr>
-				</thead>
-				<tbody>
-					<tr>
-						<td><strong>Transfer</strong> to the new phone (Move Authenticator)</td>
-						<td>2-day trade and Market restriction</td>
-					</tr>
-					<tr>
-						<td><strong>Remove</strong> the authenticator, then add it again</td>
-						<td>15 days, unable to trade or use the Market</td>
-					</tr>
-					<tr>
-						<td>Trades created in the first <strong>7 days</strong> after adding one</td>
-						<td>up to a 15-day hold on those trades</td>
-					</tr>
-				</tbody>
-			</table>
+			<ul class="stat-strip">
+				<li>
+					<b>2<small> days</small></b>
+					<span>Transferring with Move Authenticator, if the old one still works.</span>
+				</li>
+				<li class="cost">
+					<b>15<small> days</small></b>
+					<span>Removing it and enrolling again. Same end state, thirteen days more.</span>
+				</li>
+			</ul>
+
+			<div class="tbl">
+				<table>
+					<thead>
+						<tr><th scope="col">What you do</th><th scope="col">What it costs</th></tr>
+					</thead>
+					<tbody>
+						<tr>
+							<th scope="row"><strong>Transfer</strong> to the new phone (Move Authenticator)</th>
+							<td><span class="num">2 days</span><br>of trade and Market restriction</td>
+						</tr>
+						<tr>
+							<th scope="row"><strong>Remove</strong> the authenticator, then add it again</th>
+							<td><span class="num warn">15 days</span><br>unable to trade or use the Market</td>
+						</tr>
+						<tr>
+							<th scope="row">Trades created in the first <strong>7 days</strong> after adding one</th>
+							<td><span class="num warn">up to 15 days</span><br>held on those trades specifically</td>
+						</tr>
+					</tbody>
+				</table>
+			</div>
 			<p class="hint">
 				Durations quoted from Valve's
 				<a href="${VALVE.guard}" rel="noopener">Steam Guard Mobile Authenticator FAQ</a>
@@ -380,16 +461,26 @@ ${tradeHoldDiagram()}
 			</p>
 
 			<h2>Related</h2>
-			<ul class="plain next">
-				<li><a href="/steam-revocation-code">Your recovery code, explained</a></li>
-				<li><a href="/lost-authenticator">Lost access entirely?</a></li>
-				<li><a href="/steam-guard-code-not-working">Codes being refused after a move?</a></li>
+			<ul class="link-cards">
+				<li>
+					<a href="/steam-revocation-code"><b>Your recovery code</b>
+					<span>The R-code that detaches an authenticator, and where to find it.</span></a>
+				</li>
+				<li>
+					<a href="/steam-guard-code-not-working"><b>Codes refused after the move</b>
+					<span>Almost always the clock on the new device. Fixed in about a minute.</span></a>
+				</li>
+				<li>
+					<a href="/lost-authenticator"><b>Lost access entirely</b>
+					<span>What to do when neither the old phone nor the number is available.</span></a>
+				</li>
 			</ul>
 		</article>`
 };
 
 export const revocationCode = {
 	slug: 'steam-revocation-code',
+	guide: true,
 	navTitle: 'Recovery code',
 	title: 'Steam recovery code: what the R-code does',
 	updated: '2026-08-14',
@@ -405,7 +496,7 @@ export const revocationCode = {
 		mainEntityOfPage: `${s.origin}/steam-revocation-code`
 	}),
 	body: (s) => `
-		<article>
+		<article class="guide">
 			<h1>Steam recovery code: what the R-code does</h1>
 			<p class="lede">
 				It looks like <code>R12345</code>. Valve calls it your <strong>recovery
@@ -414,6 +505,21 @@ export const revocationCode = {
 				authenticator in five minutes and spending days proving your identity to
 				Steam Support.
 			</p>
+
+			<div class="answer">
+				<span class="eyebrow">Short answer</span>
+				<p>
+					Your recovery code is a short <code>R</code>-code that lets you
+					<strong>detach the Steam Guard authenticator from your account</strong>
+					without access to the device it runs on. It is shown when you enrol, and it
+					can be retrieved again while the authenticator still works.
+				</p>
+				<p>
+					It is not a login code and not a second password. On its own it cannot open
+					your account — and without it, losing your authenticator means Steam Support
+					and a wait measured in days.
+				</p>
+			</div>
 
 			<h2>What does the recovery code actually do?</h2>
 			<p>
@@ -537,16 +643,26 @@ export const revocationCode = {
 			</p>
 
 			<h2>Related</h2>
-			<ul class="plain next">
-				<li><a href="/lost-authenticator">Lost access, in recovery order</a></li>
-				<li><a href="/move-steam-authenticator-new-phone">Moving to a new phone</a></li>
-				<li><a href="/what-is-a-mafile">What else a maFile holds</a></li>
+			<ul class="link-cards">
+				<li>
+					<a href="/lost-authenticator"><b>Lost access, in recovery order</b>
+					<span>Every route back in, cheapest and fastest first.</span></a>
+				</li>
+				<li>
+					<a href="/move-steam-authenticator-new-phone"><b>Moving to a new phone</b>
+					<span>The two-day path and the fifteen-day one, and how to stay on the first.</span></a>
+				</li>
+				<li>
+					<a href="/what-is-a-mafile"><b>What else a maFile holds</b>
+					<span>The other secrets stored beside the recovery code, field by field.</span></a>
+				</li>
 			</ul>
 		</article>`
 };
 
 export const encryptedMafile = {
 	slug: 'encrypted-mafile',
+	guide: true,
 	navTitle: 'Encrypted maFiles',
 	title: 'Encrypted maFiles: the password, and the manifest',
 	updated: '2026-08-14',
@@ -562,13 +678,28 @@ export const encryptedMafile = {
 		mainEntityOfPage: `${s.origin}/encrypted-mafile`
 	}),
 	body: (s) => `
-		<article>
+		<article class="guide">
 			<h1>Encrypted maFiles: the password, and the manifest</h1>
 			<p class="lede">
 				You have a <code>.maFile</code>, something is asking for a password, and
 				nothing you type works. Two facts untangle nearly every case: which password
 				it actually wants, and the second file it cannot work without.
 			</p>
+
+			<div class="answer">
+				<span class="eyebrow">Short answer</span>
+				<p>
+					An encrypted maFile wants <strong>the passphrase you set in SDA</strong> —
+					not your Steam password, and not your email password. It also needs the
+					<code>manifest.json</code> that was sitting beside it, because the salt and
+					initialisation vector live in that file rather than in the maFile.
+				</p>
+				<p>
+					That is why copying a single <code>.maFile</code> to a new machine leaves
+					you with something that cannot be opened even when the passphrase is
+					correct. <strong>Copy the whole <code>maFiles</code> folder.</strong>
+				</p>
+			</div>
 
 			<h2>Which password does an encrypted maFile want?</h2>
 			<p>
@@ -676,10 +807,19 @@ ${manifestDiagram()}
 			</ol>
 
 			<h2>Related</h2>
-			<ul class="plain next">
-				<li><a href="/what-is-a-mafile">What a maFile is, field by field</a></li>
-				<li><a href="/how-to-open-mafile">Opening one safely</a></li>
-				<li><a href="/import-from-sda">Importing maFiles — encrypted ones included</a></li>
+			<ul class="link-cards">
+				<li>
+					<a href="/how-to-open-mafile"><b>Opening one safely</b>
+					<span>What to look at it with, and what never to paste it into.</span></a>
+				</li>
+				<li>
+					<a href="/what-is-a-mafile"><b>A maFile, field by field</b>
+					<span>Which values are the account's second factor and which are metadata.</span></a>
+				</li>
+				<li>
+					<a href="/import-from-sda"><b>Importing from SDA</b>
+					<span>Bringing accounts across, encrypted files included.</span></a>
+				</li>
 			</ul>
 		</article>`
 };

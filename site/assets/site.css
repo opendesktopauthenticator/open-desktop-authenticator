@@ -1769,3 +1769,582 @@ article > .projects,
 article > .signals {
 	max-width: none;
 }
+
+/* ------------------------------------------------------------- guide kit -- */
+
+/*
+ * Furniture for the troubleshooting guides.
+ *
+ * ## The problem this solves
+ *
+ * The guides were correct and unreadable. Measured on
+ * /steam-guard-code-not-working: 1033 words across 27 top-level blocks, with a
+ * longest unbroken run of *thirteen* consecutive headings and paragraphs. A
+ * reader arriving mid-problem — their code was just refused, they are annoyed,
+ * they may be about to lose an inventory — met an undifferentiated grey column
+ * and had to read it linearly to find out whether it applied to them.
+ *
+ * Every number that reader actually wants was buried inside a sentence: the
+ * thirty-second window, the two-day transfer hold, the fifteen-day removal
+ * hold, the five-day password-reset restriction. Those are the page. They
+ * belonged in numerals large enough to see while scrolling past.
+ *
+ * ## The approach
+ *
+ * Nothing here is decoration bolted onto prose. Each component answers a
+ * question a worried reader asks, in the order they ask it:
+ *
+ *   .answer      — is this my problem, and what is the fix?   (first thing)
+ *   .jump        — which part of this page is mine?
+ *   .stat-strip  — what is this going to cost me?
+ *   .steps       — what do I do, in order?
+ *   .check       — which of these applies to me?
+ *   .pull        — the one line worth remembering if they skim
+ *   .link-cards  — that was not it, where next?
+ *
+ * The palette is unchanged. This adds rhythm and entry points, not new colour,
+ * because a security page that starts looking like a landing page stops being
+ * believed.
+ */
+
+/*
+ * Scroll position, as a hairline.
+ *
+ * Long troubleshooting pages give no sense of remaining depth, and "how much
+ * more of this is there" is exactly what makes somebody leave. Driven by
+ * scroll() so it costs no JavaScript — which matters here, because the content
+ * security policy carries no unsafe-inline and this project would rather add a
+ * component than an exception.
+ *
+ * Inside @supports so browsers without scroll-driven animation get no bar at
+ * all, rather than one that animates itself once on a time-based default.
+ */
+.progress {
+	display: none;
+}
+@supports (animation-timeline: scroll()) {
+	.progress {
+		display: block;
+		position: fixed;
+		inset: 0 0 auto;
+		height: 2px;
+		z-index: 30;
+		transform-origin: 0 50%;
+		background: linear-gradient(90deg, var(--teal), var(--mint), var(--mint-bright));
+		scale: 0 1;
+		animation: progress-grow linear both;
+		animation-timeline: scroll(root block);
+	}
+	@keyframes progress-grow {
+		to {
+			scale: 1 1;
+		}
+	}
+}
+
+/* The byline row: when it was checked, how long it takes, what it rests on. */
+.guide-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 14px;
+	margin: 0 0 26px;
+	font-family: var(--font-small);
+	font-size: 0.82rem;
+	color: var(--faint);
+}
+.guide-meta > * {
+	display: inline-flex;
+	align-items: center;
+	gap: 7px;
+}
+.guide-meta .dot {
+	width: 3px;
+	height: 3px;
+	border-radius: 50%;
+	background: var(--line-strong);
+}
+/* A claim about sourcing, so it is written as one rather than styled as a badge. */
+.guide-meta .sourced {
+	color: var(--mint-pale);
+}
+
+/*
+ * The answer, before the explanation.
+ *
+ * Somebody who reads one box and leaves should still leave fixed. This is also
+ * the block a search engine lifts for a featured snippet, which is why the
+ * first sentence inside it is written to stand alone with no antecedents.
+ */
+.answer {
+	position: relative;
+	margin: 30px 0 34px;
+	max-width: 72ch;
+	padding: 24px 26px 22px 30px;
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius);
+	background: linear-gradient(150deg, rgba(66, 242, 154, 0.07), transparent 58%), var(--panel-hi);
+	box-shadow: 0 22px 50px -34px rgba(0, 0, 0, 1);
+	overflow: hidden;
+}
+/* A drawn bar rather than a border, so it can carry a gradient. */
+.answer::before {
+	content: '';
+	position: absolute;
+	inset: 0 auto 0 0;
+	width: 3px;
+	background: linear-gradient(180deg, var(--mint-bright), var(--teal));
+}
+.answer > .eyebrow {
+	display: block;
+	margin-bottom: 9px;
+	font-family: var(--font-small);
+	font-size: 0.71rem;
+	font-weight: 700;
+	letter-spacing: 0.13em;
+	text-transform: uppercase;
+	color: var(--mint);
+}
+.answer p {
+	margin: 0 0 12px;
+	font-size: 1.09rem;
+	line-height: 1.6;
+	color: var(--text);
+}
+.answer p:last-child {
+	margin-bottom: 0;
+}
+.answer strong {
+	color: var(--mint-pale);
+}
+
+/*
+ * Jump links.
+ *
+ * A contents list on a thousand-word page is not navigation furniture, it is a
+ * promise that the page is organised — and it lets somebody whose problem is
+ * the fourth heading skip the three that are not theirs instead of bouncing.
+ */
+.jump {
+	margin: 0 0 34px;
+	padding: 16px 18px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+}
+.jump > p {
+	margin: 0 0 11px;
+	font-family: var(--font-small);
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+.jump ul {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+.jump li {
+	margin: 0;
+}
+.jump a {
+	display: block;
+	padding: 7px 13px;
+	border: 1px solid var(--line-strong);
+	border-radius: 999px;
+	font-size: 0.88rem;
+	color: var(--body);
+	text-decoration: none;
+	transition:
+		border-color 200ms var(--ease),
+		color 200ms var(--ease),
+		background-color 200ms var(--ease);
+}
+.jump a:hover,
+.jump a:focus-visible {
+	border-color: rgba(66, 242, 154, 0.5);
+	background: rgba(66, 242, 154, 0.08);
+	color: var(--mint-pale);
+}
+
+/*
+ * The numbers, at a size you can read while scrolling.
+ *
+ * These pages are about costs measured in days, and a reader choosing between
+ * two routes wants the difference between 2 and 15 without parsing a clause.
+ * Set in the numeric face at display size, because that contrast — one large
+ * figure against a small uppercase label — is most of what makes a page look
+ * considered rather than typed.
+ */
+.stat-strip {
+	display: grid;
+	gap: 14px;
+	grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+	margin: 30px 0;
+	padding: 0;
+	list-style: none;
+}
+.stat-strip > li {
+	margin: 0;
+	padding: 20px 20px 18px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.stat-strip b {
+	display: block;
+	font-family: var(--font-numeric);
+	font-size: clamp(1.9rem, 1.2rem + 2vw, 2.5rem);
+	font-weight: 600;
+	line-height: 1.02;
+	letter-spacing: -0.02em;
+	color: var(--mint);
+}
+.stat-strip b small {
+	font-size: 0.42em;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--mint-pale);
+}
+.stat-strip span {
+	display: block;
+	margin-top: 8px;
+	font-family: var(--font-small);
+	font-size: 0.83rem;
+	line-height: 1.45;
+	color: var(--muted);
+}
+/* The expensive one, so two very different costs are not weighted the same. */
+.stat-strip > li.cost {
+	border-color: rgba(245, 194, 107, 0.28);
+}
+.stat-strip > li.cost b {
+	color: var(--warn);
+}
+
+/*
+ * Instructions as cards rather than list items.
+ *
+ * An ordered list of four sentences reads as a paragraph with bullets. Giving
+ * each step its own surface and its own numeral makes it a place you can be —
+ * which matters when somebody is following along with one hand on the keyboard
+ * and keeps losing their line.
+ */
+.steps {
+	counter-reset: step;
+	margin: 28px 0;
+	padding: 0;
+	max-width: 72ch;
+	list-style: none;
+}
+.steps > li {
+	position: relative;
+	margin: 0 0 12px;
+	padding: 18px 20px 17px 62px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+	transition:
+		border-color 240ms var(--ease),
+		transform 240ms var(--ease);
+}
+.steps > li:hover {
+	border-color: rgba(66, 242, 154, 0.26);
+	transform: translateX(2px);
+}
+.steps > li::before {
+	counter-increment: step;
+	content: counter(step);
+	position: absolute;
+	left: 18px;
+	top: 16px;
+	width: 30px;
+	height: 30px;
+	display: grid;
+	place-items: center;
+	border-radius: 50%;
+	border: 1px solid rgba(66, 242, 154, 0.4);
+	background: rgba(66, 242, 154, 0.1);
+	font-family: var(--font-numeric);
+	font-size: 0.95rem;
+	color: var(--mint);
+}
+.steps > li > strong {
+	display: block;
+	margin-bottom: 4px;
+	color: var(--text);
+	font-weight: 650;
+}
+.steps > li > p {
+	margin: 0;
+}
+
+/*
+ * Yes-and-no lists.
+ *
+ * Several of these pages turn on a distinction the prose kept having to
+ * restate — what a stolen secret does and does not get an attacker, which
+ * routes are Valve's and which are somebody else's. Two marks carry it faster.
+ * The mark is paired with wording rather than replacing it, so the meaning
+ * never lives in colour alone.
+ */
+.check {
+	margin: 24px 0;
+	padding: 0;
+	max-width: 72ch;
+	list-style: none;
+}
+.check > li {
+	position: relative;
+	margin: 0 0 11px;
+	padding-left: 34px;
+	line-height: 1.6;
+}
+.check > li::before {
+	position: absolute;
+	left: 0;
+	top: 2px;
+	width: 21px;
+	height: 21px;
+	display: grid;
+	place-items: center;
+	border-radius: 50%;
+	font-size: 0.76rem;
+	font-weight: 700;
+}
+.check > li.yes::before {
+	content: '\2713';
+	border: 1px solid rgba(66, 242, 154, 0.45);
+	background: rgba(66, 242, 154, 0.1);
+	color: var(--mint);
+}
+.check > li.no::before {
+	content: '\2715';
+	border: 1px solid rgba(255, 138, 138, 0.4);
+	background: rgba(255, 138, 138, 0.09);
+	color: var(--danger);
+}
+
+/*
+ * The sentence worth keeping.
+ *
+ * One per page at most. It is the line somebody repeats to the friend about to
+ * make the same mistake, so it is set to be readable from a scroll rather than
+ * from a sentence.
+ */
+.pull {
+	margin: 34px 0;
+	padding: 4px 0 4px 26px;
+	max-width: 66ch;
+	border-left: 2px solid rgba(66, 242, 154, 0.5);
+	font-family: var(--font-display);
+	font-size: clamp(1.17rem, 1rem + 0.8vw, 1.42rem);
+	font-weight: 620;
+	line-height: 1.38;
+	letter-spacing: -0.014em;
+	color: var(--text);
+}
+.pull em {
+	font-style: normal;
+	color: var(--mint-pale);
+}
+
+/*
+ * Where to go when this page was not it.
+ *
+ * The old ending was a bulleted list of bare links, which reads as a footer and
+ * gets skipped. As cards with a line of description each, the next step becomes
+ * a choice rather than a list — and a reader who leaves for the right page has
+ * still been helped.
+ */
+.link-cards {
+	display: grid;
+	gap: 14px;
+	grid-template-columns: repeat(auto-fit, minmax(258px, 1fr));
+	margin: 26px 0 0;
+	padding: 0;
+	list-style: none;
+}
+.link-cards > li {
+	margin: 0;
+}
+.link-cards a {
+	display: block;
+	height: 100%;
+	padding: 19px 20px 17px;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+	text-decoration: none;
+	transition:
+		border-color 250ms var(--ease),
+		transform 250ms var(--ease),
+		box-shadow 250ms var(--ease);
+}
+.link-cards a:hover,
+.link-cards a:focus-visible {
+	border-color: rgba(66, 242, 154, 0.3);
+	transform: translateY(-2px);
+	box-shadow: 0 20px 40px -26px rgba(0, 0, 0, 1);
+}
+.link-cards b {
+	display: block;
+	margin-bottom: 5px;
+	color: var(--mint-pale);
+	font-weight: 650;
+}
+/* A margin rather than a space inside `content`, which collapses in flow. */
+.link-cards b::after {
+	content: '\2192';
+	display: inline-block;
+	margin-left: 7px;
+	transition: transform 250ms var(--ease);
+}
+.link-cards a:hover b::after {
+	transform: translateX(3px);
+}
+.link-cards span {
+	display: block;
+	font-size: 0.9rem;
+	line-height: 1.5;
+	color: var(--muted);
+}
+
+/*
+ * Comparison tables.
+ *
+ * Wide content scrolls inside its own container rather than widening the
+ * document, which on a phone is the difference between a readable table and a
+ * page that slides sideways under the thumb.
+ */
+.tbl {
+	margin: 28px 0;
+	overflow-x: auto;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	background: var(--panel);
+}
+.tbl table {
+	width: 100%;
+	min-width: 480px;
+	border-collapse: collapse;
+	font-size: 0.94rem;
+}
+.tbl th,
+.tbl td {
+	padding: 13px 16px;
+	text-align: left;
+	vertical-align: top;
+	border-bottom: 1px solid var(--line);
+}
+.tbl thead th {
+	font-family: var(--font-small);
+	font-size: 0.76rem;
+	font-weight: 700;
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+	color: var(--mint-pale);
+	background: rgba(255, 255, 255, 0.025);
+	border-bottom-color: var(--line-strong);
+}
+.tbl tbody tr:last-child th,
+.tbl tbody tr:last-child td {
+	border-bottom: 0;
+}
+.tbl tbody th {
+	font-weight: 640;
+	color: var(--text);
+}
+.tbl .num {
+	font-family: var(--font-numeric);
+	font-size: 1.05rem;
+	color: var(--mint);
+	white-space: nowrap;
+}
+.tbl .num.warn {
+	color: var(--warn);
+}
+
+/*
+ * Numbered sections.
+ *
+ * A small figure above each heading gives the page a spine you can feel while
+ * scrolling, so you always know roughly where you are in it. Direct children
+ * only, so headings inside callouts and figures are left alone.
+ */
+article.guide {
+	counter-reset: sec;
+}
+article.guide > h2 {
+	margin-top: 58px;
+}
+article.guide > h2::before {
+	counter-increment: sec;
+	content: counter(sec, decimal-leading-zero);
+	display: block;
+	margin-bottom: 6px;
+	font-family: var(--font-numeric);
+	font-size: 0.78rem;
+	font-weight: 600;
+	letter-spacing: 0.16em;
+	color: rgba(66, 242, 154, 0.62);
+}
+
+/*
+ * A heading you can link to.
+ *
+ * Every heading gets an id at build time; this makes it addressable by hand for
+ * somebody answering a question with "the bit about clock drift". Hidden until
+ * the heading is hovered or the link itself is focused, so it never competes
+ * with the heading text.
+ */
+.anchor {
+	margin-left: 10px;
+	font-size: 0.72em;
+	color: var(--faint);
+	text-decoration: none;
+	opacity: 0;
+	transition: opacity 180ms var(--ease);
+}
+h2:hover > .anchor,
+h3:hover > .anchor,
+.anchor:focus-visible {
+	opacity: 1;
+}
+.anchor:hover {
+	color: var(--mint);
+}
+/* Headings are scroll targets, so they must not land under the masthead. */
+article h2[id],
+article h3[id] {
+	scroll-margin-top: 88px;
+}
+
+/* New wide components opt out of the reading measure; text ones keep it. */
+article > .stat-strip,
+article > .link-cards,
+article > .tbl,
+article > .jump {
+	max-width: none;
+}
+
+@media (max-width: 720px) {
+	.answer {
+		padding: 20px 18px 18px 22px;
+	}
+	.steps > li {
+		padding: 16px 16px 15px 56px;
+	}
+	.pull {
+		padding-left: 18px;
+	}
+	article.guide > h2 {
+		margin-top: 44px;
+	}
+}
