@@ -248,7 +248,13 @@ function head(page) {
 		rather than the best one — so the SVG, which every modern browser prefers,
 		comes last among the icon entries.
 	-->
-	<link rel="icon" href="/favicon.ico" sizes="32x32">
+	<!--
+		The .ico holds 16, 32 and 48, and this used to declare only 32x32.
+		Google asks for a square that is a multiple of 48 and reads the declared
+		sizes, so the one qualifying image in the file was being hidden behind an
+		attribute that understated it. Declaring all three is simply accurate.
+	-->
+	<link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
 	<link rel="icon" type="image/png" sizes="16x16" href="${asset('favicon-16.png')}">
 	<link rel="icon" type="image/png" sizes="32x32" href="${asset('favicon-32.png')}">
 	<link rel="icon" type="image/png" sizes="48x48" href="${asset('favicon-48.png')}">
