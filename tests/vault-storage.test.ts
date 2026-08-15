@@ -74,13 +74,29 @@ describe('atomicity', () => {
 		expect(readBackupEnvelope(file)).toEqual(first);
 	});
 
+	/*
+	 * Twenty-five writes, and the writes are the subject.
+	 *
+	 * This used to seal inside the loop, so most of the five-second budget went on
+	 * twenty-five sequential scrypt derivations rather than on the thing being
+	 * tested. It passed here and timed out on Windows CI, where the same work is
+	 * several times slower — a flake that says nothing about atomicity.
+	 *
+	 * Sealing up front and in parallel puts the derivations on the threadpool and
+	 * leaves the loop doing only what the test is named after. The explicit
+	 * timeout is there because the cost is real work on a real KDF, not because
+	 * the writes are slow.
+	 */
 	it('survives many sequential writes without drift', async () => {
-		for (let i = 0; i < 25; i++) {
-			writeEnvelope(file, await envelope(`{"seq":${i}}`));
+		const envelopes = await Promise.all(
+			Array.from({ length: 25 }, (_, i) => envelope(`{"seq":${i}}`))
+		);
+		for (const env of envelopes) {
+			writeEnvelope(file, env);
 		}
 		expect(() => readEnvelope(file)).not.toThrow();
 		expect(existsSync(vaultPaths(file).temp)).toBe(false);
-	});
+	}, 30_000);
 });
 
 describe('failure leaves the previous vault intact', () => {
