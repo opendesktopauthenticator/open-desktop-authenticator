@@ -1517,7 +1517,8 @@ async function handle(request, response, url) {
 		 * are covered by the cookie the page request already set, and an old direct
 		 * link to one still works on its own key.
 		 */
-		if (ticket && fromQuery && request.method === 'GET' && !onTicket[3]) {
+		const reading = request.method === 'GET' || request.method === 'HEAD';
+		if (ticket && fromQuery && reading && !onTicket[3]) {
 			return send(response, 303, '', {
 				location: `/support/ticket/${ticket.reference}`,
 				'set-cookie': ticketCookie(ticket.reference, ticket.access_key),
