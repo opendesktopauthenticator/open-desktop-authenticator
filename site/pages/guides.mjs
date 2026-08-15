@@ -569,9 +569,10 @@ export const support = {
 			<h2>What happens to a report</h2>
 			<ol>
 				<li>
-					<strong>You get a reference</strong> in the form <code>ODA-7K2M-B9QW</code>.
-					It is the only way to find the report again, so keep it — there is no account
-					to recover it from.
+					<strong>You get a link</strong>, holding a reference in the form
+					<code>ODA-7K2M-B9QW</code> and the key that opens it. <strong>Keep the whole
+					link</strong> — the reference on its own will not open the report, and there
+					is no account to recover it from.
 				</li>
 				<li>
 					<strong>It is read.</strong> Reports are triaged rather than queued: anything
