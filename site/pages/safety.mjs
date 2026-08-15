@@ -361,7 +361,7 @@ export const security = {
 		publisher: { '@type': 'Organization', name: s.publisher },
 		mainEntityOfPage: `${s.origin}/security`
 	}),
-	body: () => `
+	body: (s) => `
 		<article>
 			<h1>Security model</h1>
 			<p class="lede">
@@ -381,12 +381,25 @@ export const security = {
 				<dd>
 					scrypt, deliberately tuned to take a noticeable moment on ordinary hardware.
 					That cost is the point: it is paid once when you unlock, and paid again by
-					anyone trying to guess your passphrase, several billion times.
+					anyone trying to guess your passphrase, several billion times. The current
+					defaults are
+					<strong><code>N=131072</code>, <code>r=8</code>, <code>p=1</code></strong>,
+					which is <strong>128&nbsp;MiB</strong> of scrypt memory per attempt, with a
+					32-byte random salt and a 256-bit derived key. Every vault records the
+					parameters it was written with, so an old file still opens after the
+					defaults are raised.
+					<span class="hint">
+						Stated exactly rather than described, because "tuned to take a moment" is
+						not something anybody can check. These values are in
+						<a href="${s.repo}/blob/main/src/shared/vault-format.ts" rel="noopener">src/shared/vault-format.ts</a>
+						and are the numbers the application actually uses.
+					</span>
 				</dd>
 				<dt>Encryption</dt>
 				<dd>
-					AES-256-GCM. The authentication tag covers the vault's version, the key
-					derivation parameters and the nonce as additional data, so a file cannot be
+					AES-256-GCM, with a 12-byte (96-bit) nonce generated fresh for every write.
+					The authentication tag covers the vault's version, the key derivation
+					parameters and the nonce as additional data, so a file cannot be
 					altered — including downgrading it to weaker parameters — without the
 					decryption failing outright rather than silently producing something wrong.
 				</dd>

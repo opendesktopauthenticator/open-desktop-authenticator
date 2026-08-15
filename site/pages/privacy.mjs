@@ -30,9 +30,12 @@ export const privacy = {
 		<article>
 			<h1>What this site stores</h1>
 			<p class="lede">
-				Short version: the application holds your secrets on your own machine and sends
-				them nowhere. This website holds nothing about you unless you file a report, and
-				what a report holds is listed below with how long it lives.
+				Short version: <strong>the application</strong> holds your secrets on your own
+				machine, sends them nowhere, and contains no analytics or telemetry of any
+				kind. <strong>This website</strong> is a separate thing and does collect a
+				little — server logs kept for 14 days, Cloudflare in front of it, and Google
+				Analytics. All of that is listed below, along with what a report holds and how
+				long it lives.
 			</p>
 
 			<div class="callout">

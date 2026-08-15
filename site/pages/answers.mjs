@@ -39,7 +39,12 @@ export const mafile = {
 			<p class="lede">
 				A maFile is a small JSON file holding one Steam account's authenticator. Not a
 				copy of it, not a reference to it — the authenticator itself. Anyone with the
-				file can generate that account's Steam Guard codes and approve its trades.
+				<code>shared_secret</code> from it can generate that account's Steam Guard
+				codes; with the <code>identity_secret</code> <em>and</em> a valid Steam
+				session they can also
+				<a href="/approve-steam-confirmations-desktop">approve confirmations</a>. A
+				maFile can carry session material too, which is why losing one is treated here
+				as losing the account.
 			</p>
 
 			<h2>What is inside one</h2>
@@ -57,8 +62,12 @@ export const mafile = {
 				</dd>
 				<dt><code>revocation_code</code></dt>
 				<dd>
-					Short, in the form <code>R12345</code>. The only way to detach the
-					authenticator yourself. <a href="/lost-authenticator">Losing it is a
+					Short, in the form <code>R12345</code>. One of the ways to detach the
+					authenticator yourself — the one that still works when the device is gone
+					and no phone number is linked.
+					<a href="https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31" rel="noopener">Valve also documents</a> removing it from
+					inside the Steam Mobile App, transferring it to a new device with an SMS
+					code if you no longer have the old one, and printed backup codes. <a href="/lost-authenticator">Losing it is a
 					different kind of problem</a>.
 				</dd>
 				<dt><code>Session</code></dt>
@@ -189,7 +198,18 @@ export const lostAuthenticator = {
 				Steam accepts before you rely on it.
 			</p>
 
-			<h2>2. Do you have the revocation code?</h2>
+			<h2>2. Is a phone number still linked to the account?</h2>
+			<p>
+				If it is, you may not need the recovery code at all.
+				<a href="https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31" rel="noopener">Valve's own instructions</a> say that when you
+				no longer have access to your authenticator, you can choose
+				<em>"I no longer have access to my authenticator"</em> at the sign-in
+				confirmation and transfer it to a new device using an SMS code sent to that
+				number. Printed backup codes, if you made a set, work here too. Both are
+				self-service and neither needs a support ticket.
+			</p>
+
+			<h2>3. Do you have the revocation code?</h2>
 			<p>
 				It looks like <code>R12345</code> and was shown when the authenticator was first
 				added. With it, you can remove the authenticator yourself from Steam's help
@@ -201,7 +221,7 @@ export const lostAuthenticator = {
 				otherwise is a scam.
 			</p>
 
-			<h2>3. No revocation code</h2>
+			<h2>4. No recovery code and no phone number</h2>
 			<p>
 				Then it is Steam Support, through a help request to remove the authenticator.
 				Expect to prove ownership: purchase history, payment details, the original email
@@ -272,9 +292,11 @@ export const alternatives = {
 
 			<h2>Steam Mobile — the default, and the right answer for most people</h2>
 			<p>
-				Valve's own app. It is maintained by the people who run the service, it cannot
-				be counterfeited on a search results page, and losing your phone is a recoverable
-				problem rather than a catastrophe.
+				Valve's own app. It is maintained by the people who run the service, it comes
+				from Apple's or Google's store rather than a search result — so it is far
+				harder to substitute a fake, though phishing pages still imitate Steam's
+				branding — and losing your phone is a recoverable problem rather than a
+				catastrophe.
 			</p>
 			<p>
 				<strong>Choose it if:</strong> you are not confirming listings in bulk, you are

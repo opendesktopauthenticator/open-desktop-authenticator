@@ -38,8 +38,9 @@ export const download = {
 			<ol class="signs">
 				<li>
 					<strong>Steam's official mobile authenticator.</strong> Maintained by the
-					people who run the service, impossible to counterfeit on a search results
-					page, and a lost phone is recoverable rather than fatal. If you are here
+					people who run the service, distributed through Apple's and Google's own
+					stores rather than a search result, and a lost phone is recoverable rather
+					than fatal. If you are here
 					because you searched for a desktop authenticator, this is still probably what
 					you want.
 				</li>
