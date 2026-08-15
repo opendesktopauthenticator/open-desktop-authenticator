@@ -114,7 +114,7 @@ async function view(reference: string) {
 	await service.handle(get(), response, at(linkTo(reference)));
 	// The link spends its key and answers 303; follow it as a browser would.
 	if (out.status !== 303) return out;
-	const cookie = String(out.headers['set-cookie'] ?? '').split(';')[0];
+	const cookie = String(out.headers['set-cookie'] ?? '').split(';')[0] ?? '';
 	const next = capture();
 	await service.handle(get({ cookie }), next.response, at(String(out.headers.location)));
 	return next.out;

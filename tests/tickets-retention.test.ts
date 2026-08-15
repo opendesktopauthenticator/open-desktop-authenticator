@@ -292,7 +292,7 @@ describe('the reference names a report; the key opens it', () => {
 		expect(String(out.headers['set-cookie'] ?? '')).toContain('HttpOnly');
 		expect(String(out.headers.location)).not.toContain('k=');
 
-		const cookie = String(out.headers['set-cookie'] ?? '').split(';')[0];
+		const cookie = String(out.headers['set-cookie'] ?? '').split(';')[0] ?? '';
 		const next = capture();
 		await service.handle(
 			{ method: 'GET', headers: { cookie }, socket: { remoteAddress: '10.0.0.7' } },

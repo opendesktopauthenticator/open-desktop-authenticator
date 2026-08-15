@@ -50,7 +50,7 @@ function get(path: string) {
  */
 async function follow(first: { status: number; body: string; headers: Record<string, string> }) {
 	if (first.status !== 303) return first;
-	const cookie = String(first.headers['set-cookie'] ?? '').split(';')[0];
+	const cookie = String(first.headers['set-cookie'] ?? '').split(';')[0] ?? '';
 	const { out, response } = capture();
 	await service.handle(
 		{ method: 'GET', headers: { cookie }, socket: { remoteAddress: '10.0.0.9' } },
