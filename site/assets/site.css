@@ -2354,3 +2354,76 @@ article > .jump {
 		margin-top: 44px;
 	}
 }
+
+/* ------------------------------------------------------- stragglers -- */
+
+/*
+ * Three classes that were written into pages and never given a rule.
+ *
+ * Found by diffing the class names in the built HTML against the selectors in
+ * this file. Nothing failed and nothing looked obviously wrong, which is why
+ * they survived: an unstyled element still renders, it just renders as though
+ * the stylesheet forgot about it. The retention table on /privacy had no
+ * borders and no padding, the pairs lists on /verify had browser-default
+ * indentation, and text marked `.muted` on /donate was drawn at full strength —
+ * the one that actually changes meaning, since it is the emphasis telling a
+ * reader which half of a sentence is the aside.
+ */
+
+/* Secondary text. The whole job of the class is to recede. */
+.muted {
+	color: var(--muted);
+}
+
+/* Term-and-value pairs, matching the definition lists elsewhere. */
+.pairs {
+	margin: 22px 0;
+}
+.pairs dt {
+	margin-top: 18px;
+	font-weight: 650;
+	color: var(--mint-pale);
+}
+.pairs dd {
+	margin: 5px 0 0;
+	padding-left: 16px;
+	border-left: 2px solid var(--line);
+}
+
+/* The data-retention table, given the same treatment as every other table. */
+.retention {
+	width: 100%;
+	margin: 26px 0;
+	border: 1px solid var(--line);
+	border-radius: var(--radius);
+	border-collapse: separate;
+	border-spacing: 0;
+	background: var(--panel);
+	overflow: hidden;
+	font-size: 0.94rem;
+}
+.retention th,
+.retention td {
+	padding: 13px 16px;
+	text-align: left;
+	vertical-align: top;
+	border-bottom: 1px solid var(--line);
+}
+.retention thead th {
+	font-family: var(--font-small);
+	font-size: 0.76rem;
+	font-weight: 700;
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+	color: var(--mint-pale);
+	background: rgba(255, 255, 255, 0.025);
+	border-bottom-color: var(--line-strong);
+}
+.retention tbody tr:last-child th,
+.retention tbody tr:last-child td {
+	border-bottom: 0;
+}
+.retention tbody th {
+	font-weight: 640;
+	color: var(--text);
+}
