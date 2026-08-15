@@ -458,7 +458,8 @@ ${tradeHoldDiagram()}
 					Moving to or from an unofficial desktop authenticator may instead require
 					removing the authenticator and enrolling again, which is the fifteen-day
 					path. Assume the longer one unless you have tested the specific route.
-			</p>
+				</p>
+			</div>
 
 			<h2>Related</h2>
 			<ul class="link-cards">

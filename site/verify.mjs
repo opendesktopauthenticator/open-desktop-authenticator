@@ -230,6 +230,50 @@ for (const [slug, html] of built) {
 const ORIGINAL_SDA = 'https://github.com/Jessecar96/SteamDesktopAuthenticator';
 const BRAND_URL = 'https://masterspanel.com';
 
+/*
+ * Container tags must balance.
+ *
+ * A callout on /move-steam-authenticator-new-phone lost its closing `</div>`
+ * and shipped. Nothing caught it: the build is string concatenation so it had
+ * no opinion, every test passed, and the page still rendered — it just rendered
+ * the entire Related section *inside* an amber warning box, because that is
+ * what a browser does with an unclosed container. It looked deliberate enough
+ * that several careful reads went past it.
+ *
+ * Counting is crude and that is the point: it needs no parser, it cannot be
+ * argued with, and the failure it catches is exactly the one a human eye slides
+ * over. Only containers whose imbalance changes the visual structure of a page
+ * are counted; void and self-closing elements are not.
+ */
+const BALANCED = ['article', 'div', 'ul', 'ol', 'li', 'dl', 'figure', 'nav', 'table', 'p'];
+
+for (const [slug, html] of built) {
+	/*
+	 * Literal regular expressions, tallied once.
+	 *
+	 * The first version built these from a template literal, where `\s` is not a
+	 * valid escape and quietly collapses to a bare `s` — so the character class
+	 * became `[s>]` and almost no opening tag matched. It reported every page as
+	 * broken, which is at least a loud failure; a check that silently matched
+	 * nothing would have been worse than no check at all.
+	 */
+	const opened = new Map();
+	const closed = new Map();
+	for (const [, tag] of html.matchAll(/<([a-z]+)[\s>]/g)) {
+		opened.set(tag, (opened.get(tag) ?? 0) + 1);
+	}
+	for (const [, tag] of html.matchAll(/<\/([a-z]+)>/g)) {
+		closed.set(tag, (closed.get(tag) ?? 0) + 1);
+	}
+	for (const tag of BALANCED) {
+		const open = opened.get(tag) ?? 0;
+		const close = closed.get(tag) ?? 0;
+		if (open !== close) {
+			fail(slug, `<${tag}> does not balance: ${open} opened, ${close} closed`);
+		}
+	}
+}
+
 for (const [slug, html] of built) {
 	if (!html.includes(ORIGINAL_SDA)) {
 		fail(slug, 'does not link the original SDA repository anywhere on the page');
