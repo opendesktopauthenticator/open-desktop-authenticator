@@ -64,7 +64,11 @@ function post(fields: Record<string, string>, headers: Record<string, string> = 
 	return request;
 }
 
-const get = () => ({ method: 'GET', headers: {}, socket: { remoteAddress: someAddress() } });
+const get = (headers: Record<string, string> = {}) => ({
+	method: 'GET',
+	headers,
+	socket: { remoteAddress: someAddress() }
+});
 
 async function fileReport(over: Record<string, string> = {}) {
 	const { out, response } = capture();
@@ -108,7 +112,12 @@ const linkTo = (reference: string, suffix = '') =>
 async function view(reference: string) {
 	const { out, response } = capture();
 	await service.handle(get(), response, at(linkTo(reference)));
-	return out;
+	// The link spends its key and answers 303; follow it as a browser would.
+	if (out.status !== 303) return out;
+	const cookie = String(out.headers['set-cookie'] ?? '').split(';')[0];
+	const next = capture();
+	await service.handle(get({ cookie }), next.response, at(String(out.headers.location)));
+	return next.out;
 }
 
 async function reply(reference: string, body: string, headers = {}) {
@@ -223,11 +232,12 @@ describe('routing', () => {
 		const { out, response } = capture();
 		await service.handle(get(), response, at(linkTo(reference, '/reply')));
 		expect(out.status).toBe(303);
-		// The key travels with the redirect. Sending somebody to the bare reference
-		// would land them on a 404, since the reference alone no longer opens a
-		// report — a redirect that strips the credential is just a broken link.
-		expect(out.headers.location).toBe(linkTo(reference));
-		expect(out.headers.location).toContain('?k=');
+		// The redirect no longer carries the key. It does not need to: the same
+		// request that spent the key was answered with the cookie that replaces it,
+		// so the reader arrives authenticated at a URL with no secret in it.
+		expect(out.headers.location).toBe(`/support/ticket/${reference}`);
+		expect(out.headers.location).not.toContain('k=');
+		expect(String(out.headers['set-cookie'] ?? '')).toContain('HttpOnly');
 		expect(out.body).not.toMatch(/<article/);
 	});
 

@@ -44,10 +44,11 @@ const at = (p: string) => new URL(`https://opendesktopauthenticator.com${p}`);
 const ORIGIN = { origin: 'https://opendesktopauthenticator.com' };
 
 function capture() {
-	const out = { status: 0, body: '' };
+	const out = { status: 0, body: '', headers: {} as Record<string, string> };
 	const response = {
 		headersSent: false,
-		writeHead(status: number) {
+		writeHead(status: number, headers?: Record<string, string>) {
+			out.headers = headers ?? {};
 			out.status = status;
 			return this;
 		},
@@ -285,8 +286,21 @@ describe('the reference names a report; the key opens it', () => {
 		const reference = await report();
 		const { out, response } = capture();
 		await service.handle(bare('GET'), response, at(linkTo(reference)));
-		expect(out.status).toBe(200);
-		expect(out.body).toContain(reference);
+		// The key in the link is now exchanged for a cookie, so the first answer is
+		// a redirect. That is the fix working — assert it, then follow it.
+		expect(out.status).toBe(303);
+		expect(String(out.headers['set-cookie'] ?? '')).toContain('HttpOnly');
+		expect(String(out.headers.location)).not.toContain('k=');
+
+		const cookie = String(out.headers['set-cookie'] ?? '').split(';')[0];
+		const next = capture();
+		await service.handle(
+			{ method: 'GET', headers: { cookie }, socket: { remoteAddress: '10.0.0.7' } },
+			next.response,
+			at(String(out.headers.location))
+		);
+		expect(next.out.status).toBe(200);
+		expect(next.out.body).toContain(reference);
 	});
 
 	it('issues a key with enough room in it to be a credential', async () => {

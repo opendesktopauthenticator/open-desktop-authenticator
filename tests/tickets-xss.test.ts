@@ -40,6 +40,26 @@ function get(path: string) {
 	return { request, url: new URL(`https://opendesktopauthenticator.com${path}`) };
 }
 
+/**
+ * Open a report the way a browser does.
+ *
+ * The link spends its key on the first request and comes back as a 303 with a
+ * cookie; the browser then fetches the same page again with the secret no
+ * longer in the URL. The tests follow that too, so what they assert against is
+ * the page a real reader ends up on rather than an intermediate redirect.
+ */
+async function follow(first: { status: number; body: string; headers: Record<string, string> }) {
+	if (first.status !== 303) return first;
+	const cookie = String(first.headers['set-cookie'] ?? '').split(';')[0];
+	const { out, response } = capture();
+	await service.handle(
+		{ method: 'GET', headers: { cookie }, socket: { remoteAddress: '10.0.0.9' } },
+		response,
+		new URL(`https://opendesktopauthenticator.com${first.headers.location}`)
+	);
+	return out;
+}
+
 /** Collects what the handler would actually send to a browser. */
 function capture() {
 	const out = { status: 0, body: '', headers: {} as Record<string, string> };
@@ -94,9 +114,10 @@ describe('stored cross-site scripting', () => {
 		const view = get(`/support/ticket/${reference}?k=${encodeURIComponent(key ?? '')}`);
 		const second = capture();
 		await service.handle(view.request, second.response, view.url);
-		expect(second.out.status).toBe(200);
+		const opened = await follow(second.out);
+		expect(opened.status).toBe(200);
 
-		const html = second.out.body;
+		const html = opened.body;
 		// The payload must be present as text — it should not be silently dropped,
 		// because the maintainer needs to see what was reported.
 		expect(html).toContain('Payload test');
@@ -151,10 +172,11 @@ describe('what the public ticket page discloses', () => {
 		const view = get(`/support/ticket/${reference}?k=${encodeURIComponent(key ?? '')}`);
 		const second = capture();
 		await service.handle(view.request, second.response, view.url);
+		const opened = await follow(second.out);
 
 		// Anyone holding the link can read the report. The address must not be
 		// part of that — it is for us to reply with, not for the page to publish.
-		expect(second.out.body).not.toContain('reporter@example.com');
+		expect(opened.body).not.toContain('reporter@example.com');
 	});
 
 	it('does not leak whether a reference exists through the status code alone', async () => {

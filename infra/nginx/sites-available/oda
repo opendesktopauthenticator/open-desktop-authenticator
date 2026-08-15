@@ -229,6 +229,9 @@ server {
 
 	location ~ ^/(support/submit|support/ticket/|admin) {
 		include snippets/security-headers.conf;
+		# These URLs can carry a report's access key. Log the path, never the
+		# query string or the referer. See log_format sensitive in 00-hardening.
+		access_log /var/log/nginx/access.log sensitive;
 		limit_req  zone=tickets burst=4 nodelay;
 		limit_conn perip 8;
 

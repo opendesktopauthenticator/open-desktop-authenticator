@@ -570,6 +570,62 @@ function sameSecret(a, b) {
 const sessions = new Map();
 const SESSION_LIFETIME_MS = 8 * 60 * 60 * 1000;
 
+/*
+ * How long a report stays open in a browser once its link has been used.
+ *
+ * Long enough to read a reply and answer it without digging the email out
+ * again; short enough that a borrowed machine does not keep somebody else's
+ * support thread open indefinitely.
+ */
+const TICKET_COOKIE_LIFETIME_MS = 12 * 60 * 60 * 1000;
+
+/*
+ * A report's access key, moved out of the URL.
+ *
+ * ## Why
+ *
+ * The key was delivered as `?k=<32 bytes>` and then stayed in the address bar
+ * for the whole visit. A query string is not a secret channel: nginx writes
+ * `$request` into the access log, the CDN logs the same, the browser keeps it
+ * in history, and any URL the reader copies carries it. Those logs are kept for
+ * fourteen days, so a bearer credential to somebody's screenshots sat in a file
+ * for two weeks with no way to revoke it.
+ *
+ * ## What replaces it
+ *
+ * The emailed link still carries the key, because an email has nowhere else to
+ * put it. On the first request that key is exchanged for a cookie and the
+ * browser is redirected to the same page without the query string. Everything
+ * after that authenticates from the cookie, so the secret appears in one log
+ * line instead of every one, and never in the address bar the reader can see.
+ *
+ * `Path` scopes the cookie to a single report, so two reports on one machine do
+ * not overwrite each other. `SameSite=Lax` still arrives when the reader
+ * follows the link from their mail client, which is a top-level navigation,
+ * while keeping the cookie off cross-site POSTs — that is what now stands in
+ * for the CSRF protection the key in the form action used to provide.
+ */
+const ticketCookieName = (reference) => `t_${reference.replace(/[^A-Z0-9]/gi, '')}`;
+
+const ticketCookie = (reference, key) =>
+	`${ticketCookieName(reference)}=${encodeURIComponent(key)}; Path=/support/ticket/${reference}; HttpOnly; Secure; SameSite=Lax; Max-Age=${TICKET_COOKIE_LIFETIME_MS / 1000}`;
+
+/** The key a request offers in its cookie, if it has one for this report. */
+const cookieKey = (request, reference) => {
+	const name = ticketCookieName(reference);
+	for (const part of (request.headers.cookie ?? '').split(';')) {
+		const eq = part.indexOf('=');
+		if (eq < 0) continue;
+		if (part.slice(0, eq).trim() !== name) continue;
+		try {
+			return decodeURIComponent(part.slice(eq + 1).trim());
+		} catch {
+			return '';
+		}
+	}
+	return '';
+};
+
 function newSession() {
 	// Swept here rather than on a timer: `readSession` only drops a session when
 	// that exact one is presented again, so a session signed in and never
@@ -1186,15 +1242,15 @@ const bytesLabel = (n) =>
 const dayLabel = (iso) =>
 	new Date(iso).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
 
-function attachmentList(reference, key, files) {
+function attachmentList(reference, files) {
 	if (!files.length) {
 		return '';
 	}
 	const item = (f, i) => {
-		// The key travels with every attachment URL as well. Without it the page
-		// would render and every picture on it would 404 — the images sit behind
-		// the same gate as the report, which is the point of the gate.
-		const href = `/support/ticket/${encodeURIComponent(reference)}/file/${encodeURIComponent(f.id)}?k=${encodeURIComponent(key)}`;
+		// No key on the URL. Attachments live under the report's own path, so the
+		// cookie scoped to that path is sent with each image request and the images
+		// stay behind exactly the same gate as the report itself.
+		const href = `/support/ticket/${encodeURIComponent(reference)}/file/${encodeURIComponent(f.id)}`;
 		// A video gets a real player; an image gets a thumbnail that opens full size.
 		const preview = f.media_type.startsWith('video/')
 			? `<video controls preload="metadata" src="${escape(href)}"></video>`
@@ -1228,15 +1284,10 @@ function ticketView(ticket, notes, files, options = {}) {
 			'reporter',
 			ticket.created_at,
 			ticket.detail,
-			attachmentList(ticket.reference, ticket.access_key, opening)
+			attachmentList(ticket.reference, opening)
 		),
 		...notes.map((n) =>
-			message(
-				n.author,
-				n.created_at,
-				n.body,
-				attachmentList(ticket.reference, ticket.access_key, ofNote(n.id))
-			)
+			message(n.author, n.created_at, n.body, attachmentList(ticket.reference, ofNote(n.id)))
 		)
 	].join('\n');
 
@@ -1265,7 +1316,7 @@ ${thread}
 					? 'If this was closed too early, reply and it goes back into the queue.'
 					: 'Anything you forgot, or an answer to a question above.'
 			}</p>
-			<form class="form" method="post" action="/support/ticket/${escape(ticket.reference)}/reply?k=${encodeURIComponent(ticket.access_key)}">
+			<form class="form" method="post" action="/support/ticket/${escape(ticket.reference)}/reply">
 				<div class="field">
 					<label for="reply">Your message</label>
 					<textarea id="reply" name="body" rows="5" maxlength="4000" minlength="4" required
@@ -1441,13 +1492,38 @@ async function handle(request, response, url) {
 		 * oracle for which reports are real.
 		 */
 		const found = db.prepare('SELECT * FROM tickets WHERE reference = ?').get(onTicket[1]);
-		const offered = url.searchParams.get('k') ?? '';
+		/*
+		 * The key arrives in the link the first time and in the cookie afterwards.
+		 * Both are compared in constant time against the stored value; the query
+		 * string is still accepted so that the emailed link keeps working.
+		 */
+		const fromQuery = url.searchParams.get('k') ?? '';
+		const offered = fromQuery || cookieKey(request, onTicket[1]);
 		const ticket =
 			found &&
 			typeof found.access_key === 'string' &&
 			sameSecret(Buffer.from(offered), Buffer.from(found.access_key))
 				? found
 				: undefined;
+
+		/*
+		 * A good key in the URL is spent immediately: set the cookie, then send the
+		 * browser to the same address without it. 303 so a link followed from a mail
+		 * client lands on a GET, and so the address bar the reader ends up looking at
+		 * no longer holds the secret.
+		 *
+		 * Only on the report page itself. Attachments hang off the same path and are
+		 * fetched as subresources, where a redirect would be pointless churn — they
+		 * are covered by the cookie the page request already set, and an old direct
+		 * link to one still works on its own key.
+		 */
+		if (ticket && fromQuery && request.method === 'GET' && !onTicket[3]) {
+			return send(response, 303, '', {
+				location: `/support/ticket/${ticket.reference}`,
+				'set-cookie': ticketCookie(ticket.reference, ticket.access_key),
+				'referrer-policy': 'no-referrer'
+			});
+		}
 		if (!ticket) {
 			return send(
 				response,
@@ -1587,7 +1663,7 @@ async function handle(request, response, url) {
 				ticket.id
 			);
 			return send(response, 303, '', {
-				location: `/support/ticket/${ticket.reference}?k=${encodeURIComponent(ticket.access_key)}`
+				location: `/support/ticket/${ticket.reference}`
 			});
 		}
 
@@ -1602,7 +1678,7 @@ async function handle(request, response, url) {
 		 */
 		if (onTicket[2] === '/reply' && method === 'GET') {
 			return send(response, 303, '', {
-				location: `/support/ticket/${ticket.reference}?k=${encodeURIComponent(ticket.access_key)}`
+				location: `/support/ticket/${ticket.reference}`
 			});
 		}
 

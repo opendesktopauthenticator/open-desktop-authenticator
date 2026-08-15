@@ -517,8 +517,10 @@ export const revocationCode = {
 				</p>
 				<p>
 					It is not a login code and not a second password. On its own it cannot open
-					your account — and without it, losing your authenticator means asking Steam
-					Support to remove it, and proving the account is yours first.
+					your account. If the authenticator is lost, Steam may still let you transfer
+					it using an SMS code when a phone number is linked; without either that
+					route or this code, Steam Support is the remaining option — and it will
+					verify the account is yours first.
 				</p>
 			</div>
 
