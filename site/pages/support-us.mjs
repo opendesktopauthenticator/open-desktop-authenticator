@@ -198,7 +198,10 @@ const SPENDS = [
 		body: `An unsigned Windows installer shows a blue warning telling people not to run it.
 		That warning is the correct advice for an unsigned binary, and it is also the reason
 		an honest small project looks more suspicious than a well-funded scam that bought a
-		certificate. This is the one thing standing between the application and a release.`
+		certificate. It is the largest single cost left, though not the only thing
+		outstanding — packaging and installers, published checksums and a signature, and a
+		reproducible build others can compare against are all still to come.
+		<a href="/download">The download page tracks where each one stands.</a>`
 	},
 	{
 		what: 'The server this runs on',

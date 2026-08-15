@@ -73,8 +73,14 @@ export default {
 					<span>It links to a new version. It never replaces itself.</span>
 				</li>
 				<li>
-					<b>Verifiable builds</b>
-					<span>Checksums and signatures you can check against the source.</span>
+					<b>${s.release.checksums && s.release.signed ? 'Verifiable builds' : 'Built to be verifiable'}</b>
+					<span>
+						${
+							s.release.checksums && s.release.signed
+								? 'Checksums and signatures you can check against the source.'
+								: 'Public source and public CI now; checksums and a signature ship with the first release.'
+						}
+					</span>
 				</li>
 			</ul>
 		</section>`,
