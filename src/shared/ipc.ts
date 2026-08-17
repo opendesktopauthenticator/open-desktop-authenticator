@@ -284,6 +284,9 @@ export const transferStatusResponse = z.object({
 	transfer: z.object({ steamId64: z.string(), accountName: z.string() }).optional()
 });
 
+export type TransferAuthenticated = z.infer<typeof transferAuthenticateResponse>;
+export type TransferStatus = z.infer<typeof transferStatusResponse>;
+
 export const enrollBeginResponse = z.discriminatedUnion('state', [
 	z.object({ state: z.literal('needsEmailCode'), emailDomain: z.string().optional() }),
 	z.object({
@@ -897,6 +900,14 @@ export interface RendererApi {
 	 * `enrolled`, the secrets are already in the vault and there is no undoing it
 	 * from here. The screen treats that as a point of no return.
 	 */
+	authenticateTransfer(
+		accountName: string,
+		password: string,
+		steamGuardCode: string,
+		proxyUrl?: string
+	): Promise<TransferAuthenticated>;
+	getTransferStatus(): Promise<TransferStatus>;
+	cancelTransfer(): Promise<object>;
 	beginEnrollment(accountName: string, password: string, proxyUrl?: string): Promise<EnrollBegin>;
 	submitEnrollmentEmailCode(code: string): Promise<EnrollBegin>;
 	/** Abandon a sign-in that has not attached an authenticator yet. */

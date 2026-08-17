@@ -48,6 +48,7 @@ const render = (accounts: AccountSummary[]) =>
 			onChangeRouting={noop}
 			onShowConfirmations={noop}
 			onRemoveAccount={noop}
+			onMove={noop}
 			onChangeAutoConfirm={noop}
 			onImport={noop}
 			onRecover={noop}

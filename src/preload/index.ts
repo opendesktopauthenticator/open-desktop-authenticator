@@ -20,7 +20,9 @@ import type {
 	SignInResult,
 	UpdateCheckResult,
 	VaultSettingsView,
-	VaultStatus
+	VaultStatus,
+	TransferAuthenticated,
+	TransferStatus
 } from '../shared/ipc';
 
 /**
@@ -73,6 +75,25 @@ const api: RendererApi = {
 	updateSettings: (settings: VaultSettingsView) =>
 		ipcRenderer.invoke(CHANNELS.settingsUpdate, settings) as Promise<{ ok: true }>,
 	checkForUpdate: () => ipcRenderer.invoke(CHANNELS.updateCheck, {}) as Promise<UpdateCheckResult>,
+
+	// Moving an authenticator that already exists on the Steam mobile app. The
+	// password and the Guard code travel inbound only; what comes back names an
+	// account and carries no token.
+	authenticateTransfer: (
+		accountName: string,
+		password: string,
+		steamGuardCode: string,
+		proxyUrl?: string
+	) =>
+		ipcRenderer.invoke(CHANNELS.transferAuthenticate, {
+			accountName,
+			password,
+			steamGuardCode,
+			...(proxyUrl === undefined || proxyUrl === '' ? {} : { proxyUrl })
+		}) as Promise<TransferAuthenticated>,
+	getTransferStatus: () =>
+		ipcRenderer.invoke(CHANNELS.transferStatus, {}) as Promise<TransferStatus>,
+	cancelTransfer: () => ipcRenderer.invoke(CHANNELS.transferCancel, {}) as Promise<object>,
 
 	// Enrollment. The password travels inbound only, exactly as a vault
 	// passphrase does, and is never held in renderer state beyond the input.

@@ -17,6 +17,7 @@ import { Settings } from './screens/Settings';
 import { ImportAccounts } from './screens/ImportAccounts';
 import { RecoverAccount } from './screens/RecoverAccount';
 import { AddAuthenticator } from './screens/AddAuthenticator';
+import { MoveAuthenticator } from './screens/MoveAuthenticator';
 import { RevocationBackup } from './screens/RevocationBackup';
 import { UnlockVault } from './screens/UnlockVault';
 import { VaultHome } from './screens/VaultHome';
@@ -53,7 +54,7 @@ export function App(): React.JSX.Element {
 	 * on the account list rather than resuming a half-finished import.
 	 */
 	const [view, setView] = useState<
-		'accounts' | 'import' | 'settings' | 'activity' | 'enroll' | 'recover' | 'about'
+		'accounts' | 'import' | 'settings' | 'activity' | 'enroll' | 'move' | 'recover' | 'about'
 	>('accounts');
 	/**
 	 * An enrolled-but-unactivated account being resumed, if any.
@@ -482,6 +483,18 @@ export function App(): React.JSX.Element {
 			);
 		}
 
+		if (view === 'move') {
+			return (
+				<MoveAuthenticator
+					onAuthenticate={(accountName, password, code, proxyUrl) =>
+						api.authenticateTransfer(accountName, password, code, proxyUrl)
+					}
+					onCancel={() => api.cancelTransfer()}
+					onClose={() => setView('accounts')}
+				/>
+			);
+		}
+
 		if (view === 'enroll') {
 			return (
 				<AddAuthenticator
@@ -570,6 +583,7 @@ export function App(): React.JSX.Element {
 					setResumeEnrollment(undefined);
 					setView('enroll');
 				}}
+				onMove={() => setView('move')}
 				onFinishActivation={(account) => {
 					setResumeEnrollment(account);
 					setView('enroll');

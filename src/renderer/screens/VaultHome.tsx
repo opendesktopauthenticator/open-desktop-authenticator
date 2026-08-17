@@ -26,6 +26,7 @@ export function VaultHome({
 	onImport,
 	onRecover,
 	onEnrol,
+	onMove,
 	onFinishActivation,
 	onExport,
 	onSettings,
@@ -54,6 +55,15 @@ export function VaultHome({
 	onRecover: () => void;
 	/** Add an authenticator to an account that has none. */
 	onEnrol: () => void;
+	/**
+	 * Moving an authenticator that already exists on the Steam mobile app.
+	 *
+	 * Its own button rather than a branch inside "Add authenticator", because the
+	 * two are different operations with different costs. Somebody with an
+	 * authenticator on their phone who presses Add is told to remove it first —
+	 * which is the fifteen-day path, and the exact mistake this offers a way past.
+	 */
+	onMove: () => void;
 	/** Resume an enrollment that was never activated. */
 	onFinishActivation: (account: AccountSummary) => void;
 	/** Write one account out as a maFile. */
@@ -149,6 +159,9 @@ export function VaultHome({
 					<button type="button" onClick={onEnrol}>
 						Add authenticator
 					</button>
+					<button type="button" className="secondary" onClick={onMove}>
+						Move one from the Steam app
+					</button>
 					<button type="button" className="secondary" onClick={onImport}>
 						Import maFiles
 					</button>
@@ -228,6 +241,9 @@ export function VaultHome({
 					</p>
 					<button type="button" onClick={onEnrol}>
 						Add an authenticator
+					</button>
+					<button type="button" className="secondary" onClick={onMove}>
+						Move one from the Steam app
 					</button>
 					<button type="button" className="secondary" onClick={onImport}>
 						Import maFiles
