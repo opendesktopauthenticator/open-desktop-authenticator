@@ -200,6 +200,20 @@ export const CHANNELS = {
 	 * `begin` is the one that changes the Steam account. By the time it answers,
 	 * the secrets are already in the vault — see `EnrollmentService`.
 	 */
+	/**
+	 * Moving an authenticator that already exists on the Steam mobile app.
+	 *
+	 * Separate from `enroll:*` on purpose. Enrolling attaches a new authenticator
+	 * and refuses an account that already has one; transferring asks Steam to
+	 * *replace* the existing one, which is a different operation with a different
+	 * cost — and folding it into enrolment is how somebody ends up doing
+	 * remove-then-add and paying fifteen days for it.
+	 *
+	 * `authenticate` changes nothing on the account. It signs in and stops.
+	 */
+	transferAuthenticate: 'transfer:authenticate',
+	transferStatus: 'transfer:status',
+	transferCancel: 'transfer:cancel',
 	enrollBegin: 'enroll:begin',
 	enrollEmailCode: 'enroll:emailCode',
 	enrollActivate: 'enroll:activate',

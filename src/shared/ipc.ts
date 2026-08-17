@@ -265,6 +265,25 @@ export const updateCheckResponse = z.discriminatedUnion('state', [
  * existing S2-sanctioned reveal, gated on the passphrase, rather than being
  * handed out as a side effect of enrolling.
  */
+/**
+ * What a transfer sign-in answers with.
+ *
+ * Deliberately thin. The main process is holding a refresh token and an access
+ * token for this account at this point — credentials as real as the password
+ * that produced them — and none of that has any business crossing IPC. The
+ * renderer needs to know which account it is looking at and nothing else.
+ */
+export const transferAuthenticateResponse = z.object({
+	state: z.literal('authenticated'),
+	steamId64: z.string(),
+	accountName: z.string()
+});
+
+/** The transfer in progress, if one is still live. */
+export const transferStatusResponse = z.object({
+	transfer: z.object({ steamId64: z.string(), accountName: z.string() }).optional()
+});
+
 export const enrollBeginResponse = z.discriminatedUnion('state', [
 	z.object({ state: z.literal('needsEmailCode'), emailDomain: z.string().optional() }),
 	z.object({
@@ -609,6 +628,25 @@ export const IPC_CONTRACT = {
 	[CHANNELS.settingsGet]: { request: emptyRequest, response: vaultSettingsView },
 	[CHANNELS.settingsUpdate]: { request: settingsUpdateRequest, response: okResponse },
 	[CHANNELS.updateCheck]: { request: emptyRequest, response: updateCheckResponse },
+
+	[CHANNELS.transferAuthenticate]: {
+		/*
+		 * The Guard code is read off the phone that still holds the authenticator,
+		 * so it is typed rather than derived. It travels inbound exactly as the
+		 * password does and is dropped as soon as Steam has answered.
+		 */
+		request: z
+			.object({
+				accountName: z.string().min(1).max(64),
+				password: z.string().min(1).max(1024),
+				steamGuardCode: z.string().min(1).max(16),
+				proxyUrl: z.string().max(2048).optional()
+			})
+			.strict(),
+		response: transferAuthenticateResponse
+	},
+	[CHANNELS.transferStatus]: { request: emptyRequest, response: transferStatusResponse },
+	[CHANNELS.transferCancel]: { request: emptyRequest, response: z.object({}).strict() },
 
 	[CHANNELS.enrollBegin]: {
 		// The password travels inbound exactly as a vault passphrase does, and is

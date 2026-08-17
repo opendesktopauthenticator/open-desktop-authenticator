@@ -27,6 +27,8 @@ import { registerCodeHandlers } from './codes/ipc';
 import { registerUpdateHandlers } from './update/ipc';
 import { EnrollmentService } from './steam/enrollment';
 import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
+import { TransferService } from './steam/transfer';
+import { registerTransferHandlers } from './steam/transfer-ipc';
 import { createRecoveryHooks, RECOVERY_EXTENSION } from './vault/recovery';
 import { SteamTransportFactory, type ElectronNetworking } from './net/transport';
 import { ConfirmationsService } from './confirmations/service';
@@ -330,6 +332,15 @@ function start(): void {
 		updateRecovery: recovery.updateRecovery
 	});
 
+	/*
+	 * Moving an authenticator that already lives on the Steam mobile app.
+	 *
+	 * Its own service rather than a mode of `EnrollmentService`, because the two
+	 * refuse opposite things: enrolment will not touch an account that already
+	 * has an authenticator, which is exactly the account this one is for.
+	 */
+	const transfer = new TransferService(vault, transports, () => codes.timeOffsetSeconds());
+
 	const activity = new ActivityLog();
 	// The engine used to report into callbacks nobody supplied, so a held-back
 	// account-recovery confirmation — the loudest warning this app can raise — was
@@ -384,6 +395,7 @@ function start(): void {
 			(steamId64) => transports.routingStatus(steamId64)
 		);
 		registerImportHandlers(imports);
+		registerTransferHandlers(transfer, vault);
 		registerEnrollmentHandlers(
 			enrollment,
 			vault,
