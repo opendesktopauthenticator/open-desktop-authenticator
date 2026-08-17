@@ -47,17 +47,17 @@ export class TransferApiError extends Error {
 }
 
 /** What Steam's answer turned out to be, so the caller need not guess. */
-export type StartChallengeResult =
-	/** Decoded, and Steam agreed to send the text. */
-	| { shape: 'json'; success: boolean }
-	/**
-	 * A 200 that is not JSON — almost certainly a protobuf body.
-	 *
-	 * Carried as a length and a prefix rather than the bytes themselves. This is
-	 * a diagnostic for deciding how to parse, not a payload, and a response body
-	 * from an authenticated Steam call is not something to keep around.
-	 */
-	| { shape: 'binary'; bytes: number; prefixHex: string };
+export type StartChallengeResult = {
+	/** Steam's own result code, when it sent one. 1 is OK. */
+	eresult?: number;
+	/** True when Steam said the text was sent, by whichever route it said it. */
+	sent: boolean;
+	/** How Steam answered, so the next endpoint need not re-learn it. */
+	shape: 'json' | 'protobuf';
+};
+
+/** `EResult.OK`. The only value that means the text went out. */
+const ERESULT_OK = 1;
 
 /**
  * Ask Steam to text a code to the phone on the account.
@@ -99,25 +99,44 @@ export async function startTransferChallenge(
 	}
 
 	const text = response.text ?? '';
+
+	/*
+	 * An empty body is the expected answer here, not a broken one.
+	 *
+	 * `CTwoFactor_RemoveAuthenticatorViaChallengeStart_Response` has a single
+	 * optional field, and an unset optional field encodes to nothing at all — so
+	 * a successful protobuf reply is zero bytes. The first version of this
+	 * classified that as "not JSON, probably protobuf, needs a decoder", which
+	 * was true and useless: there is nothing in it to decode. Steam says what
+	 * happened in `x-eresult`.
+	 */
+	if (text === '') {
+		return {
+			...(response.eresult === undefined ? {} : { eresult: response.eresult }),
+			sent: response.eresult === ERESULT_OK,
+			shape: 'protobuf'
+		};
+	}
+
 	try {
 		const parsed: unknown = JSON.parse(text);
 		const success =
 			typeof parsed === 'object' && parsed !== null && 'response' in parsed
 				? Boolean((parsed as { response?: { success?: unknown } }).response?.success)
 				: false;
-		return { shape: 'json', success };
-	} catch {
-		/*
-		 * Not JSON. Report that plainly rather than treating an unparseable body as
-		 * a failure: a protobuf response with success set looks identical to a
-		 * network error if the only question asked is "did JSON.parse throw".
-		 */
 		return {
-			shape: 'binary',
-			bytes: text.length,
-			prefixHex: [...text.slice(0, 16)]
-				.map((ch) => ch.charCodeAt(0).toString(16).padStart(2, '0'))
-				.join(' ')
+			...(response.eresult === undefined ? {} : { eresult: response.eresult }),
+			sent: success,
+			shape: 'json'
+		};
+	} catch {
+		// A non-empty body that is not JSON is a protobuf message with something in
+		// it, which for this response means `success` was explicitly set. Trust the
+		// header over guessing at the bytes.
+		return {
+			...(response.eresult === undefined ? {} : { eresult: response.eresult }),
+			sent: response.eresult === ERESULT_OK,
+			shape: 'protobuf'
 		};
 	}
 }

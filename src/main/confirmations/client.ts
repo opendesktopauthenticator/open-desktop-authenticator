@@ -46,6 +46,18 @@ export interface SteamRequest {
 export interface SteamResponse {
 	status: number;
 	text: string;
+	/**
+	 * Steam's own result code, from the `x-eresult` response header.
+	 *
+	 * The WebAPI answers its protobuf-shaped methods with the outcome in a header
+	 * and, very often, an empty body — because a protobuf message whose only
+	 * field is unset encodes to zero bytes. Reading HTTP 200 and an empty body as
+	 * either success or failure is guessing; this is where Steam actually says.
+	 *
+	 * Absent when the header was not sent, which is the case for the JSON-shaped
+	 * calls that carry their result inside the body instead.
+	 */
+	eresult?: number;
 }
 
 /**

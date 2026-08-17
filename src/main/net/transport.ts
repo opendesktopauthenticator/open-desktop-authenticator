@@ -147,6 +147,13 @@ export interface NetRequestHandle {
 
 export interface NetResponseHandle {
 	statusCode: number;
+	/**
+	 * Response headers, as Electron's net module supplies them.
+	 *
+	 * Narrowed to what is read: Steam puts the result of its protobuf-shaped
+	 * calls in `x-eresult`, and a body that is empty says nothing either way.
+	 */
+	headers?: Record<string, string | string[] | undefined>;
 	on(event: 'data', listener: (chunk: Buffer | string) => void): void;
 	on(event: 'end', listener: () => void): void;
 	on(event: 'error', listener: (error: Error) => void): void;
@@ -734,7 +741,18 @@ export class SteamTransportFactory {
 					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough))))
 				);
 				response.on('end', () =>
-					finish(() => resolve({ status: response.statusCode, text: chunks.join('') }))
+					finish(() => {
+						// Steam reports the outcome of its protobuf-shaped methods here rather
+						// than in the body, which is frequently empty. Only the one header is
+						// taken: the rest belong to the transport, not to its callers.
+						const raw = response.headers?.['x-eresult'];
+						const eresult = Number(Array.isArray(raw) ? raw[0] : raw);
+						resolve({
+							status: response.statusCode,
+							text: chunks.join(''),
+							...(Number.isFinite(eresult) ? { eresult } : {})
+						});
+					})
 				);
 			});
 

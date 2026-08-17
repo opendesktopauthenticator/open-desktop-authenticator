@@ -282,15 +282,20 @@ export const transferAuthenticateResponse = z.object({
 /**
  * What Steam answered when asked to send the text.
  *
- * `shape` is here because which wire format these endpoints speak was an open
- * question when this was written, and reporting it is how it gets answered
- * against a real account rather than guessed at. A `binary` answer means the
- * protobuf decoder is needed; it is not a failure.
+ * Answered against a real account: this endpoint replies protobuf, and a
+ * successful reply is *empty*, because the response message's only field is
+ * optional and an unset optional field encodes to nothing. The outcome is in
+ * the `x-eresult` header instead, which is why `sent` is derived from that
+ * rather than from the body.
  */
-export const transferStartChallengeResponse = z.discriminatedUnion('shape', [
-	z.object({ shape: z.literal('json'), success: z.boolean() }),
-	z.object({ shape: z.literal('binary'), bytes: z.number(), prefixHex: z.string() })
-]);
+export const transferStartChallengeResponse = z.object({
+	/** True when Steam said the text went out. */
+	sent: z.boolean(),
+	/** Steam's own result code, when it sent one. 1 is OK. */
+	eresult: z.number().optional(),
+	/** How Steam answered. Recorded because it was an open question. */
+	shape: z.enum(['json', 'protobuf'])
+});
 
 /** The transfer in progress, if one is still live. */
 export const transferStatusResponse = z.object({

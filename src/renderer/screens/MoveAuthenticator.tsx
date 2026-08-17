@@ -132,16 +132,14 @@ export function MoveAuthenticator({
 				{challenge ? (
 					<div className="notice">
 						<strong>
-							{challenge.shape === 'json'
-								? challenge.success
-									? 'Steam says it sent the text.'
-									: 'Steam declined to send a text.'
-								: 'Steam answered, but not in JSON.'}
+							{challenge.sent
+								? 'Steam has sent the code to your phone.'
+								: 'Steam did not send a code.'}
 						</strong>
 						<p className="hint">
-							{challenge.shape === 'json'
-								? 'Check the phone on the account.'
-								: `A ${challenge.bytes}-byte binary body, beginning ${challenge.prefixHex}. That is a protobuf response, and decoding it is the next piece of work.`}
+							{challenge.sent
+								? 'Check the phone on the account. The code is single-use and Steam rate-limits requests for another.'
+								: `Steam answered without confirming it${challenge.eresult === undefined ? '' : ` (result ${challenge.eresult})`}. Nothing has changed on the account; you can close this and try again.`}
 						</p>
 						<p className="hint">
 							Submitting that code is not built yet, so nothing further will happen to this account.
