@@ -441,9 +441,12 @@ export const security = {
 					your codes" is an attack that works on real people.
 				</li>
 				<li>
-					<strong>Four runtime dependencies.</strong> Every package that ships is a
-					package someone could compromise, so there are as close to none as the job
-					allows.
+					<strong>${s.runtimeDependencies} runtime dependencies.</strong> Every package
+					that ships is a package someone could compromise, so there are as close to
+					none as the job allows. The number is counted from
+					<code>package.json</code> when this page is built rather than written into
+					the sentence, because a dependency claim that has to be remembered is one
+					that eventually goes stale.
 				</li>
 			</ul>
 

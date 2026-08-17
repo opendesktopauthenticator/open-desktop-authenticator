@@ -72,6 +72,20 @@ export const SITE = {
 	updated: '2026-08-12',
 	/** GA4 measurement ID. Referenced by head() and by the CSP host allowlist. */
 	analyticsId: 'G-G0GE9H5VR7',
+
+	/*
+	 * How many packages actually ship, counted rather than remembered.
+	 *
+	 * /security advertises this number, and it was written out as a word — "Four
+	 * runtime dependencies" — which was true until the day a fifth was needed and
+	 * would then have been a false claim on the page whose whole argument is that
+	 * claims should be checkable. Read from package.json at build time, so adding
+	 * or removing one corrects the sentence by itself.
+	 */
+	get runtimeDependencies() {
+		const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'));
+		return Object.keys(pkg.dependencies ?? {}).length;
+	},
 	repo: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator',
 
 	/*

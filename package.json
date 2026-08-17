@@ -25,6 +25,7 @@
     "icons": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/make-icons.mjs"
   },
   "dependencies": {
+    "protobufjs": "7.6.5",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "steam-session": "^1.9.4",
