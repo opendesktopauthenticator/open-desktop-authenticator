@@ -212,6 +212,7 @@ export const CHANNELS = {
 	 * `authenticate` changes nothing on the account. It signs in and stops.
 	 */
 	transferAuthenticate: 'transfer:authenticate',
+	transferStartChallenge: 'transfer:startChallenge',
 	transferStatus: 'transfer:status',
 	transferCancel: 'transfer:cancel',
 	enrollBegin: 'enroll:begin',

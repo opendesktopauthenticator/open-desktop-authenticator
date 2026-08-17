@@ -22,6 +22,7 @@ import type {
 	VaultSettingsView,
 	VaultStatus,
 	TransferAuthenticated,
+	TransferStartChallenge,
 	TransferStatus
 } from '../shared/ipc';
 
@@ -91,6 +92,8 @@ const api: RendererApi = {
 			steamGuardCode,
 			...(proxyUrl === undefined || proxyUrl === '' ? {} : { proxyUrl })
 		}) as Promise<TransferAuthenticated>,
+	startTransferChallenge: () =>
+		ipcRenderer.invoke(CHANNELS.transferStartChallenge, {}) as Promise<TransferStartChallenge>,
 	getTransferStatus: () =>
 		ipcRenderer.invoke(CHANNELS.transferStatus, {}) as Promise<TransferStatus>,
 	cancelTransfer: () => ipcRenderer.invoke(CHANNELS.transferCancel, {}) as Promise<object>,

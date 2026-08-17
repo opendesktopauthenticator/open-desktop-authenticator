@@ -20,6 +20,7 @@ const props = {
 		})
 	),
 	onCancel: () => Promise.resolve({}),
+	onStartChallenge: () => Promise.resolve({ shape: 'json' as const, success: true }),
 	onClose: (): void => {}
 };
 

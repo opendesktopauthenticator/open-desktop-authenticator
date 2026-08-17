@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { TransferAuthenticated } from '../../shared/ipc';
+import type { TransferAuthenticated, TransferStartChallenge } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -32,6 +32,7 @@ import { messageOf } from '../ipc-message';
 export function MoveAuthenticator({
 	onAuthenticate,
 	onCancel,
+	onStartChallenge,
 	onClose
 }: {
 	onAuthenticate: (
@@ -42,6 +43,8 @@ export function MoveAuthenticator({
 	) => Promise<TransferAuthenticated>;
 	/** Drops the pending sign-in in the main process. Always safe at this stage. */
 	onCancel: () => Promise<unknown>;
+	/** Asks Steam to text a code. Reversible, but it spends a message and a rate limit. */
+	onStartChallenge: () => Promise<TransferStartChallenge>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [accountName, setAccountName] = useState('');
@@ -51,6 +54,7 @@ export function MoveAuthenticator({
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>(undefined);
 	const [authenticated, setAuthenticated] = useState<TransferAuthenticated | undefined>(undefined);
+	const [challenge, setChallenge] = useState<TransferStartChallenge | undefined>(undefined);
 
 	const submit = async (event: React.FormEvent): Promise<void> => {
 		event.preventDefault();
@@ -68,6 +72,21 @@ export function MoveAuthenticator({
 			// password again, and the code is single-use.
 			setPassword('');
 			setCode('');
+		} catch (err) {
+			setError(messageOf(err));
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const requestCode = async (): Promise<void> => {
+		if (busy) {
+			return;
+		}
+		setBusy(true);
+		setError(undefined);
+		try {
+			setChallenge(await onStartChallenge());
 		} catch (err) {
 			setError(messageOf(err));
 		} finally {
@@ -108,14 +127,42 @@ export function MoveAuthenticator({
 					</p>
 				</div>
 
-				<p className="hint">
-					The step that sends the text is not built yet. Nothing further will happen to this account
-					until it is.
-				</p>
+				{error ? <p className="error">{error}</p> : undefined}
+
+				{challenge ? (
+					<div className="notice">
+						<strong>
+							{challenge.shape === 'json'
+								? challenge.success
+									? 'Steam says it sent the text.'
+									: 'Steam declined to send a text.'
+								: 'Steam answered, but not in JSON.'}
+						</strong>
+						<p className="hint">
+							{challenge.shape === 'json'
+								? 'Check the phone on the account.'
+								: `A ${challenge.bytes}-byte binary body, beginning ${challenge.prefixHex}. That is a protobuf response, and decoding it is the next piece of work.`}
+						</p>
+						<p className="hint">
+							Submitting that code is not built yet, so nothing further will happen to this account.
+							The authenticator on your phone is still the one in charge.
+						</p>
+					</div>
+				) : (
+					<p className="hint">
+						Nothing is sent until you press the button below, and nothing is changed even then.
+					</p>
+				)}
 
 				<div className="controls">
+					{challenge ? undefined : (
+						<button type="button" disabled={busy} onClick={() => void requestCode()}>
+							{busy ? 'Asking Steam…' : 'Send the code to my phone'}
+						</button>
+					)}
 					<button
 						type="button"
+						className={challenge ? undefined : 'secondary'}
 						onClick={() => {
 							void onCancel();
 							onClose();

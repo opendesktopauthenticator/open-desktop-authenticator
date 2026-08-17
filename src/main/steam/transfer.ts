@@ -1,5 +1,7 @@
 import { signIn, type LoginSessionFactory } from './login';
 import { redactCredentials } from '../net/egress';
+import { mintAccessToken } from './access-token';
+import { startTransferChallenge, type StartChallengeResult } from './transfer-api';
 import type { SteamTransportFactory } from '../net/transport';
 import type { VaultService } from '../vault/service';
 
@@ -91,6 +93,8 @@ export interface TransferServiceOptions {
 	now?: () => number;
 	loginSession?: LoginSessionFactory;
 	signIn?: typeof signIn;
+	startChallenge?: typeof startTransferChallenge;
+	mintAccessToken?: typeof mintAccessToken;
 }
 
 /**
@@ -118,12 +122,17 @@ export class TransferService {
 	private readonly offset: () => number;
 	private readonly loginSession: LoginSessionFactory | undefined;
 	private readonly performSignIn: typeof signIn;
+	private readonly performStart: typeof startTransferChallenge;
+	private readonly mint: typeof mintAccessToken;
 
 	/** At most one transfer at a time. A second would race the first over storage. */
 	private pending: PendingTransfer | undefined;
 
 	/** Guards against a double-clicked button starting two sign-ins. */
 	private authenticating = false;
+
+	/** The same guard for the challenge, where a double press costs a text message. */
+	private challenging = false;
 
 	constructor(
 		vault: VaultService,
@@ -137,6 +146,8 @@ export class TransferService {
 		this.now = options.now ?? (() => Date.now());
 		this.loginSession = options.loginSession;
 		this.performSignIn = options.signIn ?? signIn;
+		this.performStart = options.startChallenge ?? startTransferChallenge;
+		this.mint = options.mintAccessToken ?? mintAccessToken;
 	}
 
 	/**
@@ -214,6 +225,52 @@ export class TransferService {
 			return { state: 'authenticated', steamId64, accountName };
 		} finally {
 			this.authenticating = false;
+		}
+	}
+
+	/**
+	 * Ask Steam to text a code to the phone on the account.
+	 *
+	 * Still nothing irreversible: no authenticator changes, and a user who never
+	 * uses the code has lost nothing but a text message. What it does spend is
+	 * the account's tolerance — Steam rate-limits this, and somebody's phone is
+	 * on the other end — so it is offered once and repeated only on request.
+	 */
+	async startChallenge(): Promise<StartChallengeResult> {
+		const pending = this.live();
+		if (!pending) {
+			throw new TransferError(
+				'That transfer has expired. Sign in again to start a new one.',
+				false
+			);
+		}
+		if (this.challenging) {
+			throw new TransferError('Steam has already been asked for a code.', false);
+		}
+
+		this.challenging = true;
+		try {
+			const transport = await this.transports.forAccount({
+				steamId64: pending.steamId64,
+				proxyUrl: pending.proxyUrl
+			});
+			/*
+			 * A fresh access token rather than the one the sign-in returned.
+			 *
+			 * The short-lived token is minutes old by the time somebody has read the
+			 * warnings on this screen, and an expired token here fails a call that
+			 * has already texted a phone on some other attempt. Minting is cheap.
+			 */
+			const accessToken = await this.mint(
+				transport,
+				pending.steamId64,
+				pending.refreshToken,
+				this.now()
+			);
+			pending.accessToken = accessToken;
+			return await this.performStart(transport, accessToken);
+		} finally {
+			this.challenging = false;
 		}
 	}
 

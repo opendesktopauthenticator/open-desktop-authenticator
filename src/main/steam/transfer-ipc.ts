@@ -48,6 +48,19 @@ export function registerTransferHandlers(transfer: TransferService, vault: Vault
 		}
 	);
 
+	/**
+	 * Sends a text to the phone on the account.
+	 *
+	 * Still reversible — no authenticator changes — but it is the first call that
+	 * costs the user something they cannot take back, in the form of a message
+	 * and Steam's rate limit. The vault check is repeated rather than assumed
+	 * from the sign-in, because minutes of reading warnings may have passed.
+	 */
+	registerHandler(CHANNELS.transferStartChallenge, async () => {
+		requireUnlocked();
+		return transfer.startChallenge();
+	});
+
 	registerHandler(CHANNELS.transferStatus, () => {
 		const current = transfer.current();
 		return Promise.resolve(current ? { transfer: current } : {});

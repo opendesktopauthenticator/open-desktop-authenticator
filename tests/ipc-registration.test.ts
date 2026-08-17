@@ -128,6 +128,7 @@ describe('IPC registration', () => {
 			CHANNELS.steamSignIn,
 			CHANNELS.updateCheck,
 			CHANNELS.transferAuthenticate,
+			CHANNELS.transferStartChallenge,
 			CHANNELS.transferStatus,
 			CHANNELS.transferCancel,
 			CHANNELS.enrollBegin,

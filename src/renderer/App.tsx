@@ -489,6 +489,7 @@ export function App(): React.JSX.Element {
 					onAuthenticate={(accountName, password, code, proxyUrl) =>
 						api.authenticateTransfer(accountName, password, code, proxyUrl)
 					}
+					onStartChallenge={() => api.startTransferChallenge()}
 					onCancel={() => api.cancelTransfer()}
 					onClose={() => setView('accounts')}
 				/>

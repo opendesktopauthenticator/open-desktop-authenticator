@@ -279,6 +279,19 @@ export const transferAuthenticateResponse = z.object({
 	accountName: z.string()
 });
 
+/**
+ * What Steam answered when asked to send the text.
+ *
+ * `shape` is here because which wire format these endpoints speak was an open
+ * question when this was written, and reporting it is how it gets answered
+ * against a real account rather than guessed at. A `binary` answer means the
+ * protobuf decoder is needed; it is not a failure.
+ */
+export const transferStartChallengeResponse = z.discriminatedUnion('shape', [
+	z.object({ shape: z.literal('json'), success: z.boolean() }),
+	z.object({ shape: z.literal('binary'), bytes: z.number(), prefixHex: z.string() })
+]);
+
 /** The transfer in progress, if one is still live. */
 export const transferStatusResponse = z.object({
 	transfer: z.object({ steamId64: z.string(), accountName: z.string() }).optional()
@@ -286,6 +299,7 @@ export const transferStatusResponse = z.object({
 
 export type TransferAuthenticated = z.infer<typeof transferAuthenticateResponse>;
 export type TransferStatus = z.infer<typeof transferStatusResponse>;
+export type TransferStartChallenge = z.infer<typeof transferStartChallengeResponse>;
 
 export const enrollBeginResponse = z.discriminatedUnion('state', [
 	z.object({ state: z.literal('needsEmailCode'), emailDomain: z.string().optional() }),
@@ -648,6 +662,10 @@ export const IPC_CONTRACT = {
 			.strict(),
 		response: transferAuthenticateResponse
 	},
+	[CHANNELS.transferStartChallenge]: {
+		request: emptyRequest,
+		response: transferStartChallengeResponse
+	},
 	[CHANNELS.transferStatus]: { request: emptyRequest, response: transferStatusResponse },
 	[CHANNELS.transferCancel]: { request: emptyRequest, response: z.object({}).strict() },
 
@@ -906,6 +924,7 @@ export interface RendererApi {
 		steamGuardCode: string,
 		proxyUrl?: string
 	): Promise<TransferAuthenticated>;
+	startTransferChallenge(): Promise<TransferStartChallenge>;
 	getTransferStatus(): Promise<TransferStatus>;
 	cancelTransfer(): Promise<object>;
 	beginEnrollment(accountName: string, password: string, proxyUrl?: string): Promise<EnrollBegin>;
