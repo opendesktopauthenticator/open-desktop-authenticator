@@ -139,8 +139,16 @@ export function MoveAuthenticator({
 						<p className="hint">
 							{challenge.sent
 								? 'Check the phone on the account. The code is single-use and Steam rate-limits requests for another.'
-								: `Steam answered without confirming it${challenge.eresult === undefined ? '' : ` (result ${challenge.eresult})`}. Nothing has changed on the account; you can close this and try again.`}
+								: (challenge.meaning ??
+									`Steam answered without confirming it${challenge.eresult === undefined ? '' : ` (result ${challenge.eresult})`}.`)}
 						</p>
+						{challenge.sent ? undefined : (
+							<p className="hint">
+								Nothing has changed on the account. Steam&rsquo;s texts are unreliable even in its
+								own app, so a missing message is not proof anything is wrong — close this and try
+								again in a few minutes.
+							</p>
+						)}
 						<p className="hint">
 							Submitting that code is not built yet, so nothing further will happen to this account.
 							The authenticator on your phone is still the one in charge.

@@ -48,6 +48,8 @@ export class TransferApiError extends Error {
 
 /** What Steam's answer turned out to be, so the caller need not guess. */
 export type StartChallengeResult = {
+	/** What the result code means, when it is one we recognise. */
+	meaning?: string;
 	/** Steam's own result code, when it sent one. 1 is OK. */
 	eresult?: number;
 	/** True when Steam said the text was sent, by whichever route it said it. */
@@ -58,6 +60,31 @@ export type StartChallengeResult = {
 
 /** `EResult.OK`. The only value that means the text went out. */
 const ERESULT_OK = 1;
+
+/**
+ * The results this call actually produces, in words.
+ *
+ * A bare number in front of a user is a dead end — they cannot look it up and
+ * it does not tell them what to do next. These are the ones worth naming; the
+ * same values `enroll.ts` already recognises, which is not a coincidence since
+ * both are ITwoFactorService.
+ *
+ * Anything unlisted is reported as its number rather than guessed at. A wrong
+ * explanation is worse than an unfamiliar one, because it sends somebody off to
+ * fix the wrong thing.
+ */
+const RESULT_MEANING: Readonly<Record<number, string>> = {
+	2: 'Steam refused the request without saying why.',
+	8: 'Steam rejected the request as malformed. That is a bug here, not something you did.',
+	9: 'There is no verified phone number on this account, so Steam has nowhere to send a code.',
+	15: 'This session is not allowed to do that. Signing in again may help.',
+	84: 'Steam is rate-limiting these requests. Wait several minutes before asking again.'
+};
+
+/** What Steam's result code means, in a sentence, when it is one we know. */
+export function describeResult(eresult: number | undefined): string | undefined {
+	return eresult === undefined ? undefined : RESULT_MEANING[eresult];
+}
 
 /**
  * Ask Steam to text a code to the phone on the account.
@@ -113,6 +140,9 @@ export async function startTransferChallenge(
 	if (text === '') {
 		return {
 			...(response.eresult === undefined ? {} : { eresult: response.eresult }),
+			...(describeResult(response.eresult) === undefined
+				? {}
+				: { meaning: describeResult(response.eresult) }),
 			sent: response.eresult === ERESULT_OK,
 			shape: 'protobuf'
 		};
@@ -126,6 +156,9 @@ export async function startTransferChallenge(
 				: false;
 		return {
 			...(response.eresult === undefined ? {} : { eresult: response.eresult }),
+			...(describeResult(response.eresult) === undefined
+				? {}
+				: { meaning: describeResult(response.eresult) }),
 			sent: success,
 			shape: 'json'
 		};
@@ -135,6 +168,9 @@ export async function startTransferChallenge(
 		// header over guessing at the bytes.
 		return {
 			...(response.eresult === undefined ? {} : { eresult: response.eresult }),
+			...(describeResult(response.eresult) === undefined
+				? {}
+				: { meaning: describeResult(response.eresult) }),
 			sent: response.eresult === ERESULT_OK,
 			shape: 'protobuf'
 		};

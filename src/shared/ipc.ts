@@ -294,7 +294,9 @@ export const transferStartChallengeResponse = z.object({
 	/** Steam's own result code, when it sent one. 1 is OK. */
 	eresult: z.number().optional(),
 	/** How Steam answered. Recorded because it was an open question. */
-	shape: z.enum(['json', 'protobuf'])
+	shape: z.enum(['json', 'protobuf']),
+	/** What the result code means, when it is one we recognise. */
+	meaning: z.string().optional()
 });
 
 /** The transfer in progress, if one is still live. */
