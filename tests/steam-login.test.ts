@@ -192,6 +192,55 @@ describe('a successful sign-in', () => {
 	});
 });
 
+describe('signing in for an account this app does not hold yet', () => {
+	/*
+	 * Transferring an authenticator away from the Steam mobile app has to sign in
+	 * before the secret exists here, so there is nothing to derive a code from.
+	 * The user reads the five characters off the phone instead.
+	 */
+	it('sends the code the user typed', async () => {
+		const { session, started } = fakeSession({});
+		await signIn(
+			{ accountName: 'someone', password: 'pw', steamGuardCode: 'QK4TX', unixSeconds: 1 },
+			undefined,
+			() => session,
+			at
+		);
+		expect(started[0]?.steamGuardCode).toBe('QK4TX');
+	});
+
+	it('still derives the code when the secret is held', async () => {
+		const { session, started } = fakeSession({});
+		await signIn(REQUEST, undefined, () => session, at);
+		// Whatever it is, it is not the string a user typed — it came from SHARED.
+		expect(started[0]?.steamGuardCode).toMatch(/^[0-9A-Z]{5}$/);
+		expect(started[0]?.steamGuardCode).not.toBe('QK4TX');
+	});
+
+	it('refuses when it has neither a secret nor a typed code', async () => {
+		const { session } = fakeSession({});
+		await expect(
+			signIn(
+				{ accountName: 'someone', password: 'pw', unixSeconds: 1 },
+				undefined,
+				() => session,
+				at
+			)
+		).rejects.toThrow(/secret or a Steam Guard code/);
+	});
+
+	it('never keeps the typed code on the result', async () => {
+		const { session } = fakeSession({});
+		const result = await signIn(
+			{ accountName: 'someone', password: 'pw', steamGuardCode: 'QK4TX', unixSeconds: 1 },
+			undefined,
+			() => session,
+			at
+		);
+		expect(JSON.stringify(result)).not.toContain('QK4TX');
+	});
+});
+
 describe('what a sign-in refuses to accept', () => {
 	it('rejects a web-scoped token rather than storing one that cannot work', async () => {
 		// The whole point of asking for MobileApp. A web-scoped token signs in, and

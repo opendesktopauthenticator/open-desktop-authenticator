@@ -83,8 +83,20 @@ export interface SignInRequest {
 	accountName: string;
 	/** Used once, in this call, and never retained. */
 	password: string;
-	/** base64 or hex, from the vault — used to answer the Guard challenge. */
-	sharedSecret: string;
+	/**
+	 * base64 or hex, from the vault — used to answer the Guard challenge.
+	 *
+	 * Absent for an account this app does not hold yet. Transferring an
+	 * authenticator away from the Steam mobile app has to sign in *before* the
+	 * secret exists here, so that flow supplies `steamGuardCode` instead: the
+	 * five characters the user reads off the phone that still holds it.
+	 */
+	sharedSecret?: string;
+	/**
+	 * A Guard code typed by the user, for when there is no secret to derive one
+	 * from. Exactly one of this and `sharedSecret` must be given.
+	 */
+	steamGuardCode?: string;
 	/** Steam-corrected seconds, the same clock the codes use. */
 	unixSeconds: number;
 }
@@ -190,9 +202,27 @@ export async function signIn(
 ): Promise<SignInResult> {
 	const session = factory(proxyUrl);
 
-	// Generated here rather than left to the library, so the only clock involved
-	// is the Steam-corrected one the codes already use (D13).
-	const steamGuardCode = generateGuardCode(request.sharedSecret, request.unixSeconds);
+	/*
+	 * Derived from the secret when this app holds it, typed by the user when it
+	 * does not.
+	 *
+	 * Derivation stays the default because it is the case that must not depend on
+	 * a human reading a rolling code correctly, and because generating it here
+	 * rather than leaving it to the library keeps the only clock involved the
+	 * Steam-corrected one the codes already use (D13).
+	 *
+	 * Supplying the code up front matters more than it looks: Steam then completes
+	 * the sign-in outright instead of answering `actionRequired`, which is the
+	 * branch that refuses every guard type this app cannot drive.
+	 */
+	const steamGuardCode = request.sharedSecret
+		? generateGuardCode(request.sharedSecret, request.unixSeconds)
+		: (request.steamGuardCode ?? '');
+	if (!steamGuardCode) {
+		throw new SteamLoginError(
+			'Signing in needs either a stored authenticator secret or a Steam Guard code.'
+		);
+	}
 
 	return new Promise<SignInResult>((resolve, reject) => {
 		let settled = false;
