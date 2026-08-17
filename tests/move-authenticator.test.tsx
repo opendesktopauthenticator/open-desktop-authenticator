@@ -36,7 +36,7 @@ describe('what the screen tells the user before anything happens', () => {
 	});
 
 	it('says the sign-in changes nothing on the account', () => {
-		expect(markup()).toContain('Signing in changes nothing on the Steam account');
+		expect(markup()).toContain('changes nothing on the Steam account');
 	});
 
 	it('asks for the code from the phone, not an emailed one', () => {

@@ -77,37 +77,42 @@ export function MoveAuthenticator({
 
 	if (authenticated) {
 		return (
-			<section className="screen">
+			<section>
 				<h1>Signed in to {authenticated.accountName}</h1>
-				<p>
+				<p className="lede">
 					Nothing on the Steam account has changed yet, and the authenticator on your phone is still
 					the one in charge.
 				</p>
-				<div className="callout callout-warn">
-					<h2>What happens next, and what it costs</h2>
-					<ul>
-						<li>
-							Steam will text a code to the phone number on the account. Have it to hand — there is
-							no way to finish without it.
-						</li>
-						<li>
-							Submitting that code asks Steam to <strong>replace</strong> the authenticator. The one
-							on your phone stops being the account&rsquo;s authenticator at that moment.
-						</li>
-						<li>
-							Steam normally applies a short trading and Market restriction to a transfer. That is
-							expected, and it is far shorter than the fifteen days a remove-and-add would cost.
-						</li>
-						<li>
-							You will be given a new recovery code. Write it down before doing anything else — it
-							is the only way back in if this machine is lost.
-						</li>
-					</ul>
+
+				<div className="notice">
+					<strong>The next step is the one that cannot be undone.</strong>
+					<p className="hint">
+						Submitting the texted code asks Steam to <strong>replace</strong> the authenticator. The
+						one on your phone stops being the account&rsquo;s authenticator at that moment.
+					</p>
 				</div>
+
+				<div className="ceremony">
+					<h2>What happens next</h2>
+					<p className="hint">
+						Steam texts a code to the phone number on the account. Have it to hand — there is no way
+						to finish without it.
+					</p>
+					<p className="hint">
+						Steam normally applies a short trading and Market restriction to a transfer. That is
+						expected, and far shorter than the fifteen days a remove-and-add costs.
+					</p>
+					<p className="hint">
+						You will be given a new recovery code. Write it down before doing anything else — it is
+						the only way back in if this machine is lost.
+					</p>
+				</div>
+
 				<p className="hint">
 					The step that sends the text is not built yet. Nothing further will happen to this account
 					until it is.
 				</p>
+
 				<div className="controls">
 					<button
 						type="button"
@@ -124,87 +129,90 @@ export function MoveAuthenticator({
 	}
 
 	return (
-		<section className="screen">
+		<section>
 			<h1>Move an authenticator from the Steam mobile app</h1>
-			<p>
-				This asks Steam to move the authenticator on your phone to this application. Steam replaces
-				it: a new secret is issued here, and the one on the phone stops being the account&rsquo;s
-				authenticator.
+			<p className="lede">
+				Steam replaces the authenticator on your phone with one here. A new secret is issued to this
+				app, and the one on the phone stops being the account&rsquo;s authenticator.
 			</p>
 
-			<div className="callout callout-warn">
-				<h2>Do not remove the authenticator from your phone first</h2>
-				<p>
+			<div className="notice">
+				<strong>Do not remove the authenticator from your phone first.</strong>
+				<p className="hint">
 					Removing it and adding a new one is a different operation and costs{' '}
 					<strong>fifteen days</strong> of no trading and no Market. A transfer carries a much
 					shorter restriction. Leave the phone exactly as it is and use this screen instead.
 				</p>
 			</div>
 
-			<p>
-				You will need the account&rsquo;s password, the current Steam Guard code from the phone, and
-				later a code Steam texts to the number on the account.
-			</p>
+			<div className="ceremony">
+				<h2>Before you start</h2>
+				<p className="hint">
+					You need the account&rsquo;s password, the code currently showing in the Steam mobile app,
+					and later a code Steam texts to the number on the account.
+				</p>
+				<p className="hint">
+					Signing in below changes nothing on the Steam account. You can stop at any point up to the
+					texted code and your phone will carry on working.
+				</p>
+			</div>
 
 			<form onSubmit={(event) => void submit(event)}>
-				<label>
-					Account name
-					<input
-						value={accountName}
-						onChange={(event) => setAccountName(event.target.value)}
-						autoComplete="off"
-						spellCheck={false}
-						required
-					/>
-				</label>
-				<label>
-					Password
-					<input
-						type="password"
-						value={password}
-						onChange={(event) => setPassword(event.target.value)}
-						autoComplete="off"
-						required
-					/>
-				</label>
-				<label>
-					Steam Guard code, from the Steam mobile app
-					<input
-						value={code}
-						onChange={(event) => setCode(event.target.value)}
-						autoComplete="off"
-						spellCheck={false}
-						maxLength={16}
-						required
-					/>
-					<span className="hint">
-						The five characters currently showing on the phone. This is what proves you hold the
-						authenticator being moved.
-					</span>
-				</label>
-				<label>
-					Proxy for this account (optional)
-					<input
-						value={proxyUrl}
-						onChange={(event) => setProxyUrl(event.target.value)}
-						autoComplete="off"
-						spellCheck={false}
-						placeholder="socks5://user:pass@host:port"
-					/>
-				</label>
+				<label htmlFor="move-account">Steam account name</label>
+				<input
+					id="move-account"
+					type="text"
+					value={accountName}
+					onChange={(event) => setAccountName(event.target.value)}
+					autoComplete="off"
+					spellCheck={false}
+				/>
 
-				{error ? <p className="field-error">{error}</p> : undefined}
-
+				<label htmlFor="move-password">Steam password</label>
+				<input
+					id="move-password"
+					type="password"
+					value={password}
+					onChange={(event) => setPassword(event.target.value)}
+					autoComplete="off"
+				/>
 				<p className="hint">
-					Signing in changes nothing on the Steam account. You can stop here and your phone will
-					carry on working.
+					Used once, to sign in, and never stored. What is kept is the session Steam gives back.
 				</p>
+
+				<label htmlFor="move-code">Steam Guard code, from the Steam mobile app</label>
+				<input
+					id="move-code"
+					type="text"
+					value={code}
+					onChange={(event) => setCode(event.target.value)}
+					autoComplete="off"
+					spellCheck={false}
+					maxLength={16}
+				/>
+				<p className="hint">
+					The five characters currently showing on the phone. This is what proves you hold the
+					authenticator being moved.
+				</p>
+
+				<label htmlFor="move-proxy">Route this account through a proxy (optional)</label>
+				<input
+					id="move-proxy"
+					type="text"
+					value={proxyUrl}
+					onChange={(event) => setProxyUrl(event.target.value)}
+					autoComplete="off"
+					spellCheck={false}
+					placeholder="socks5://user:pass@host:port"
+				/>
+
+				{error ? <p className="error">{error}</p> : undefined}
 
 				<div className="controls">
 					<button type="submit" disabled={busy}>
 						{busy ? 'Signing in…' : 'Sign in'}
 					</button>
-					<button type="button" onClick={onClose} disabled={busy}>
+					<button type="button" className="secondary" onClick={onClose} disabled={busy}>
 						Cancel
 					</button>
 				</div>
