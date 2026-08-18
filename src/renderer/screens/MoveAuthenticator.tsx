@@ -324,7 +324,11 @@ export function MoveAuthenticator({
 							type="button"
 							className="secondary"
 							onClick={() => {
-								void onCancel();
+								// Refuses once Steam has replaced the authenticator, which is
+								// correct and is why this button is hidden then. Swallowed rather
+								// than left to become an unhandled rejection: closing a screen must
+								// not depend on the main process agreeing to forget it.
+								void onCancel().catch(() => undefined);
 								onClose();
 							}}
 						>

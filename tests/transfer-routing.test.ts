@@ -59,14 +59,13 @@ function harness(): {
 
 	const service = new TransferService(vault, transports, () => 0, {
 		now: () => 1_700_000_000_000,
-		signIn: ((_request: unknown, proxyUrl: string | undefined) => {
+		signIn: (_request: unknown, proxyUrl: string | undefined) => {
 			signInProxies.push(proxyUrl);
 			return Promise.resolve({ refreshToken: TOKEN, steamId64: STEAM_ID });
-		}) as never,
-		mintAccessToken: (() => Promise.resolve('access')) as never,
+		},
+		mintAccessToken: () => Promise.resolve('access'),
 		startChallenge: (() => Promise.resolve({ sent: true, shape: 'protobuf' })) as never,
-		continueChallenge: (() =>
-			Promise.resolve({ success: true, replacementToken: REPLACEMENT })) as never,
+		continueChallenge: () => Promise.resolve({ success: true, replacementToken: REPLACEMENT }),
 		writeRecovery: () => undefined
 	});
 
@@ -139,10 +138,9 @@ describe('a transfer for a routed account', () => {
 		} as unknown as SteamTransportFactory;
 		const service = new TransferService(vault, transports, () => 0, {
 			now: () => 1_700_000_000_000,
-			signIn: (() => Promise.resolve({ refreshToken: TOKEN, steamId64: STEAM_ID })) as never,
-			mintAccessToken: (() => Promise.resolve('access')) as never,
-			continueChallenge: (() =>
-				Promise.resolve({ success: true, replacementToken: REPLACEMENT })) as never,
+			signIn: () => Promise.resolve({ refreshToken: TOKEN, steamId64: STEAM_ID }),
+			mintAccessToken: () => Promise.resolve('access'),
+			continueChallenge: () => Promise.resolve({ success: true, replacementToken: REPLACEMENT }),
 			writeRecovery: () => undefined
 		});
 

@@ -4,6 +4,7 @@ import { mintAccessToken } from './access-token';
 import {
 	continueTransfer,
 	startTransferChallenge,
+	TransferApiError,
 	type StartChallengeResult
 } from './transfer-api';
 import { decodeContinueResponse, type ReplacementToken } from './transfer-proto';
@@ -400,15 +401,28 @@ export class TransferService {
 			 */
 			const result = await this.performContinue(transport, accessToken, code, (body) => {
 				this.rawReply = body;
-			}).catch(() => {
+			}).catch((err: unknown) => {
 				/*
-				 * The dangerous branch.
+				 * Two very different failures arrive here, and telling them apart is
+				 * the difference between a shrug and an emergency.
 				 *
-				 * Steam answered — the request was not refused — but the reply could
-				 * not be understood. The authenticator has very likely been replaced
+				 * A `TransferApiError` means Steam declined to act — rate limit,
+				 * expired token, malformed request. It answered with a status and did
+				 * nothing, so the authenticator is untouched and its own message is
+				 * both accurate and actionable. Dressing that up as "your
+				 * authenticator has probably been replaced" would be false, and
+				 * frightening in a way that invites the wrong reaction.
+				 */
+				if (err instanceof TransferApiError) {
+					this.rawReply = undefined;
+					throw new TransferError(err.message, false);
+				}
+
+				/*
+				 * Anything else is a reply that arrived and could not be understood.
+				 * Steam was not refusing, so the authenticator has very likely rotated
 				 * already, and what replaced it is sitting in `rawReply` and nowhere
-				 * else. Saying "it failed" here would be false and would invite the
-				 * user to close the window.
+				 * else. Saying "it failed" here would invite closing the window.
 				 */
 				throw new TransferError(
 					'Steam answered but the reply could not be read. Your authenticator has probably ' +
@@ -418,6 +432,16 @@ export class TransferService {
 				);
 			});
 			if (!result.success) {
+				/*
+				 * Steam read the request and refused it, so nothing rotated and the
+				 * reply holds nothing worth keeping.
+				 *
+				 * Dropping it matters: a retained `rawReply` makes `hasUnreadReply`
+				 * answer yes and stops the pending transfer ever lapsing, so a
+				 * mistyped code would leave the session immortal and the screen
+				 * offering to "read the reply again" when there is nothing in it.
+				 */
+				this.rawReply = undefined;
 				throw new TransferError(
 					'Steam did not accept that code. Nothing has changed — check the code and try again.',
 					false
@@ -521,7 +545,22 @@ export class TransferService {
 
 		try {
 			await this.vault.mutate((draft) => {
-				draft.accounts.push(account);
+				/*
+				 * Replace, never blindly append.
+				 *
+				 * `persist` is deliberately re-runnable: a failed read-back keeps the
+				 * secrets and invites a retry. But the vault write may well have
+				 * succeeded on the attempt that failed its read-back, so a retry that
+				 * pushed unconditionally would leave two records for one SteamID —
+				 * holding the same live secrets, shown twice everywhere, and with
+				 * "remove the account" leaving a copy behind.
+				 */
+				const existing = draft.accounts.findIndex((a) => a.steamId64 === account.steamId64);
+				if (existing >= 0) {
+					draft.accounts[existing] = account;
+				} else {
+					draft.accounts.push(account);
+				}
 			});
 		} catch {
 			throw new TransferError(
@@ -575,8 +614,23 @@ export class TransferService {
 		return pending ? { steamId64: pending.steamId64, accountName: pending.accountName } : undefined;
 	}
 
-	/** Abandon a transfer that has not yet asked Steam to change anything. */
+	/**
+	 * Abandon a transfer that has not yet asked Steam to change anything.
+	 *
+	 * Refuses once secrets are held, rather than obliging. By then the
+	 * authenticator has rotated and `pending` is what `retryDecode` validates
+	 * against, so discarding it would strip the user of the only route back to
+	 * secrets Steam will not reissue — on a channel the renderer can reach at any
+	 * time, for a button the screen is merely careful not to show.
+	 */
 	cancel(): void {
+		if (this.unsaved !== undefined || this.rawReply !== undefined) {
+			throw new TransferError(
+				'This transfer cannot be abandoned: Steam has already replaced the authenticator and ' +
+					'the new one is not saved yet. Use the retry on this screen.',
+				false
+			);
+		}
 		this.pending = undefined;
 	}
 
@@ -590,6 +644,23 @@ export class TransferService {
 	private live(): PendingTransfer | undefined {
 		if (!this.pending) {
 			return undefined;
+		}
+		/*
+		 * A transfer holding secrets never lapses.
+		 *
+		 * The TTL exists to drop an abandoned sign-in, which costs nothing. Once
+		 * Steam has answered it is the opposite: the authenticator has rotated, the
+		 * only copy of its replacement is in `unsaved` or `rawReply`, and
+		 * `retryDecode` needs the pending record for the SteamID it validates
+		 * against.
+		 *
+		 * Without this, the status channel was enough to lose an account. It calls
+		 * `current()`, which calls this — so one poll fifteen minutes after a failed
+		 * decode would clear the record and leave the reply unreadable, while the
+		 * user was still reading the error telling them not to close the window.
+		 */
+		if (this.unsaved !== undefined || this.rawReply !== undefined) {
+			return this.pending;
 		}
 		if (this.now() - this.pending.startedAtMs > PENDING_TTL_MS) {
 			this.pending = undefined;

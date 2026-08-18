@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { TransferService } from '../src/main/steam/transfer';
+import { TransferApiError } from '../src/main/steam/transfer-api';
 import type { SteamTransportFactory } from '../src/main/net/transport';
 import type { VaultService } from '../src/main/vault/service';
 import type { Account } from '../src/shared/vault-schema';
@@ -49,7 +50,9 @@ function harness(
 	options: {
 		continueResult?: unknown;
 		continueThrows?: boolean;
+		continueError?: Error;
 		rawReply?: Buffer;
+		now?: () => number;
 		mutateThrows?: boolean;
 		readsBackWrong?: boolean;
 		writeRecoveryThrows?: boolean;
@@ -84,7 +87,7 @@ function harness(
 	} as unknown as SteamTransportFactory;
 
 	const service = new TransferService(vault, transports, () => 0, {
-		now: () => 1_700_000_000_000,
+		now: options.now ?? (() => 1_700_000_000_000),
 		signIn: () => Promise.resolve({ refreshToken: TOKEN, steamId64: STEAM_ID }),
 		mintAccessToken: () => Promise.resolve('access'),
 		startChallenge: (() => Promise.resolve({ sent: true, shape: 'protobuf' })) as never,
@@ -94,7 +97,7 @@ function harness(
 				onRaw?.(options.rawReply);
 			}
 			if (options.continueThrows) {
-				return Promise.reject(new Error('unreadable'));
+				return Promise.reject(options.continueError ?? new Error('unreadable'));
 			}
 			return Promise.resolve(
 				options.continueResult ?? { success: true, replacementToken: REPLACEMENT }
@@ -227,6 +230,160 @@ describe('when Steam answers but the reply cannot be read', () => {
 		expect(result.revocationCode).toBe('R55555');
 		expect(h.stored).toHaveLength(1);
 		expect(h.continueCalls).toBe(1);
+	});
+});
+
+describe('bugs found by reading the flow rather than exercising it', () => {
+	/*
+	 * A retry after a bad read-back must not store the account twice.
+	 *
+	 * `persist` pushes unconditionally. If the vault write succeeds and only the
+	 * read-back check fails, the account is already in the vault — and `unsaved`
+	 * is deliberately kept so the user can retry. Pressing "try again" then
+	 * pushes the same SteamID a second time.
+	 *
+	 * Two records for one account is not cosmetic: they hold the same secrets,
+	 * every list shows the account twice, and removing "the" account leaves a
+	 * copy of live authenticator secrets behind.
+	 */
+	it('does not store the account twice when a retry follows a bad read-back', async () => {
+		let faithful = false;
+		const stored: Account[] = [];
+		const vault = {
+			read: () => ({
+				// Fails the read-back the first time, passes the second.
+				accounts: faithful ? stored : stored.map((a) => ({ ...a, sharedSecret: 'wrong' }))
+			}),
+			mutate: (change: (draft: { accounts: Account[] }) => void) => {
+				change({ accounts: stored });
+				return Promise.resolve();
+			}
+		} as unknown as VaultService;
+
+		const service = new TransferService(
+			vault,
+			{ forAccount: () => Promise.resolve(vi.fn()) } as unknown as SteamTransportFactory,
+			() => 0,
+			{
+				now: () => 1_700_000_000_000,
+				signIn: () => Promise.resolve({ refreshToken: TOKEN, steamId64: STEAM_ID }),
+				mintAccessToken: () => Promise.resolve('access'),
+				continueChallenge: () => Promise.resolve({ success: true, replacementToken: REPLACEMENT }),
+				writeRecovery: () => undefined
+			}
+		);
+
+		await service.authenticate('someone', 'pw', 'QK4TX');
+		await expect(service.completeTransfer('12345')).rejects.toThrow(/does not read back/);
+
+		faithful = true;
+		await service.retryPersist();
+
+		expect(stored.filter((a) => a.steamId64 === STEAM_ID)).toHaveLength(1);
+	});
+
+	/*
+	 * The pending record must not lapse while secrets are unstored.
+	 *
+	 * `live()` drops the pending transfer once the TTL passes, and `retryDecode`
+	 * needs it for the SteamID it validates against. The status channel calls
+	 * `current()`, which calls `live()` — so a poll fifteen minutes after a failed
+	 * decode silently destroys the ability to read a reply whose secrets exist
+	 * nowhere else. The authenticator has already rotated by then.
+	 */
+	it('keeps the transfer alive while an unread reply is held', async () => {
+		let clock = 1_700_000_000_000;
+		const h = harness({ continueThrows: true, rawReply: goodReply(), now: () => clock });
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
+
+		// The user reads the error, finds their phone, comes back.
+		clock += 20 * 60_000;
+		h.service.current();
+
+		expect(h.service.hasUnreadReply()).toBe(true);
+		await expect(h.service.retryDecode()).resolves.toMatchObject({ revocationCode: 'R55555' });
+	});
+
+	it('keeps the transfer alive while unsaved secrets are held', async () => {
+		let clock = 1_700_000_000_000;
+		const h = harness({ mutateThrows: true, now: () => clock });
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
+
+		clock += 20 * 60_000;
+		h.service.current();
+
+		expect(h.service.hasUnsaved()).toBe(true);
+	});
+});
+
+describe('when Steam refuses the request outright', () => {
+	/*
+	 * A non-200 is Steam declining to act: rate limit, expired token, malformed
+	 * request. Nothing rotated. Reporting that as "your authenticator has
+	 * probably been replaced, do not close this window" is false, and frightening
+	 * in a way that invites exactly the wrong reaction.
+	 */
+	it('does not claim the authenticator was replaced', async () => {
+		const h = harness({
+			continueThrows: true,
+			continueError: new TransferApiError(
+				'Steam is rate-limiting these requests. Wait several minutes before asking again.',
+				429
+			)
+		});
+		await readyToSubmit(h);
+		const err = await h.service
+			.completeTransfer('12345')
+			.then(() => undefined)
+			.catch((e: unknown) => e as Error);
+
+		expect(err?.message).toMatch(/rate-limiting/);
+		expect(err?.message).not.toMatch(/probably been replaced/);
+	});
+
+	it('holds nothing, because nothing was issued', async () => {
+		const h = harness({
+			continueThrows: true,
+			continueError: new TransferApiError('Steam refused the code (HTTP 401).', 401)
+		});
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
+		expect(h.service.hasUnsaved()).toBe(false);
+		expect(h.service.hasUnreadReply()).toBe(false);
+	});
+});
+
+describe('the guards around holding secrets', () => {
+	it('refuses to abandon a transfer whose secrets are unsaved', async () => {
+		const h = harness({ mutateThrows: true });
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
+		// The renderer can reach this channel whenever it likes.
+		expect(() => h.service.cancel()).toThrow(/cannot be abandoned/);
+		expect(h.service.hasUnsaved()).toBe(true);
+	});
+
+	it('abandons freely before Steam has been asked', async () => {
+		const h = harness();
+		await readyToSubmit(h);
+		expect(() => h.service.cancel()).not.toThrow();
+		expect(h.service.current()).toBeUndefined();
+	});
+
+	/*
+	 * A refusal from Steam leaves nothing worth keeping. Holding the reply would
+	 * make the session immortal and offer to re-read a body with nothing in it.
+	 */
+	it('drops the reply when Steam rejects the code', async () => {
+		const h = harness({
+			continueResult: { success: false },
+			rawReply: Buffer.from([0x08, 0x00])
+		});
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/did not accept/);
+		expect(h.service.hasUnreadReply()).toBe(false);
 	});
 });
 
