@@ -117,6 +117,42 @@ describe('class names', () => {
 		expect([...new Set(missing)], 'these resolve to nothing and drop the property').toEqual([]);
 	});
 
+	/*
+	 * Every screen has to bring its own padding.
+	 *
+	 * `.shell` supplies the side gutters, the max-width and the centring, and
+	 * app.css says in as many words that each screen renders its own. The
+	 * transfer screen did not: it returned a bare `<section>`, so its content sat
+	 * flush against the window edge on every state.
+	 *
+	 * It went unseen for a whole review pass because the harness that rendered it
+	 * for inspection wrapped it in `.shell` itself — the scaffold supplied the
+	 * very thing that was missing, and the screenshot looked correct. A test that
+	 * reads the source cannot be fooled that way.
+	 */
+	it('give every screen its own .shell', () => {
+		const missing = screens()
+			.filter((file) => file.includes('screens'))
+			.filter((file) => {
+				const source = readFileSync(file, 'utf8');
+
+				/*
+				 * Only whole screens. Some files under `screens/` are fragments the
+				 * screens embed — `BackupRestore` opens on a `.controls` div — and
+				 * those are laid out by whatever contains them.
+				 */
+				const root = /<(main|section)\b[^>]*>/.exec(source);
+				if (!root) return false;
+
+				// `shell` as a class token, not as an exact attribute: the two gate
+				// screens legitimately carry `className="shell gate"`.
+				return !/className="[^"]*\bshell\b/.test(source);
+			})
+			.map((file) => file.split(/[\\/]/).pop() ?? file);
+
+		expect(missing, 'these render without side padding').toEqual([]);
+	});
+
 	it('would notice a class that does not exist', () => {
 		// The check above is only worth having if it fails when it should.
 		expect(defined.has('callout-warn')).toBe(false);

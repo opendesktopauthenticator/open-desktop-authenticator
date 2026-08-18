@@ -163,7 +163,7 @@ export function MoveAuthenticator({
 	 */
 	if (done) {
 		return (
-			<section>
+			<main className="shell">
 				<h1>{done.accountName} has moved</h1>
 				<p className="lede">
 					The authenticator is now held here. The one on your phone is no longer the account&rsquo;s
@@ -205,13 +205,13 @@ export function MoveAuthenticator({
 						Done
 					</button>
 				</div>
-			</section>
+			</main>
 		);
 	}
 
 	if (authenticated) {
 		return (
-			<section>
+			<main className="shell">
 				<h1>Signed in to {authenticated.accountName}</h1>
 				<p className="lede">
 					Nothing on the Steam account has changed yet, and the authenticator on your phone is still
@@ -332,12 +332,12 @@ export function MoveAuthenticator({
 						</button>
 					)}
 				</div>
-			</section>
+			</main>
 		);
 	}
 
 	return (
-		<section>
+		<main className="shell">
 			<h1>Move an authenticator from the Steam mobile app</h1>
 			<p className="lede">
 				Steam replaces the authenticator on your phone with one here. A new secret is issued to this
@@ -429,6 +429,6 @@ export function MoveAuthenticator({
 					</button>
 				</div>
 			</form>
-		</section>
+		</main>
 	);
 }
