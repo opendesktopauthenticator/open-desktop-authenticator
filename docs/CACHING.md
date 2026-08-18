@@ -89,6 +89,27 @@ curl -sSI https://opendesktopauthenticator.com/ | grep -i cf-cache-status
 A `HIT` should also show a TTFB well under 0.2s from most locations, against
 the 0.47–0.93s measured before.
 
+## Measured result
+
+The Cache Rule was applied on 14 August 2026. Every HTML page answers
+`cf-cache-status: HIT`, and the private routes answer `DYNAMIC` with
+`no-store`, which is the outcome the exclusions exist for.
+
+|                               | Before        | After       |
+| ----------------------------- | ------------- | ----------- |
+| First byte, cold connection   | 0.47s – 0.93s | ~0.32s      |
+| First byte, connection reused | —             | **~0.107s** |
+| Of which TCP + TLS handshake  | —             | ~0.22s      |
+
+The number worth reading is the second one. A cold `curl` pays a fresh DNS
+lookup, TCP connect and TLS handshake before the first byte, and roughly 0.22s
+of the 0.32s is that — unavoidable network latency, paid once per connection
+rather than once per page. Strip it and the edge is answering in about 0.107s,
+which is one round trip to the nearest Cloudflare point of presence.
+
+The origin round trip to Germany is gone entirely. A reader on their second page
+view, and a crawler holding a connection open, sees the second figure.
+
 ## What was deliberately not done
 
 Caching HTML for longer than five minutes. The gain past that point is small
