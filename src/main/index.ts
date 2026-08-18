@@ -339,7 +339,11 @@ function start(): void {
 	 * refuse opposite things: enrolment will not touch an account that already
 	 * has an authenticator, which is exactly the account this one is for.
 	 */
-	const transfer = new TransferService(vault, transports, () => codes.timeOffsetSeconds());
+	const transfer = new TransferService(vault, transports, () => codes.timeOffsetSeconds(), {
+		// The durable copy of a secret bundle Steam issues once. Written before the
+		// vault, so a vault that cannot be written is survivable.
+		writeRecovery: recovery.writeRecovery
+	});
 
 	const activity = new ActivityLog();
 	// The engine used to report into callbacks nobody supplied, so a held-back

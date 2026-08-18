@@ -61,6 +61,23 @@ export function registerTransferHandlers(transfer: TransferService, vault: Vault
 		return transfer.startChallenge();
 	});
 
+	/**
+	 * The point of no return.
+	 *
+	 * Everything before this can be walked away from. This cannot: when it
+	 * answers, the authenticator on the user's phone has already been replaced.
+	 */
+	registerHandler(CHANNELS.transferComplete, async ({ smsCode }) => {
+		requireUnlocked();
+		return transfer.completeTransfer(smsCode);
+	});
+
+	/** Storage only. Steam is not asked again — it could not be. */
+	registerHandler(CHANNELS.transferRetryPersist, async () => {
+		requireUnlocked();
+		return transfer.retryPersist();
+	});
+
 	registerHandler(CHANNELS.transferStatus, () => {
 		const current = transfer.current();
 		return Promise.resolve(current ? { transfer: current } : {});

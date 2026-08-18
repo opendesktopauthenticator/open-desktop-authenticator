@@ -23,6 +23,7 @@ import type {
 	VaultStatus,
 	TransferAuthenticated,
 	TransferStartChallenge,
+	TransferComplete,
 	TransferStatus
 } from '../shared/ipc';
 
@@ -94,6 +95,10 @@ const api: RendererApi = {
 		}) as Promise<TransferAuthenticated>,
 	startTransferChallenge: () =>
 		ipcRenderer.invoke(CHANNELS.transferStartChallenge, {}) as Promise<TransferStartChallenge>,
+	completeTransfer: (smsCode: string) =>
+		ipcRenderer.invoke(CHANNELS.transferComplete, { smsCode }) as Promise<TransferComplete>,
+	retryTransferPersist: () =>
+		ipcRenderer.invoke(CHANNELS.transferRetryPersist, {}) as Promise<TransferComplete>,
 	getTransferStatus: () =>
 		ipcRenderer.invoke(CHANNELS.transferStatus, {}) as Promise<TransferStatus>,
 	cancelTransfer: () => ipcRenderer.invoke(CHANNELS.transferCancel, {}) as Promise<object>,

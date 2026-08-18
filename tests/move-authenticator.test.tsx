@@ -21,6 +21,20 @@ const props = {
 	),
 	onCancel: () => Promise.resolve({}),
 	onStartChallenge: () => Promise.resolve({ shape: 'protobuf' as const, sent: true, eresult: 1 }),
+	onComplete: () =>
+		Promise.resolve({
+			steamId64: '76561198000000001',
+			accountName: 'someone',
+			revocationCode: 'R12345',
+			timeOffsetSeconds: 0
+		}),
+	onRetryPersist: () =>
+		Promise.resolve({
+			steamId64: '76561198000000001',
+			accountName: 'someone',
+			revocationCode: 'R12345',
+			timeOffsetSeconds: 0
+		}),
 	onClose: (): void => {}
 };
 

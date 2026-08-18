@@ -213,6 +213,16 @@ export const CHANNELS = {
 	 */
 	transferAuthenticate: 'transfer:authenticate',
 	transferStartChallenge: 'transfer:startChallenge',
+	/**
+	 * The irreversible one. Submits the texted code and rotates the authenticator.
+	 *
+	 * Its own channel rather than a mode of another, because cancellation stops
+	 * being possible the moment it is called and the UI has to know exactly where
+	 * that line is.
+	 */
+	transferComplete: 'transfer:complete',
+	/** Finish storing a replacement Steam already issued. Safe to repeat. */
+	transferRetryPersist: 'transfer:retryPersist',
 	transferStatus: 'transfer:status',
 	transferCancel: 'transfer:cancel',
 	enrollBegin: 'enroll:begin',

@@ -1,7 +1,19 @@
 import { signIn, type LoginSessionFactory } from './login';
 import { redactCredentials } from '../net/egress';
 import { mintAccessToken } from './access-token';
-import { startTransferChallenge, type StartChallengeResult } from './transfer-api';
+import {
+	continueTransfer,
+	startTransferChallenge,
+	type StartChallengeResult
+} from './transfer-api';
+import type { ReplacementToken } from './transfer-proto';
+import {
+	accountFromReplacement,
+	offsetFrom,
+	storedFaithfully,
+	validateReplacement
+} from './transfer-store';
+import type { Account } from '../../shared/vault-schema';
 import type { SteamTransportFactory } from '../net/transport';
 import type { VaultService } from '../vault/service';
 
@@ -83,6 +95,21 @@ export class TransferError extends Error {
 	}
 }
 
+/**
+ * A transfer that is finished and stored.
+ *
+ * The revocation code is here because the screen has to show it — it is the one
+ * value the user must copy out before doing anything else, and it exists in
+ * exactly two places at this moment: the vault and this object.
+ */
+export type TransferComplete = {
+	steamId64: string;
+	accountName: string;
+	revocationCode: string;
+	/** Steam's clock minus this machine's, from the replacement itself. */
+	timeOffsetSeconds: number;
+};
+
 export type AuthenticateOutcome = {
 	state: 'authenticated';
 	steamId64: string;
@@ -94,7 +121,16 @@ export interface TransferServiceOptions {
 	loginSession?: LoginSessionFactory;
 	signIn?: typeof signIn;
 	startChallenge?: typeof startTransferChallenge;
+	continueChallenge?: typeof continueTransfer;
 	mintAccessToken?: typeof mintAccessToken;
+	/**
+	 * Writes the per-account recovery file.
+	 *
+	 * Optional and best-effort in enrolment; here it is the durable copy of a
+	 * secret bundle Steam will never reissue, written *before* the vault so that
+	 * a vault failure is survivable.
+	 */
+	writeRecovery?: (account: Account) => void;
 }
 
 /**
@@ -124,6 +160,8 @@ export class TransferService {
 	private readonly performSignIn: typeof signIn;
 	private readonly performStart: typeof startTransferChallenge;
 	private readonly mint: typeof mintAccessToken;
+	private readonly performContinue: typeof continueTransfer;
+	private readonly writeRecovery: ((account: Account) => void) | undefined;
 
 	/** At most one transfer at a time. A second would race the first over storage. */
 	private pending: PendingTransfer | undefined;
@@ -133,6 +171,19 @@ export class TransferService {
 
 	/** The same guard for the challenge, where a double press costs a text message. */
 	private challenging = false;
+
+	/** And for the code, where a double press costs an authenticator. */
+	private submitting = false;
+
+	/**
+	 * A replacement Steam has issued that is not yet safely stored.
+	 *
+	 * Its presence means the account's authenticator has already rotated. It is
+	 * held so that a storage failure can be retried without asking Steam again —
+	 * which is impossible, because the code is spent and the secrets are issued
+	 * once.
+	 */
+	private unsaved: { account: Account; token: ReplacementToken } | undefined;
 
 	constructor(
 		vault: VaultService,
@@ -148,6 +199,8 @@ export class TransferService {
 		this.performSignIn = options.signIn ?? signIn;
 		this.performStart = options.startChallenge ?? startTransferChallenge;
 		this.mint = options.mintAccessToken ?? mintAccessToken;
+		this.performContinue = options.continueChallenge ?? continueTransfer;
+		this.writeRecovery = options.writeRecovery;
 	}
 
 	/**
@@ -272,6 +325,175 @@ export class TransferService {
 		} finally {
 			this.challenging = false;
 		}
+	}
+
+	/**
+	 * Submit the texted code. **This rotates the authenticator.**
+	 *
+	 * The ordering below is the whole point of the method, and it is ordered by
+	 * what is irreversible rather than by what is convenient:
+	 *
+	 * 1. Everything that can refuse, refuses first — while refusing is free.
+	 * 2. Steam is asked, once, and never asked again automatically.
+	 * 3. The recovery file is written *before* the vault, because it is the copy
+	 *    that survives a vault this process cannot write.
+	 * 4. The vault is written, then read back, and only a faithful read-back is
+	 *    reported as success.
+	 *
+	 * If any step after Steam answers fails, the bundle stays in memory and the
+	 * transfer enters a state `retryPersist` can finish. Nothing is discarded and
+	 * nothing claims to have worked.
+	 */
+	async completeTransfer(smsCode: string): Promise<TransferComplete> {
+		const pending = this.live();
+		if (!pending) {
+			throw new TransferError(
+				'That transfer has expired before the code was submitted. Nothing has changed; sign ' +
+					'in again to start over.',
+				false
+			);
+		}
+		if (this.submitting) {
+			throw new TransferError('That code is already being submitted.', false);
+		}
+		const code = smsCode.trim();
+		if (!code) {
+			throw new TransferError('Enter the code Steam sent to your phone.', false);
+		}
+
+		// Re-checked here rather than trusted from the sign-in: minutes of reading
+		// warnings may have passed, and this is the last moment refusing is free.
+		this.refuseIfAlreadyHeld(pending.steamId64);
+
+		this.submitting = true;
+		try {
+			const transport = await this.transports.forAccount({
+				steamId64: pending.steamId64,
+				proxyUrl: pending.proxyUrl
+			});
+			const accessToken = await this.mint(
+				transport,
+				pending.steamId64,
+				pending.refreshToken,
+				this.now()
+			);
+
+			/*
+			 * From here until the vault is written, a failure is expensive.
+			 *
+			 * `continueTransfer` throws rather than returning failure when it cannot
+			 * read the reply, because Steam may have rotated the authenticator
+			 * anyway. That is surfaced as an uncertain outcome, not a failed one.
+			 */
+			const result = await this.performContinue(transport, accessToken, code);
+			if (!result.success) {
+				throw new TransferError(
+					'Steam did not accept that code. Nothing has changed — check the code and try again.',
+					false
+				);
+			}
+
+			validateReplacement(result.replacementToken, pending.steamId64);
+			const account = accountFromReplacement(
+				result.replacementToken,
+				pending.accountName,
+				pending.proxyUrl,
+				new Date(this.now()).toISOString()
+			);
+			this.unsaved = { account, token: result.replacementToken };
+
+			return await this.persist();
+		} finally {
+			this.submitting = false;
+		}
+	}
+
+	/**
+	 * Finish storing a replacement Steam has already issued.
+	 *
+	 * Separate and callable again because the expensive half is done: the
+	 * authenticator has rotated and the code is spent. Retrying storage costs
+	 * nothing and is the only way out of a failed write that does not end in a
+	 * support ticket.
+	 */
+	async retryPersist(): Promise<TransferComplete> {
+		if (!this.unsaved) {
+			throw new TransferError('There is no unsaved authenticator to store.', false);
+		}
+		return this.persist();
+	}
+
+	/** True when secrets are held that the vault has not accepted yet. */
+	hasUnsaved(): boolean {
+		return this.unsaved !== undefined;
+	}
+
+	private async persist(): Promise<TransferComplete> {
+		const held = this.unsaved;
+		if (!held) {
+			throw new TransferError('There is no unsaved authenticator to store.', false);
+		}
+		const { account, token } = held;
+
+		/*
+		 * The recovery file first.
+		 *
+		 * It is written with the vault's own key, so it is no less protected — and
+		 * it is the copy that survives if the vault write is the thing that fails.
+		 * Best-effort: a backup that cannot be written is not a reason to abandon
+		 * secrets that exist nowhere else.
+		 */
+		let recovered = false;
+		try {
+			this.writeRecovery?.(account);
+			recovered = this.writeRecovery !== undefined;
+		} catch {
+			// Already false. A backup that cannot be written is not a reason to
+			// abandon secrets that exist nowhere else.
+		}
+
+		try {
+			await this.vault.mutate((draft) => {
+				draft.accounts.push(account);
+			});
+		} catch {
+			throw new TransferError(
+				`Steam has moved the authenticator for ${account.accountName} to this app, but it ` +
+					'could not be saved' +
+					(recovered
+						? '. A recovery file was written first, so nothing is lost. Unlock the vault and ' +
+							'try again from this screen.'
+						: ', and the recovery file could not be written either. Do not close this window: ' +
+							`write down this recovery code now, it is the only way to detach the ` +
+							`authenticator yourself — ${account.revocationCode}.`)
+			);
+		}
+
+		/*
+		 * Read it back before saying it worked.
+		 *
+		 * "The write did not throw" and "the secrets are on disk and decryptable"
+		 * are different claims. Only the second one is safe to tell somebody whose
+		 * phone stopped being their authenticator a moment ago.
+		 */
+		const stored = this.vault.read().accounts.find((a) => a.steamId64 === account.steamId64);
+		if (!storedFaithfully(stored, account)) {
+			throw new TransferError(
+				`Steam has moved the authenticator for ${account.accountName}, but what was saved does ` +
+					'not read back correctly. Nothing has been discarded — try again from this screen. ' +
+					`If it keeps failing, write down this recovery code: ${account.revocationCode}.`
+			);
+		}
+
+		this.unsaved = undefined;
+		this.pending = undefined;
+
+		return {
+			steamId64: account.steamId64,
+			accountName: account.accountName,
+			revocationCode: account.revocationCode ?? '',
+			timeOffsetSeconds: offsetFrom(token, this.now())
+		};
 	}
 
 	/**

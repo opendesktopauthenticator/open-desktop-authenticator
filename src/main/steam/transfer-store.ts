@@ -131,7 +131,7 @@ export function accountFromReplacement(
 		accountName,
 		sharedSecret: token.sharedSecret as string,
 		identitySecret: token.identitySecret as string,
-		revocationCode: token.revocationCode as string,
+		revocationCode: token.revocationCode,
 		deviceId: deviceIdFor(token.steamId64 as string),
 		/*
 		 * Stored as needing its recovery code written down, exactly as a fresh

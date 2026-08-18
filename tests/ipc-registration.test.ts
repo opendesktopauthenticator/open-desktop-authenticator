@@ -129,6 +129,8 @@ describe('IPC registration', () => {
 			CHANNELS.updateCheck,
 			CHANNELS.transferAuthenticate,
 			CHANNELS.transferStartChallenge,
+			CHANNELS.transferComplete,
+			CHANNELS.transferRetryPersist,
 			CHANNELS.transferStatus,
 			CHANNELS.transferCancel,
 			CHANNELS.enrollBegin,

@@ -176,9 +176,23 @@ function asDecimalString(value: unknown): string | undefined {
 	if (typeof value === 'string') {
 		return value;
 	}
-	if (typeof value === 'object' && 'toString' in value) {
-		const text = String(value);
-		return /^\d+$/.test(text) ? text : undefined;
+	/*
+	 * A Long from protobufjs, or anything else that can name itself as digits.
+	 *
+	 * Checked against `Object.prototype.toString` rather than merely for the
+	 * presence of the method: every object has one, and the default returns
+	 * "[object Object]", which would sail through a digits test only by failing
+	 * it — quietly turning a SteamID into undefined.
+	 */
+	if (typeof value === 'object') {
+		const candidate = value as { toString?: () => string };
+		if (
+			typeof candidate.toString === 'function' &&
+			candidate.toString !== Object.prototype.toString
+		) {
+			const text = candidate.toString();
+			return /^\d+$/.test(text) ? text : undefined;
+		}
 	}
 	return undefined;
 }

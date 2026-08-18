@@ -299,6 +299,21 @@ export const transferStartChallengeResponse = z.object({
 	meaning: z.string().optional()
 });
 
+/**
+ * A finished transfer.
+ *
+ * The revocation code crosses IPC here, and only here. It has to: the screen
+ * must put it in front of the user, and this is the one moment it exists
+ * outside the vault. Nothing else about the authenticator travels — not the
+ * shared secret, not the identity secret, not the session.
+ */
+export const transferCompleteResponse = z.object({
+	steamId64: z.string(),
+	accountName: z.string(),
+	revocationCode: z.string(),
+	timeOffsetSeconds: z.number()
+});
+
 /** The transfer in progress, if one is still live. */
 export const transferStatusResponse = z.object({
 	transfer: z.object({ steamId64: z.string(), accountName: z.string() }).optional()
@@ -307,6 +322,7 @@ export const transferStatusResponse = z.object({
 export type TransferAuthenticated = z.infer<typeof transferAuthenticateResponse>;
 export type TransferStatus = z.infer<typeof transferStatusResponse>;
 export type TransferStartChallenge = z.infer<typeof transferStartChallengeResponse>;
+export type TransferComplete = z.infer<typeof transferCompleteResponse>;
 
 export const enrollBeginResponse = z.discriminatedUnion('state', [
 	z.object({ state: z.literal('needsEmailCode'), emailDomain: z.string().optional() }),
@@ -673,6 +689,14 @@ export const IPC_CONTRACT = {
 		request: emptyRequest,
 		response: transferStartChallengeResponse
 	},
+	[CHANNELS.transferComplete]: {
+		request: z.object({ smsCode: z.string().min(1).max(16) }).strict(),
+		response: transferCompleteResponse
+	},
+	[CHANNELS.transferRetryPersist]: {
+		request: emptyRequest,
+		response: transferCompleteResponse
+	},
 	[CHANNELS.transferStatus]: { request: emptyRequest, response: transferStatusResponse },
 	[CHANNELS.transferCancel]: { request: emptyRequest, response: z.object({}).strict() },
 
@@ -932,6 +956,8 @@ export interface RendererApi {
 		proxyUrl?: string
 	): Promise<TransferAuthenticated>;
 	startTransferChallenge(): Promise<TransferStartChallenge>;
+	completeTransfer(smsCode: string): Promise<TransferComplete>;
+	retryTransferPersist(): Promise<TransferComplete>;
 	getTransferStatus(): Promise<TransferStatus>;
 	cancelTransfer(): Promise<object>;
 	beginEnrollment(accountName: string, password: string, proxyUrl?: string): Promise<EnrollBegin>;

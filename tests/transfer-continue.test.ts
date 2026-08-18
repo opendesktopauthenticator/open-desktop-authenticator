@@ -41,7 +41,7 @@ function transportReturning(response: Partial<SteamResponse>): {
 	const seen: SteamRequest[] = [];
 	const transport = vi.fn((request: SteamRequest) => {
 		seen.push(request);
-		return Promise.resolve({ status: 200, text: '', ...response } as SteamResponse);
+		return Promise.resolve({ status: 200, text: '', ...response });
 	});
 	return { transport, seen };
 }

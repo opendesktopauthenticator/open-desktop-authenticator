@@ -1,5 +1,9 @@
 import { useState } from 'react';
-import type { TransferAuthenticated, TransferStartChallenge } from '../../shared/ipc';
+import type {
+	TransferAuthenticated,
+	TransferComplete,
+	TransferStartChallenge
+} from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -33,6 +37,8 @@ export function MoveAuthenticator({
 	onAuthenticate,
 	onCancel,
 	onStartChallenge,
+	onComplete,
+	onRetryPersist,
 	onClose
 }: {
 	onAuthenticate: (
@@ -45,6 +51,10 @@ export function MoveAuthenticator({
 	onCancel: () => Promise<unknown>;
 	/** Asks Steam to text a code. Reversible, but it spends a message and a rate limit. */
 	onStartChallenge: () => Promise<TransferStartChallenge>;
+	/** **Irreversible.** Submits the code and replaces the authenticator. */
+	onComplete: (smsCode: string) => Promise<TransferComplete>;
+	/** Stores a replacement Steam already issued. Steam is not asked again. */
+	onRetryPersist: () => Promise<TransferComplete>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [accountName, setAccountName] = useState('');
@@ -55,6 +65,17 @@ export function MoveAuthenticator({
 	const [error, setError] = useState<string | undefined>(undefined);
 	const [authenticated, setAuthenticated] = useState<TransferAuthenticated | undefined>(undefined);
 	const [challenge, setChallenge] = useState<TransferStartChallenge | undefined>(undefined);
+	const [smsCode, setSmsCode] = useState('');
+	const [done, setDone] = useState<TransferComplete | undefined>(undefined);
+	const [savedCode, setSavedCode] = useState(false);
+	/**
+	 * True once Steam has been asked to rotate.
+	 *
+	 * From this point the screen stops offering to cancel, because cancelling is
+	 * no longer a thing that exists — the authenticator has moved whether or not
+	 * anything here succeeds afterwards.
+	 */
+	const [committed, setCommitted] = useState(false);
 
 	const submit = async (event: React.FormEvent): Promise<void> => {
 		event.preventDefault();
@@ -93,6 +114,93 @@ export function MoveAuthenticator({
 			setBusy(false);
 		}
 	};
+
+	const submitCode = async (): Promise<void> => {
+		if (busy) {
+			return;
+		}
+		setBusy(true);
+		setError(undefined);
+		setCommitted(true);
+		try {
+			setDone(await onComplete(smsCode));
+			setSmsCode('');
+		} catch (err) {
+			setError(messageOf(err));
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const retrySave = async (): Promise<void> => {
+		if (busy) {
+			return;
+		}
+		setBusy(true);
+		setError(undefined);
+		try {
+			setDone(await onRetryPersist());
+		} catch (err) {
+			setError(messageOf(err));
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	/*
+	 * The recovery-code ceremony.
+	 *
+	 * Shown only once the secrets are provably on disk, and it will not let the
+	 * user leave by pretending. Steam issues this code once; the account it
+	 * belongs to now depends on this machine.
+	 */
+	if (done) {
+		return (
+			<section>
+				<h1>{done.accountName} has moved</h1>
+				<p className="lede">
+					The authenticator is now held here. The one on your phone is no longer the account&rsquo;s
+					authenticator.
+				</p>
+
+				<div className="notice">
+					<strong>Write this recovery code down before you close this window.</strong>
+					<p className="hint">
+						It is the only way to detach this authenticator yourself if this machine is lost. Steam
+						issued it once and will not issue it again.
+					</p>
+					<p className="code">{done.revocationCode}</p>
+				</div>
+
+				<div className="ceremony">
+					<h2>What to expect now</h2>
+					<p className="hint">
+						Steam applies a short trading and Market restriction after a transfer. Codes and
+						confirmations work throughout; only trading is held.
+					</p>
+					<p className="hint">
+						Nothing needs removing from the Steam mobile app. Steam replaced the authenticator on
+						its side, so the app&rsquo;s copy is already inert.
+					</p>
+				</div>
+
+				<label className="checkbox">
+					<input
+						type="checkbox"
+						checked={savedCode}
+						onChange={(event) => setSavedCode(event.target.checked)}
+					/>
+					I have written the recovery code down somewhere other than this computer
+				</label>
+
+				<div className="controls">
+					<button type="button" disabled={!savedCode} onClick={onClose}>
+						Done
+					</button>
+				</div>
+			</section>
+		);
+	}
 
 	if (authenticated) {
 		return (
@@ -160,22 +268,62 @@ export function MoveAuthenticator({
 					</p>
 				)}
 
+				{challenge?.sent ? (
+					<>
+						<div className="notice">
+							<strong>Submitting the code cannot be undone.</strong>
+							<p className="hint">
+								Steam replaces the authenticator the moment it accepts this code. Do not close this
+								window until it says the new one has been saved.
+							</p>
+						</div>
+
+						<label htmlFor="move-sms">Code Steam sent to your phone</label>
+						<input
+							id="move-sms"
+							type="text"
+							value={smsCode}
+							onChange={(event) => setSmsCode(event.target.value)}
+							autoComplete="off"
+							spellCheck={false}
+							maxLength={16}
+							disabled={committed && !error}
+						/>
+					</>
+				) : undefined}
+
 				<div className="controls">
 					{challenge ? undefined : (
 						<button type="button" disabled={busy} onClick={() => void requestCode()}>
 							{busy ? 'Asking Steam…' : 'Send the code to my phone'}
 						</button>
 					)}
-					<button
-						type="button"
-						className={challenge ? undefined : 'secondary'}
-						onClick={() => {
-							void onCancel();
-							onClose();
-						}}
-					>
-						Close
-					</button>
+					{challenge?.sent ? (
+						<button
+							type="button"
+							disabled={busy || smsCode.trim() === ''}
+							onClick={() => void submitCode()}
+						>
+							{busy ? 'Working…' : 'Replace the authenticator'}
+						</button>
+					) : undefined}
+					{committed && error ? (
+						<button type="button" disabled={busy} onClick={() => void retrySave()}>
+							Try saving again
+						</button>
+					) : undefined}
+					{committed ? undefined : (
+						<button
+							type="button"
+							className="secondary"
+							onClick={() => {
+								void onCancel();
+								onClose();
+							}}
+						>
+							Close
+						</button>
+					)}
 				</div>
 			</section>
 		);
