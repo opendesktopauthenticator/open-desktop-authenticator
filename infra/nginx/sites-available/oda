@@ -133,7 +133,42 @@ server {
 		#
 		# The assets can be cached hard precisely because their filenames carry a
 		# content hash: new bytes are always a new URL.
+		#
+		# **The browser and the edge are told different things, deliberately, and
+		# in different headers.**
+		#
+		# `Cache-Control: no-cache` is unchanged and keeps the guarantee above: a
+		# browser revalidates every time, so a corrected page is never served
+		# stale from somebody's disk.
+		#
+		# `CDN-Cache-Control` speaks only to shared caches and is invisible to
+		# browsers. It exists because the obvious approach does not work: a single
+		# `Cache-Control: public, max-age=0, s-maxage=300` looks right and
+		# Cloudflare refuses to cache it, because its documented rule is that
+		# `max-age=0` makes a response uncacheable *regardless of s-maxage*. That
+		# was tried here first and the edge kept answering DYNAMIC.
+		#
+		# Five minutes is chosen against the deploy, not the content: every HTML
+		# response was being fetched from Germany, measured at 0.47s to 0.93s
+		# before the first byte for every reader, and a page is never wrong for
+		# longer than one cache period after a correction ships.
+		#
+		# `stale-while-revalidate` means the one unlucky request after expiry is
+		# served from the edge while the refresh happens behind it, rather than
+		# being the request that pays for everyone else's freshness.
+		#
+		# **This alone is not enough.** Cloudflare caches by file extension and
+		# does not consider HTML eligible at all, whatever the headers say, until
+		# a Cache Rule says so. The rule is a dashboard setting, so it is recorded
+		# in docs/CACHING.md rather than here where it cannot be applied.
+		#
+		# Private routes are not covered by this block — the ticket service and
+		# /admin proxy through their own location and send `no-store`, which is
+		# what keeps a support thread out of a shared cache. Asserted in
+		# `tests/infra-caching.test.ts`, because "a different location block" is
+		# not a guarantee anybody can see from here.
 		add_header Cache-Control "no-cache" always;
+		add_header CDN-Cache-Control "public, max-age=300, stale-while-revalidate=86400" always;
 		include snippets/security-headers.conf;
 		try_files $uri $uri.html $uri/index.html =404;
 	}
@@ -162,9 +197,15 @@ server {
 	# a changed mark actually replaces the one already sitting in a tab strip.
 	# Getting this wrong is how a stale or generic favicon outlives three
 	# redesigns.
+	#
+	# The same split as the HTML: the browser keeps revalidating, so a changed
+	# mark still replaces the one in the tab strip, while the edge is allowed to
+	# answer for an hour instead of crossing to Germany for a 15KB icon every
+	# visitor asks for by name.
 	location ~ ^/(favicon\.ico|apple-touch-icon(-precomposed)?\.png|site\.webmanifest)$ {
 		include snippets/security-headers.conf;
 		add_header Cache-Control "no-cache" always;
+		add_header CDN-Cache-Control "public, max-age=3600, stale-while-revalidate=86400" always;
 		# Not in nginx's default mime.types, and the wrong type means the manifest
 		# is ignored and Android falls back to a screenshot of the page.
 		types { application/manifest+json webmanifest; image/x-icon ico; image/png png; }
