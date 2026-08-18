@@ -152,12 +152,19 @@ export function VaultHome({
 					<h1>Accounts</h1>
 				</div>
 				<div className="controls">
-					{/* **The one primary button on this screen.** Six identical secondary
-					    buttons gave the eye nowhere to land; adding an account is the
-					    thing a new user is here to do, so it is the thing that looks
-					    like an action. */}
+					{/* **Add is the one primary button.** A row of identical secondary
+					    buttons gives the eye nowhere to land; adding an account is what a
+					    new user is here to do, so it is what looks like an action.
+
+					    Move sits immediately beside it, because the two are the same job
+					    with different starting conditions — get an authenticator into this
+					    app, whether it exists on a phone already or not. Grouping them is
+					    what stops Move being lost among the tools that follow. */}
 					<button type="button" onClick={onEnrol}>
 						Add authenticator
+					</button>
+					<button type="button" className="secondary" onClick={onMove}>
+						Move from phone
 					</button>
 					<button type="button" className="secondary" onClick={onImport}>
 						Import maFiles
@@ -240,7 +247,7 @@ export function VaultHome({
 						Add an authenticator
 					</button>
 					<button type="button" className="secondary" onClick={onMove}>
-						Move one from the Steam app
+						Move from phone
 					</button>
 					<button type="button" className="secondary" onClick={onImport}>
 						Import maFiles
