@@ -1,4 +1,9 @@
 import type { SteamTransport } from '../confirmations/client';
+import {
+	decodeContinueResponse,
+	encodeContinueRequest,
+	type ContinueResult
+} from './transfer-proto';
 
 /**
  * Steam's authenticator *replacement* endpoints.
@@ -175,4 +180,53 @@ export async function startTransferChallenge(
 			shape: 'protobuf'
 		};
 	}
+}
+
+/**
+ * Submit the texted code, and take the replacement Steam issues.
+ *
+ * **This is the irreversible call.** When it returns, the authenticator on the
+ * user's phone has already stopped being the account's authenticator, and the
+ * only copy of its replacement is the value this function returns.
+ *
+ * It is never retried automatically, and the transport is not permitted to
+ * either. A request that times out may still have been processed: retrying
+ * would submit a spent code against an account whose authenticator has already
+ * rotated, and the second answer would look like a failure while the first
+ * silently succeeded and threw the secrets away. A caller that loses the reply
+ * has an uncertain outcome, not a failed one, and must say so.
+ */
+export async function continueTransfer(
+	transport: SteamTransport,
+	accessToken: string,
+	smsCode: string
+): Promise<ContinueResult> {
+	const encoded = encodeContinueRequest(smsCode);
+
+	const response = await transport({
+		method: 'POST',
+		url: `${BASE}/RemoveAuthenticatorViaChallengeContinue/v1/?access_token=${encodeURIComponent(accessToken)}`,
+		body: new URLSearchParams({ input_protobuf_encoded: encoded.toString('base64') }),
+		cookie: '',
+		// The reply is raw secret material. Read as UTF-8 it comes back mangled
+		// beyond recovery, and quietly — see SteamRequest.binary.
+		binary: true
+	});
+
+	if (response.status !== 200) {
+		throw new TransferApiError(
+			describeResult(response.eresult) ?? `Steam refused the code (HTTP ${response.status}).`,
+			response.status
+		);
+	}
+
+	/*
+	 * `latin1`, not `utf8`.
+	 *
+	 * The transport hands back a string, and protobuf is binary. Decoding those
+	 * bytes as UTF-8 replaces every invalid sequence with U+FFFD — which for a
+	 * body full of raw secret material means most of it. latin1 is a byte-for-byte
+	 * mapping, so the buffer that comes out is the one that went in.
+	 */
+	return decodeContinueResponse(Buffer.from(response.text ?? '', 'latin1'));
 }

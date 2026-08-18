@@ -735,7 +735,11 @@ export class SteamTransportFactory {
 						finish(() => reject(new EgressError('Steam sent an implausibly large response.')));
 						return;
 					}
-					chunks.push(typeof chunk === 'string' ? chunk : chunk.toString('utf8'));
+					chunks.push(
+						typeof chunk === 'string'
+							? chunk
+							: chunk.toString(request.binary === true ? 'latin1' : 'utf8')
+					);
 				});
 				response.on('error', (error) =>
 					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough))))

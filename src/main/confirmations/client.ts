@@ -41,6 +41,19 @@ export interface SteamRequest {
 	body?: URLSearchParams;
 	/** The account's web session cookie. */
 	cookie: string;
+	/**
+	 * Keep the response bytes intact instead of reading them as UTF-8.
+	 *
+	 * Every call in this application but one answers with text, so UTF-8 is the
+	 * right default. The exception is Steam's protobuf-shaped authenticator
+	 * transfer, whose body is raw secret material: read as UTF-8, every invalid
+	 * byte sequence becomes U+FFFD, which for a body of random bytes is most of
+	 * it. The corruption is silent and the result still parses as a string.
+	 *
+	 * With this set the body is mapped byte-for-byte through latin1, so
+	 * `Buffer.from(text, 'latin1')` recovers exactly what Steam sent.
+	 */
+	binary?: boolean;
 }
 
 export interface SteamResponse {
