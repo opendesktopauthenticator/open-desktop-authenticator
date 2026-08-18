@@ -150,26 +150,49 @@ A live transfer is destructive and can only be validated by performing one. When
 doing so, on a **sacrificial account whose current recovery code is written down
 off-machine**, confirm:
 
-- [ ] The new code ODA generates is accepted by Steam at sign-in
-- [ ] The code the phone shows is no longer accepted
-- [ ] Confirmations can be listed and approved with the new identity secret
-- [ ] The new recovery code was captured before leaving the ceremony
-- [ ] The restriction observed matches a transfer, not a fifteen-day
+- [x] The new code ODA generates is accepted by Steam at sign-in
+- [x] The phone no longer holds an authenticator for the account
+- [x] Confirmations can be listed with the new identity secret
+- [ ] Confirmations can be _approved_ with the new identity secret
+- [x] The new recovery code was captured before leaving the ceremony
+- [x] The restriction observed matches a transfer, not a fifteen-day
       remove-and-add
 
-### Status
+### Status: validated live
 
-A live transfer has been performed successfully against a real account with an
-active authenticator, including the SMS challenge and the replacement being
-stored. The individual checklist items above were not each recorded at the time
-and are worth confirming explicitly on the next run.
+A transfer has been performed end to end against a real account with an active
+authenticator, and each item above was checked afterwards.
+
+Two of them are worth stating precisely rather than as ticks.
+
+**Approving a confirmation is not yet proven.** The confirmations screen
+authenticated, fetched, and reported none pending — which exercises the identity
+secret and the session as far as _listing_ goes. Nothing was outstanding on the
+account to approve, so the signing path for `allow` has still only ever run
+against mocked responses. It is the one behaviour in this feature that a live
+run has not covered.
+
+**The short restriction is the load-bearing observation.** It is what
+distinguishes a transfer from a remove-and-add on Steam's side, and it is the
+claim the whole feature rests on. Seeing it confirms `generate_new_token`
+reached Steam and was honoured, rather than the request having been quietly
+interpreted as a plain removal.
+
+The phone's authenticator was gone and its sessions cleared, which is the
+expected consequence of a server-side replacement — nothing was done to the
+device.
 
 ## Not built yet
 
 - A dedicated `outcome_uncertain` screen for a network timeout _after_ the
   submit. The retry path covers the same ground; the wording could be clearer.
 - `QueryStatus` verification of `time_transferred` after the transfer.
-- A gated live-test harness (`STEAM_TRANSFER_LIVE_TEST=1`).
+- A gated live-test harness (`STEAM_TRANSFER_LIVE_TEST=1`). Lower value than it
+  looked: the transfer has been validated by performing one, and a harness that
+  automates a destructive, once-per-account operation is of limited use.
+- Approving a real confirmation with a transferred identity secret. The only
+  behaviour here a live run has not covered, because the test account had none
+  pending.
 
 ## Sources
 
