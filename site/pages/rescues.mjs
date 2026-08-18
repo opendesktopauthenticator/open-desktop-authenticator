@@ -464,6 +464,10 @@ ${tradeHoldDiagram()}
 			<h2>Related</h2>
 			<ul class="link-cards">
 				<li>
+					<a href="/move-steam-authenticator-to-pc"><b>Moving it to a PC instead</b>
+					<span>The same two-day transfer, to a desktop rather than another phone.</span></a>
+				</li>
+				<li>
 					<a href="/steam-revocation-code"><b>Your recovery code</b>
 					<span>The R-code that detaches an authenticator, and where to find it.</span></a>
 				</li>
@@ -601,7 +605,7 @@ export const revocationCode = {
 			<div class="callout callout-warn">
 				<p>
 					<strong>Removing costs fifteen days.</strong> A removal carries a
-					<a href="/move-steam-authenticator-new-phone">fifteen-day trade and Market
+					<a href="/steam-guard-trade-holds">fifteen-day trade and Market
 					restriction</a>, which is why
 					<a href="/move-steam-authenticator-new-phone">transferring is the better path
 					whenever you still can</a> — that one costs two. Steam Support cannot lift

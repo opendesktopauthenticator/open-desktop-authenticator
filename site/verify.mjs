@@ -482,6 +482,37 @@ for (const [slug, html] of built) {
 			fail(page.slug, 'exists but nothing links to it — unreachable except through the sitemap');
 		}
 	}
+
+	/*
+	 * And reachable from the home page specifically, not merely from something.
+	 *
+	 * The check above asks whether any page links to this one, which two new
+	 * pages satisfied by linking to each other. They were a perfectly connected
+	 * island: every internal link resolved, nothing was orphaned by the rule as
+	 * written, and a crawler starting at the front door could reach neither.
+	 *
+	 * That is the shape the rule was meant to catch and did not, so it now walks
+	 * outward from `index` the way a crawler does rather than counting inbound
+	 * links.
+	 */
+	const reachable = new Set();
+	const queue = ['index'];
+	while (queue.length > 0) {
+		const slug = queue.pop();
+		if (slug === undefined || reachable.has(slug)) continue;
+		const html = built.get(slug);
+		if (html === undefined) continue;
+		reachable.add(slug);
+		for (const [, href] of html.matchAll(/href="(\/[^"#?]*)"/g)) {
+			queue.push(href === '/' ? 'index' : href.slice(1));
+		}
+	}
+	for (const page of PAGES) {
+		if (page.slug === 'index' || page.slug === '404') continue;
+		if (!reachable.has(page.slug)) {
+			fail(page.slug, 'cannot be reached by following links from the home page');
+		}
+	}
 }
 
 process.stdout.write(`pass 1 — ${built.size} pages read from site/dist\n`);

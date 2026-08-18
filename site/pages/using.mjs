@@ -470,6 +470,10 @@ export const mobileVsDesktop = {
 			<h2>Related</h2>
 			<ul class="link-cards">
 				<li>
+					<a href="/move-steam-authenticator-to-pc"><b>Moving yours to a PC</b>
+					<span>What Steam's transfer does, and the two days it costs.</span></a>
+				</li>
+				<li>
 					<a href="/alternatives"><b>Every desktop option, compared</b>
 					<span>What each one is, who maintains it, and what it asks of you.</span></a>
 				</li>
