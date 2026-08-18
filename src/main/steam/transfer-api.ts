@@ -199,7 +199,15 @@ export async function startTransferChallenge(
 export async function continueTransfer(
 	transport: SteamTransport,
 	accessToken: string,
-	smsCode: string
+	smsCode: string,
+	/**
+	 * Handed the reply before anything tries to understand it.
+	 *
+	 * Decoding can fail, and by then Steam may already have rotated the
+	 * authenticator — so the bytes have to escape this function before they can
+	 * be lost to a parse error. This is the only copy that exists.
+	 */
+	onRaw?: (body: Buffer) => void
 ): Promise<ContinueResult> {
 	const encoded = encodeContinueRequest(smsCode);
 
@@ -228,5 +236,7 @@ export async function continueTransfer(
 	 * body full of raw secret material means most of it. latin1 is a byte-for-byte
 	 * mapping, so the buffer that comes out is the one that went in.
 	 */
-	return decodeContinueResponse(Buffer.from(response.text ?? '', 'latin1'));
+	const body = Buffer.from(response.text ?? '', 'latin1');
+	onRaw?.(body);
+	return decodeContinueResponse(body);
 }

@@ -39,6 +39,7 @@ export function MoveAuthenticator({
 	onStartChallenge,
 	onComplete,
 	onRetryPersist,
+	onRetryDecode,
 	onClose
 }: {
 	onAuthenticate: (
@@ -55,6 +56,8 @@ export function MoveAuthenticator({
 	onComplete: (smsCode: string) => Promise<TransferComplete>;
 	/** Stores a replacement Steam already issued. Steam is not asked again. */
 	onRetryPersist: () => Promise<TransferComplete>;
+	/** Reads a reply that arrived but could not be decoded. Steam is not contacted. */
+	onRetryDecode: () => Promise<TransferComplete>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [accountName, setAccountName] = useState('');
@@ -132,6 +135,8 @@ export function MoveAuthenticator({
 		}
 	};
 
+	const unread = /could not be read/.test(error ?? '');
+
 	const retrySave = async (): Promise<void> => {
 		if (busy) {
 			return;
@@ -139,7 +144,9 @@ export function MoveAuthenticator({
 		setBusy(true);
 		setError(undefined);
 		try {
-			setDone(await onRetryPersist());
+			// Whichever stage failed, the way forward is the same button: read the
+			// reply if it was never understood, store it if it was.
+			setDone(await (unread ? onRetryDecode() : onRetryPersist()));
 		} catch (err) {
 			setError(messageOf(err));
 		} finally {

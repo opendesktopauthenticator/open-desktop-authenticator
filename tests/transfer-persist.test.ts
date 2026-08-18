@@ -15,6 +15,28 @@ import type { Account } from '../src/shared/vault-schema';
 const STEAM_ID = '76561198000000001';
 const TOKEN = 'eyJhbGciOiJub25lIn0.eyJhdWQiOlsibW9iaWxlIl0sImV4cCI6MjAwMDAwMDAwMH0.';
 
+/** A real encoded reply, so the retry path decodes rather than pretends. */
+function goodReply(): Buffer {
+	const token = Buffer.concat([
+		Buffer.from([0x0a, 0x06]),
+		Buffer.from('shared', 'utf8'),
+		Buffer.from([0x1a, 0x06]),
+		Buffer.from('R55555', 'utf8'),
+		// server_time (field 5) is uint64 — a varint, not a length-delimited field.
+		// Getting that wrong produced a body protobufjs read past the end of.
+		Buffer.from([0x28, 0x80, 0xe2, 0xcf, 0xaa, 0x06]),
+		Buffer.from([0x42, 0x08]),
+		Buffer.from('identity', 'utf8'),
+		(() => {
+			const b = Buffer.alloc(9);
+			b[0] = 0x61;
+			b.writeBigUInt64LE(76561198000000001n, 1);
+			return b;
+		})()
+	]);
+	return Buffer.concat([Buffer.from([0x08, 0x01]), Buffer.from([0x12, token.length]), token]);
+}
+
 const REPLACEMENT = {
 	sharedSecret: 'c2hhcmVk',
 	identitySecret: 'aWRlbnRpdHk=',
@@ -26,6 +48,8 @@ const REPLACEMENT = {
 function harness(
 	options: {
 		continueResult?: unknown;
+		continueThrows?: boolean;
+		rawReply?: Buffer;
 		mutateThrows?: boolean;
 		readsBackWrong?: boolean;
 		writeRecoveryThrows?: boolean;
@@ -64,8 +88,14 @@ function harness(
 		signIn: () => Promise.resolve({ refreshToken: TOKEN, steamId64: STEAM_ID }),
 		mintAccessToken: () => Promise.resolve('access'),
 		startChallenge: (() => Promise.resolve({ sent: true, shape: 'protobuf' })) as never,
-		continueChallenge: (() => {
+		continueChallenge: ((_t: unknown, _a: unknown, _c: unknown, onRaw?: (body: Buffer) => void) => {
 			continueCalls += 1;
+			if (options.rawReply) {
+				onRaw?.(options.rawReply);
+			}
+			if (options.continueThrows) {
+				return Promise.reject(new Error('unreadable'));
+			}
 			return Promise.resolve(
 				options.continueResult ?? { success: true, replacementToken: REPLACEMENT }
 			);
@@ -163,6 +193,39 @@ describe('when storing fails after Steam has already rotated', () => {
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
 		await expect(h.service.retryPersist()).rejects.toThrow();
+		expect(h.continueCalls).toBe(1);
+	});
+});
+
+describe('when Steam answers but the reply cannot be read', () => {
+	/*
+	 * The most dangerous branch in the feature. Steam did not refuse, so the
+	 * authenticator has very likely rotated — and the only copy of what replaced
+	 * it is the bytes that just failed to parse. Losing them costs the account.
+	 */
+	it('does not say it failed, because it probably did not', async () => {
+		const h = harness({ continueThrows: true });
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(
+			/probably been replaced already/
+		);
+	});
+
+	it('keeps the reply so it can be read again', async () => {
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
+		expect(h.service.hasUnreadReply()).toBe(true);
+	});
+
+	it('can decode and store it on a second attempt, without asking Steam', async () => {
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
+
+		const result = await h.service.retryDecode();
+		expect(result.revocationCode).toBe('R55555');
+		expect(h.stored).toHaveLength(1);
 		expect(h.continueCalls).toBe(1);
 	});
 });

@@ -697,6 +697,10 @@ export const IPC_CONTRACT = {
 		request: emptyRequest,
 		response: transferCompleteResponse
 	},
+	[CHANNELS.transferRetryDecode]: {
+		request: emptyRequest,
+		response: transferCompleteResponse
+	},
 	[CHANNELS.transferStatus]: { request: emptyRequest, response: transferStatusResponse },
 	[CHANNELS.transferCancel]: { request: emptyRequest, response: z.object({}).strict() },
 
@@ -958,6 +962,7 @@ export interface RendererApi {
 	startTransferChallenge(): Promise<TransferStartChallenge>;
 	completeTransfer(smsCode: string): Promise<TransferComplete>;
 	retryTransferPersist(): Promise<TransferComplete>;
+	retryTransferDecode(): Promise<TransferComplete>;
 	getTransferStatus(): Promise<TransferStatus>;
 	cancelTransfer(): Promise<object>;
 	beginEnrollment(accountName: string, password: string, proxyUrl?: string): Promise<EnrollBegin>;

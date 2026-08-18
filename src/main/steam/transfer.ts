@@ -6,7 +6,7 @@ import {
 	startTransferChallenge,
 	type StartChallengeResult
 } from './transfer-api';
-import type { ReplacementToken } from './transfer-proto';
+import { decodeContinueResponse, type ReplacementToken } from './transfer-proto';
 import {
 	accountFromReplacement,
 	offsetFrom,
@@ -184,6 +184,19 @@ export class TransferService {
 	 * once.
 	 */
 	private unsaved: { account: Account; token: ReplacementToken } | undefined;
+
+	/**
+	 * Steam's reply, exactly as it arrived, kept until it is safely stored.
+	 *
+	 * Decoding is the one step between Steam rotating an authenticator and this
+	 * application holding anything at all, and a parse failure there would
+	 * otherwise destroy the only copy of secrets that are issued once. Held so
+	 * that `retryDecode` can have another go — at a bug, a schema surprise, or
+	 * anything else that made the first attempt throw.
+	 *
+	 * Memory only. It is raw secret material and never touches disk unsealed.
+	 */
+	private rawReply: Buffer | undefined;
 
 	constructor(
 		vault: VaultService,
@@ -385,7 +398,25 @@ export class TransferService {
 			 * read the reply, because Steam may have rotated the authenticator
 			 * anyway. That is surfaced as an uncertain outcome, not a failed one.
 			 */
-			const result = await this.performContinue(transport, accessToken, code);
+			const result = await this.performContinue(transport, accessToken, code, (body) => {
+				this.rawReply = body;
+			}).catch(() => {
+				/*
+				 * The dangerous branch.
+				 *
+				 * Steam answered — the request was not refused — but the reply could
+				 * not be understood. The authenticator has very likely been replaced
+				 * already, and what replaced it is sitting in `rawReply` and nowhere
+				 * else. Saying "it failed" here would be false and would invite the
+				 * user to close the window.
+				 */
+				throw new TransferError(
+					'Steam answered but the reply could not be read. Your authenticator has probably ' +
+						'been replaced already, and the details are still held here — do not close this ' +
+						'window. Use Try again to store them.',
+					false
+				);
+			});
 			if (!result.success) {
 				throw new TransferError(
 					'Steam did not accept that code. Nothing has changed — check the code and try again.',
@@ -406,6 +437,42 @@ export class TransferService {
 		} finally {
 			this.submitting = false;
 		}
+	}
+
+	/**
+	 * Have another go at reading a reply that could not be decoded.
+	 *
+	 * Separate from `retryPersist` because the failure is at a different stage:
+	 * nothing has been understood yet, so there is no account to store. Steam is
+	 * not contacted — the bytes are the ones it already sent.
+	 */
+	async retryDecode(): Promise<TransferComplete> {
+		const body = this.rawReply;
+		const pending = this.pending;
+		if (!body || !pending) {
+			throw new TransferError('There is no unread reply from Steam to retry.', false);
+		}
+
+		const result = decodeContinueResponse(body);
+		if (!result.success) {
+			throw new TransferError("Steam's reply says the transfer did not complete.", false);
+		}
+		validateReplacement(result.replacementToken, pending.steamId64);
+		this.unsaved = {
+			account: accountFromReplacement(
+				result.replacementToken,
+				pending.accountName,
+				pending.proxyUrl,
+				new Date(this.now()).toISOString()
+			),
+			token: result.replacementToken
+		};
+		return this.persist();
+	}
+
+	/** True when a reply arrived that could not be decoded. */
+	hasUnreadReply(): boolean {
+		return this.rawReply !== undefined && this.unsaved === undefined;
 	}
 
 	/**
@@ -486,6 +553,7 @@ export class TransferService {
 		}
 
 		this.unsaved = undefined;
+		this.rawReply = undefined;
 		this.pending = undefined;
 
 		return {

@@ -223,6 +223,8 @@ export const CHANNELS = {
 	transferComplete: 'transfer:complete',
 	/** Finish storing a replacement Steam already issued. Safe to repeat. */
 	transferRetryPersist: 'transfer:retryPersist',
+	/** Read a reply that arrived but could not be decoded. Steam is not contacted. */
+	transferRetryDecode: 'transfer:retryDecode',
 	transferStatus: 'transfer:status',
 	transferCancel: 'transfer:cancel',
 	enrollBegin: 'enroll:begin',

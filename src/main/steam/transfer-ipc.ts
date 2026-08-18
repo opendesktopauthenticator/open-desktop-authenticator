@@ -78,6 +78,17 @@ export function registerTransferHandlers(transfer: TransferService, vault: Vault
 		return transfer.retryPersist();
 	});
 
+	/**
+	 * Read again a reply that arrived but could not be decoded.
+	 *
+	 * The bytes are the ones Steam already sent. Nothing is requested, because
+	 * nothing could be — the code is spent and the secrets are issued once.
+	 */
+	registerHandler(CHANNELS.transferRetryDecode, async () => {
+		requireUnlocked();
+		return transfer.retryDecode();
+	});
+
 	registerHandler(CHANNELS.transferStatus, () => {
 		const current = transfer.current();
 		return Promise.resolve(current ? { transfer: current } : {});

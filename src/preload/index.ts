@@ -99,6 +99,8 @@ const api: RendererApi = {
 		ipcRenderer.invoke(CHANNELS.transferComplete, { smsCode }) as Promise<TransferComplete>,
 	retryTransferPersist: () =>
 		ipcRenderer.invoke(CHANNELS.transferRetryPersist, {}) as Promise<TransferComplete>,
+	retryTransferDecode: () =>
+		ipcRenderer.invoke(CHANNELS.transferRetryDecode, {}) as Promise<TransferComplete>,
 	getTransferStatus: () =>
 		ipcRenderer.invoke(CHANNELS.transferStatus, {}) as Promise<TransferStatus>,
 	cancelTransfer: () => ipcRenderer.invoke(CHANNELS.transferCancel, {}) as Promise<object>,

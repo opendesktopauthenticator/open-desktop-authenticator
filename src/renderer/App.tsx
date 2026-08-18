@@ -492,6 +492,7 @@ export function App(): React.JSX.Element {
 					onStartChallenge={() => api.startTransferChallenge()}
 					onComplete={(smsCode) => api.completeTransfer(smsCode)}
 					onRetryPersist={() => api.retryTransferPersist()}
+					onRetryDecode={() => api.retryTransferDecode()}
 					onCancel={() => api.cancelTransfer()}
 					onClose={() => setView('accounts')}
 				/>

@@ -28,6 +28,13 @@ const props = {
 			revocationCode: 'R12345',
 			timeOffsetSeconds: 0
 		}),
+	onRetryDecode: () =>
+		Promise.resolve({
+			steamId64: '76561198000000001',
+			accountName: 'someone',
+			revocationCode: 'R12345',
+			timeOffsetSeconds: 0
+		}),
 	onRetryPersist: () =>
 		Promise.resolve({
 			steamId64: '76561198000000001',
