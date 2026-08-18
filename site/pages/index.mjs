@@ -12,6 +12,7 @@ import { download, importFromSda, docs, faq, support, notFound } from './guides.
 import { mafile, lostAuthenticator, alternatives } from './answers.mjs';
 import { codeNotWorking, moveAuthenticator, revocationCode, encryptedMafile } from './rescues.mjs';
 import { confirmationsOnDesktop, mobileVsDesktop, withoutPhone, openMafile } from './using.mjs';
+import { tradeHolds, moveToPc } from './transfer.mjs';
 import owners from './owners.mjs';
 import story from './story.mjs';
 import { credits, donate } from './support-us.mjs';
@@ -30,6 +31,8 @@ export const PAGES = [
 	lostAuthenticator,
 	revocationCode,
 	moveAuthenticator,
+	moveToPc,
+	tradeHolds,
 	codeNotWorking,
 	withoutPhone,
 	confirmationsOnDesktop,
