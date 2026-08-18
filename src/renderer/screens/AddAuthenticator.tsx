@@ -217,8 +217,10 @@ export function AddAuthenticator({
 					<div className="ceremony">
 						<h2>Before you start</h2>
 						<p className="hint">
-							The account must not already have an authenticator. If it has one on a phone, remove
-							it there first — this app will not detach it for you.
+							This screen is for an account with <strong>no</strong> authenticator yet. If the
+							account already has one on a phone, do not remove it — move it across instead, using
+							the link under the button below. Removing and re-adding costs fifteen days of no
+							trading; moving does not.
 						</p>
 						<p className="hint">
 							A phone number is <strong>not</strong> required. If the account has one, Steam texts
@@ -264,9 +266,10 @@ export function AddAuthenticator({
 						    through another is linked to both, by Steam, through the account
 						    itself. Adding routing later cannot undo the first request. */}
 						<p className="hint">
-							Leave empty to use this machine&rsquo;s own connection. If you intend to route this
-							account at all, <strong>set it now</strong> — Steam sees the address every request
-							comes from, so enrolling here and routing later ties the two together permanently.
+							HTTP, HTTPS, SOCKS4 and SOCKS5 are all accepted; the example is only an example. Leave
+							empty to use this machine&rsquo;s own connection. If you intend to route this account
+							at all, <strong>set it now</strong> — Steam sees the address every request comes from,
+							so enrolling here and routing later ties the two together permanently.
 						</p>
 
 						<div className="controls">

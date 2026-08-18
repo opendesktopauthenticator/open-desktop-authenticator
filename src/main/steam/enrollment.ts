@@ -289,9 +289,18 @@ export class EnrollmentService {
 			const emailCode = actions.find((action) => action.type === 2);
 			if (!emailCode) {
 				this.cancel(session);
+				/*
+				 * The advice this used to give was the expensive one.
+				 *
+				 * "Remove it in the Steam mobile app first" is remove-then-add, which
+				 * costs fifteen days of no trading and leaves a window with no second
+				 * factor. It was the only answer available when enrolment was the only
+				 * path; it is not any more, and pointing at the transfer costs nothing.
+				 */
 				throw new EnrollmentError(
-					'Steam wants this sign-in approved in a way this app cannot complete. If the account ' +
-						'already has an authenticator, remove it in the Steam mobile app first.'
+					'Steam wants this sign-in approved in a way this app cannot complete, which usually ' +
+						'means the account already has an authenticator. Do not remove it — use "Move one ' +
+						'from the Steam app" instead, which keeps the shorter restriction.'
 				);
 			}
 
