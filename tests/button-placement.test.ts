@@ -94,6 +94,17 @@ describe('button placement', () => {
 					return;
 				}
 				counted++;
+				/*
+				 * A button styled as a link belongs in the sentence, not beside it.
+				 *
+				 * The rule below exists because a bare button next to prose gets no
+				 * spacing and looks wrong. `button.link` is the deliberate opposite: it
+				 * is set inline, carries no box, and reads as part of the paragraph it
+				 * sits in — wrapping it in `.controls` is what would break it.
+				 */
+				if (/className="link"/.test(line)) {
+					return;
+				}
 				const parent = parentTag(lines, index) ?? '(nothing)';
 				if (!ALLOWED.test(parent.replace(/\s+/g, ' '))) {
 					stray.push(`${name}:${index + 1} sits in ${parent.slice(0, 40)}`);

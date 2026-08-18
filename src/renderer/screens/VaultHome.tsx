@@ -159,9 +159,6 @@ export function VaultHome({
 					<button type="button" onClick={onEnrol}>
 						Add authenticator
 					</button>
-					<button type="button" className="secondary" onClick={onMove}>
-						Move one from the Steam app
-					</button>
 					<button type="button" className="secondary" onClick={onImport}>
 						Import maFiles
 					</button>

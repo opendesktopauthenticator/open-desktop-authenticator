@@ -1706,3 +1706,35 @@ ul.plain li {
 .powered-mark:focus-visible .powered-name {
 	color: var(--mint);
 }
+
+/*
+ * A button that reads as a link.
+ *
+ * Used where an action belongs inside a sentence rather than beside one — the
+ * offer to move an existing authenticator sits mid-paragraph on the add screen,
+ * because that is where somebody discovers they need it. A real `<button>`
+ * rather than an anchor: it performs an action and navigates nothing, and an
+ * anchor without an href is not reachable by keyboard.
+ */
+button.link {
+	display: inline;
+	padding: 0;
+	border: 0;
+	background: none;
+	font: inherit;
+	color: var(--mint);
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	cursor: pointer;
+	min-height: 0;
+}
+
+button.link:hover {
+	color: var(--mint-pale);
+}
+
+button.link:focus-visible {
+	outline: 2px solid var(--mint);
+	outline-offset: 2px;
+	border-radius: 2px;
+}

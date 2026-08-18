@@ -502,6 +502,7 @@ export function App(): React.JSX.Element {
 		if (view === 'enroll') {
 			return (
 				<AddAuthenticator
+					onMove={() => setView('move')}
 					{...(resumeEnrollment
 						? {
 								resume: {

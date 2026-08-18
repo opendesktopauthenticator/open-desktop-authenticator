@@ -32,6 +32,7 @@ export function AddAuthenticator({
 	onActivate,
 	onBackup,
 	onClose,
+	onMove,
 	resume
 }: {
 	onBegin: (accountName: string, password: string, proxyUrl?: string) => Promise<EnrollBegin>;
@@ -42,6 +43,17 @@ export function AddAuthenticator({
 	/** Opens the revocation-code ceremony for the newly enrolled account. */
 	onBackup: (steamId64: string, accountName: string) => void;
 	onClose: () => void;
+	/**
+	 * Switch to moving an authenticator that already exists on a phone.
+	 *
+	 * Offered here rather than as another button on the accounts screen, because
+	 * here is where the person who needs it actually arrives: they press "add",
+	 * Steam refuses because the account already has one, and the error tells them
+	 * to remove it from their phone — which is the fifteen-day mistake. The way
+	 * out belongs next to the wall, not in a row of seven buttons they read
+	 * before they knew they had a problem.
+	 */
+	onMove: () => void;
 	/**
 	 * An account that is already enrolled but not activated, to resume.
 	 *
@@ -243,7 +255,7 @@ export function AddAuthenticator({
 							type="text"
 							value={proxyUrl}
 							onChange={(event) => setProxyUrl(event.target.value)}
-							placeholder="socks5://user:password@host:1080"
+							placeholder="socks5://user:pass@host:1080"
 							autoComplete="off"
 							spellCheck={false}
 						/>
@@ -262,6 +274,15 @@ export function AddAuthenticator({
 								{busy ? 'Talking to Steam…' : 'Sign in and add authenticator'}
 							</button>
 						</div>
+
+						<p className="hint">
+							Already have an authenticator on your phone for this account?{' '}
+							<button type="button" className="link" onClick={onMove}>
+								Move it here instead
+							</button>{' '}
+							— adding a second one is not possible, and removing the first costs fifteen days of no
+							trading.
+						</p>
 					</form>
 				</>
 			)}
