@@ -82,6 +82,38 @@ export type Envelope = z.infer<typeof envelopeSchema>;
  */
 export const MINIMUM_SCRYPT = Object.freeze({ N: 16384, r: 8, p: 1 });
 
+/**
+ * Upper bounds, because the parameters come out of the *file*.
+ *
+ * A vault is opened before anything proves who wrote it, and scrypt's memory
+ * cost is roughly `128 * N * r` bytes: a crafted envelope naming a huge `N`
+ * turns "open this vault" into an allocation that freezes or kills the process
+ * before the passphrase is ever checked. The minimums keep a weak file from
+ * being quietly acceptable; these keep a hostile one from being expensive.
+ * The ceiling clears the shipping defaults (`128 * 131072 * 8` = 128 MiB) by
+ * 8x, so re-sealing at a raised work factor stays possible.
+ */
+const MAXIMUM_SCRYPT = Object.freeze({
+	/** 2^21. With r at its own cap this stays within `maxmem` reach. */
+	N: 2 ** 21,
+	r: 32,
+	p: 8,
+	/** Bytes of scrypt working memory a file may demand: 1 GiB. */
+	memory: 1024 * 1024 * 1024
+});
+
 export function isAcceptableKdf(kdf: Kdf): boolean {
-	return kdf.N >= MINIMUM_SCRYPT.N && kdf.r >= MINIMUM_SCRYPT.r && kdf.p >= MINIMUM_SCRYPT.p;
+	return (
+		kdf.N >= MINIMUM_SCRYPT.N &&
+		kdf.r >= MINIMUM_SCRYPT.r &&
+		kdf.p >= MINIMUM_SCRYPT.p &&
+		kdf.N <= MAXIMUM_SCRYPT.N &&
+		kdf.r <= MAXIMUM_SCRYPT.r &&
+		kdf.p <= MAXIMUM_SCRYPT.p &&
+		// scrypt requires a power of two; Node throws on anything else, but a
+		// refusal here names the file as the problem instead of surfacing an
+		// internal crypto error for a vault that was never valid.
+		Number.isInteger(Math.log2(kdf.N)) &&
+		128 * kdf.N * kdf.r <= MAXIMUM_SCRYPT.memory
+	);
 }

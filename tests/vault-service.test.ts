@@ -823,3 +823,59 @@ describe('concurrent passphrase changes', () => {
 		await expect(v.unlock('the first replacement phrase')).resolves.toBeUndefined();
 	});
 });
+
+/*
+ * Two unlocks racing.
+ *
+ * Both read the file, then raced their derivations. Nothing locked, so the
+ * generation moved for neither — and the loser installed the *older* contents
+ * over state a mutation had already moved past, so the next save wrote the
+ * stale copy back over the newer file. The guard refuses the second caller the
+ * way `create` and the passphrase change already do.
+ */
+describe('concurrent unlocks', () => {
+	it('refuses the second while the first is still deriving', async () => {
+		const v = service();
+		await v.create(PASS);
+		v.lock('manual');
+
+		let releaseFirst: (() => void) | undefined;
+		duringUnseal = () =>
+			new Promise((resolve) => {
+				releaseFirst = resolve;
+			});
+		const first = v.unlock(PASS);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		await expect(v.unlock(PASS)).rejects.toThrow(/already being unlocked/);
+
+		releaseFirst?.();
+		await first;
+		expect(v.isUnlocked()).toBe(true);
+	});
+});
+
+/*
+ * The backup answer must track the file, not a stale cache.
+ *
+ * `backupAvailable` is polled once a second by the status handler, so it is
+ * memoised against the backup's stat — and a memo that survived the file
+ * changing would tell the unlock screen a backup exists after it was deleted,
+ * or hide one that just appeared.
+ */
+describe('backupAvailable caching', () => {
+	it('notices the backup appearing and disappearing', async () => {
+		const v = service();
+		expect(v.backupAvailable()).toBeUndefined();
+
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+		expect(v.backupAvailable()).toBeDefined();
+
+		rmSync(`${file}.bak`);
+		expect(v.backupAvailable()).toBeUndefined();
+
+		await v.mutate((d) => (d.settings.autoLockMinutes = 30));
+		expect(v.backupAvailable()).toBeDefined();
+	});
+});

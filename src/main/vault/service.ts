@@ -114,6 +114,9 @@ export class VaultService {
 	/** Guards `changePassphrase` the same way. */
 	private changingPassphrase = false;
 
+	/** Guards `unlock` against a concurrent second unlock. */
+	private opening = false;
+
 	constructor(options: VaultServiceOptions) {
 		this.file = options.file;
 		this.now = options.now ?? (() => Date.now());
@@ -224,6 +227,23 @@ export class VaultService {
 
 	/** Unlock an existing vault. */
 	async unlock(passphrase: string): Promise<void> {
+		// One at a time, like `create` and the passphrase change. Two concurrent
+		// unlocks both read the file, then raced their derivations — and the loser
+		// installed the *older* contents over state a mutation had already moved
+		// on, so the next save wrote the stale copy back over the newer file. The
+		// generation check cannot see this: nothing locked, so nothing bumped it.
+		if (this.opening) {
+			throw new VaultServiceError('the vault is already being unlocked');
+		}
+		this.opening = true;
+		try {
+			await this.unlockOnce(passphrase);
+		} finally {
+			this.opening = false;
+		}
+	}
+
+	private async unlockOnce(passphrase: string): Promise<void> {
 		if (!this.exists()) {
 			throw new VaultServiceError('there is no vault at this location yet');
 		}
@@ -586,8 +606,28 @@ export class VaultService {
 		writeEnvelope(this.file, envelope);
 	}
 
+	/**
+	 * Cached against the backup file's identity, because the status poll asks
+	 * once a second. Uncached, every tick synchronously read and parsed the whole
+	 * backup — kilobytes of base64 through JSON.parse and zod, on the main
+	 * thread, to answer a boolean that changes a handful of times a session. The
+	 * `stat` is the cheap part and is what notices a change.
+	 */
+	private backupCache: { key: string; envelope: Envelope | undefined } | undefined;
+
 	backupAvailable(): Envelope | undefined {
-		return readBackupEnvelope(this.file);
+		let key: string;
+		try {
+			const stat = statSync(`${this.file}.bak`);
+			key = `${stat.mtimeMs}:${stat.size}`;
+		} catch {
+			this.backupCache = { key: 'absent', envelope: undefined };
+			return undefined;
+		}
+		if (this.backupCache?.key !== key) {
+			this.backupCache = { key, envelope: readBackupEnvelope(this.file) };
+		}
+		return this.backupCache.envelope;
 	}
 
 	/**

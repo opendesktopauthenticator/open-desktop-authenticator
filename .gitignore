@@ -51,3 +51,16 @@ coverage/
 # Test fixtures are the ONE exception: they are synthetic and deliberately
 # tracked so the parser corpus survives. They contain no real account material.
 !spike/fixtures/*.maFile
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The support server's runtime state. The schema is created by the server at
+# startup; the database fills with reporters' contact details and report text,
+# and the attachments directory with their screenshots. None of it is ever
+# ours to commit. (An early schema-only tickets.db was tracked once — verified
+# row-free before it was untracked.)
+# ─────────────────────────────────────────────────────────────────────────────
+tickets/*.db
+tickets/*.db-wal
+tickets/*.db-shm
+tickets/*.db-journal
+tickets/attachments/

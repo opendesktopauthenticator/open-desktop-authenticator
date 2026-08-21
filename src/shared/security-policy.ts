@@ -186,9 +186,11 @@ export function isOpenableExternally(rawUrl: string): boolean {
 		return false;
 	}
 
-	// Only http(s). Anything else — file:, javascript:, ms-msdt:, custom schemes —
-	// is a way to launch something rather than to show a page.
-	if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+	// Only https. Anything else — file:, javascript:, ms-msdt:, custom schemes —
+	// is a way to launch something rather than to show a page, and plain http is
+	// a downgrade nothing this app links to needs: every allowed host serves
+	// https, and an http link is one a network attacker can answer.
+	if (url.protocol !== 'https:') {
 		return false;
 	}
 

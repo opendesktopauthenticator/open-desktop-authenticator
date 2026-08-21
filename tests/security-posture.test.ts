@@ -1,7 +1,12 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { cspFor, PRODUCTION_CSP, SECURE_WEB_PREFERENCES } from '../src/shared/security-policy';
+import {
+	cspFor,
+	isOpenableExternally,
+	PRODUCTION_CSP,
+	SECURE_WEB_PREFERENCES
+} from '../src/shared/security-policy';
 
 /**
  * The §11 invariants, asserted rather than documented.
@@ -353,5 +358,46 @@ describe('§12 F2 — the recovery path is reachable from the interface', () => 
 
 		expect(enrollment).toContain(phrase);
 		expect(home).toContain(phrase);
+	});
+});
+
+describe('external links are https only', () => {
+	it('refuses plain http even for allowed hosts', () => {
+		// Nothing this app links to serves anything over http that it does not
+		// also serve over https, and an http link is one a network attacker can
+		// answer — on the app whose job is teaching people to follow only the
+		// verified chain.
+		expect(isOpenableExternally('http://github.com/anything')).toBe(false);
+		expect(isOpenableExternally('http://steamcommunity.com/')).toBe(false);
+		expect(isOpenableExternally('https://github.com/anything')).toBe(true);
+	});
+});
+
+describe('the renderer bundle stays free of the schema library', () => {
+	it('no renderer file value-imports the zod-bearing contract', () => {
+		// Two screens importing two constants from `ipc.ts` pulled all of zod —
+		// a third of the renderer bundle — into a process that validates nothing.
+		// The constants live in the zod-free `acknowledgements.ts`; types are fine
+		// (erased at compile), values are not.
+		const screens = readdirSync(join(root, 'src/renderer/screens')).filter((name) =>
+			name.endsWith('.tsx')
+		);
+		const offenders: string[] = [];
+		for (const name of [...screens.map((s) => `screens/${s}`), 'App.tsx']) {
+			const source = read(`src/renderer/${name}`);
+			// A value import: `import {` ... `} from '<path>/shared/ipc'` without `type`.
+			const match = /import \{[^}]*\} from '[^']*shared\/ipc'/.exec(source);
+			if (match && !/^import type/.test(match[0]) && /\{[^}]*\b(?!type )[a-z]/.test(match[0])) {
+				// Allow imports where every named binding is `type X`.
+				const bindings = /\{([^}]*)\}/.exec(match[0])?.[1] ?? '';
+				const hasValue = bindings
+					.split(',')
+					.some((entry) => entry.trim() !== '' && !entry.trim().startsWith('type '));
+				if (hasValue) {
+					offenders.push(name);
+				}
+			}
+		}
+		expect(offenders).toEqual([]);
 	});
 });

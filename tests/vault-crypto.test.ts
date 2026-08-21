@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { open, seal, VaultCryptoError, wipe } from '../src/main/vault/crypto';
+import { deriveKey, open, seal, VaultCryptoError, wipe } from '../src/main/vault/crypto';
 import {
+	isAcceptableKdf,
 	MINIMUM_SCRYPT,
 	NONCE_BYTES,
 	SALT_BYTES,
@@ -235,5 +236,55 @@ describe('key material handling', () => {
 		const key = Buffer.from('sensitive key material here!!!!!', 'utf8');
 		wipe(key);
 		expect(key.every((b) => b === 0)).toBe(true);
+	});
+});
+
+/*
+ * The KDF parameters come out of the file, and the file may be hostile.
+ *
+ * scrypt's working memory is roughly 128 * N * r bytes. A crafted envelope
+ * naming a huge N turned "open this vault" into a multi-gigabyte allocation
+ * before the passphrase was ever checked — the minimums guarded the weak
+ * direction and nothing guarded the expensive one.
+ */
+describe('KDF parameters from a hostile file', () => {
+	const kdf = (over: Partial<{ N: number; r: number; p: number }>) => ({
+		type: 'scrypt' as const,
+		N: 131072,
+		r: 8,
+		p: 1,
+		salt: Buffer.alloc(32).toString('base64'),
+		...over
+	});
+
+	it('accepts the shipping defaults and a reasonable raise', () => {
+		expect(isAcceptableKdf(kdf({}))).toBe(true);
+		expect(isAcceptableKdf(kdf({ N: 2 ** 20 }))).toBe(true);
+	});
+
+	it('refuses an N built to exhaust memory', () => {
+		expect(isAcceptableKdf(kdf({ N: 2 ** 25 }))).toBe(false);
+	});
+
+	it('refuses an N that is not a power of two', () => {
+		// Node throws on these anyway; refusing here names the file as the
+		// problem instead of surfacing an internal crypto error.
+		expect(isAcceptableKdf(kdf({ N: 131073 }))).toBe(false);
+	});
+
+	it('refuses a memory demand smuggled through r', () => {
+		// N at its own cap, r at its own cap: each individually allowed, the
+		// product past the memory ceiling.
+		expect(isAcceptableKdf(kdf({ N: 2 ** 21, r: 32 }))).toBe(false);
+	});
+
+	it('still refuses the weak direction', () => {
+		expect(isAcceptableKdf(kdf({ N: 1024 }))).toBe(false);
+	});
+
+	it('carries the refusal through deriveKey', async () => {
+		await expect(deriveKey('a passphrase', Buffer.alloc(32), kdf({ N: 2 ** 25 }))).rejects.toThrow(
+			/outside the acceptable range/
+		);
 	});
 });

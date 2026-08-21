@@ -26,58 +26,16 @@ import { CHANNELS, type ChannelName } from './channels';
 /** No arguments. Declared explicitly rather than omitted, so every channel has a schema. */
 const emptyRequest = z.object({}).strict();
 
-/**
- * The words a user must type to switch automatic trade confirmation on.
- *
- * Declared here, in the contract, because the main process is what enforces it.
- * The screen imports this same constant so the two cannot drift — a gate whose
- * wording differs between the field and the check is a gate that silently opens.
- */
-export const TRADES_ACK = 'APPROVE TRADES';
-
-/**
- * The words a user must type to detach an authenticator from Steam.
- *
- * Names the consequence rather than confirming an intent — "REMOVE STEAM GUARD"
- * is what actually happens, and somebody typing it cannot later say they thought
- * it only affected this app.
- */
-export const DEACTIVATE_ACK = 'REMOVE STEAM GUARD';
-
-/**
- * Whether what the user typed counts as the acknowledgement.
- *
- * Shared by the screen that collects it and the handler that enforces it, so the
- * two cannot disagree — a gate that accepts in one place and rejects in the
- * other is worse than no gate, because it reads as the application being broken.
- *
- * Internal whitespace is collapsed. The first version compared after `trim()`
- * only, so `APPROVE  TRADES` was refused: a person typing two words is not
- * making a security decision about how many spaces sit between them, and
- * refusing that teaches them the feature is flaky rather than that the phrase
- * matters. Case and surrounding space were already forgiven; this is the same
- * judgement applied consistently.
- */
-export function matchesTradesAck(typed: string | undefined): boolean {
-	return matchesAck(typed, TRADES_ACK);
-}
-
-/**
- * The same rule for the deactivation phrase.
- *
- * Shared rather than open-coded. The handler normalised the typed phrase inline
- * while the trades gate used the helper above, so the two most destructive
- * confirmations in the application applied the same rule from two places — and
- * the screen applied neither, offering a submit that the main process would then
- * refuse.
- */
-export function matchesDeactivateAck(typed: string | undefined): boolean {
-	return matchesAck(typed, DEACTIVATE_ACK);
-}
-
-function matchesAck(typed: string | undefined, phrase: string): boolean {
-	return typed !== undefined && typed.trim().replace(/\s+/g, ' ').toUpperCase() === phrase;
-}
+// Re-exported so the main process keeps one import path for the contract.
+// The definitions live in `acknowledgements.ts`, which is zod-free, so the two
+// screens that need the phrases do not drag the schema library into the
+// renderer bundle.
+export {
+	TRADES_ACK,
+	DEACTIVATE_ACK,
+	matchesTradesAck,
+	matchesDeactivateAck
+} from './acknowledgements';
 
 export const appInfoResponse = z.object({
 	productName: z.string(),

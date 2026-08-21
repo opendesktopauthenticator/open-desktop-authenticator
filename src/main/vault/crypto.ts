@@ -53,8 +53,11 @@ export class VaultCryptoError extends Error {
  */
 export async function deriveKey(passphrase: string, salt: Buffer, kdf: Kdf): Promise<Buffer> {
 	if (!isAcceptableKdf(kdf)) {
+		// "Outside the acceptable range", not "weaker": the bounds now cut both
+		// ways, and the dangerous direction is a *crafted* file demanding enough
+		// scrypt memory to freeze the process before the passphrase is checked.
 		throw new VaultCryptoError(
-			`refusing KDF parameters weaker than the minimum (N=${kdf.N}, r=${kdf.r}, p=${kdf.p})`
+			`refusing KDF parameters outside the acceptable range (N=${kdf.N}, r=${kdf.r}, p=${kdf.p})`
 		);
 	}
 	// maxmem is not stored in the file: it is a local execution limit, not a

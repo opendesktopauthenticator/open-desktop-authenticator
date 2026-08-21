@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { DEACTIVATE_ACK, matchesDeactivateAck, type AccountSummary } from '../../shared/ipc';
+import type { AccountSummary } from '../../shared/ipc';
+import { DEACTIVATE_ACK, matchesDeactivateAck } from '../../shared/acknowledgements';
 import { messageOf } from '../ipc-message';
 
 /**

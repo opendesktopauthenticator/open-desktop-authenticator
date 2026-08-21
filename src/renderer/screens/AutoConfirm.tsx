@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { matchesTradesAck, TRADES_ACK, type AccountSummary } from '../../shared/ipc';
+import type { AccountSummary } from '../../shared/ipc';
+import { matchesTradesAck, TRADES_ACK } from '../../shared/acknowledgements';
 import { messageOf } from '../ipc-message';
 
 /**
