@@ -10,7 +10,14 @@ public post-mortem — what broke, when we detected it, and what we changed.
 
 ## [Unreleased]
 
-Pre-release. Nothing has shipped; there is no version to install.
+## [0.1.0] — first packaged build
+
+The first version that exists as an installable file rather than as source.
+
+**Not yet code-signed.** Windows SmartScreen will warn on it, and `/download`
+says so. Verify the download against the published `SHA256SUMS.txt` and the
+build provenance attestation, both produced by the public workflow from this
+tag.
 
 ### Added
 
