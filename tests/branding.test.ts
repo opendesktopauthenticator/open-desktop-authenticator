@@ -28,7 +28,8 @@ import {
 /** Read rather than imported, so this asserts against the real file on disk. */
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as {
 	name: string;
-	author: string;
+	/** Object form, because the `.deb` target requires a maintainer email. */
+	author: { name: string; email: string };
 	description: string;
 };
 
@@ -76,8 +77,22 @@ describe('branding placeholders', () => {
 		// vault becomes invisible to the app that wrote it. No migration exists.
 		const slug = branding.productName.toLowerCase().replace(/\s+/g, '-');
 		expect(pkg.name).toBe(slug);
-		expect(pkg.author).toBe(branding.company);
+		// `author` is an object rather than a string because the `.deb` target
+		// refuses to build without a maintainer email, and the packaging run that
+		// first proved this pipeline works failed on exactly that. The name half
+		// still has to agree with `branding.company`.
+		expect(pkg.author.name).toBe(branding.company);
 		expect(pkg.description).toContain(branding.productName);
+	});
+
+	it('publishes a role address, never an individual, as the package maintainer', () => {
+		// This string is written into public `.deb` metadata on every machine the
+		// package is installed on, and into the Store listing's publisher details.
+		// A personal address there is published permanently and cannot be recalled,
+		// so it is a role address on the project's own domain — the same one
+		// `security.txt` already advertises.
+		expect(pkg.author.email).toMatch(/^[a-z]+@opendesktopauthenticator\.com$/);
+		expect(pkg.author.email).not.toMatch(/gmail|outlook|hotmail|yahoo|proton/i);
 	});
 
 	it('does not flag the company, which is settled', () => {

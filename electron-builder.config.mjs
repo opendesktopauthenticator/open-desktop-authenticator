@@ -144,6 +144,27 @@ export default {
 	linux: {
 		icon: 'build/icons',
 		category: 'Utility;Security',
+		/*
+		 * The `.desktop` entry's basename, and the `app_id`/`WM_CLASS` Electron
+		 * reports.
+		 *
+		 * Without it a running window is not associated with its launcher entry:
+		 * the app appears twice in a dock, once as the installed application and
+		 * once as an unnamed window, and pinning does not stick. electron-builder
+		 * warns about this rather than failing, so it survives a build that looks
+		 * entirely successful.
+		 */
+		desktopName: 'open-desktop-authenticator.desktop',
+		/*
+		 * Required by the `.deb` target, which refuses to build without a
+		 * maintainer — the packaging run that first produced this file failed on
+		 * exactly that, after AppImage had already succeeded.
+		 *
+		 * A role address on the project's own domain, the same one `security.txt`
+		 * publishes. Deliberately not an individual's: this string is written into
+		 * public package metadata on every machine the `.deb` is installed on.
+		 */
+		maintainer: 'MASTERPANEL LLC <security@opendesktopauthenticator.com>',
 		synopsis: 'Steam Guard codes and confirmations on your desktop',
 		target: [
 			{ target: 'AppImage', arch: ['x64'] },
