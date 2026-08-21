@@ -1,4 +1,4 @@
-import { writeFile } from 'node:fs/promises';
+import { chmod, writeFile } from 'node:fs/promises';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { maFileName, toMaFile } from '../import/export';
@@ -158,11 +158,41 @@ export function registerEnrollmentHandlers(
 			return { state: 'cancelled' as const };
 		}
 
+		// **Checked again, after the dialog.** A save dialog sits open for as long as
+		// the user takes to pick a folder, and the idle timer, a suspend or an OS
+		// screen lock can all fire in that window. The account was copied out before
+		// the dialog opened, so without this the plaintext secrets are written after
+		// the vault has locked — the one moment the application has been told nobody
+		// is present.
+		requireUnlocked();
+
 		// `mode: 0o600` — owner-only. This file contains the same secrets as the
 		// vault and none of its encryption, so the one protection available is that
 		// other users on the machine cannot read it. The user is told as much on
 		// the screen that offers this.
-		await writeFile(destination, toMaFile(account), { encoding: 'utf8', mode: 0o600 });
+		//
+		// Wrapped because a failed write throws with the absolute path in its
+		// message, and the rule at the top of this module is that no path crosses
+		// IPC in either direction.
+		try {
+			await writeFile(destination, toMaFile(account), { encoding: 'utf8', mode: 0o600 });
+		} catch {
+			throw new Error(`${suggested} could not be written to that location.`);
+		}
+		// **`mode` alone was not enough.** POSIX applies it only when the file is
+		// created, so exporting over a file that already existed — a second export to
+		// the same name, which is the ordinary case — kept whatever permissions it
+		// had, commonly `0644`, while replacing its contents with an unencrypted
+		// shared_secret and identity_secret.
+		//
+		// Best effort: Windows has no POSIX mode, and failing an export that has
+		// already written its bytes would leave the user worse off than a permission
+		// bit that could not be set.
+		try {
+			await chmod(destination, 0o600);
+		} catch {
+			/* not supported here; the directory's own permissions still apply */
+		}
 
 		return { state: 'saved' as const, fileName: suggested };
 	});

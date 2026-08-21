@@ -1,4 +1,5 @@
 import {
+	chmodSync,
 	closeSync,
 	copyFileSync,
 	existsSync,
@@ -62,7 +63,12 @@ export function readEnvelope(file: string): Envelope {
 	try {
 		raw = readFileSync(file, 'utf8');
 	} catch (err) {
-		throw new VaultStorageError(`could not read the vault file at ${file}`, err);
+		// **No path in the message.** `ENOENT`/`EACCES` text reaches the renderer
+		// through unlock, passphrase change and passphrase verification, none of
+		// which sanitise it — and the path names the user's OS account and their
+		// AppData layout to a sandboxed process that has no use for either. The
+		// original error is still attached as `cause` for anything running locally.
+		throw new VaultStorageError('the vault file could not be read', err);
 	}
 
 	let json: unknown;
@@ -106,7 +112,15 @@ export function writeEnvelope(file: string, envelope: Envelope): void {
 	}
 
 	try {
-		const fd = openSync(paths.temp, 'w');
+		// **`0o600`, owner-only.** Without an explicit mode `openSync` creates the
+		// file `0o666`, which an ordinary `022` umask turns into `0o644` — so on a
+		// shared Linux machine every other local user could read the vault and
+		// attack the passphrase offline, at their leisure, against a file whose
+		// whole purpose is to be the thing they cannot get. `recovery.ts` has always
+		// written `0o600`; this is the same policy on the larger file.
+		//
+		// `renameSync` carries the mode across, so the vault inherits it.
+		const fd = openSync(paths.temp, 'w', 0o600);
 		try {
 			writeSync(fd, serialised, 0, 'utf8');
 			// Durable before the rename, or "atomic" is a claim rather than a fact.
@@ -116,6 +130,13 @@ export function writeEnvelope(file: string, envelope: Envelope): void {
 		}
 
 		renameSync(paths.temp, file);
+		// Vaults written by an earlier build are already on disk at `0o644`, and the
+		// mode above only fixes files created from here on. Narrowing both on every
+		// write is what actually repairs an existing install.
+		tighten(file);
+		if (hadExisting) {
+			tighten(paths.backup);
+		}
 		syncDirectory(dirname(file));
 
 		// Verify what actually landed rather than trusting the write.
@@ -153,6 +174,22 @@ function syncDirectory(dir: string): void {
 				/* nothing useful to do */
 			}
 		}
+	}
+}
+
+/**
+ * Narrow a file to owner-only, best effort.
+ *
+ * Best effort because Windows has no POSIX mode — `chmodSync` there touches only
+ * the read-only flag, and the real protection is the per-user ACL on
+ * `%APPDATA%`. Failing a vault write over a permission bit we cannot set on the
+ * platform most users are on would trade a real guarantee for a theoretical one.
+ */
+function tighten(file: string): void {
+	try {
+		chmodSync(file, 0o600);
+	} catch {
+		/* not supported here; the directory's own permissions still apply */
 	}
 }
 

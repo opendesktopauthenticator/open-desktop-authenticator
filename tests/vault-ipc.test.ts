@@ -206,31 +206,33 @@ describe('routing is optional, and removable', () => {
 });
 
 describe('the backup ceremony cannot be short-circuited', () => {
+	const CODE = 'R12345';
+
 	it('refuses to mark a backup done before the code was shown', () => {
 		// The UI presents reveal-then-confirm, but the renderer is untrusted. One
 		// IPC call must not clear the warning for an account whose code nobody saw —
 		// that warning is the last thing standing between a user and an
 		// unrecoverable account.
 		const ceremony = new RevocationCeremony();
-		expect(ceremony.hasRevealed('76561198000000001')).toBe(false);
+		expect(ceremony.hasRevealed('76561198000000001', CODE)).toBe(false);
 	});
 
 	it('allows it once the code has genuinely been revealed', () => {
 		const ceremony = new RevocationCeremony();
-		ceremony.recordReveal('76561198000000001');
+		ceremony.recordReveal('76561198000000001', CODE);
 
-		expect(ceremony.hasRevealed('76561198000000001')).toBe(true);
+		expect(ceremony.hasRevealed('76561198000000001', CODE)).toBe(true);
 		// And only for that account.
-		expect(ceremony.hasRevealed('76561198000000002')).toBe(false);
+		expect(ceremony.hasRevealed('76561198000000002', CODE)).toBe(false);
 	});
 
 	it('forgets on lock, so an unlock has to show the code again', () => {
 		const ceremony = new RevocationCeremony();
-		ceremony.recordReveal('76561198000000001');
+		ceremony.recordReveal('76561198000000001', CODE);
 
 		ceremony.forget();
 
-		expect(ceremony.hasRevealed('76561198000000001')).toBe(false);
+		expect(ceremony.hasRevealed('76561198000000001', CODE)).toBe(false);
 	});
 });
 
@@ -413,5 +415,58 @@ describe('the settings contract', () => {
 			'updateCheck'
 		]);
 		expect(JSON.stringify(parsed)).not.toContain('LEAKED');
+	});
+});
+
+/*
+ * The ceremony is about a code, not about an account.
+ *
+ * It was a `Set` of SteamIDs, which cannot express that. Reveal code A, import a
+ * maFile carrying a different code B for the same account, and confirming marked
+ * B written down on the strength of having shown A — while `mergeAccount` had
+ * already cleared `revocationBackedUpAt` for exactly that case, with a comment
+ * saying the ceremony is owed again. The two halves disagreed, and the half that
+ * won was the one that silences the warning.
+ *
+ * What is at stake is the last warning standing between a user and an account
+ * only Steam Support can recover.
+ */
+describe('the ceremony is bound to the code that was shown', () => {
+	const ID = '76561198000000001';
+
+	it('refuses a code that was never displayed, even for a revealed account', () => {
+		const ceremony = new RevocationCeremony();
+		ceremony.recordReveal(ID, 'R11111');
+
+		// What an import between reveal and confirm leaves behind.
+		expect(ceremony.hasRevealed(ID, 'R22222')).toBe(false);
+	});
+
+	it('still accepts the code that was displayed', () => {
+		const ceremony = new RevocationCeremony();
+		ceremony.recordReveal(ID, 'R11111');
+
+		expect(ceremony.hasRevealed(ID, 'R11111')).toBe(true);
+	});
+
+	it('accepts a re-reveal of the new code', () => {
+		// The way out is the ceremony itself: show the new code, confirm the new
+		// code. Nothing here should make that harder than it is.
+		const ceremony = new RevocationCeremony();
+		ceremony.recordReveal(ID, 'R11111');
+		ceremony.recordReveal(ID, 'R22222');
+
+		expect(ceremony.hasRevealed(ID, 'R22222')).toBe(true);
+		// And the superseded one is no longer good enough.
+		expect(ceremony.hasRevealed(ID, 'R11111')).toBe(false);
+	});
+
+	it('does not keep the code in memory in readable form', () => {
+		// Only ever compared, never read back, so there is nothing to gain from a
+		// second plaintext copy of a secret whose loss cannot be undone.
+		const ceremony = new RevocationCeremony();
+		ceremony.recordReveal(ID, 'R11111');
+
+		expect(JSON.stringify(ceremony)).not.toContain('R11111');
 	});
 });

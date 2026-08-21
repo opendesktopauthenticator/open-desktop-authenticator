@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { VaultService } from './service';
 import { BrowserWindow, dialog } from 'electron';
 import { CHANNELS } from '../../shared/channels';
@@ -33,19 +34,40 @@ import { matchesTradesAck, TRADES_ACK, type AccountSummary } from '../../shared/
  * Reset on lock: an unlock is a new sitting, and the ceremony is per sitting.
  */
 export class RevocationCeremony {
-	private readonly revealed = new Set<string>();
+	/**
+	 * SteamID to a digest of the code that was shown for it.
+	 *
+	 * **Not a `Set` of SteamIDs**, which is what this was. The ceremony is about a
+	 * *code*, and identity alone cannot express that: reveal code A, import a
+	 * maFile carrying a different code B for the same account, and confirming
+	 * marked B written down on the strength of having shown A. `mergeAccount` gets
+	 * this right — it clears `revocationBackedUpAt` when the code changes, with a
+	 * comment saying the ceremony is owed again — so the two halves actively
+	 * disagreed, and the half that wins is the one that silences the warning.
+	 *
+	 * A digest rather than the code, because this outlives the handler that read
+	 * it and a second plaintext copy of an unrecoverable secret earns nothing: the
+	 * only question ever asked of it is whether it equals the stored code.
+	 */
+	private readonly revealed = new Map<string, string>();
 
-	recordReveal(steamId64: string): void {
-		this.revealed.add(steamId64);
+	recordReveal(steamId64: string, revocationCode: string): void {
+		this.revealed.set(steamId64, digest(revocationCode));
 	}
 
-	hasRevealed(steamId64: string): boolean {
-		return this.revealed.has(steamId64);
+	/** Whether *this* code is the one that was shown for this account. */
+	hasRevealed(steamId64: string, revocationCode: string): boolean {
+		const shown = this.revealed.get(steamId64);
+		return shown !== undefined && shown === digest(revocationCode);
 	}
 
 	forget(): void {
 		this.revealed.clear();
 	}
+}
+
+function digest(revocationCode: string): string {
+	return createHash('sha256').update(revocationCode, 'utf8').digest('hex');
 }
 
 /**
@@ -275,8 +297,10 @@ export function registerVaultHandlers(
 		}
 
 		// Recorded only once the code is genuinely about to be returned, so the
-		// confirm step below cannot be reached without this having happened.
-		ceremony.recordReveal(steamId64);
+		// confirm step below cannot be reached without this having happened — and
+		// recorded *with* the code, so confirming a different one later cannot ride
+		// on this reveal.
+		ceremony.recordReveal(steamId64, account.revocationCode);
 
 		vault.touch();
 		return { revocationCode: account.revocationCode };
@@ -286,7 +310,12 @@ export function registerVaultHandlers(
 		// The ceremony is show-then-confirm, and this is where that is enforced
 		// rather than merely presented. Without it, one IPC call clears the warning
 		// for an account whose code was never displayed to anybody.
-		if (!ceremony.hasRevealed(steamId64)) {
+		//
+		// Checked against the code stored *now*: an import between the reveal and
+		// this call can have replaced it, and the reveal said nothing about the
+		// replacement.
+		const current = vault.read().accounts.find((a) => a.steamId64 === steamId64);
+		if (!current?.revocationCode || !ceremony.hasRevealed(steamId64, current.revocationCode)) {
 			throw new Error('the recovery code has to be shown before it can be marked as written down');
 		}
 

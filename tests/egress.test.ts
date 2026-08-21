@@ -1269,3 +1269,102 @@ describe('a request committed but not yet sent', () => {
 		expect(requests).toHaveLength(0);
 	});
 });
+
+/*
+ * Redaction has to cover every credential shape the router will actually accept.
+ *
+ * `planProxy` attaches credentials when *either* the username or the password is
+ * present, while the redaction pattern required both to be non-empty. The two
+ * disagreed, and the gap is not theoretical: these strings reach the renderer as
+ * failure messages and are written into the activity log, so a proxy URL that
+ * survived redaction put the credential somewhere the user can read it — and
+ * somewhere a screenshot of a bug report carries it.
+ */
+describe('redacting one-sided proxy credentials', () => {
+	it('redacts a username with no password', () => {
+		expect(redactCredentials('failed on http://alice@proxy.test:8080')).toBe(
+			'failed on http://***:***@proxy.test:8080'
+		);
+	});
+
+	it('redacts a password with no username', () => {
+		expect(redactCredentials('failed on http://:hunter2@proxy.test:8080')).toBe(
+			'failed on http://***:***@proxy.test:8080'
+		);
+	});
+
+	it('still redacts the ordinary pair', () => {
+		expect(redactCredentials('socks5://bob:pw@proxy.test:1080')).toBe(
+			'socks5://***:***@proxy.test:1080'
+		);
+	});
+
+	it('leaves an @ in a path alone', () => {
+		// `[^\s/@]*` cannot cross a slash, so a profile URL is not mistaken for
+		// userinfo. Over-redacting here would corrupt error messages that quote a
+		// perfectly ordinary Steam URL.
+		const url = 'https://steamcommunity.com/id/someone@example';
+		expect(redactCredentials(url)).toBe(url);
+	});
+
+	it('redacts every credential a message carries, not just the first', () => {
+		expect(redactCredentials('http://a@one.test and socks5://:b@two.test')).toBe(
+			'http://***:***@one.test and socks5://***:***@two.test'
+		);
+	});
+});
+
+/*
+ * Redaction must not damage a URL that carries no credentials.
+ *
+ * Widening the pattern to catch one-sided credentials made it worse than the one
+ * it replaced: bounded only by `/`, the match ran straight through a query
+ * string, so `https://example.com?email=alice@example.net` came out as
+ * `https://***:***@example.net` — the real host gone, credentials invented, in a
+ * message whose entire job is to tell somebody what failed.
+ */
+describe('redaction leaves credential-free URLs alone', () => {
+	it('does not treat a query string as userinfo', () => {
+		const url = 'https://example.com?email=alice@example.net';
+		expect(redactCredentials(url)).toBe(url);
+	});
+
+	it('does not treat a fragment as userinfo', () => {
+		const url = 'https://example.com#contact@example.net';
+		expect(redactCredentials(url)).toBe(url);
+	});
+
+	it('keeps the host intact in a realistic failure message', () => {
+		const message = 'GET https://api.steampowered.com/x?notify=ops@example.net failed';
+		expect(redactCredentials(message)).toContain('api.steampowered.com');
+		expect(redactCredentials(message)).not.toContain('***');
+	});
+});
+
+/*
+ * A password containing a literal `@`.
+ *
+ * The URL parser takes the **last** `@` in an authority as the delimiter, so
+ * `http://alice:secret@part@proxy:8080` has the password `secret@part` — and
+ * `planProxy` accepts it. A pattern that stopped at the first `@` therefore left
+ * `part` of that password sitting in the message it was supposed to be scrubbing.
+ */
+describe('redaction agrees with the parser about where credentials end', () => {
+	it('redacts a password containing an @', () => {
+		const url = 'http://alice:secret@part@proxy.example:8080';
+		// What the parser sees, so the test is anchored to the real ambiguity.
+		expect(decodeURIComponent(new URL(url).password)).toBe('secret@part');
+		expect(redactCredentials(url)).toBe('http://***:***@proxy.example:8080');
+	});
+
+	it('leaves nothing of the password behind', () => {
+		expect(redactCredentials('http://alice:secret@part@proxy.example:8080')).not.toContain('part@');
+		expect(redactCredentials('http://a:b@c@host.test')).not.toContain('b@c');
+	});
+
+	it('still stops at the end of the authority', () => {
+		// The greedier class must not start eating query strings again.
+		const url = 'https://example.com?to=alice@example.net';
+		expect(redactCredentials(url)).toBe(url);
+	});
+});

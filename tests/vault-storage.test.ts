@@ -1,4 +1,12 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	chmodSync,
+	existsSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -155,7 +163,26 @@ describe('rejects files that are not ours', () => {
 	});
 
 	it('reports a missing file rather than throwing something opaque', () => {
-		expect(() => readEnvelope(join(dir, 'absent.json'))).toThrow(/could not read the vault file/);
+		expect(() => readEnvelope(join(dir, 'absent.json'))).toThrow(/vault file could not be read/);
+	});
+
+	it('does not name the path in the message', () => {
+		// The message reaches the renderer through unlock, passphrase change and the
+		// passphrase verification behind account removal and the revocation reveal —
+		// none of which sanitise it. A raw `ENOENT` quotes the absolute path, which
+		// hands a sandboxed process the user's OS account name and their AppData
+		// layout for nothing.
+		const absent = join(dir, 'absent.json');
+		try {
+			readEnvelope(absent);
+			expect.unreachable('should have thrown');
+		} catch (err) {
+			expect((err as Error).message).not.toContain(absent);
+			expect((err as Error).message).not.toContain(dir);
+			// Still attached for anything running locally, which is where a path is
+			// actually of use.
+			expect((err as VaultStorageError).cause).toBeDefined();
+		}
 	});
 });
 
@@ -169,5 +196,71 @@ describe('backup recovery', () => {
 		writeEnvelope(file, await envelope('{"seq":2}'));
 		writeFileSync(vaultPaths(file).backup, 'garbage');
 		expect(readBackupEnvelope(file)).toBeUndefined();
+	});
+});
+
+/*
+ * Who else on the machine can read the vault.
+ *
+ * `openSync(path, 'w')` creates a file `0o666`, which an ordinary `022` umask
+ * turns into `0o644`. On a shared Linux box that means every other local user
+ * could copy the vault and grind the passphrase offline at their leisure —
+ * against the one file whose entire purpose is to be the thing they cannot get.
+ *
+ * `recovery.ts` has always written `0o600`, so the intended policy was never in
+ * doubt; the larger file simply missed it.
+ *
+ * POSIX only. Windows has no mode bits — `chmodSync` there moves the read-only
+ * flag and nothing else — and the real protection is the per-user ACL on
+ * `%APPDATA%`, which is not this function's to assert.
+ */
+describe.skipIf(process.platform === 'win32')('the vault is owner-only on disk', () => {
+	const modeOf = (path: string): number => statSync(path).mode & 0o777;
+
+	it('creates a new vault readable only by its owner', async () => {
+		writeEnvelope(file, await envelope());
+		expect(modeOf(file)).toBe(0o600);
+	});
+
+	it('narrows a vault an earlier build left world-readable', async () => {
+		// The mode on create only helps files made from here on. Existing installs
+		// are the ones actually at risk, and they are only repaired if every write
+		// narrows what it finds.
+		writeEnvelope(file, await envelope());
+		chmodSync(file, 0o644);
+
+		writeEnvelope(file, await envelope('{"seq":2}'));
+
+		expect(modeOf(file)).toBe(0o600);
+	});
+
+	it('narrows the backup too', async () => {
+		// The backup is a byte-for-byte copy of the vault. Protecting one and
+		// leaving the other beside it protects nothing.
+		writeEnvelope(file, await envelope());
+		writeEnvelope(file, await envelope('{"seq":2}'));
+
+		expect(modeOf(vaultPaths(file).backup)).toBe(0o600);
+	});
+});
+
+/*
+ * The same guarantee, asserted where it can actually run.
+ *
+ * The behavioural tests above are POSIX-only, so on the platform most of this
+ * project's users and its author are on, they are skipped — and a guarantee that
+ * only ever runs on somebody else's machine is one that regresses quietly.
+ * `infra-caching.test.ts` asserts against a config file for the same reason.
+ */
+describe('the owner-only policy is in the source, on every platform', () => {
+	const SOURCE = readFileSync(join(__dirname, '..', 'src', 'main', 'vault', 'storage.ts'), 'utf8');
+
+	it('opens the temp file with an explicit mode', () => {
+		expect(SOURCE).toContain("openSync(paths.temp, 'w', 0o600)");
+	});
+
+	it('narrows the vault and its backup after the rename', () => {
+		expect(SOURCE).toMatch(/tighten\(file\);/);
+		expect(SOURCE).toMatch(/tighten\(paths\.backup\);/);
 	});
 });

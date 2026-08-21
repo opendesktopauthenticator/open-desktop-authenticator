@@ -167,8 +167,28 @@ export function describeNetworkError(error: unknown, routedThrough?: string): st
  * careful, because the one that is not careful is the one nobody checked.
  */
 export function redactCredentials(message: string): string {
-	// scheme://user:pass@host -> scheme://***:***@host
-	return message.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, '$1***:***@');
+	// scheme://<anything>@host -> scheme://***:***@host
+	//
+	// **Any userinfo, not only a `user:pass` pair.** The pattern used to require
+	// both halves to be non-empty, while `planProxy` accepts credentials when
+	// *either* is — so `http://alice@proxy:8080` and `http://:secret@proxy:8080`
+	// are routable, are credential-bearing, and travelled through this function
+	// completely untouched into renderer-visible errors and activity records.
+	//
+	// Greedy, and stopping only at a character that ends the authority. The URL
+	// parser treats the **last** `@` in an authority as the delimiter, so
+	// `http://alice:secret@part@proxy:8080` has the password `secret@part` — and a
+	// class that also excluded `@` stopped at the first one, leaving `part` of that
+	// password in the message it was supposed to be scrubbing from.
+	//
+	// The class excludes `?` and `#` as well as `/`, because all three end the
+	// authority. Bounding on `/` alone was not enough and was actively worse than
+	// the pattern it replaced: `https://example.com?email=alice@example.net` has no
+	// slash before its `@`, so the match ran through the query string and rewrote
+	// the whole thing as `https://***:***@example.net` — destroying the real host
+	// and inventing credentials that were never there, in a message whose job is to
+	// tell somebody what failed.
+	return message.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, '$1***:***@');
 }
 
 export interface ProxyPlan {
