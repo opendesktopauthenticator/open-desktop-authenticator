@@ -31,6 +31,13 @@ import type { Account } from '../src/shared/vault-schema';
  */
 let duringDerive: (() => Promise<void>) | undefined;
 
+/**
+ * The same, for `unseal` — which is what `unlock` and `restoreFromBackup` call.
+ * `deriveKey` is invoked *inside* crypto.ts there, so the module mock never
+ * sees it; pausing an unlock mid-derivation needs the exported entry point.
+ */
+let duringUnseal: (() => Promise<void>) | undefined;
+
 vi.mock('../src/main/vault/crypto', async () => {
 	const actual = await vi.importActual<typeof import('../src/main/vault/crypto')>(
 		'../src/main/vault/crypto'
@@ -44,6 +51,14 @@ vi.mock('../src/main/vault/crypto', async () => {
 				await hook();
 			}
 			return actual.deriveKey(...args);
+		},
+		unseal: async (...args: Parameters<typeof actual.unseal>) => {
+			const hook = duringUnseal;
+			duringUnseal = undefined;
+			if (hook) {
+				await hook();
+			}
+			return actual.unseal(...args);
 		}
 	};
 });
@@ -725,5 +740,51 @@ describe('adopting a vault file', () => {
 		writeFileSync(big, Buffer.alloc(2 * 1024 * 1024));
 		const v = service();
 		expect(() => v.adoptFrom(big)).toThrow(/too large/);
+	});
+});
+
+/*
+ * An unlock racing a restore.
+ *
+ * The unlock read the pre-restore envelope and spent a second deriving; the
+ * restore finished in that second. Nothing had locked, so the unlock's
+ * generation check passed and it installed the pre-restore contents over the
+ * restored state — memory showed the old vault, disk held the new one, and the
+ * next save sealed the stale contents straight over the restored file. Found
+ * as a probe left behind by an external audit; the restore now disowns any
+ * derivation still in flight against the file it replaced.
+ */
+describe('an unlock finishing after a restore', () => {
+	it('is refused, and the restored state stands', async () => {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+		// The backup now holds the account-free vault; main holds one account.
+		v.lock('manual');
+
+		// Start an unlock against the CURRENT main file, paused mid-derivation.
+		let releaseUnlock: (() => void) | undefined;
+		duringUnseal = () =>
+			new Promise((resolve) => {
+				releaseUnlock = resolve;
+			});
+		const lateUnlock = v.unlock(PASS);
+		const settled = lateUnlock.then(
+			() => 'resolved',
+			(err: Error) => err.message
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		// The restore completes while that unlock is still deriving.
+		await v.restoreFromBackup(PASS);
+		expect(v.read().accounts).toHaveLength(0);
+
+		releaseUnlock?.();
+		await expect(settled).resolves.toMatch(/locked while it was being opened/i);
+
+		// The restored state is what survives — not the pre-restore contents the
+		// late unlock was carrying.
+		expect(v.isUnlocked()).toBe(true);
+		expect(v.read().accounts).toHaveLength(0);
 	});
 });

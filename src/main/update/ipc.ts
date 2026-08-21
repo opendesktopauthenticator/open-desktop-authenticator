@@ -53,6 +53,15 @@ export function registerUpdateHandlers(deps: UpdateCheckDeps): void {
 	const now = deps.now ?? ((): number => Date.now());
 
 	let cached: { at: number; result: UpdateCheckResult } | undefined;
+	/**
+	 * The request currently on the wire, so simultaneous calls share it.
+	 *
+	 * The cache is only written when a request finishes, so two calls arriving
+	 * before the first resolved both saw it empty and both asked GitHub — and
+	 * React's Strict Mode double-runs effects in development, making the pair the
+	 * ordinary case rather than a race.
+	 */
+	let inFlight: Promise<UpdateCheckResult> | undefined;
 
 	const isStoreBuild = deps.isStoreBuild ?? installedFromStore;
 
@@ -86,30 +95,47 @@ export function registerUpdateHandlers(deps: UpdateCheckDeps): void {
 			return previous.result;
 		}
 
-		const outcome = await checkForUpdate({
-			// Wrapped rather than passed by reference: `deps.fetchText` detached from
-			// `deps` is a method with no `this`, which lint rightly objects to.
-			fetchText: (url) => deps.fetchText(url),
-			currentVersion: deps.currentVersion
+		if (inFlight) {
+			return inFlight;
+		}
+
+		inFlight = (async (): Promise<UpdateCheckResult> => {
+			const outcome = await checkForUpdate({
+				// Wrapped rather than passed by reference: `deps.fetchText` detached from
+				// `deps` is a method with no `this`, which lint rightly objects to.
+				fetchText: (url) => deps.fetchText(url),
+				currentVersion: deps.currentVersion
+			});
+
+			const result: UpdateCheckResult =
+				outcome.state === 'updateAvailable'
+					? {
+							state: 'updateAvailable' as const,
+							version: outcome.release.version,
+							url: outcome.release.url,
+							...(outcome.release.publishedAt !== undefined
+								? { publishedAt: outcome.release.publishedAt }
+								: {})
+						}
+					: outcome.state === 'upToDate'
+						? { state: 'upToDate' as const }
+						: { state: 'unknown' as const, reason: outcome.reason };
+
+			// A failure is cached too, deliberately. Retrying a broken network on every
+			// mount is how a transient outage becomes a request storm.
+			cached = { at: now(), result };
+
+			// Consent, checked **again** with the answer in hand. The check at the top
+			// ran before the network round trip, and switching the setting off during
+			// it must win: returning `updateAvailable` here is what put the banner
+			// back up after the user had just watched it come down.
+			if (!deps.isEnabled()) {
+				return { state: 'disabled' as const };
+			}
+			return result;
+		})().finally(() => {
+			inFlight = undefined;
 		});
-
-		const result: UpdateCheckResult =
-			outcome.state === 'updateAvailable'
-				? {
-						state: 'updateAvailable' as const,
-						version: outcome.release.version,
-						url: outcome.release.url,
-						...(outcome.release.publishedAt !== undefined
-							? { publishedAt: outcome.release.publishedAt }
-							: {})
-					}
-				: outcome.state === 'upToDate'
-					? { state: 'upToDate' as const }
-					: { state: 'unknown' as const, reason: outcome.reason };
-
-		// A failure is cached too, deliberately. Retrying a broken network on every
-		// mount is how a transient outage becomes a request storm.
-		cached = { at: now(), result };
-		return result;
+		return inFlight;
 	});
 }

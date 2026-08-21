@@ -119,3 +119,20 @@ describe('the recovery-file picker', () => {
 		expect(mainSource).toContain('const MAX_RECOVERY_FILE_BYTES = 1024 * 1024;');
 	});
 });
+
+// Tested as the property expression, not the word: a comment *about*
+// `dontAddToRecent` must not satisfy a test for the property being set —
+// which is exactly how the first version of this test passed a mutation.
+describe('dialogs whose filenames carry a SteamID', () => {
+	it('keep the maFile save dialog out of Recent Documents', () => {
+		const dialog = /title: 'Save maFile'[\s\S]*?\n\t{5}\};/.exec(mainSource)?.[0];
+		expect(dialog).toBeDefined();
+		expect(/properties: \[[^\]]*'dontAddToRecent'/.test(dialog ?? '')).toBe(true);
+	});
+
+	it('keep the recovery picker out of Recent Documents', () => {
+		const dialog = /title: 'Open a recovery file'[\s\S]*?\n\t{5}\};/.exec(mainSource)?.[0];
+		expect(dialog).toBeDefined();
+		expect(/properties: \[[^\]]*'dontAddToRecent'/.test(dialog ?? '')).toBe(true);
+	});
+});

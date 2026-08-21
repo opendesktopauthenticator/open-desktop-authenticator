@@ -467,7 +467,12 @@ function start(): void {
 					const options = {
 						title: 'Save maFile',
 						defaultPath: suggestedName,
-						filters: [{ name: 'maFile', extensions: ['maFile'] }]
+						filters: [{ name: 'maFile', extensions: ['maFile'] }],
+						// The filename is the SteamID64. Without this, the OS records it in
+						// Recent Documents — a list of which Steam accounts live on this
+						// machine, kept by the shell. The import picker has always set it,
+						// for exactly this reason.
+						properties: ['dontAddToRecent' as const]
 					};
 					const result = await (parent
 						? dialog.showSaveDialog(parent, options)
@@ -483,7 +488,11 @@ function start(): void {
 					const parent = BrowserWindow.getFocusedWindow();
 					const options = {
 						title: 'Open a recovery file',
-						properties: ['openFile' as const],
+						// `dontAddToRecent` because recovery files are named for their
+						// SteamID64, and the shell's Recent Documents list would otherwise
+						// record which accounts exist here — same reasoning as the import
+						// picker.
+						properties: ['openFile' as const, 'dontAddToRecent' as const],
 						filters: [{ name: 'Recovery file', extensions: [RECOVERY_EXTENSION.replace('.', '')] }]
 					};
 					const result = await (parent

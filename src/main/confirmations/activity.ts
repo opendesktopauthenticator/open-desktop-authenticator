@@ -133,7 +133,16 @@ export class ActivityLog {
 				combined.push({ steamId64, entry });
 			}
 		}
-		return combined.sort((a, b) => b.entry.at.localeCompare(a.entry.at));
+		// The sequence breaks timestamp ties. `at` has millisecond resolution and
+		// two accounts routinely record inside the same millisecond — the automatic
+		// sweep runs them back to back — so sorting on the string alone left those
+		// pairs in Map insertion order, which is "whichever account was seen first
+		// this session", not "newest first" as promised.
+		return combined.sort(
+			(a, b) =>
+				b.entry.at.localeCompare(a.entry.at) ||
+				(this.order.get(b.entry) ?? 0) - (this.order.get(a.entry) ?? 0)
+		);
 	}
 
 	/**

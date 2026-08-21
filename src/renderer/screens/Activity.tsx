@@ -55,9 +55,26 @@ export function Activity({
 	/** So a re-render, or a retry after a success, cannot acknowledge twice. */
 	const acknowledged = useRef(false);
 
+	/**
+	 * Whether this screen is still on screen. The mount effect has its own
+	 * `cancelled` flag, but the retry path had nothing: press Try again, then
+	 * Back before the promise resolves, and the continuation still acknowledged
+	 * — React swallowed the state update, but the IPC ran, clearing a held
+	 * account-recovery warning nobody was shown.
+	 */
+	const alive = useRef(true);
+	useEffect(() => {
+		alive.current = true;
+		return () => {
+			alive.current = false;
+		};
+	}, []);
+
 	/** One place both load paths go through, so neither can forget. */
 	const markSeen = useCallback((upTo: number): void => {
-		if (acknowledged.current) {
+		// Never after unmount. Both load paths funnel through here, so this is the
+		// one place the guard cannot be forgotten by a future third path.
+		if (acknowledged.current || !alive.current) {
 			return;
 		}
 		acknowledged.current = true;
@@ -74,6 +91,9 @@ export function Activity({
 		loadRef
 			.current()
 			.then((loaded) => {
+				if (!alive.current) {
+					return;
+				}
 				setActivity(loaded);
 				// **Acknowledged here too.** This is the "Try again" the error state
 				// offers, and it was the one path that rendered entries without ever

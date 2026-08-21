@@ -191,3 +191,19 @@ describe('the transfer cancel channel is gated too', () => {
 		expect(cancel).toHaveBeenCalled();
 	});
 });
+
+describe('ordering across accounts', () => {
+	it('breaks a timestamp tie with the sequence, newest first', () => {
+		// Millisecond timestamps collide routinely — the automatic sweep records
+		// two accounts back to back — and sorting on the string alone left tied
+		// pairs in Map insertion order: whichever account this session saw first,
+		// not whichever entry is newer.
+		const log = new ActivityLog(() => 1_700_000_000_000);
+		log.recordFailure('76561198000000001', 'first');
+		log.recordFailure('76561198000000002', 'second');
+
+		const all = log.all();
+		expect(all[0]?.steamId64).toBe('76561198000000002');
+		expect(all[1]?.steamId64).toBe('76561198000000001');
+	});
+});

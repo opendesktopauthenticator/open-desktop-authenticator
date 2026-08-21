@@ -664,11 +664,24 @@ export class VaultService {
 			);
 		}
 
+		// **Anything still deriving against the file this replaced is disowned.**
+		// An unlock started before the swap holds the pre-restore envelope; letting
+		// it finish installed those contents over the restored state — memory then
+		// showed the old vault while disk held the new one, and the next save
+		// sealed the stale contents straight over the restored file. Bumping the
+		// generation here makes that unlock's own `stillCurrent` check refuse, the
+		// same way a lock does.
+		this.generation += 1;
+
 		// The restore itself stands: the backup is on disk and is the vault now.
 		// A lock that arrived mid-derivation cancels leaving it open, not the
 		// replacement — undoing the file swap here would be the more destructive
 		// reading of "lock".
-		if (!this.stillCurrent(generation, key)) {
+		//
+		// `- 1` because the bump above is this restore's own; anything beyond it
+		// is a lock that arrived during the derivation.
+		if (generation !== this.generation - 1) {
+			wipe(key);
 			throw new VaultServiceError(LOCKED_DURING_OPEN);
 		}
 

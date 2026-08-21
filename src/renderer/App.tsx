@@ -294,6 +294,13 @@ export function App(): React.JSX.Element {
 	 * on a schedule would make the app chatty for no benefit. An update that
 	 * lands while somebody is mid-session can wait until the next unlock.
 	 */
+	/**
+	 * Set the moment the user saves `updateCheck: false`, cleared when they turn
+	 * it back on. A ref, not state: the in-flight check's continuation reads it,
+	 * and it must see the save that happened after the request started.
+	 */
+	const updateBannerSuppressed = useRef(false);
+
 	useEffect(() => {
 		if (!api || !status?.unlocked) {
 			return;
@@ -303,7 +310,16 @@ export function App(): React.JSX.Element {
 		// are using — the handler already reports failure as a value.
 		api
 			.checkForUpdate()
-			.then((result) => setUpdate(result))
+			.then((result) => {
+				// A result that arrives after the user switched the check off stays
+				// off-screen. Saving `updateCheck: false` clears the banner, and this
+				// promise resolving a moment later put it straight back — the one
+				// visible consequence of the setting, undone by a race the user could
+				// not see.
+				if (!updateBannerSuppressed.current) {
+					setUpdate(result);
+				}
+			})
 			.catch(() => undefined);
 	}, [api, status?.unlocked]);
 
@@ -506,6 +522,7 @@ export function App(): React.JSX.Element {
 						// raised. Leaving it up meant the one visible consequence of the
 						// setting — the only thing it does that a user can see — carried on
 						// for the rest of the session as though nothing had changed.
+						updateBannerSuppressed.current = !settings.updateCheck;
 						if (!settings.updateCheck) {
 							setUpdate(undefined);
 						}

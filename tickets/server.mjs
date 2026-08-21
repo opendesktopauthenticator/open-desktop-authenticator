@@ -1227,12 +1227,21 @@ function retryForm(errors, form) {
  * Said plainly and given its own box, because "keep this" buried in a sentence
  * is how somebody ends up locked out of their own report.
  */
-function submitted(reference, key) {
+function submitted(reference, key, missingAttachments = 0) {
 	const link = `${SITE_ORIGIN}/support/ticket/${encodeURIComponent(reference)}?k=${encodeURIComponent(key)}`;
+	const missing =
+		missingAttachments > 0
+			? notice('callout-warn', [
+					`${missingAttachments} of your attachments could not be included — uploads expire ` +
+						'two hours after they are added. Your report itself was saved. Open it with the ' +
+						'link below and attach the files again in a reply.'
+				])
+			: '';
 	return page({
 		title: 'Report received',
 		body: `		<article>
 			<h1>Report received</h1>
+			${missing}
 			<p class="lede">Your reference is <code>${escape(reference)}</code>. Quote that if you
 			write to us about it.</p>
 
@@ -1384,7 +1393,18 @@ ${thread}
 				<div class="controls"><button type="submit">Send</button></div>
 			</form>
 
-			<p class="hint">Keep the reference ${escape(ticket.reference)} — it is the only way back to this page.</p>
+			<div class="callout">
+				<p>
+					The way back to this page is the full link below — the same one shown when the
+					report was filed. The reference <code>${escape(ticket.reference)}</code> on its own
+					will not reopen it, and once the browser session this page is using expires,
+					nothing else will either. Save the link if you have not.
+				</p>
+				<div class="wallet-address">
+					<code id="ticket-link">${escape(`${SITE_ORIGIN}/support/ticket/${encodeURIComponent(ticket.reference)}?k=${encodeURIComponent(ticket.access_key)}`)}</code>
+					<button type="button" class="secondary" data-copy="ticket-link">Copy</button>
+				</div>
+			</div>
 			${ticket.status === 'resolved' ? reviewAsk('Did we sort this out for you?') : ''}
 		</article>`
 	});
@@ -1449,8 +1469,13 @@ async function handle(request, response, url) {
 				stamp,
 				stamp
 			);
-		claimAttachments(Number(inserted.lastInsertRowid), null, form.attachments);
-		return send(response, 200, submitted(reference, accessKey));
+		// Claimed vs asked-for. An upload sits unclaimed for at most two hours, so
+		// somebody who spent longer than that composing their report submits ids
+		// whose files are already gone — and "Report received" with no caveat told
+		// them their evidence was attached when it was not.
+		const wanted = attachmentIds(form.attachments).slice(0, MAX_FILES).length;
+		const claimed = claimAttachments(Number(inserted.lastInsertRowid), null, form.attachments);
+		return send(response, 200, submitted(reference, accessKey, wanted - claimed));
 	}
 
 	/* ---- public: upload one screenshot or clip ---- */
@@ -1698,7 +1723,9 @@ async function handle(request, response, url) {
 			const note = db
 				.prepare('INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)')
 				.run(ticket.id, body, 'reporter', stamp);
-			claimAttachments(ticket.id, Number(note.lastInsertRowid), form.attachments);
+			const wanted = attachmentIds(form.attachments).slice(0, MAX_FILES).length;
+			const claimed = claimAttachments(ticket.id, Number(note.lastInsertRowid), form.attachments);
+			const shortfall = wanted - claimed;
 			// A reply from the reporter moves a closed report back into the queue,
 			// and a "waiting on you" one back to us. Nobody should have to file a
 			// second report to answer a question on the first.
@@ -1708,8 +1735,10 @@ async function handle(request, response, url) {
 				stamp,
 				ticket.id
 			);
+			// The shortfall rides the redirect, because the reply itself was saved
+			// and a 303 has nowhere else to say so. The page renders it as a warning.
 			return send(response, 303, '', {
-				location: `/support/ticket/${ticket.reference}`
+				location: `/support/ticket/${ticket.reference}${shortfall > 0 ? `?missing=${shortfall}` : ''}`
 			});
 		}
 
@@ -1735,7 +1764,22 @@ async function handle(request, response, url) {
 			const files = db
 				.prepare('SELECT * FROM attachments WHERE ticket_id = ? ORDER BY created_at, id')
 				.all(ticket.id);
-			return send(response, 200, ticketView(ticket, notes, files));
+			// `?missing=N` is set by the reply handler when uploads had expired
+			// before the reply claimed them. Parsed strictly — it is a URL anybody
+			// can edit — and it only ever selects between fixed sentences.
+			const missing = Math.min(
+				MAX_FILES,
+				Math.max(0, Number(url.searchParams.get('missing')) || 0)
+			);
+			const notice_ =
+				missing > 0
+					? notice('callout-warn', [
+							`${missing} of the attachments on your last reply could not be included — ` +
+								'uploads expire two hours after they are added. The reply itself was ' +
+								'saved. Attach the files again in a new reply.'
+						])
+					: '';
+			return send(response, 200, ticketView(ticket, notes, files, { notice: notice_ }));
 		}
 	}
 

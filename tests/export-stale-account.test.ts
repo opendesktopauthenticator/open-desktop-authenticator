@@ -1,4 +1,4 @@
-import { mkdtempSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,6 +16,33 @@ import type { Account } from '../src/shared/vault-schema';
  */
 
 const handlers = new Map<string, (event: unknown, request: unknown) => Promise<unknown>>();
+
+/**
+ * When set, `writeFile` to exactly this path empties the real file and throws —
+ * the observable shape of a write that failed after truncation. The fix writes
+ * to a temp name and renames, so the destination itself is never opened for
+ * writing and the sabotage never fires against it.
+ */
+let sabotageWriteTo: string | undefined;
+
+vi.mock('node:fs/promises', async () => {
+	const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+	return {
+		...actual,
+		writeFile: async (
+			path: Parameters<typeof actual.writeFile>[0],
+			data: Parameters<typeof actual.writeFile>[1],
+			options?: Parameters<typeof actual.writeFile>[2]
+		) => {
+			if (sabotageWriteTo !== undefined && typeof path === 'string' && path === sabotageWriteTo) {
+				const { writeFileSync } = await vi.importActual<typeof import('node:fs')>('node:fs');
+				writeFileSync(sabotageWriteTo, '');
+				throw new Error('ENOSPC: disk full');
+			}
+			return actual.writeFile(path, data, options);
+		}
+	};
+});
 
 vi.mock('electron', () => ({
 	ipcMain: {
@@ -49,6 +76,7 @@ let dir: string;
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), 'export-stale-'));
 	handlers.clear();
+	sabotageWriteTo = undefined;
 	__resetRouterForTests();
 	setTrustedSender(() => true);
 });
@@ -104,5 +132,43 @@ describe('accountExport after the dialog', () => {
 			state: 'saved'
 		});
 		expect(existsSync(destination)).toBe(true);
+	});
+});
+
+/*
+ * A failed re-export must leave the previous maFile as it was.
+ *
+ * Writing straight to the destination opens it for truncation before a byte
+ * lands, so a write that then failed — disk full, drive unplugged — had
+ * already emptied the file it was replacing. Re-exporting over an existing
+ * backup is the ordinary case; the export goes to a temp name and is renamed
+ * into place, like every other secret-bearing write in the application.
+ */
+describe('a failing export over an existing file', () => {
+	it('leaves the previous export intact', async () => {
+		const destination = join(dir, 'out.maFile');
+		const previous = '{"the previous, perfectly good backup": true}';
+		writeFileSync(destination, previous);
+		sabotageWriteTo = destination;
+
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		// With the fix, the write goes to `${destination}.tmp` — the sabotage
+		// never fires, the rename replaces the file whole, and the export
+		// SUCCEEDS. What matters either way: the destination is never an empty
+		// husk. (Reverted to a direct write, the sabotage fires: the handler
+		// rejects and the previous content is gone.)
+		await handler(EVENT, { steamId64: account.steamId64 }).catch(() => undefined);
+		const after = readFileSync(destination, 'utf8');
+		expect(after).not.toBe('');
 	});
 });

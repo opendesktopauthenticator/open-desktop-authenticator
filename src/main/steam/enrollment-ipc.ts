@@ -1,4 +1,4 @@
-import { chmod, writeFile } from 'node:fs/promises';
+import { chmod, rename, rm, writeFile } from 'node:fs/promises';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { maFileName, toMaFile } from '../import/export';
@@ -191,12 +191,23 @@ export function registerEnrollmentHandlers(
 		// other users on the machine cannot read it. The user is told as much on
 		// the screen that offers this.
 		//
+		// **Temp beside the destination, then rename — never truncate in place.**
+		// Writing straight to the chosen path opens it for truncation first, so a
+		// write that then failed — disk full, a drive unplugged mid-copy — had
+		// already emptied the previous maFile at that name. Re-exporting over an
+		// existing backup is the ordinary case, and a failed export must leave the
+		// old file exactly as it was; the vault and recovery writers have always
+		// worked this way.
+		//
 		// Wrapped because a failed write throws with the absolute path in its
 		// message, and the rule at the top of this module is that no path crosses
 		// IPC in either direction.
+		const temp = `${destination}.tmp`;
 		try {
-			await writeFile(destination, toMaFile(current), { encoding: 'utf8', mode: 0o600 });
+			await writeFile(temp, toMaFile(current), { encoding: 'utf8', mode: 0o600 });
+			await rename(temp, destination);
 		} catch {
+			await rm(temp, { force: true }).catch(() => undefined);
 			throw new Error(`${suggested} could not be written to that location.`);
 		}
 		// **`mode` alone was not enough.** POSIX applies it only when the file is

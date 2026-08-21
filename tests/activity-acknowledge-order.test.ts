@@ -41,7 +41,7 @@ describe('the alert is cleared only once the entries are in hand', () => {
 		// The load result can be reached again by the retry the error state offers.
 		expect(SOURCE).toContain('acknowledged.current');
 		expect(SOURCE).toMatch(
-			/if \(acknowledged\.current\) \{\s*return;\s*\}\s*acknowledged\.current = true;/
+			/if \(acknowledged\.current \|\| !alive\.current\) \{\s*return;\s*\}\s*acknowledged\.current = true;/
 		);
 	});
 
@@ -83,5 +83,21 @@ describe('both load paths discharge the alert', () => {
 		// effect, which legitimately does call `markSeen`.
 		const retry = SOURCE.slice(SOURCE.indexOf('const load = useCallback'));
 		expect(retry).toMatch(/\.catch\(\(err: unknown\) => setError\(messageOf\(err\)\)\);/);
+	});
+});
+
+describe('leaving during a retry', () => {
+	it('cannot acknowledge after unmount', () => {
+		// The mount effect has its own `cancelled` flag; the retry path funnels
+		// through `markSeen`, so the liveness check must sit inside it — press
+		// Try again, then Back before the promise resolves, and the continuation
+		// still runs. React swallows the state update; the acknowledgement IPC
+		// does not get swallowed by anything except this guard.
+		expect(SOURCE).toMatch(/const alive = useRef\(true\);/);
+		expect(SOURCE).toMatch(/alive\.current = false;/);
+		// And the retry's own continuation bails out before touching state.
+		expect(SOURCE).toMatch(
+			/\.then\(\(loaded\) => \{\s*if \(!alive\.current\) \{\s*return;\s*\}\s*setActivity\(loaded\);/
+		);
 	});
 });
