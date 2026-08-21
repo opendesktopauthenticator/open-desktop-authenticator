@@ -342,8 +342,24 @@ function readBody(request, limit) {
 		request.on('data', (chunk) => {
 			size += chunk.length;
 			if (size > limit) {
+				// **Paused, not destroyed.** Destroying the request tears down the
+				// socket, so the 413 the caller then writes goes to a connection that
+				// no longer exists and the client sees `ECONNRESET: socket hang up`
+				// instead of the coded answer — on the one response whose whole job is
+				// to say *why* the submission was refused.
+				//
+				// Pausing stops us reading any more of the body, which is the actual
+				// goal, and leaves the caller able to answer. `send` closes the
+				// connection on a 413, which discards whatever the client is still
+				// sending.
+				request.pause();
+				// Marked so the connection closes whatever status the caller settles
+				// on. Only the 413 path closed it, and several callers catch this
+				// rejection, substitute an empty form and answer 400 or 403 instead —
+				// leaving a paused request with body bytes outstanding on a keep-alive
+				// socket, which the next request on it would be parsed out of.
+				request.oversized = true;
 				reject(new Error('too large'));
-				request.destroy();
 				return;
 			}
 			chunks.push(chunk);
@@ -484,7 +500,13 @@ function validate(form) {
 		if (value.length > max) errors.push(`The ${name} must be under ${max} characters.`);
 	}
 
-	errors.push(...secretsIn(`${summary}\n${detail}`));
+	// **`contact` is scanned too.** It was left out, and it is stored in SQLite
+	// exactly like the other two — so a reporter who pasted a secret into the one
+	// field that looks like a header rather than a body defeated the promise this
+	// service makes about never collecting one. The false-positive profile is the
+	// same as it already is for `detail`, and a refusal here returns the form with
+	// every typed word intact rather than losing anything.
+	errors.push(...secretsIn(`${summary}\n${detail}\n${contact}`));
 
 	// More attachments than the limit is refused, not trimmed.
 	//
@@ -931,6 +953,13 @@ const send = (response, status, html, headers = {}) => {
 		'cache-control': 'no-store',
 		'referrer-policy': 'same-origin',
 		'x-content-type-options': 'nosniff',
+		...(status === 413 || response.req?.oversized ? { connection: 'close' } : {}),
+		// A refused-for-size request still has a body arriving behind it, and this
+		// answer was written without reading the rest. Keeping the connection alive
+		// would leave those bytes to be parsed as the *next* request on it, so the
+		// connection ends with this response — on the marker, not only on the 413,
+		// because a caller may answer 400 or 403 to the very same truncated body.
+
 		...headers
 	});
 	response.end(html);
@@ -947,8 +976,24 @@ function readForm(request, limit = 16 * 1024) {
 		request.on('data', (chunk) => {
 			size += chunk.length;
 			if (size > limit) {
+				// **Paused, not destroyed.** Destroying the request tears down the
+				// socket, so the 413 the caller then writes goes to a connection that
+				// no longer exists and the client sees `ECONNRESET: socket hang up`
+				// instead of the coded answer — on the one response whose whole job is
+				// to say *why* the submission was refused.
+				//
+				// Pausing stops us reading any more of the body, which is the actual
+				// goal, and leaves the caller able to answer. `send` closes the
+				// connection on a 413, which discards whatever the client is still
+				// sending.
+				request.pause();
+				// Marked so the connection closes whatever status the caller settles
+				// on. Only the 413 path closed it, and several callers catch this
+				// rejection, substitute an empty form and answer 400 or 403 instead —
+				// leaving a paused request with body bytes outstanding on a keep-alive
+				// socket, which the next request on it would be parsed out of.
+				request.oversized = true;
 				reject(new Error('too large'));
-				request.destroy();
 				return;
 			}
 			chunks.push(chunk);

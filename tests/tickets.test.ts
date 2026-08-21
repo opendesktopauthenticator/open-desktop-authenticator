@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { Readable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
@@ -59,6 +61,27 @@ describe('what a report may contain', () => {
 		const { errors } = service.validate({ ...good, detail: `${good.detail} ${poison}` });
 		expect(errors.length).toBeGreaterThan(0);
 		expect(errors.join(' ')).toMatch(/has not been saved/i);
+	});
+
+	it.each([
+		['a shared secret', '"shared_secret": "abc123deadbeef=="'],
+		['a revocation code', 'R12345'],
+		['a private key', '-----BEGIN PRIVATE KEY-----']
+	])('refuses %s pasted into the contact field', (_what, poison) => {
+		// `contact` was length-checked and then stored, but never scanned. It is the
+		// field that looks like a header rather than a body, which is exactly why
+		// somebody in a panic puts the wrong thing in it — and it lands in SQLite
+		// beside the rest, defeating the promise this service makes about never
+		// collecting an authenticator secret.
+		const { errors } = service.validate({ ...good, contact: poison });
+		expect(errors.length).toBeGreaterThan(0);
+		expect(errors.join(' ')).toMatch(/has not been saved/i);
+	});
+
+	it('still accepts an ordinary way to get back in touch', () => {
+		// The scan must not make the field unusable for what it is for.
+		expect(service.validate({ ...good, contact: 'someone@example.com' }).errors).toEqual([]);
+		expect(service.validate({ ...good, contact: '@someone on Discord' }).errors).toEqual([]);
 	});
 
 	it('enforces length bounds at both ends', () => {
@@ -167,5 +190,35 @@ describe('the admin view', () => {
 		await service.handleAdmin(empty, response, new URL('https://x/admin/bootstrap'));
 		expect(status).toBe(403);
 		expect(chunks.join('')).not.toMatch(/Reports<\/h1>/);
+	});
+});
+
+/*
+ * An oversized submission has to be *told* it was oversized.
+ *
+ * Both body readers destroyed the request the moment the cap was passed, so the
+ * 413 the caller then wrote went to a socket that no longer existed and the
+ * client saw `ECONNRESET: socket hang up` instead — on the one response whose
+ * entire job is to explain why the submission was refused.
+ */
+describe('refusing an oversized body', () => {
+	const SOURCE = readFileSync(join(__dirname, '..', 'tickets', 'server.mjs'), 'utf8');
+
+	it('stops reading without destroying the request', () => {
+		expect(SOURCE).not.toMatch(/reject\(new Error\('too large'\)\);\s*request\.destroy\(\)/);
+		expect(SOURCE.match(/request\.pause\(\);/g) ?? []).toHaveLength(2);
+	});
+
+	it('closes the connection whenever the body was truncated', () => {
+		// The rest of the body is still arriving behind an answer written without
+		// reading it. Left alive, those bytes would be parsed as the next request on
+		// the same connection.
+		//
+		// Keyed on the marker as well as the status, because several callers catch
+		// the oversized rejection, substitute an empty form and answer 400 or 403 —
+		// so gating on 413 alone left exactly those responses on a live socket with
+		// body bytes outstanding.
+		expect(SOURCE).toMatch(/status === 413 \|\| response\.req\?\.oversized/);
+		expect(SOURCE.match(/request\.oversized = true;/g) ?? []).toHaveLength(2);
 	});
 });
