@@ -788,3 +788,38 @@ describe('an unlock finishing after a restore', () => {
 		expect(v.read().accounts).toHaveLength(0);
 	});
 });
+
+/*
+ * Two passphrase changes racing.
+ *
+ * Both verified the same old envelope, both derived, and both reported success
+ * — while only whichever wrote last had a passphrase that opened the vault.
+ * The other caller walked away trusting a passphrase that no longer works,
+ * which for a vault with no recovery is a lockout with a success message.
+ */
+describe('concurrent passphrase changes', () => {
+	it('refuses the second while the first is still deriving', async () => {
+		const v = service();
+		await v.create(PASS);
+
+		let releaseFirst: (() => void) | undefined;
+		duringUnseal = () =>
+			new Promise((resolve) => {
+				releaseFirst = resolve;
+			});
+		const first = v.changePassphrase(PASS, 'the first replacement phrase');
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		await expect(v.changePassphrase(PASS, 'the second replacement phrase')).rejects.toThrow(
+			/already in progress/
+		);
+
+		releaseFirst?.();
+		await first;
+
+		// Exactly one passphrase opens the vault, and it is the one whose change
+		// reported success.
+		v.lock('manual');
+		await expect(v.unlock('the first replacement phrase')).resolves.toBeUndefined();
+	});
+});

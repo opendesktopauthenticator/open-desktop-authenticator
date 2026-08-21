@@ -23,6 +23,9 @@ export interface SteamClockOptions {
 /** Partition name used when the vault has no accounts to borrow a route from. */
 const DIRECT_SYNC_ID = 'steam-clock-sync';
 
+/** How long a failed sync stands before another attempt is worth making. */
+const RETRY_COOLDOWN_MS = 60_000;
+
 export class SteamClock {
 	private readonly codes: CodeService;
 	private readonly vault: VaultService;
@@ -30,6 +33,17 @@ export class SteamClock {
 	private readonly now: () => number;
 	/** Coalesce concurrent callers into one QueryTime. */
 	private inFlight: Promise<void> | undefined;
+
+	/**
+	 * No earlier retry than this, after a failure.
+	 *
+	 * The renderer's one-second poll calls `listCodes`, which calls here — so a
+	 * failed sync with no cooldown asked Steam again every single second for as
+	 * long as the failure lasted. Against a dead proxy that is sixty requests a
+	 * minute spent proving the same thing, from an app whose whole posture is
+	 * not drawing attention to its accounts.
+	 */
+	private nextAttemptAtMs = 0;
 
 	constructor(options: SteamClockOptions) {
 		this.codes = options.codes;
@@ -55,6 +69,11 @@ export class SteamClock {
 		}
 		if (this.inFlight) {
 			return this.inFlight;
+		}
+		// Resolves without asking, exactly like a failure does: the caller only
+		// learns "we tried recently", and the codes stay marked unverified.
+		if (this.now() < this.nextAttemptAtMs) {
+			return Promise.resolve();
 		}
 
 		this.inFlight = this.run().finally(() => {
@@ -84,7 +103,9 @@ export class SteamClock {
 			// whole round trip and pushed generated codes ahead of Steam's clock.
 			const offset = await queryTimeOffset(transport, this.now);
 			this.codes.setTimeOffset(offset);
+			this.nextAttemptAtMs = 0;
 		} catch (err) {
+			this.nextAttemptAtMs = this.now() + RETRY_COOLDOWN_MS;
 			// Deliberately not writing zero. That would mark the clock "verified"
 			// for a check that never happened (or failed), and the UI would stop
 			// warning about the exact condition the user needs to know about.

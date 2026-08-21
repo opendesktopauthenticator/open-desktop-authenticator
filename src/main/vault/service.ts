@@ -111,6 +111,9 @@ export class VaultService {
 	/** Guards `create` against a concurrent second creation. */
 	private creating = false;
 
+	/** Guards `changePassphrase` the same way. */
+	private changingPassphrase = false;
+
 	constructor(options: VaultServiceOptions) {
 		this.file = options.file;
 		this.now = options.now ?? (() => Date.now());
@@ -401,6 +404,22 @@ export class VaultService {
 	 * and it would reuse a salt across two different secrets.
 	 */
 	async changePassphrase(current: string, next: string): Promise<void> {
+		// One at a time. Two concurrent changes both verified the same old
+		// envelope, both derived, and both reported success — while only whichever
+		// wrote the file last had a passphrase that opened it. The other caller
+		// walked away believing a passphrase that no longer works.
+		if (this.changingPassphrase) {
+			throw new VaultServiceError('a passphrase change is already in progress');
+		}
+		this.changingPassphrase = true;
+		try {
+			await this.changePassphraseOnce(current, next);
+		} finally {
+			this.changingPassphrase = false;
+		}
+	}
+
+	private async changePassphraseOnce(current: string, next: string): Promise<void> {
 		const state = this.require();
 
 		const problem = passphraseProblem(next);

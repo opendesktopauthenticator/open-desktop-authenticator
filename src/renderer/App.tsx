@@ -516,6 +516,7 @@ export function App(): React.JSX.Element {
 				<Settings
 					installedFromStore={installedFromStore}
 					onLoad={() => api.getSettings()}
+					onChangePassphrase={(current, next) => api.changePassphrase(current, next)}
 					onSave={async (settings) => {
 						const result = await api.updateSettings(settings);
 						// Switching the check off must also take down a banner it already

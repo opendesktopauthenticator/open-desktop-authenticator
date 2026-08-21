@@ -172,3 +172,38 @@ describe('a failing export over an existing file', () => {
 		expect(after).not.toBe('');
 	});
 });
+
+/*
+ * The export's temp file must never be someone else's file.
+ *
+ * A fixed `${destination}.tmp` name truncated whatever already sat there — a
+ * sibling that was never ours — and then renamed it over the destination. The
+ * temp name is unique per export now, and opened with `wx`, which cannot empty
+ * an existing file.
+ */
+describe('a sibling .tmp file at the destination', () => {
+	it('is left untouched by an export', async () => {
+		const destination = join(dir, 'backup.maFile');
+		const sibling = `${destination}.tmp`;
+		const theirs = 'somebody else’s file, not ours to empty';
+		writeFileSync(sibling, theirs);
+
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).resolves.toMatchObject({
+			state: 'saved'
+		});
+		// The export landed, and the stranger's file is exactly as it was.
+		expect(readFileSync(sibling, 'utf8')).toBe(theirs);
+		expect(readFileSync(destination, 'utf8')).toContain('shared_secret');
+	});
+});

@@ -21,11 +21,13 @@ import { messageOf } from '../ipc-message';
 export function Settings({
 	onLoad,
 	onSave,
+	onChangePassphrase,
 	onClose,
 	installedFromStore = false
 }: {
 	onLoad: () => Promise<VaultSettingsView>;
 	onSave: (settings: VaultSettingsView) => Promise<unknown>;
+	onChangePassphrase: (current: string, next: string) => Promise<unknown>;
 	onClose: () => void;
 	/** Store builds are updated by Windows, so the update toggle does nothing there. */
 	installedFromStore?: boolean;
@@ -163,12 +165,118 @@ export function Settings({
 				</form>
 			)}
 
+			<h2>Change the vault passphrase</h2>
+			<PassphraseChange onChange={onChangePassphrase} />
+
 			<div className="notice">
 				Launching at startup, starting minimised, and unlocking without the passphrase are in the
 				vault format but not implemented, so they are not offered here. A switch that appears to
 				work and does nothing is worse than no switch.
 			</div>
 		</main>
+	);
+}
+
+/**
+ * Rotating the passphrase, from the one screen a user would look for it on.
+ *
+ * The whole operation — service, IPC channel, preload bridge — existed with no
+ * renderer calling it, so a weak or shoulder-surfed passphrase could not be
+ * rotated without exporting every account and rebuilding the vault. The service
+ * verifies the current passphrase against the file itself, so an unattended
+ * unlocked machine is not enough to lock the real owner out; this form is just
+ * the doorway to that check.
+ *
+ * Split out like `UpdateCheckSetting`, and for the same reason: `Settings`
+ * renders nothing until its async load answers, so a static render of the whole
+ * screen asserts on nothing.
+ */
+export function PassphraseChange({
+	onChange
+}: {
+	onChange: (current: string, next: string) => Promise<unknown>;
+}): React.JSX.Element {
+	const [current, setCurrent] = useState('');
+	const [next, setNext] = useState('');
+	const [confirm, setConfirm] = useState('');
+	const [busy, setBusy] = useState(false);
+	const [done, setDone] = useState(false);
+	const [error, setError] = useState<string | undefined>();
+
+	const submit = (event: React.FormEvent): void => {
+		event.preventDefault();
+		if (busy) {
+			return;
+		}
+		// Checked here because only this screen has both copies. Everything else —
+		// the current passphrase being right, the new one meeting the policy — is
+		// the service's call, made against the file.
+		if (next !== confirm) {
+			setError('The new passphrase and its confirmation do not match.');
+			return;
+		}
+		setBusy(true);
+		setError(undefined);
+		setDone(false);
+		onChange(current, next)
+			.then(() => {
+				setDone(true);
+				// Passphrases have no business sitting in component state after the
+				// change. The success line is what remains.
+				setCurrent('');
+				setNext('');
+				setConfirm('');
+			})
+			.catch((err: unknown) => setError(messageOf(err)))
+			.finally(() => setBusy(false));
+	};
+
+	return (
+		<form onSubmit={submit}>
+			<p className="hint">
+				Re-encrypts the vault under the new passphrase, with a fresh salt. The current one is
+				checked against the vault file itself, so knowing it is required even while the vault is
+				unlocked. There is no recovery: a forgotten passphrase is a locked vault.
+			</p>
+
+			<label htmlFor="passphrase-current">Current passphrase</label>
+			<input
+				id="passphrase-current"
+				type="password"
+				autoComplete="current-password"
+				value={current}
+				onChange={(event) => setCurrent(event.target.value)}
+			/>
+
+			<label htmlFor="passphrase-next">New passphrase</label>
+			<input
+				id="passphrase-next"
+				type="password"
+				autoComplete="new-password"
+				value={next}
+				onChange={(event) => setNext(event.target.value)}
+			/>
+
+			<label htmlFor="passphrase-confirm">New passphrase, again</label>
+			<input
+				id="passphrase-confirm"
+				type="password"
+				autoComplete="new-password"
+				value={confirm}
+				onChange={(event) => setConfirm(event.target.value)}
+			/>
+
+			{error && <p className="error">{error}</p>}
+
+			<div className="controls">
+				<button type="submit" disabled={busy || !current || !next || !confirm}>
+					{busy ? 'Re-encrypting…' : 'Change the passphrase'}
+				</button>
+				{done && (
+					<span className="hint">Changed. The old passphrase no longer opens this vault.</span>
+				)}
+			</div>
+		</form>
 	);
 }
 

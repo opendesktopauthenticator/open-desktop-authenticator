@@ -308,3 +308,66 @@ describe('a stale offset is measured again', () => {
 		expect(forAccount).not.toHaveBeenCalled();
 	});
 });
+
+/*
+ * A failed sync must not retry once per second.
+ *
+ * The renderer polls `listCodes` every second, and every poll calls
+ * `ensureSynced`. `inFlight` was cleared the moment an attempt settled, so a
+ * fast failure — a dead proxy, a 503 — was retried on every tick: sixty
+ * identical requests a minute, indefinitely, from an application whose posture
+ * is not drawing attention to its accounts.
+ */
+describe('failure cooldown', () => {
+	function failingHarness(now: () => number): {
+		clock: SteamClock;
+		attempts: () => number;
+	} {
+		let attempts = 0;
+		const codes = {
+			clockUnverified: () => true,
+			clockStale: () => true,
+			setTimeOffset: vi.fn()
+		} as unknown as CodeService;
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts: [] })
+		} as unknown as VaultService;
+		const transports = {
+			forAccount: () =>
+				Promise.resolve(() => {
+					attempts += 1;
+					return Promise.resolve({ status: 503, text: '' });
+				}),
+			forget: vi.fn()
+		} as unknown as SteamTransportFactory;
+		return {
+			clock: new SteamClock({ codes, vault, transports, now }),
+			attempts: () => attempts
+		};
+	}
+
+	it('does not ask again within the cooldown', async () => {
+		let at = 0;
+		const { clock, attempts } = failingHarness(() => at);
+
+		await clock.ensureSynced();
+		expect(attempts()).toBe(1);
+
+		// The next three seconds of polling.
+		for (at = 1000; at <= 3000; at += 1000) {
+			await clock.ensureSynced();
+		}
+		expect(attempts()).toBe(1);
+	});
+
+	it('tries again once the cooldown has passed', async () => {
+		let at = 0;
+		const { clock, attempts } = failingHarness(() => at);
+
+		await clock.ensureSynced();
+		at = 61_000;
+		await clock.ensureSynced();
+		expect(attempts()).toBe(2);
+	});
+});

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { chmod, rename, rm, writeFile } from 'node:fs/promises';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
@@ -202,9 +203,14 @@ export function registerEnrollmentHandlers(
 		// Wrapped because a failed write throws with the absolute path in its
 		// message, and the rule at the top of this module is that no path crosses
 		// IPC in either direction.
-		const temp = `${destination}.tmp`;
+		// A unique name, and `wx`. A fixed `.tmp` suffix truncated whatever already
+		// sat at that name — a sibling file that was never ours — and two exports
+		// to the same destination shared one temp, so either's failure path could
+		// delete the other's work. The random name makes collisions impossible and
+		// `wx` makes this write constitutionally unable to empty an existing file.
+		const temp = `${destination}.${randomUUID()}.tmp`;
 		try {
-			await writeFile(temp, toMaFile(current), { encoding: 'utf8', mode: 0o600 });
+			await writeFile(temp, toMaFile(current), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
 			await rename(temp, destination);
 		} catch {
 			await rm(temp, { force: true }).catch(() => undefined);
