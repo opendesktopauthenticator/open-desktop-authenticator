@@ -58,8 +58,15 @@ function harness(
 		writeRecoveryThrows?: boolean;
 		/** The disk refuses the copy of an undecodable reply, so memory is all there is. */
 		unreadableWriteThrows?: boolean;
-		/** Holds the sign-in open, so a lock can land while it is awaiting Steam. */
-		signInGate?: Promise<void>;
+		/**
+		 * Holds a sign-in open, so something can happen while it awaits Steam.
+		 *
+		 * A function rather than a promise, because the interesting races need one
+		 * call to resolve and a *later* one to hang. A single shared promise gated
+		 * the first call too, so the test deadlocked before it reached the state it
+		 * was trying to create.
+		 */
+		signInGate?: () => Promise<void> | undefined;
 		/** The same for the irreversible submission. */
 		continueGate?: Promise<void>;
 	} = {}
@@ -95,7 +102,7 @@ function harness(
 	const service = new TransferService(vault, transports, () => 0, {
 		now: options.now ?? (() => 1_700_000_000_000),
 		signIn: async () => {
-			await options.signInGate;
+			await options.signInGate?.();
 			return { refreshToken: TOKEN, steamId64: STEAM_ID };
 		},
 		mintAccessToken: () => Promise.resolve('access'),
@@ -744,7 +751,7 @@ describe('what may not be pulled out from under a request', () => {
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		const h = harness({ signInGate: gate });
+		const h = harness({ signInGate: () => gate });
 
 		const signingIn = h.service.authenticate('someone', 'pw', 'QK4TX').catch((err: unknown) => err);
 		// The lock lands while the sign-in is still awaiting Steam.
@@ -760,7 +767,7 @@ describe('what may not be pulled out from under a request', () => {
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		const h = harness({ signInGate: gate });
+		const h = harness({ signInGate: () => gate });
 
 		const signingIn = h.service.authenticate('someone', 'pw', 'QK4TX').catch(() => undefined);
 		h.service.forgetIfIdle();
@@ -948,5 +955,119 @@ describe('credentials do not outlive a lock taken mid-submission', () => {
 
 		// The whole reason `forgetIfIdle` refused: this still works.
 		expect(h.service.awaiting()).toBe('unreadable');
+	});
+});
+
+/*
+ * Two transfers must not become one.
+ *
+ * `authenticate` refused state that was already *held*, but not a request still
+ * in the air — so a new sign-in could start beside an older submission. The old
+ * one then finished, producing terminal or unsaved state for account A, while
+ * the new one installed account B as `pending`. `current()` prefers `pending`
+ * and `awaiting()` reads the other, so a single status response claimed B owned
+ * A's outcome — and retrying A's storage cleared B's freshly authenticated
+ * session.
+ */
+describe('a second sign-in cannot interleave with an unfinished transfer', () => {
+	it('refuses while a submission is in flight', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const h = harness({ continueGate: gate });
+		await readyToSubmit(h);
+
+		const submitting = h.service.completeTransfer('12345').catch(() => undefined);
+		await untilSending();
+
+		await expect(h.service.authenticate('someone-else', 'pw', 'QK4TX')).rejects.toThrow(
+			/middle of a request/i
+		);
+
+		release?.();
+		await submitting;
+	});
+
+	it('refuses one that resolves after the older transfer ended', async () => {
+		// The window the first guard cannot see: this sign-in started legitimately
+		// and Steam answered it only after the other transfer had failed.
+		let releaseSignIn: (() => void) | undefined;
+		const signInGate = new Promise<void>((resolve) => {
+			releaseSignIn = resolve;
+		});
+		let calls = 0;
+		const h = harness({
+			signInGate: () => (calls++ === 0 ? undefined : signInGate),
+			continueThrows: true,
+			continueError: new Error('ETIMEDOUT')
+		});
+
+		// A is submitting; it will end unanswered.
+		await h.service.authenticate('account-a', 'pw', 'QK4TX');
+		await h.service.completeTransfer('12345').catch(() => undefined);
+		expect(h.service.awaiting()).toBe('unanswered');
+
+		// B signs in, and Steam answers only now.
+		const signingIn = h.service.authenticate('account-b', 'pw', 'QK4TX').catch((e: unknown) => e);
+		releaseSignIn?.();
+
+		await expect(signingIn).resolves.toMatchObject({
+			message: expect.stringMatching(/has not been dealt with|has not finished/i)
+		});
+	});
+
+	it('keeps the older outcome attached to the older account', async () => {
+		let releaseSignIn: (() => void) | undefined;
+		const signInGate = new Promise<void>((resolve) => {
+			releaseSignIn = resolve;
+		});
+		let calls = 0;
+		const h = harness({
+			signInGate: () => (calls++ === 0 ? undefined : signInGate),
+			continueThrows: true,
+			continueError: new Error('ETIMEDOUT')
+		});
+
+		await h.service.authenticate('account-a', 'pw', 'QK4TX');
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		const signingIn = h.service.authenticate('account-b', 'pw', 'QK4TX').catch(() => undefined);
+		releaseSignIn?.();
+		await signingIn;
+
+		// The status a screen would render: one account, one outcome, and they agree.
+		expect(h.service.awaiting()).toBe('unanswered');
+		expect(h.service.current()?.accountName).toBe('account-a');
+	});
+});
+
+/*
+ * Abandoning while Steam is being asked to send a text.
+ *
+ * `cancel` guarded `submitting` and `authenticating` but not `challenging`, and
+ * the screen's Close button stayed enabled while busy. So the user could close
+ * during "Send the code to my phone": `pending` was cleared, the screen went
+ * away, and the request went out anyway — spending a message and a rate limit on
+ * a transfer they had just abandoned.
+ */
+describe('abandoning during the SMS request', () => {
+	it('is refused while that request is in flight', async () => {
+		const h = harness();
+		await readyToSubmit(h);
+
+		// `startChallenge` is in the air; nothing may pull `pending` out from under it.
+		const challenging = h.service.startChallenge().catch(() => undefined);
+		expect(() => h.service.cancel()).toThrow(/middle of a request/i);
+		await challenging;
+	});
+
+	it('is allowed again once it has finished', async () => {
+		const h = harness();
+		await readyToSubmit(h);
+		await h.service.startChallenge();
+
+		expect(() => h.service.cancel()).not.toThrow();
+		expect(h.service.current()).toBeUndefined();
 	});
 });

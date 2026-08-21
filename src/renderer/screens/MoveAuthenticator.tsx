@@ -553,6 +553,12 @@ export function MoveAuthenticator({
 						<button
 							type="button"
 							className="secondary"
+							// **Disabled while a request is in the air.** It was not, so it was
+							// pressable during "Send the code to my phone": the screen closed,
+							// the cancel was refused, and Steam sent the message anyway —
+							// spending a rate limit on a transfer the user had just abandoned.
+							// The main process refuses this now; the button should not offer it.
+							disabled={busy}
 							onClick={() => {
 								// Refuses once Steam has replaced the authenticator, which is
 								// correct and is why this button is hidden then. Swallowed rather

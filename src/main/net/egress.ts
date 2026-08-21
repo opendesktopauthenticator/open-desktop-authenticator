@@ -234,6 +234,36 @@ export function describesDirectRoute(resolved: string): boolean {
 }
 
 /**
+ * The endpoint Chromium says it will actually use, or `undefined` for none.
+ *
+ * `resolveProxy` answers with a PAC-style list — `SOCKS5 10.0.0.1:1080`, or
+ * several separated by `;` — and **the first entry is the one that gets used**.
+ * Everything after it is a fallback.
+ *
+ * This exists because the check that used it was a substring test, and a
+ * substring test over this string is wrong three separate ways:
+ *
+ *   intended 10.0.0.1:1080
+ *   SOCKS5 110.0.0.1:10800                       a different host and port
+ *   SOCKS5 10.0.0.1:10800                        the same host, another port
+ *   PROXY 203.0.113.9:8080; SOCKS5 10.0.0.1:1080 a stranger's proxy, tried first
+ *
+ * All three contain the intended endpoint verbatim, none contains `DIRECT`, and
+ * all three were recorded as `verified`. On the one feature whose entire purpose
+ * is to fail closed rather than leak an address.
+ */
+export function routedEndpoint(resolved: string): string | undefined {
+	const first = resolved.split(';')[0]?.trim();
+	if (first === undefined || first === '' || /^DIRECT$/i.test(first)) {
+		return undefined;
+	}
+	// `SCHEME host:port`. Anything else is not a route we can vouch for, and
+	// returning undefined makes the caller refuse rather than guess.
+	const parts = first.split(/\s+/);
+	return parts.length >= 2 ? parts[1] : undefined;
+}
+
+/**
  * Parse a stored proxy URL.
  *
  * **Credentials are stripped out of `proxyRules` deliberately.** Chromium's proxy

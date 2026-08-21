@@ -329,6 +329,19 @@ export class TransferService {
 		//
 		// There is no safe merge here. The only correct answer is to finish the
 		// transfer that is already outstanding.
+		// **`submitting` and `challenging` count too.** Guarding only on state that
+		// is already *held* let a new sign-in start beside an older submission still
+		// in the air. The old one then finished — producing terminal or unsaved state
+		// for account A — while this one installed account B as `pending`. `current()`
+		// prefers `pending` and `awaiting()` reads the other, so one status response
+		// claimed B owned A's outcome; retrying A's storage cleared B's session.
+		if (this.submitting || this.challenging) {
+			throw new TransferError(
+				'This transfer is in the middle of a request to Steam. Wait for it to finish before ' +
+					'signing in to another account.',
+				false
+			);
+		}
 		if (this.unsaved !== undefined || this.terminal !== undefined) {
 			throw new TransferError(
 				'Another transfer has not finished: Steam has already replaced an authenticator and it ' +
@@ -395,6 +408,18 @@ export class TransferService {
 			if (this.generation !== generation) {
 				throw new TransferError(
 					'The vault locked while signing in, so nothing was kept. Unlock and start again.',
+					false
+				);
+			}
+
+			// Re-checked with the answer in hand. The guards above ran before this
+			// awaited Steam, and another transfer can reach a terminal state or leave
+			// a replacement unstored in that window — installing over it would attach
+			// one account's outcome to another account's session.
+			if (this.unsaved !== undefined || this.terminal !== undefined || this.submitting) {
+				throw new TransferError(
+					'Another transfer finished while this sign-in was in progress, and it has not been ' +
+						'dealt with yet. Nothing was kept here; finish that one first.',
 					false
 				);
 			}
@@ -920,7 +945,11 @@ export class TransferService {
 		// against. Clearing it while the irreversible request is in the air meant an
 		// answer arriving a moment later had nothing to name. The screen hides this
 		// button then, but the channel stays callable.
-		if (this.submitting || this.authenticating) {
+		// `challenging` belongs here with the other two. Cancelling during it cleared
+		// `pending` and closed the screen while the request that asks Steam to text a
+		// code was still in flight — so the message was still sent, and the user's
+		// rate limit still spent, on a transfer they had just abandoned.
+		if (this.submitting || this.authenticating || this.challenging) {
 			throw new TransferError(
 				'This transfer is in the middle of a request to Steam and cannot be abandoned yet.',
 				false

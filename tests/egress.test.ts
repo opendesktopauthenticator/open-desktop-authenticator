@@ -3,6 +3,7 @@ import {
 	describeNetworkError,
 	describesDirectRoute,
 	redactCredentials,
+	routedEndpoint,
 	EgressError,
 	isSteamEndpoint,
 	planProxy,
@@ -1366,5 +1367,57 @@ describe('redaction agrees with the parser about where credentials end', () => {
 		// The greedier class must not start eating query strings again.
 		const url = 'https://example.com?to=alice@example.net';
 		expect(redactCredentials(url)).toBe(url);
+	});
+});
+
+/*
+ * What Chromium said it would do, parsed rather than searched for.
+ *
+ * The routing check was `resolved.includes(plan.endpoint)`. `resolveProxy`
+ * answers with a PAC-style list, and a substring test over it is wrong three
+ * ways at once — all three of these contain the intended endpoint verbatim, none
+ * contains `DIRECT`, and all three were recorded as `verified`:
+ *
+ *   SOCKS5 110.0.0.1:10800                        a different host and port
+ *   SOCKS5 10.0.0.1:10800                         the same host, another port
+ *   PROXY 203.0.113.9:8080; SOCKS5 10.0.0.1:1080  a stranger's proxy, used first
+ *
+ * On the one feature whose entire purpose is to fail closed rather than leak the
+ * address the proxy exists to hide.
+ */
+describe('reading the endpoint Chromium will actually use', () => {
+	const INTENDED = '10.0.0.1:1080';
+
+	it('accepts the endpoint that was asked for', () => {
+		expect(routedEndpoint(`SOCKS5 ${INTENDED}`)).toBe(INTENDED);
+	});
+
+	it('refuses a host that merely contains it', () => {
+		expect(routedEndpoint('SOCKS5 110.0.0.1:10800')).not.toBe(INTENDED);
+	});
+
+	it('refuses the same host on another port', () => {
+		expect(routedEndpoint('SOCKS5 10.0.0.1:10800')).not.toBe(INTENDED);
+	});
+
+	it('reads only the first entry, which is the one that gets used', () => {
+		// The rest are fallbacks. A list whose head is somebody else's proxy sends
+		// this request through somebody else's proxy.
+		expect(routedEndpoint(`PROXY 203.0.113.9:8080; SOCKS5 ${INTENDED}`)).toBe('203.0.113.9:8080');
+	});
+
+	it('reports no endpoint for a direct route', () => {
+		expect(routedEndpoint('DIRECT')).toBeUndefined();
+	});
+
+	it('reports no endpoint for something it cannot read', () => {
+		// Undefined makes the caller refuse rather than guess, which is the right
+		// direction for a check that exists to fail closed.
+		expect(routedEndpoint('')).toBeUndefined();
+		expect(routedEndpoint('SOCKS5')).toBeUndefined();
+	});
+
+	it('is not fooled by leading whitespace', () => {
+		expect(routedEndpoint(`  SOCKS5 ${INTENDED}`)).toBe(INTENDED);
 	});
 });

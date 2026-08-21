@@ -2,6 +2,7 @@ import {
 	BROWSER_ONLY_HEADERS,
 	describeNetworkError,
 	describesDirectRoute,
+	routedEndpoint,
 	EgressError,
 	redactCredentials,
 	isSteamEndpoint,
@@ -379,9 +380,13 @@ export class SteamTransportFactory {
 			return block('this connection would be made directly instead');
 		}
 
-		// `resolveProxy` answers `SOCKS5 10.0.0.1:1080`, so the endpoint appears
-		// verbatim. A mismatch means some other proxy is applied to this session.
-		if (!resolved.includes(plan.endpoint)) {
+		// **Compared, not searched for.** This was `resolved.includes(plan.endpoint)`,
+		// which approves `SOCKS5 110.0.0.1:10800` for an intended `10.0.0.1:1080` —
+		// a different host and a different port, both containing the intended string
+		// — and approves an ordered list whose *first* entry, the one Chromium
+		// actually uses, is somebody else's proxy entirely.
+		const actual = routedEndpoint(resolved);
+		if (actual !== plan.endpoint) {
 			return block('a different proxy is applied to it');
 		}
 

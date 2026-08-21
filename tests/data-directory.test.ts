@@ -35,19 +35,42 @@ const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as
 
 describe('the vault directory is pinned, not inherited', () => {
 	it('is set explicitly before any path is read', () => {
-		expect(mainSource).toContain("app.setPath('userData'");
+		expect(mainSource).toMatch(/app\.setPath\(\s*'userData'/);
 	});
 
 	it('is pinned from branding rather than a literal', () => {
 		// A hard-coded string here and a value in branding is two places to
-		// disagree, which is how the path drifts in the first place.
-		expect(mainSource).toMatch(
-			/app\.setPath\(\s*'userData',\s*join\(\s*app\.getPath\('appData'\),\s*branding\.dataDirectory\s*\)\s*\)/
+		// disagree, which is how the path drifts in the first place. Asserted on
+		// the pieces rather than on one exact expression: the call now chooses
+		// between two roots, and pinning its formatting made this fail for a change
+		// that kept every invariant it exists to protect.
+		const call = mainSource.slice(
+			mainSource.search(/app\.setPath\(\s*'userData'/),
+			mainSource.indexOf('hardenApp()')
 		);
+		expect(call).toContain('branding.dataDirectory');
+		expect(call).toContain("app.getPath('appData')");
+		expect(call).not.toMatch(/'userData',\s*'[^']+'/);
+	});
+
+	it('keeps a portable build out of AppData entirely', () => {
+		// The portable target promises "no writes outside its own directory", which
+		// is the whole reason to run it from a stick on a machine you do not own.
+		// It wrote the vault to %APPDATA% like every other build, leaving encrypted
+		// account data on the host and sharing it with any installed copy.
+		//
+		// electron-builder sets this variable for that target and nothing else, so
+		// it is the only signal available — the binary is otherwise identical.
+		const call = mainSource.slice(
+			mainSource.search(/app\.setPath\(\s*'userData'/),
+			mainSource.indexOf('hardenApp()')
+		);
+		expect(mainSource).toContain('PORTABLE_EXECUTABLE_DIR');
+		expect(call).toContain('portableDir');
 	});
 
 	it('is pinned before the single-instance lock, which also derives from it', () => {
-		const pin = mainSource.indexOf("app.setPath('userData'");
+		const pin = mainSource.search(/app\.setPath\(\s*'userData'/);
 		const lock = mainSource.indexOf('hardenApp()');
 		expect(pin).toBeGreaterThan(-1);
 		expect(lock).toBeGreaterThan(-1);

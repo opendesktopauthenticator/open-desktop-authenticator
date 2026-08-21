@@ -392,3 +392,37 @@ describe('every outstanding state reaches its own screen', () => {
 		expect(dead).not.toContain('retrySave');
 	});
 });
+
+/*
+ * Recovery decrypts only while somebody is present.
+ *
+ * The handler checked the vault, opened a native picker, and decrypted whatever
+ * came back. The picker stays open for as long as the user browses, and the
+ * vault auto-locks on its own schedule — so a shared secret, an identity secret
+ * and a revocation code could be pulled into memory with nobody there. The
+ * `vault.read()` further down throws, far too late to un-read them.
+ *
+ * The maFile import path has guarded exactly this window since it was written,
+ * with a comment saying why. Recovery did not.
+ */
+describe('a recovery file is not decrypted after the vault locks', () => {
+	const ENROLL = readFileSync(
+		join(__dirname, '..', 'src', 'main', 'steam', 'enrollment-ipc.ts'),
+		'utf8'
+	);
+
+	it('re-checks the vault after the picker resolves', () => {
+		const recover = ENROLL.slice(ENROLL.indexOf('CHANNELS.accountRecover'));
+		const afterPick = recover.slice(recover.indexOf('await recoveryDialog.pick()'));
+		expect(afterPick).toMatch(/requireUnlocked\(\);/);
+	});
+
+	it('does the re-check before anything is decrypted', () => {
+		const recover = ENROLL.slice(ENROLL.indexOf('CHANNELS.accountRecover'));
+		const pick = recover.indexOf('await recoveryDialog.pick()');
+		const check = recover.indexOf('requireUnlocked();', pick);
+		const decrypt = recover.indexOf('readRecoveryFile(');
+		expect(check).toBeGreaterThan(pick);
+		expect(check).toBeLessThan(decrypt);
+	});
+});

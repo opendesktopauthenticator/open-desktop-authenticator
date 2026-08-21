@@ -106,6 +106,17 @@ export function registerEnrollmentHandlers(
 			return { state: 'cancelled' as const };
 		}
 
+		// **Checked again, and this is the one that matters.** The picker stays open
+		// for as long as the user browses, and the vault auto-locks on its own
+		// schedule — so by the time a file comes back, the session that authorised
+		// this may be gone. Decrypting anyway pulls a shared secret, an identity
+		// secret and a revocation code into memory with nobody present, and the
+		// `vault.read()` further down throws far too late to un-read them.
+		//
+		// The maFile import path has guarded exactly this window since it was
+		// written. This one did not.
+		requireUnlocked();
+
 		// Decrypted in the main process and never handed outward. The renderer
 		// learns which account came back and nothing else.
 		const recovered = await readRecoveryFile(text, passphrase);

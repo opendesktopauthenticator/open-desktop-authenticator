@@ -148,7 +148,27 @@ function start(): void {
 	// means an installed user's vault stops being found. `setPath` rather than
 	// `setName` so only the directory is fixed; the name shown to the OS stays
 	// the readable one.
-	app.setPath('userData', join(app.getPath('appData'), branding.dataDirectory));
+	/*
+	 * **The portable build keeps its data beside itself.**
+	 *
+	 * `electron-builder.config.mjs` describes that target as "no installer, no
+	 * writes outside its own directory", which is the whole reason somebody runs
+	 * it from a USB stick on a machine they do not control. This line put the
+	 * vault under `%APPDATA%` unconditionally, so a portable copy left encrypted
+	 * account data on the host and shared it with any installed copy — the
+	 * opposite of what the target promises.
+	 *
+	 * electron-builder sets `PORTABLE_EXECUTABLE_DIR` for that target and nothing
+	 * else, so it is also the only signal available at runtime: the binary is
+	 * otherwise identical to the installed one.
+	 */
+	const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
+	app.setPath(
+		'userData',
+		portableDir
+			? join(portableDir, branding.dataDirectory)
+			: join(app.getPath('appData'), branding.dataDirectory)
+	);
 
 	// Early return, not just app.quit(): quit() does not stop this tick, so a
 	// second instance would otherwise go on to register handlers and open a
