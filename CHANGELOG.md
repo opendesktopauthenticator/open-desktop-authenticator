@@ -149,6 +149,51 @@ Pre-release. Nothing has shipped; there is no version to install.
   everything else, with a plain warning and no way to sweep it up in a bulk
   approval.
 
+### Fixed
+
+Nothing here has shipped, so none of these reached a user. They are recorded
+because the reasoning is the useful part, and because several were introduced by
+the fix for the item above them.
+
+- **A confirmation Steam sends in an unfamiliar shape no longer hides the rest
+  of the list.** Entries are validated one at a time. Refusing the whole list was
+  fail-closed for a trade and fail-blind for the thing that matters: an
+  account-recovery confirmation sitting beside a malformed sibling became
+  invisible. What could not be read is now counted and said out loud, on screen
+  and in the activity log, and counts as urgent — an entry with no type cannot be
+  ruled out as the one worth shouting about.
+- **The Steam clock is measured the way `steam-totp` measures it.** Local time is
+  read when the reply arrives rather than before the request, so the offset no
+  longer absorbs the round trip and push codes ahead — worst on the slow proxies
+  this application encourages. A correction to the system clock of any size is
+  now detected immediately by comparing against a monotonic clock, and until it
+  can be re-measured the time is reported as unverified rather than quietly
+  wrong.
+- **The vault file and exported maFiles are owner-only.** Both were created
+  without an explicit mode, so an ordinary umask left them world-readable; the
+  export also kept whatever permissions an existing file already had. Neither
+  path names the file's location in an error any more.
+- **The activity log stops answering while the vault is locked**, and its alert
+  can only be discharged for entries that were actually displayed.
+- **Proxy credentials are redacted in every shape the router accepts** —
+  including a password containing an `@`, and a username or password on its own.
+- **A support report cannot store a secret pasted into the contact field**, which
+  was length-checked and never scanned.
+
+### Changed
+
+- **A transfer reply this version cannot use is now an honest dead end.** It was
+  kept in memory for a retry, and later written to an encrypted file. Neither
+  helped: the decoder is a pure function, so re-running it over the same bytes
+  fails identically, and nothing was ever built that could read the file. The
+  screen now says plainly that the authenticator has been rotated, that this
+  cannot be recovered here, and that Steam Support is the route back into the
+  account. Storing a decoded replacement that the vault refused is unchanged, and
+  is still retried — that one genuinely works.
+- A transfer that is interrupted — by a lock, a timeout, or a connection that
+  dies before Steam answers — is reported as what it is rather than as nothing.
+  An unanswered submission is never presented as safe to repeat.
+
 ### Notes
 
 - **Platforms: Windows and Linux.** macOS is deferred — signing it needs Apple
