@@ -38,7 +38,7 @@ describe('queryTimeOffset', () => {
 			text: JSON.stringify({ response: { server_time: String(localSeconds + 42) } })
 		});
 
-		await expect(queryTimeOffset(transport, NOW)).resolves.toBe(42);
+		await expect(queryTimeOffset(transport, () => NOW)).resolves.toBe(42);
 		expect(sent[0]?.method).toBe('POST');
 		expect(sent[0]?.url).toContain('ITwoFactorService/QueryTime');
 		expect(sent[0]?.cookie).toBe('');
@@ -50,17 +50,17 @@ describe('queryTimeOffset', () => {
 			status: 200,
 			text: JSON.stringify({ response: { server_time: localSeconds - 7 } })
 		});
-		await expect(queryTimeOffset(transport, NOW)).resolves.toBe(-7);
+		await expect(queryTimeOffset(transport, () => NOW)).resolves.toBe(-7);
 	});
 
 	it('refuses a non-200 without inventing an offset', async () => {
 		const { transport } = transportReturning({ status: 503, text: '' });
-		await expect(queryTimeOffset(transport, NOW)).rejects.toBeInstanceOf(SteamTimeError);
+		await expect(queryTimeOffset(transport, () => NOW)).rejects.toBeInstanceOf(SteamTimeError);
 	});
 
 	it('refuses a malformed body', async () => {
 		const { transport } = transportReturning({ status: 200, text: '<html>' });
-		await expect(queryTimeOffset(transport, NOW)).rejects.toBeInstanceOf(SteamTimeError);
+		await expect(queryTimeOffset(transport, () => NOW)).rejects.toBeInstanceOf(SteamTimeError);
 	});
 });
 
@@ -69,6 +69,7 @@ describe('SteamClock', () => {
 		const setTimeOffset = vi.fn();
 		const codes = {
 			clockUnverified: () => true,
+			clockStale: () => true,
 			setTimeOffset
 		} as unknown as CodeService;
 		const vault = {
@@ -100,6 +101,7 @@ describe('SteamClock', () => {
 		const setTimeOffset = vi.fn();
 		const codes = {
 			clockUnverified: () => true,
+			clockStale: () => true,
 			setTimeOffset
 		} as unknown as CodeService;
 		const vault = {
@@ -123,11 +125,12 @@ describe('SteamClock', () => {
 		expect(forget).toHaveBeenCalledWith('steam-clock-sync');
 	});
 
-	it('is a no-op once the clock is already verified', async () => {
+	it('is a no-op while the offset is still fresh', async () => {
 		const forAccount = vi.fn();
 		const clock = new SteamClock({
 			codes: {
 				clockUnverified: () => false,
+				clockStale: () => false,
 				setTimeOffset: vi.fn()
 			} as unknown as CodeService,
 			vault: { isUnlocked: () => true, read: () => ({ accounts: [] }) } as unknown as VaultService,
@@ -143,6 +146,7 @@ describe('SteamClock', () => {
 		const setTimeOffset = vi.fn();
 		const codes = {
 			clockUnverified: () => true,
+			clockStale: () => true,
 			setTimeOffset
 		} as unknown as CodeService;
 		const vault = {
@@ -170,5 +174,137 @@ describe('SteamClock', () => {
 		});
 		await Promise.all([a, b]);
 		expect(setTimeOffset).toHaveBeenCalledTimes(1);
+	});
+});
+
+/*
+ * *When* local time is read, which is the whole correctness of the offset.
+ *
+ * `steam-totp` calls `exports.time()` inside its `res.on('end')` handler — after
+ * the body has arrived. This module used to take a `nowMs: number`, and an
+ * argument is evaluated before the call, so local time was captured before the
+ * request even went out and the offset absorbed the entire round trip. Steam
+ * time then ran *ahead* by however long the request took, worst on exactly the
+ * slow proxies this application encourages people to route through.
+ */
+describe('the offset is measured against the clock at the moment the reply is read', () => {
+	it('does not count the round trip as skew', async () => {
+		const localSeconds = 1_700_000_000;
+		// Identical clocks, and a slow route. Steam stamps its reply 4s after the
+		// request left; this machine reads it 8s after sending.
+		const { transport } = transportReturning({
+			status: 200,
+			text: JSON.stringify({ response: { server_time: String(localSeconds + 4) } })
+		});
+
+		// Sampled with the reply in hand, Steam is 4s behind this machine: -4.
+		// Sampled before the request went out, the same exchange reads as +4. The 8
+		// seconds between those answers is a quarter of a code window, handed over
+		// for nothing but a slow connection.
+		await expect(queryTimeOffset(transport, () => (localSeconds + 8) * 1000)).resolves.toBe(-4);
+	});
+
+	it('reads the clock after the request, never before it', async () => {
+		// The ordering *is* the fix, so it is asserted directly rather than inferred
+		// from an arithmetic result that a stopped clock would also produce.
+		const order: string[] = [];
+		const { transport } = transportReturning({
+			status: 200,
+			text: JSON.stringify({ response: { server_time: String(Math.floor(NOW / 1000)) } })
+		});
+		const logged = async (request: SteamRequest): Promise<SteamResponse> => {
+			order.push('request');
+			return transport(request);
+		};
+
+		await queryTimeOffset(logged, () => {
+			order.push('clock');
+			return NOW;
+		});
+
+		expect(order).toEqual(['request', 'clock']);
+	});
+
+	it('reads the clock exactly once, after the request', async () => {
+		const clock = vi.fn(() => NOW);
+		const { transport } = transportReturning({
+			status: 200,
+			text: JSON.stringify({ response: { server_time: String(Math.floor(NOW / 1000)) } })
+		});
+
+		await queryTimeOffset(transport, clock);
+
+		expect(clock).toHaveBeenCalledTimes(1);
+	});
+
+	it('never reads the clock when the request fails', async () => {
+		// Nothing to measure against, so nothing should be measured.
+		const clock = vi.fn(() => NOW);
+		const { transport } = transportReturning({ status: 500, text: '' });
+
+		await expect(queryTimeOffset(transport, clock)).rejects.toBeInstanceOf(SteamTimeError);
+		expect(clock).not.toHaveBeenCalled();
+	});
+});
+
+/*
+ * That one good reading is not trusted forever.
+ *
+ * `offsetVerified` is only ever set true, and `ensureSynced` used to gate on it
+ * — so the first success was the last measurement the process would ever take.
+ * This app lives in a tray for days. An NTP correction, a resume from sleep, a
+ * VM clock jump or somebody fixing their time zone all move the local clock
+ * afterwards, and the offset measured against the old one kept being added to
+ * the new one. A user who corrected their clock *to fix their codes* made them
+ * wrong by exactly the amount they corrected.
+ */
+describe('a stale offset is measured again', () => {
+	const codesWith = (
+		stale: boolean
+	): { codes: CodeService; setTimeOffset: ReturnType<typeof vi.fn> } => {
+		const setTimeOffset = vi.fn();
+		return {
+			setTimeOffset,
+			codes: {
+				clockUnverified: () => false,
+				clockStale: () => stale,
+				setTimeOffset
+			} as unknown as CodeService
+		};
+	};
+
+	const clockFor = (codes: CodeService, forAccount: ReturnType<typeof vi.fn>): SteamClock =>
+		new SteamClock({
+			codes,
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts: [{ steamId64: '76561198000000001' }] })
+			} as unknown as VaultService,
+			transports: { forAccount, forget: vi.fn() } as unknown as SteamTransportFactory,
+			now: () => NOW
+		});
+
+	it('asks Steam again once the offset has gone stale', async () => {
+		const { transport } = transportReturning({
+			status: 200,
+			text: JSON.stringify({ response: { server_time: String(Math.floor(NOW / 1000) + 3) } })
+		});
+		const forAccount = vi.fn(() => Promise.resolve(transport));
+		const { codes, setTimeOffset } = codesWith(true);
+
+		await clockFor(codes, forAccount).ensureSynced();
+
+		// Verified but stale is exactly the state the old gate could not express.
+		expect(forAccount).toHaveBeenCalledTimes(1);
+		expect(setTimeOffset).toHaveBeenCalledWith(3);
+	});
+
+	it('does not ask while the offset is still fresh', async () => {
+		const forAccount = vi.fn();
+		const { codes } = codesWith(false);
+
+		await clockFor(codes, forAccount).ensureSynced();
+
+		expect(forAccount).not.toHaveBeenCalled();
 	});
 });

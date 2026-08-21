@@ -44,14 +44,27 @@ export class SteamTimeError extends Error {
 /**
  * Seconds to add to the local clock so it matches Steam's.
  *
- * Matches `steam-totp`'s definition: `server_time - floor(nowMs / 1000)` at the
- * moment the body is read. Latency is not folded in — Steam accepts a window of
- * skew, and inventing a midpoint correction here would diverge from the library
- * every other authenticator is compared against.
+ * Matches `steam-totp`'s definition: `server_time - floor(now / 1000)`, sampled
+ * **at the moment the body is read**. Latency is not folded in — Steam accepts a
+ * window of skew, and inventing a midpoint correction here would diverge from
+ * the library every other authenticator is compared against.
+ *
+ * ## Why this takes a clock rather than a timestamp
+ *
+ * It used to take `nowMs: number`, which callers filled with `Date.now()` — and
+ * an argument is evaluated *before* the call, so the local time was captured
+ * before the request went out and the offset absorbed the entire round trip.
+ * That put Steam time **ahead** by however long the request took, worst on
+ * exactly the slow proxies this app encourages people to route through.
+ *
+ * `steam-totp` calls `exports.time()` inside its `res.on('end')` handler, after
+ * the body has arrived. A function parameter is the only shape that lets this
+ * module decide when the reading is taken, so the parity the comment claims is
+ * something the code actually does.
  */
 export async function queryTimeOffset(
 	transport: SteamTransport,
-	nowMs: number = Date.now()
+	now: () => number = Date.now
 ): Promise<number> {
 	const response = await transport({
 		method: 'POST',
@@ -77,5 +90,7 @@ export async function queryTimeOffset(
 		throw new SteamTimeError('Steam returned a time response this version does not understand.');
 	}
 
-	return result.data.response.server_time - Math.floor(nowMs / 1000);
+	// Sampled here, with the parsed body in hand — not at the top of the function
+	// and emphatically not at the call site.
+	return result.data.response.server_time - Math.floor(now() / 1000);
 }

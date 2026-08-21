@@ -46,7 +46,11 @@ export class SteamClock {
 	 * good", only as "we tried". Success calls `setTimeOffset`; failure never does.
 	 */
 	ensureSynced(): Promise<void> {
-		if (!this.codes.clockUnverified()) {
+		// `clockStale`, not `clockUnverified`. The latter is only ever cleared, so
+		// gating on it meant the very first successful reading was the last one this
+		// process would ever take — and a local clock corrected afterwards kept
+		// having an offset measured against the old one added to it.
+		if (!this.codes.clockStale()) {
 			return Promise.resolve();
 		}
 		if (this.inFlight) {
@@ -75,7 +79,10 @@ export class SteamClock {
 
 		try {
 			const transport = await this.transports.forAccount({ steamId64, proxyUrl });
-			const offset = await queryTimeOffset(transport, this.now());
+			// `this.now` itself, not `this.now()`. Passing the *result* sampled local
+			// time before the request had even been sent, so the offset carried the
+			// whole round trip and pushed generated codes ahead of Steam's clock.
+			const offset = await queryTimeOffset(transport, this.now);
 			this.codes.setTimeOffset(offset);
 		} catch (err) {
 			// Deliberately not writing zero. That would mark the clock "verified"
