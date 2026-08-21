@@ -145,17 +145,6 @@ export default {
 		icon: 'build/icons',
 		category: 'Utility;Security',
 		/*
-		 * The `.desktop` entry's basename, and the `app_id`/`WM_CLASS` Electron
-		 * reports.
-		 *
-		 * Without it a running window is not associated with its launcher entry:
-		 * the app appears twice in a dock, once as the installed application and
-		 * once as an unnamed window, and pinning does not stick. electron-builder
-		 * warns about this rather than failing, so it survives a build that looks
-		 * entirely successful.
-		 */
-		desktopName: 'open-desktop-authenticator.desktop',
-		/*
 		 * Required by the `.deb` target, which refuses to build without a
 		 * maintainer — the packaging run that first produced this file failed on
 		 * exactly that, after AppImage had already succeeded.
