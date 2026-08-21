@@ -108,3 +108,14 @@ describe('the once-a-second sweep', () => {
 		expect(sweep).toContain('imports.enforceExpiry()');
 	});
 });
+
+describe('the recovery-file picker', () => {
+	it('bounds what it will read, like the import picker always has', () => {
+		// `readFileSync` of whatever the dialog returns, with no cap, meant one
+		// mis-click on a multi-gigabyte file pulled the whole thing into memory.
+		const picker = /pick: async \(\) => \{[\s\S]*?\n\t{4}\}/.exec(mainSource)?.[0];
+		expect(picker).toBeDefined();
+		expect(picker).toContain('MAX_RECOVERY_FILE_BYTES');
+		expect(mainSource).toContain('const MAX_RECOVERY_FILE_BYTES = 1024 * 1024;');
+	});
+});

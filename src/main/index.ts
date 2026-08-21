@@ -10,7 +10,7 @@ import {
 	powerMonitor,
 	session
 } from 'electron';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { branding } from '../shared/branding';
@@ -66,6 +66,9 @@ import {
 const WINDOW_CHROME = { background: '#070a0e', symbol: '#93a89e' } as const;
 
 /** How long to wait on GitHub before giving up on an update check. */
+/** A recovery file is a few KB; anything past this is a wrong pick, not a file to read. */
+const MAX_RECOVERY_FILE_BYTES = 1024 * 1024;
+
 const UPDATE_CHECK_TIMEOUT_MS = 15_000;
 
 const isDev = !app.isPackaged;
@@ -497,6 +500,13 @@ function start(): void {
 					// process that has no use for either. The user picked this file a
 					// moment ago in a dialog, so nothing is lost by not repeating it back.
 					try {
+						// A recovery file is a few kilobytes. Reading whatever was picked
+						// with no bound meant one mis-click on a multi-gigabyte file pulled
+						// the whole thing into memory; a megabyte is generous by three
+						// orders of magnitude, mirroring the import picker's own cap.
+						if (statSync(chosen).size > MAX_RECOVERY_FILE_BYTES) {
+							throw new Error('too large');
+						}
 						return readFileSync(chosen, 'utf8');
 					} catch {
 						throw new Error('that recovery file could not be read.');

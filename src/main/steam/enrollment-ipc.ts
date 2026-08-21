@@ -177,6 +177,15 @@ export function registerEnrollmentHandlers(
 		// is present.
 		requireUnlocked();
 
+		// And re-read, for the same reason. The copy taken before the dialog
+		// outlives anything that happened during it — writing it out for an
+		// account since removed would put secrets the user just chose to be rid of
+		// into a fresh plaintext file.
+		const current = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+		if (!current) {
+			throw new Error('that account is no longer in this vault, so nothing was exported.');
+		}
+
 		// `mode: 0o600` — owner-only. This file contains the same secrets as the
 		// vault and none of its encryption, so the one protection available is that
 		// other users on the machine cannot read it. The user is told as much on
@@ -186,7 +195,7 @@ export function registerEnrollmentHandlers(
 		// message, and the rule at the top of this module is that no path crosses
 		// IPC in either direction.
 		try {
-			await writeFile(destination, toMaFile(account), { encoding: 'utf8', mode: 0o600 });
+			await writeFile(destination, toMaFile(current), { encoding: 'utf8', mode: 0o600 });
 		} catch {
 			throw new Error(`${suggested} could not be written to that location.`);
 		}

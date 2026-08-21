@@ -414,16 +414,45 @@ describe('proxy options for steam-session', () => {
 		});
 	});
 
-	it('routes SOCKS through socksProxy, never httpProxy', () => {
+	it('routes SOCKS through socksProxy, never httpProxy — in the remote-DNS spelling', () => {
+		// `socks5h`, not `socks5`. socks-proxy-agent reads `socks5` as *resolve
+		// the hostname locally*, so the plain spelling had every sign-in look
+		// Steam's hostnames up on the user's own resolver — at the exact moments
+		// an account was being tied to a route. Chromium's half of the app already
+		// resolves at the proxy for `socks5`; this makes the Node half agree.
 		expect(steamSessionProxy('socks5://user:pa55@1.2.3.4:1080')).toEqual({
-			socksProxy: 'socks5://user:pa55@1.2.3.4:1080'
+			socksProxy: 'socks5h://user:pa55@1.2.3.4:1080'
 		});
 	});
 
-	it('normalises socks5h, which means the same thing', () => {
+	it('never downgrades an explicit remote-DNS spelling', () => {
+		// The old normalisation rewrote socks5h to socks5 — turning the one
+		// spelling a user chooses *specifically for remote DNS* into the local
+		// one, silently.
 		expect(steamSessionProxy('socks5h://1.2.3.4:1080')).toEqual({
-			socksProxy: 'socks5://1.2.3.4:1080'
+			socksProxy: 'socks5h://1.2.3.4:1080'
 		});
+		expect(steamSessionProxy('socks4a://1.2.3.4:1080')).toEqual({
+			socksProxy: 'socks4a://1.2.3.4:1080'
+		});
+	});
+
+	it('produces URLs the real agent reads as remote-DNS', async () => {
+		// Against the library itself, not our reading of its documentation:
+		// `shouldLookup === false` is socks-proxy-agent's own flag for "send the
+		// hostname to the proxy". If a future version changes its scheme table,
+		// this is the test that notices.
+		const { SocksProxyAgent } = await import('socks-proxy-agent');
+		for (const stored of ['socks5://1.2.3.4:1080', 'socks5h://1.2.3.4:1080']) {
+			const options = steamSessionProxy(stored);
+			if (!('socksProxy' in options)) {
+				throw new Error('expected a socksProxy');
+			}
+			const agent = new SocksProxyAgent(options.socksProxy) as unknown as {
+				shouldLookup: boolean;
+			};
+			expect(agent.shouldLookup).toBe(false);
+		}
 	});
 
 	it('refuses anything planProxy would refuse, so the two cannot disagree', () => {

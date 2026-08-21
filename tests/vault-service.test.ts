@@ -716,3 +716,14 @@ describe('restore while unlocked', () => {
 		expect(v.read().settings.autoLockMinutes).not.toBe(30);
 	});
 });
+
+describe('adopting a vault file', () => {
+	it('refuses to read an enormous pick at all', () => {
+		const big = join(dir, 'huge.vault');
+		// Sparse-ish: two megabytes of zeros is enough to trip a one-megabyte cap
+		// without slowing the suite.
+		writeFileSync(big, Buffer.alloc(2 * 1024 * 1024));
+		const v = service();
+		expect(() => v.adoptFrom(big)).toThrow(/too large/);
+	});
+});

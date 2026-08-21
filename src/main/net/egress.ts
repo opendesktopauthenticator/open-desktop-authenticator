@@ -136,6 +136,21 @@ const NETWORK_ERRORS: Record<string, string> = {
  */
 export type SteamSessionProxy = { httpProxy: string } | { socksProxy: string };
 
+/**
+ * SOCKS schemes as `socks-proxy-agent` reads them, chosen for remote DNS.
+ *
+ * The agent's own table: `socks5` resolves locally, `socks5h` and bare `socks`
+ * resolve at the proxy; `socks4` local (the protocol takes only an IP), and
+ * `socks4a` remote. See `steamSessionProxy` for why local resolution here is a
+ * leak Chromium's half of the app never had.
+ */
+const NODE_SOCKS_SCHEME: Record<string, string> = {
+	'socks5:': 'socks5h',
+	'socks5h:': 'socks5h',
+	'socks4:': 'socks4',
+	'socks4a:': 'socks4a'
+};
+
 export function steamSessionProxy(proxyUrl: string): SteamSessionProxy {
 	const url = new URL(proxyUrl);
 	// Throws `EgressError` for anything `planProxy` would refuse.
@@ -146,11 +161,23 @@ export function steamSessionProxy(proxyUrl: string): SteamSessionProxy {
 		return { httpProxy: proxyUrl };
 	}
 
-	// Normalised for the same reason Chromium needs it normalised: `socks5h` and
-	// `socks5` mean the same thing, and the app should not care which one the user
-	// happened to paste. Only the scheme is rewritten — credentials, host and port
-	// are left exactly as stored.
-	return { socksProxy: `${scheme}:${proxyUrl.slice(url.protocol.length)}` };
+	// **Normalised to the remote-DNS spelling, which is the opposite direction
+	// from Chromium's.** The two halves of this application read the same scheme
+	// differently: Chromium's `socks5` sends the hostname to the proxy, but
+	// `socks-proxy-agent` — which is what `steam-session` builds from this URL —
+	// treats `socks5` as *resolve locally* and only `socks5h` as remote. So a
+	// stored `socks5://` had every sign-in, enrollment and transfer look Steam's
+	// hostnames up on the user's own resolver, at the exact moments an account
+	// was being tied to a route — and a user who explicitly wrote `socks5h://`
+	// had it silently rewritten to the local-DNS spelling.
+	//
+	// Remote DNS is part of the SOCKS5 protocol itself (ATYP=DOMAINNAME), and it
+	// is what Chromium already does for every confirmation request, so this
+	// changes nothing about which proxies work — only where the lookup happens.
+	// SOCKS4 genuinely cannot carry a hostname, so it alone stays local; `4a`
+	// keeps its remote spelling instead of being downgraded.
+	const nodeScheme = NODE_SOCKS_SCHEME[url.protocol] as string;
+	return { socksProxy: `${nodeScheme}:${proxyUrl.slice(url.protocol.length)}` };
 }
 
 /**

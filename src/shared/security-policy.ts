@@ -22,6 +22,15 @@ export const SECURE_WEB_PREFERENCES = Object.freeze({
 	experimentalFeatures: false,
 	webviewTag: false,
 	/**
+	 * Electron's default is **on**, and on Linux an active spellchecker downloads
+	 * Hunspell dictionaries from a Google-run CDN — a network request this
+	 * application never disclosed, from an app whose README promises the update
+	 * check is the only non-Steam request it makes. Nothing here is prose: the
+	 * fields are account names, passphrases and codes, none of which a
+	 * spellchecker should ever see.
+	 */
+	spellcheck: false,
+	/**
 	 * Off by default; development re-enables it explicitly at the call site.
 	 *
 	 * DevTools in a shipped authenticator is a self-XSS vector: "open the console

@@ -34,6 +34,15 @@ describe('S6 — window security posture', () => {
 		expect(SECURE_WEB_PREFERENCES.webviewTag).toBe(false);
 	});
 
+	it('disables the spellchecker, which phones a Google CDN on Linux', () => {
+		// Electron's default is on, and an active spellchecker on Linux downloads
+		// Hunspell dictionaries from a Google-run CDN — an undisclosed network
+		// request from an app that promises the update check is its only
+		// non-Steam traffic. Nothing here is prose: the fields are account names,
+		// passphrases and codes.
+		expect(SECURE_WEB_PREFERENCES.spellcheck).toBe(false);
+	});
+
 	it('disables DevTools by default', () => {
 		// "Open the console and paste this to fix your codes" is a scam that works
 		// on real people, and pasted script gets everything window.api exposes.

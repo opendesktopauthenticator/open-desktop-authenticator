@@ -1,3 +1,4 @@
+import { statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { deriveKey, sealWithKey, unseal, VaultCryptoError, wipe } from './crypto';
 import {
@@ -81,6 +82,9 @@ interface UnlockedState {
 	/** The same instant on the monotonic clock. See `msUntilAutoLock`. */
 	lastActivityMono: number;
 }
+
+/** A vault is tens of KB. See `adoptFrom`. */
+const MAX_ADOPTABLE_BYTES = 1024 * 1024;
 
 export class VaultService {
 	private readonly file: string;
@@ -537,6 +541,20 @@ export class VaultService {
 			throw new VaultServiceError(
 				'there is already a vault on this machine, so this will not replace it'
 			);
+		}
+
+		// Bounded before it is read. `readEnvelope` pulls the whole file into
+		// memory, and the picker will hand this method anything — a vault is tens
+		// of kilobytes, so a megabyte separates every real vault from a mis-click
+		// on something enormous.
+		try {
+			if (statSync(path).size > MAX_ADOPTABLE_BYTES) {
+				throw new VaultServiceError('that file is far too large to be a vault');
+			}
+		} catch (err) {
+			throw err instanceof VaultServiceError
+				? err
+				: new VaultServiceError('that file is not a vault this app can read');
 		}
 
 		let envelope: Envelope;
