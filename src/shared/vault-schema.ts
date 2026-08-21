@@ -173,7 +173,26 @@ export const vaultContentsSchema = z
 		createdAt: z.string(),
 		updatedAt: z.string()
 	})
-	.passthrough();
+	.passthrough()
+	// **One Steam identity, one stored account.** Every consumer assumes it —
+	// codes and confirmations `find` the first match, removal splices exactly
+	// one — and the schema was the one layer that never said so, so a valid
+	// legacy or third-party vault carrying duplicates was accepted whole and
+	// then half-honoured everywhere. Refused with a message naming the account,
+	// because "not valid" alone would strand the person holding the file.
+	.superRefine((contents, ctx) => {
+		const seen = new Set<string>();
+		for (const account of contents.accounts) {
+			if (seen.has(account.steamId64)) {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					message: `duplicate entries for account ${account.steamId64} — this vault lists the same Steam account twice`
+				});
+				return;
+			}
+			seen.add(account.steamId64);
+		}
+	});
 
 export type Account = z.infer<typeof accountSchema>;
 export type AccountStatus = z.infer<typeof accountStatusSchema>;

@@ -208,14 +208,21 @@ export class AutoConfirmEngine {
 				return;
 			}
 
-			for (const account of this.dueAccounts()) {
-				// Re-checked between accounts as well as inside `runOne`: a lock partway
-				// through a sweep must not mean the rest of the list is still visited.
-				if (this.generation !== generation || !this.vault.isUnlocked()) {
-					return;
-				}
-				await this.runOne(account.steamId64, account.pollIntervalSeconds, generation);
+			// In parallel, not in sequence. Accounts are independent — the service
+			// serialises per account precisely because of that — and awaiting each
+			// in turn meant one dead proxy's thirty-second timeout stalled every
+			// account behind it in the list, every sweep. A lock partway through is
+			// still caught: `runOne` checks the generation around its own await, and
+			// the service refuses work for a locked vault.
+			const due = this.dueAccounts();
+			if (this.generation !== generation || !this.vault.isUnlocked()) {
+				return;
 			}
+			await Promise.all(
+				due.map((account) =>
+					this.runOne(account.steamId64, account.pollIntervalSeconds, generation)
+				)
+			);
 		} finally {
 			this.running = false;
 		}

@@ -450,6 +450,9 @@ describe('adopting a vault file from elsewhere', () => {
 
 		const here = service();
 		await here.create('a different long passphrase');
+		// Locked, so the existence refusal is the one under test — an open session
+		// is refused earlier and for its own reason, tested separately below.
+		here.lock('manual');
 		const before = readFileSync(file, 'utf8');
 
 		expect(() => here.adoptFrom(source)).toThrow(/already a vault/);
@@ -877,5 +880,42 @@ describe('backupAvailable caching', () => {
 
 		await v.mutate((d) => (d.settings.autoLockMinutes = 30));
 		expect(v.backupAvailable()).toBeDefined();
+	});
+});
+
+/*
+ * The vault file vanishing under an open session.
+ *
+ * `exists()` says no, the create screen appears — and creating or adopting
+ * then destroyed what the session still held: create replaced the live state
+ * with an empty vault (old key never wiped, next save rotates the empty vault
+ * over the .bak that held everything); adopt was overwritten by the open
+ * session's next save. The open session heals itself instead — any save
+ * rewrites the file from memory — so both are refused while it lasts.
+ */
+describe('create and adopt while a session is open', () => {
+	it('refuses to create over a live session', async () => {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+		rmSync(file);
+		expect(v.exists()).toBe(false);
+
+		await expect(v.create('another long passphrase')).rejects.toThrow(/vault is open/i);
+		// The session still holds the accounts, and a save restores the file.
+		expect(v.read().accounts).toHaveLength(1);
+		await v.mutate(() => undefined);
+		expect(v.exists()).toBe(true);
+	});
+
+	it('refuses to adopt over a live session', async () => {
+		const source = join(dir, 'other', 'vault.json');
+		await new VaultService({ file: source, now }).create('another long passphrase');
+
+		const v = service();
+		await v.create(PASS);
+		rmSync(file);
+
+		expect(() => v.adoptFrom(source)).toThrow(/vault is open/i);
 	});
 });

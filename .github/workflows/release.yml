@@ -93,6 +93,21 @@ jobs:
           tag="${{ inputs.tag || github.ref_name }}"
           manifest="v$(node -p "require('./package.json').version")"
           echo "tag=$tag manifest=$manifest"
+          # The dispatched ref must BE a pushed tag, not merely equal a version
+          # string. `actions/checkout` accepts any ref, so a branch named like a
+          # tag built the branch — and `gh release create` would then invent the
+          # missing tag from the default branch, publishing hashes and
+          # provenance for one commit against binaries from another. Fetching
+          # the tag from origin is what proves it exists remotely; comparing it
+          # to HEAD is what proves the build is of that exact commit.
+          if ! git fetch --depth 1 origin "refs/tags/$tag:refs/tags/$tag" 2>/dev/null; then
+            echo "::error::$tag is not a pushed tag on this repository"
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "$(git rev-parse "refs/tags/$tag^{commit}")" ]; then
+            echo "::error::the checked-out commit does not match tag $tag"
+            exit 1
+          fi
           if [ "$tag" != "$manifest" ]; then
             echo "::error::tag $tag does not match package.json ($manifest)"
             exit 1
@@ -251,6 +266,7 @@ jobs:
         shell: bash
         run: |
           gh release create "$TAG" \
+            --verify-tag \
             --draft \
             --title "$TAG" \
             --notes "Draft. Release notes are written by hand before publishing — see docs/RELEASE_CHECKLIST.md.

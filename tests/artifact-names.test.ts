@@ -77,3 +77,20 @@ describe('the verification instructions name real files', () => {
 		expect(SAFETY).toMatch(/upper case/i);
 	});
 });
+
+describe('a dispatched release builds the tag it names', () => {
+	const workflow = readFileSync(join(__dirname, '../.github/workflows/release.yml'), 'utf8');
+
+	it('verifies the ref is a pushed tag before building', () => {
+		// `actions/checkout` accepts any ref, so a branch named like a tag built
+		// the branch — and `gh release create` then invented the missing tag from
+		// the default branch: hashes and provenance for one commit, binaries from
+		// another, on the workflow whose entire purpose is that they match.
+		expect(workflow).toContain('git fetch --depth 1 origin "refs/tags/$tag:refs/tags/$tag"');
+		expect(workflow).toMatch(/git rev-parse HEAD.*git rev-parse "refs\/tags\/\$tag/);
+	});
+
+	it('tells gh to refuse rather than invent a missing tag', () => {
+		expect(workflow).toContain('--verify-tag');
+	});
+});

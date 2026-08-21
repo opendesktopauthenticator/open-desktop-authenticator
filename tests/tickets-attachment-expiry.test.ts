@@ -1,6 +1,6 @@
 import { Readable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -167,5 +167,86 @@ describe('the way back to a report', () => {
 		expect(view.out.body).not.toContain('it is the only way back to this page');
 		expect(view.out.body).toContain(`?k=${encodeURIComponent(key)}`);
 		expect(view.out.body).toMatch(/reference .*on its own[\s\S]*will not reopen/);
+	});
+});
+
+/*
+ * Legacy rows without an access key were a permanent lockout.
+ *
+ * The migration added the column nullable "so an existing database opens
+ * without a migration step" — and the ticket view requires a string key
+ * compared in constant time, so NULL matched nothing, ever: every
+ * pre-migration conversation 404'd for everyone, admin links included. The
+ * startup backfill mints a key per legacy row so each report is reachable
+ * again, and the admin can send its holder a working link.
+ */
+describe('legacy tickets without an access key', () => {
+	it('are given one at startup, and open with it', async () => {
+		service.db
+			.prepare(
+				`INSERT INTO tickets (reference, access_key, kind, summary, detail, contact, created_at, updated_at)
+				 VALUES ('ODA-OLDR-OWXX', NULL, 'bug', 'A legacy report', 'Filed before keys existed.', '', ?, ?)`
+			)
+			.run(new Date().toISOString(), new Date().toISOString());
+
+		// The function itself, and the wiring: the backfill only helps if the
+		// server actually runs it at startup, before any request is answered.
+		const source = readFileSync(join(__dirname, '../tickets/server.mjs'), 'utf8');
+		expect(source).toMatch(/^backfillAccessKeys\(\);/m);
+
+		expect(service.backfillAccessKeys()).toBe(1);
+
+		const row = service.db
+			.prepare("SELECT access_key FROM tickets WHERE reference = 'ODA-OLDR-OWXX'")
+			.get() as { access_key: string | null };
+		expect(typeof row.access_key).toBe('string');
+
+		const { out, response } = capture();
+		await service.handle(get(), response, at(`/support/ticket/ODA-OLDR-OWXX?k=${row.access_key}`));
+		// The key spends into a cookie via a 303 — that redirect is the proof the
+		// gate accepted it; a wrong key answers 404.
+		expect(out.status).toBe(303);
+	});
+});
+
+/*
+ * A submission is one transaction.
+ *
+ * node:sqlite autocommits per statement, so a claim failure after the ticket
+ * INSERT left half a report stored behind a 500 reading "Nothing was saved" —
+ * inviting a duplicate whose first copy nobody can ever open. Sabotaging the
+ * claim now proves the INSERT rolls back with it.
+ */
+describe('a submission whose attachment claim fails', () => {
+	it('stores nothing at all', async () => {
+		const before = (service.db.prepare('SELECT COUNT(*) AS n FROM tickets').get() as { n: number })
+			.n;
+
+		service.db.exec('ALTER TABLE attachments RENAME TO attachments_sabotaged');
+		try {
+			const { response } = capture();
+			// The throw escapes `handle` here because the 500 wrapper lives a layer
+			// above it in the real server; what matters is what the database holds
+			// once the dust settles.
+			await expect(
+				service.handle(
+					post({
+						kind: 'bug',
+						summary: 'This submission is doomed',
+						detail: 'The attachments table is gone, so the claim throws mid-submission.',
+						attachments: 'a'.repeat(32)
+					}),
+					response,
+					at('/support/submit')
+				)
+			).rejects.toThrow(/no such table/);
+		} finally {
+			service.db.exec('ALTER TABLE attachments_sabotaged RENAME TO attachments');
+		}
+
+		const after = (service.db.prepare('SELECT COUNT(*) AS n FROM tickets').get() as { n: number })
+			.n;
+		// "Nothing was saved" is now the truth.
+		expect(after).toBe(before);
 	});
 });

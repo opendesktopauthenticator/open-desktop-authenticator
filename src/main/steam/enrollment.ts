@@ -480,10 +480,12 @@ export class EnrollmentService {
 			return 'wantMore';
 		}
 
+		let present = false;
 		try {
 			await this.vault.mutate((draft) => {
 				const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
 				if (stored) {
+					present = true;
 					// Only now. Until Steam confirms, this account's authenticator is
 					// attached but unproven, and `pendingActivation` is what says so.
 					stored.status = stored.revocationBackedUpAt ? 'active' : 'pendingRevocationBackup';
@@ -501,6 +503,20 @@ export class EnrollmentService {
 					'offering to finish activation until it can write. Unlock the vault and try once ' +
 					'more; if it says the account is already activated, that is the truth and nothing ' +
 					'is wrong.'
+			);
+		}
+
+		// **The row can be gone.** `mutate` succeeding proves the write, not the
+		// account: a removal that landed while `finalizeEnrollment` was in the air
+		// leaves a mutation that found nothing to update — and reporting
+		// 'activated' then claims durable local state that does not exist, for an
+		// authenticator Steam has just made live.
+		if (!present) {
+			throw new EnrollmentError(
+				`Steam activated the authenticator on ${account.accountName}, but the account was ` +
+					'removed from this vault while that was happening — so the secrets that drive it ' +
+					'are no longer stored here. The recovery file written at enrollment still holds ' +
+					'them: use "Recover from file" to restore the account.'
 			);
 		}
 
@@ -760,7 +776,18 @@ export class EnrollmentService {
 
 		try {
 			await this.vault.mutate((draft) => {
-				draft.accounts.push(account);
+				// Replace, never blindly push. The duplicate check at the top of this
+				// method ran before `AddAuthenticator` was awaited, and an import or a
+				// recovery can insert the same SteamID during that round trip — a
+				// second push then stored two rows for one identity, with every later
+				// `find` seeing only the first. The fresh enrollment is the live
+				// authenticator on Steam's side, so it is the copy that wins.
+				const existing = draft.accounts.findIndex((entry) => entry.steamId64 === steamId64);
+				if (existing >= 0) {
+					draft.accounts[existing] = account;
+				} else {
+					draft.accounts.push(account);
+				}
 			});
 		} catch {
 			// Never a bare rethrow. Whatever went wrong, Steam's side of this is

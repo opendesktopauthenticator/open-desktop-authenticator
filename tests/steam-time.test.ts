@@ -371,3 +371,58 @@ describe('failure cooldown', () => {
 		expect(attempts()).toBe(2);
 	});
 });
+
+/*
+ * One dead proxy must not monopolise the clock sync.
+ *
+ * The borrowed route was always `.find()`'s first routed account, so a dead
+ * proxy there meant the second — perfectly healthy — route was never tried,
+ * and every account stayed clock-unverified behind a proxy that was not even
+ * theirs.
+ */
+describe('route rotation on failure', () => {
+	it('borrows a different routed account after a failure', async () => {
+		let at = 0;
+		const calls: string[] = [];
+		const setTimeOffset = vi.fn();
+		const codes = {
+			clockUnverified: () => true,
+			clockStale: () => !setTimeOffset.mock.calls.length,
+			setTimeOffset
+		} as unknown as CodeService;
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({
+				accounts: [
+					{ steamId64: '76561198000000001', proxyUrl: 'socks5://dead:1080' },
+					{ steamId64: '76561198000000002', proxyUrl: 'socks5://alive:1080' }
+				]
+			})
+		} as unknown as VaultService;
+		const transports = {
+			forAccount: (account: { steamId64: string }) => {
+				calls.push(account.steamId64);
+				if (account.steamId64 === '76561198000000001') {
+					return Promise.reject(new Error('proxy is dead'));
+				}
+				return Promise.resolve(() =>
+					Promise.resolve({
+						status: 200,
+						text: JSON.stringify({ response: { server_time: 1_700_000_000 } })
+					})
+				);
+			},
+			forget: vi.fn()
+		} as unknown as SteamTransportFactory;
+
+		const clock = new SteamClock({ codes, vault, transports, now: () => at });
+
+		await clock.ensureSynced();
+		expect(calls).toEqual(['76561198000000001']);
+
+		at = 61_000;
+		await clock.ensureSynced();
+		expect(calls).toEqual(['76561198000000001', '76561198000000002']);
+		expect(setTimeOffset).toHaveBeenCalled();
+	});
+});

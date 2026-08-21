@@ -653,3 +653,54 @@ describe('the clock is checked before a pass signs anything', () => {
 		expect(runAutoConfirm).not.toHaveBeenCalled();
 	});
 });
+
+/*
+ * Accounts are independent, and the sweep must treat them that way.
+ *
+ * Awaiting each in sequence meant one dead proxy's thirty-second timeout
+ * stalled every account behind it in the list, every sweep — delays
+ * accumulated instead of overlapping.
+ */
+describe('one slow account does not block the others', () => {
+	it('runs the second account while the first is still in the air', async () => {
+		let releaseA: (() => void) | undefined;
+		const gateA = new Promise<void>((resolve) => {
+			releaseA = resolve;
+		});
+		const ran: string[] = [];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({
+				accounts: [
+					{
+						steamId64: '76561198000000001',
+						autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
+					},
+					{
+						steamId64: '76561198000000002',
+						autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
+					}
+				]
+			})
+		} as unknown as VaultService;
+		const confirmations = {
+			runAutoConfirm: async (steamId64: string) => {
+				ran.push(steamId64);
+				if (steamId64 === '76561198000000001') {
+					await gateA;
+				}
+				return { approved: [], held: [], unreadable: 0 };
+			}
+		} as unknown as ConfirmationsService;
+
+		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => 0 });
+		const sweep = engine.tick();
+
+		// Both must have been *started* while A is still gated.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(ran).toContain('76561198000000002');
+
+		releaseA?.();
+		await sweep;
+	});
+});

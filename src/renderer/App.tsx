@@ -366,7 +366,12 @@ export function App(): React.JSX.Element {
 			);
 		}
 
-		if (!status.exists) {
+		// `!unlocked` matters: a vault *file* can vanish under an open session
+		// (moved, deleted, a cloud-sync misfire), and showing the create screen
+		// then invited replacing live accounts with an empty vault. The open
+		// session is the better state — it still holds everything, and its next
+		// save rewrites the file from memory.
+		if (!status.exists && !status.unlocked) {
 			return (
 				<CreateVault
 					onCreate={async (passphrase) => {

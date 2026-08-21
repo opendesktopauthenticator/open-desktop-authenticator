@@ -161,6 +161,19 @@ export class VaultService {
 		if (this.creating) {
 			throw new VaultServiceError('a vault is already being created');
 		}
+		// **Refused while a session is open.** Reachable when the vault *file* has
+		// vanished under an unlocked session: `exists()` says no, the create screen
+		// appears, and creating then replaced the live state with an empty vault —
+		// without wiping the previous key, losing the in-memory accounts, and
+		// setting up the next save to rotate the empty vault over the .bak that
+		// still held everything. An open session with a missing file heals itself
+		// instead: any save rewrites the file from memory.
+		if (this.state) {
+			throw new VaultServiceError(
+				'the vault is open. Lock it first — creating a new vault would replace the accounts ' +
+					'this session is holding.'
+			);
+		}
 		if (this.exists()) {
 			throw new VaultServiceError(
 				'a vault already exists at this location; refusing to overwrite it'
@@ -576,6 +589,15 @@ export class VaultService {
 	 * rest, which is the screen the user lands on next.
 	 */
 	adoptFrom(path: string): void {
+		// Same reasoning as `create`: with the file gone but the session open, an
+		// adopted vault was silently destroyed by the very next save, which sealed
+		// the in-memory contents with the in-memory key straight over it.
+		if (this.state) {
+			throw new VaultServiceError(
+				'the vault is open. Lock it first — adopting a file now would be overwritten by ' +
+					'the open session’s next save.'
+			);
+		}
 		if (this.exists()) {
 			throw new VaultServiceError(
 				'there is already a vault on this machine, so this will not replace it'

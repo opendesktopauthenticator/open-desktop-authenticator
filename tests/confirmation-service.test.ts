@@ -739,3 +739,83 @@ describe('a permission disabled while the list is in flight', () => {
 		expect(sent.some((request) => request.url.includes('ajaxop'))).toBe(false);
 	});
 });
+
+/*
+ * A routing change on one account must not disown another's in-flight work.
+ *
+ * `forgetAccount` used to bump the service-wide generation, so account B's
+ * auto-confirm POST could succeed on Steam's side and then be reported as
+ * *failed* because account A's proxy was saved while B's reply was in the air —
+ * a false failure on an accepted, irreversible action, counted toward B's
+ * ten-strike halt.
+ */
+describe('a routing change during another account’s pass', () => {
+	const second = (): Account =>
+		account({
+			steamId64: '76561198000000002',
+			accountName: 'other',
+			autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 }
+		});
+
+	function gatedNetwork(): {
+		transports: SteamTransportFactory;
+		releaseOp: () => void;
+		opRequested: Promise<void>;
+	} {
+		let releaseOp: (() => void) | undefined;
+		const opGate = new Promise<void>((resolve) => {
+			releaseOp = resolve;
+		});
+		let opStarted: (() => void) | undefined;
+		const opRequested = new Promise<void>((resolve) => {
+			opStarted = resolve;
+		});
+		const transport = async (request: SteamRequest): Promise<SteamResponse> => {
+			if (request.url.includes('GenerateAccessTokenForApp')) {
+				return { status: 200, text: JSON.stringify({ response: { access_token: ACCESS } }) };
+			}
+			if (request.url.includes('getlist')) {
+				return { status: 200, text: JSON.stringify({ success: true, conf: [TRADE] }) };
+			}
+			// The approval POST: signalled, then held until the test releases it.
+			opStarted?.();
+			await opGate;
+			return { status: 200, text: JSON.stringify({ success: true }) };
+		};
+		return {
+			transports: {
+				forAccount: () => Promise.resolve(transport)
+			} as unknown as SteamTransportFactory,
+			releaseOp: () => releaseOp?.(),
+			opRequested
+		};
+	}
+
+	it('keeps the accepted approval instead of reporting it failed', async () => {
+		const { transports, releaseOp, opRequested } = gatedNetwork();
+		const confirmations = service(fakeVault([second()]), transports);
+
+		const pass = confirmations.runAutoConfirm('76561198000000002');
+		await opRequested;
+
+		// Account A's routing changes while B's approval POST is on the wire.
+		confirmations.forgetAccount('76561198000000001');
+		releaseOp();
+
+		const outcome = await pass;
+		expect(outcome.approved).toHaveLength(1);
+	});
+
+	it('still refuses when the change was this account’s own', async () => {
+		const { transports, releaseOp, opRequested } = gatedNetwork();
+		const confirmations = service(fakeVault([second()]), transports);
+
+		const pass = confirmations.runAutoConfirm('76561198000000002');
+		await opRequested;
+
+		confirmations.forgetAccount('76561198000000002');
+		releaseOp();
+
+		await expect(pass).rejects.toThrow(/routing changed|locked/i);
+	});
+});

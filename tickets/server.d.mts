@@ -48,6 +48,8 @@ export function derive(passphrase: string, salt: Buffer): Buffer;
 
 /** Regenerate the one-time bootstrap token, or clear it once an admin exists. */
 export function refreshBootstrap(): void;
+/** Mint an access key for every legacy row that has none. Returns how many. */
+export function backfillAccessKeys(): number;
 
 /** What a buffer's leading bytes say it is, or undefined if it is not accepted. */
 export function sniff(buffer: Buffer): { type: string; kind: 'image' | 'video' } | undefined;

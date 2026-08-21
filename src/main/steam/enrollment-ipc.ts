@@ -122,6 +122,14 @@ export function registerEnrollmentHandlers(
 		// learns which account came back and nothing else.
 		const recovered = await readRecoveryFile(text, passphrase);
 
+		// And once more with the plaintext in hand. The decrypt is a deliberate
+		// second of scrypt, and the idle lock does not pause for it — a lock that
+		// landed during it means nobody is present for the secrets that were just
+		// decrypted. They cannot be un-read, but nothing further happens with
+		// them, and the refusal names the real reason instead of surfacing the
+		// vault read below failing incidentally.
+		requireUnlocked();
+
 		// **The account's own SteamID decides, not the file's metadata.**
 		//
 		// A recovery file carries the SteamID twice: once at the top level, where it

@@ -207,3 +207,67 @@ describe('a sibling .tmp file at the destination', () => {
 		expect(readFileSync(destination, 'utf8')).toContain('shared_secret');
 	});
 });
+
+/*
+ * The vault locking during the recovery file's own decrypt.
+ *
+ * `readRecoveryFile` is a deliberate second of scrypt, and the idle lock does
+ * not pause for it. The unlock check before the decrypt passed; nothing
+ * rechecked after — so secrets decrypted with nobody present flowed on into a
+ * vault read that failed incidentally. The recheck makes the refusal name the
+ * real reason and stops anything further happening with the plaintext.
+ */
+describe('accountRecover after a mid-decrypt lock', () => {
+	it('refuses with the lock as the reason', async () => {
+		let unlocked = true;
+		const vault = {
+			isUnlocked: () => unlocked,
+			touch: () => undefined,
+			read: () => ({ accounts: [] })
+		} as unknown as VaultService;
+
+		vi.doMock('../src/main/vault/recovery', async () => {
+			const actual = await vi.importActual<typeof import('../src/main/vault/recovery')>(
+				'../src/main/vault/recovery'
+			);
+			return {
+				...actual,
+				readRecoveryFile: async () => {
+					// The lock lands while scrypt is grinding.
+					await Promise.resolve();
+					unlocked = false;
+					return {
+						steamId64: account.steamId64,
+						accountName: account.accountName,
+						account
+					};
+				}
+			};
+		});
+		vi.resetModules();
+		const { registerEnrollmentHandlers: register } =
+			await import('../src/main/steam/enrollment-ipc.js');
+		const { setTrustedSender: trust, __resetRouterForTests: reset } =
+			await import('../src/main/ipc/router.js');
+		reset();
+		trust(() => true);
+		handlers.clear();
+
+		register(
+			{} as EnrollmentService,
+			vault,
+			{ show: () => Promise.resolve(undefined) },
+			() => undefined,
+			{ pick: () => Promise.resolve('{"some":"recovery file"}') }
+		);
+
+		const handler = handlers.get(CHANNELS.accountRecover);
+		if (!handler) throw new Error('accountRecover was not registered');
+
+		await expect(handler(EVENT, { passphrase: 'a sufficiently long passphrase' })).rejects.toThrow(
+			/locked/i
+		);
+		vi.doUnmock('../src/main/vault/recovery');
+		vi.resetModules();
+	});
+});

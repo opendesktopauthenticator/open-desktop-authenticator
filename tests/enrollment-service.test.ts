@@ -1172,3 +1172,105 @@ describe('deactivating twice at once', () => {
 		expect(removals).toBe(1);
 	});
 });
+
+/*
+ * An insert landing during the AddAuthenticator round trip.
+ *
+ * The duplicate check runs before Steam is awaited — it has to, refusing is
+ * only free before the irreversible call — so an import or recovery inserting
+ * the same SteamID during that window met a persist that pushed
+ * unconditionally: two rows for one identity, with every later `find` seeing
+ * only the first. The fresh enrollment is the live authenticator on Steam's
+ * side, so it replaces rather than duplicates.
+ */
+describe('an account inserted while Steam is enrolling it', () => {
+	it('ends with exactly one row, holding the fresh secrets', async () => {
+		const { vault, accounts } = fakeVault();
+		let releaseStart: (() => void) | undefined;
+		const startGate = new Promise<void>((resolve) => {
+			releaseStart = resolve;
+		});
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => fakeSession(),
+			startEnrollment: async () => {
+				await startGate;
+				return STARTED;
+			},
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		const enrolling = service.begin('trader', 'a-password');
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		// The same identity arrives by another door mid-flight.
+		accounts.push({
+			steamId64: STEAM_ID,
+			accountName: 'trader',
+			sharedSecret: 'b2xkLXNlY3JldC1mcm9tLWltcG9ydA==',
+			identitySecret: IDENTITY,
+			status: 'active',
+			addedAt: '2026-08-01T00:00:00.000Z',
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+		releaseStart?.();
+		await enrolling;
+
+		expect(accounts).toHaveLength(1);
+		expect(accounts[0]?.sharedSecret).toBe(SHARED);
+	});
+});
+
+/*
+ * Activation success must mean durable local state.
+ *
+ * The status mutate quietly no-opped when the row was gone — removed while
+ * `finalizeEnrollment` was in the air — and 'activated' was reported for an
+ * account this vault no longer stores. Steam's side is live; the honest answer
+ * names the recovery file.
+ */
+describe('activation with the row removed mid-flight', () => {
+	it('refuses to call it activated', async () => {
+		const { vault, accounts } = fakeVault();
+		accounts.push({
+			steamId64: STEAM_ID,
+			accountName: 'trader',
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			refreshToken: MOBILE,
+			status: 'pendingActivation',
+			addedAt: '2026-08-01T00:00:00.000Z',
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+		let releaseFinalize: (() => void) | undefined;
+		const finalizeGate = new Promise<void>((resolve) => {
+			releaseFinalize = resolve;
+		});
+		const transports = {
+			forAccount: () =>
+				Promise.resolve(() =>
+					Promise.resolve({
+						status: 200,
+						text: JSON.stringify({ response: { access_token: MOBILE } })
+					})
+				)
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			finalizeEnrollment: async () => {
+				await finalizeGate;
+				return { state: 'activated' as const };
+			}
+		});
+
+		const activating = service.activate(STEAM_ID, '12345');
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		accounts.length = 0;
+		releaseFinalize?.();
+
+		await expect(activating).rejects.toThrow(/removed from this vault/);
+	});
+});

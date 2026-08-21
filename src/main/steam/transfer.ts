@@ -465,6 +465,15 @@ export class TransferService {
 		if (this.challenging) {
 			throw new TransferError('Steam has already been asked for a code.', false);
 		}
+		// Nor while a code is being submitted. Asking Steam for another text while
+		// the irreversible submission is in flight spends a message — and possibly
+		// the rate limit — against an authenticator that is being rotated away.
+		if (this.submitting) {
+			throw new TransferError(
+				'The code is already being submitted. Wait for that to finish.',
+				false
+			);
+		}
 		// **And not while a sign-in is still in the air.** `authenticate` refuses to
 		// start beside a challenge; without the mirror of that here, a challenge for
 		// account A could start during a sign-in for B, and B was installed as
@@ -551,6 +560,15 @@ export class TransferService {
 		}
 		if (this.submitting) {
 			throw new TransferError('That code is already being submitted.', false);
+		}
+		// The mirror of the guard `startChallenge` carries: a submission during a
+		// challenge still in the air raced the request that asks Steam to text a
+		// code against the one that spends it.
+		if (this.challenging) {
+			throw new TransferError(
+				'Steam is still being asked to send the code. Wait for that to finish.',
+				false
+			);
 		}
 		/*
 		 * **Refused once anything is outstanding.**

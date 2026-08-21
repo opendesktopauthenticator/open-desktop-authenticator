@@ -34,6 +34,12 @@ export function Settings({
 }): React.JSX.Element {
 	const [settings, setSettings] = useState<VaultSettingsView | undefined>();
 	const [busy, setBusy] = useState(false);
+	/**
+	 * The passphrase rotation below has its own busy flag, and Back only knew
+	 * about the settings save — so leaving mid-rotation looked like a cancel
+	 * while scrypt carried on and committed. Held here so Back waits for both.
+	 */
+	const [rotating, setRotating] = useState(false);
 	const [saved, setSaved] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 
@@ -97,7 +103,7 @@ export function Settings({
 		<main className="shell">
 			<header className="row">
 				<h1>Settings</h1>
-				<button type="button" className="secondary" onClick={onClose} disabled={busy}>
+				<button type="button" className="secondary" onClick={onClose} disabled={busy || rotating}>
 					Back
 				</button>
 			</header>
@@ -120,6 +126,7 @@ export function Settings({
 					<input
 						id="auto-lock"
 						type="number"
+						disabled={busy}
 						min={1}
 						max={240}
 						value={settings.autoLockMinutes}
@@ -137,6 +144,7 @@ export function Settings({
 					<input
 						id="clipboard-clear"
 						type="number"
+						disabled={busy}
 						min={5}
 						max={300}
 						value={settings.clipboardClearSeconds}
@@ -166,7 +174,7 @@ export function Settings({
 			)}
 
 			<h2>Change the vault passphrase</h2>
-			<PassphraseChange onChange={onChangePassphrase} />
+			<PassphraseChange onChange={onChangePassphrase} onBusy={setRotating} />
 
 			<div className="notice">
 				Launching at startup, starting minimised, and unlocking without the passphrase are in the
@@ -192,9 +200,12 @@ export function Settings({
  * screen asserts on nothing.
  */
 export function PassphraseChange({
-	onChange
+	onChange,
+	onBusy
 }: {
 	onChange: (current: string, next: string) => Promise<unknown>;
+	/** Told while the rotation is in flight, so the screen can hold Back. */
+	onBusy?: (busy: boolean) => void;
 }): React.JSX.Element {
 	const [current, setCurrent] = useState('');
 	const [next, setNext] = useState('');
@@ -216,6 +227,7 @@ export function PassphraseChange({
 			return;
 		}
 		setBusy(true);
+		onBusy?.(true);
 		setError(undefined);
 		setDone(false);
 		onChange(current, next)
@@ -228,7 +240,10 @@ export function PassphraseChange({
 				setConfirm('');
 			})
 			.catch((err: unknown) => setError(messageOf(err)))
-			.finally(() => setBusy(false));
+			.finally(() => {
+				setBusy(false);
+				onBusy?.(false);
+			});
 	};
 
 	return (
@@ -243,6 +258,7 @@ export function PassphraseChange({
 			<input
 				id="passphrase-current"
 				type="password"
+				disabled={busy}
 				autoComplete="current-password"
 				value={current}
 				onChange={(event) => setCurrent(event.target.value)}
@@ -252,6 +268,7 @@ export function PassphraseChange({
 			<input
 				id="passphrase-next"
 				type="password"
+				disabled={busy}
 				autoComplete="new-password"
 				value={next}
 				onChange={(event) => setNext(event.target.value)}
@@ -261,6 +278,7 @@ export function PassphraseChange({
 			<input
 				id="passphrase-confirm"
 				type="password"
+				disabled={busy}
 				autoComplete="new-password"
 				value={confirm}
 				onChange={(event) => setConfirm(event.target.value)}

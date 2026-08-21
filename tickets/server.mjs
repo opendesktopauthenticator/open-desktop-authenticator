@@ -140,6 +140,58 @@ addColumn('notes', 'author', `TEXT NOT NULL DEFAULT 'us'`);
  */
 addColumn('tickets', 'access_key', 'TEXT');
 
+/**
+ * Give every legacy row a key, or the migration is a lockout.
+ *
+ * "Nullable so an existing database opens without a migration step" opened the
+ * database and stranded its contents: the ticket view requires the key to be a
+ * string and compares in constant time, so no supplied `k` can ever match NULL
+ * — every pre-migration conversation answered 404 to everyone, including the
+ * admin links, forever. Reporters holding only the old reference lost access
+ * when the reference stopped being the credential; generating a key at least
+ * makes each report reachable again — the admin can read it and can send the
+ * holder a working link.
+ */
+function backfillAccessKeys() {
+	const missing = db.prepare('SELECT id FROM tickets WHERE access_key IS NULL').all();
+	if (!missing.length) {
+		return 0;
+	}
+	const set = db.prepare('UPDATE tickets SET access_key = ? WHERE id = ? AND access_key IS NULL');
+	for (const row of missing) {
+		// `randomBytes` directly rather than `makeTicketKey`, which is declared
+		// far below this module-load-time call — same construction, no TDZ.
+		set.run(randomBytes(32).toString('base64url'), row.id);
+	}
+	return missing.length;
+}
+backfillAccessKeys();
+
+/**
+ * Run `work` inside one SQLite transaction.
+ *
+ * node:sqlite autocommits per statement, so a submission that inserted its
+ * ticket and then failed claiming an attachment had half-happened — while the
+ * catch-all answered "Nothing was saved", inviting a duplicate report whose
+ * first copy the reporter can never open (its access key was never shown).
+ * BEGIN/COMMIT makes the sentence true.
+ */
+function transactionally(work) {
+	db.exec('BEGIN IMMEDIATE');
+	try {
+		const result = work();
+		db.exec('COMMIT');
+		return result;
+	} catch (err) {
+		try {
+			db.exec('ROLLBACK');
+		} catch {
+			// Already rolled back by the failure itself; the throw below is the news.
+		}
+		throw err;
+	}
+}
+
 const now = () => new Date().toISOString();
 
 /* ----------------------------------------------------------- attachments -- */
@@ -702,7 +754,7 @@ function refreshBootstrap() {
 	);
 }
 
-export { db, validate, sameSecret, derive, refreshBootstrap };
+export { db, validate, sameSecret, derive, refreshBootstrap, backfillAccessKeys };
 
 /* -------------------------------------------------------------- rendering -- */
 
@@ -1454,27 +1506,30 @@ async function handle(request, response, url) {
 		const reference = makeReference();
 		const stamp = now();
 		const accessKey = makeTicketKey();
-		const inserted = db
-			.prepare(
-				`INSERT INTO tickets (reference, access_key, kind, summary, detail, contact, created_at, updated_at)
+		// One transaction: the ticket and its attachment claims land together or
+		// not at all. Un-wrapped, a claim failure after the insert left a stored
+		// report behind a 500 that said "Nothing was saved" — inviting a duplicate
+		// whose first copy nobody can ever open, since its key was never shown.
+		const { wanted, claimed } = transactionally(() => {
+			const inserted = db
+				.prepare(
+					`INSERT INTO tickets (reference, access_key, kind, summary, detail, contact, created_at, updated_at)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-			)
-			.run(
-				reference,
-				accessKey,
-				value.kind,
-				value.summary,
-				value.detail,
-				value.contact,
-				stamp,
-				stamp
-			);
-		// Claimed vs asked-for. An upload sits unclaimed for at most two hours, so
-		// somebody who spent longer than that composing their report submits ids
-		// whose files are already gone — and "Report received" with no caveat told
-		// them their evidence was attached when it was not.
-		const wanted = attachmentIds(form.attachments).slice(0, MAX_FILES).length;
-		const claimed = claimAttachments(Number(inserted.lastInsertRowid), null, form.attachments);
+				)
+				.run(
+					reference,
+					accessKey,
+					value.kind,
+					value.summary,
+					value.detail,
+					value.contact,
+					stamp,
+					stamp
+				);
+			const asked = attachmentIds(form.attachments).slice(0, MAX_FILES).length;
+			const got = claimAttachments(Number(inserted.lastInsertRowid), null, form.attachments);
+			return { wanted: asked, claimed: got };
+		});
 		return send(response, 200, submitted(reference, accessKey, wanted - claimed));
 	}
 
@@ -1720,22 +1775,25 @@ async function handle(request, response, url) {
 				);
 			}
 			const stamp = now();
-			const note = db
-				.prepare('INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)')
-				.run(ticket.id, body, 'reporter', stamp);
-			const wanted = attachmentIds(form.attachments).slice(0, MAX_FILES).length;
-			const claimed = claimAttachments(ticket.id, Number(note.lastInsertRowid), form.attachments);
-			const shortfall = wanted - claimed;
+			// The note, its claims, and the status change land together — see the
+			// submission path for why half a reply behind a 500 is worse than none.
+			const shortfall = transactionally(() => {
+				const note = db
+					.prepare('INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)')
+					.run(ticket.id, body, 'reporter', stamp);
+				const wanted = attachmentIds(form.attachments).slice(0, MAX_FILES).length;
+				const claimed = claimAttachments(ticket.id, Number(note.lastInsertRowid), form.attachments);
+				const next = ticket.status === 'assigned' ? 'assigned' : 'open';
+				db.prepare('UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?').run(
+					next,
+					stamp,
+					ticket.id
+				);
+				return wanted - claimed;
+			});
 			// A reply from the reporter moves a closed report back into the queue,
-			// and a "waiting on you" one back to us. Nobody should have to file a
-			// second report to answer a question on the first.
-			const next = ticket.status === 'assigned' ? 'assigned' : 'open';
-			db.prepare('UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?').run(
-				next,
-				stamp,
-				ticket.id
-			);
-			// The shortfall rides the redirect, because the reply itself was saved
+			// and a "waiting on you" one back to us — applied inside the
+			// transaction above. The shortfall rides the redirect, because the reply itself was saved
 			// and a 303 has nowhere else to say so. The page renders it as a warning.
 			return send(response, 303, '', {
 				location: `/support/ticket/${ticket.reference}${shortfall > 0 ? `?missing=${shortfall}` : ''}`

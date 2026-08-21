@@ -34,6 +34,9 @@ export class SteamClock {
 	/** Coalesce concurrent callers into one QueryTime. */
 	private inFlight: Promise<void> | undefined;
 
+	/** Which routed account the next sync borrows. Advanced on failure. */
+	private routeRotation = 0;
+
 	/**
 	 * No earlier retry than this, after a failure.
 	 *
@@ -91,7 +94,15 @@ export class SteamClock {
 		// traffic, and sending it from the machine's own address when every account
 		// is configured to hide that address would be a quiet anonymity leak.
 		const accounts = this.vault.read().accounts;
-		const routed = accounts.find((account) => account.proxyUrl);
+		// Rotated, not `.find()`. Always borrowing the *first* routed account
+		// pinned every sync to that one proxy: if it happened to be dead, the
+		// second — perfectly healthy — route was never tried, and every account
+		// stayed clock-unverified behind a proxy that was not even theirs.
+		const routedAccounts = accounts.filter((account) => account.proxyUrl);
+		const routed =
+			routedAccounts.length > 0
+				? routedAccounts[this.routeRotation % routedAccounts.length]
+				: undefined;
 		const borrowed = routed ?? accounts[0];
 		const steamId64 = borrowed?.steamId64 ?? DIRECT_SYNC_ID;
 		const proxyUrl = borrowed?.proxyUrl;
@@ -106,6 +117,9 @@ export class SteamClock {
 			this.nextAttemptAtMs = 0;
 		} catch (err) {
 			this.nextAttemptAtMs = this.now() + RETRY_COOLDOWN_MS;
+			// The next attempt borrows a different routed account, so one dead
+			// proxy cannot monopolise the sync forever.
+			this.routeRotation += 1;
 			// Deliberately not writing zero. That would mark the clock "verified"
 			// for a check that never happened (or failed), and the UI would stop
 			// warning about the exact condition the user needs to know about.

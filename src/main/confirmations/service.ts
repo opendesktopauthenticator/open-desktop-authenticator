@@ -147,6 +147,18 @@ export class ConfirmationsService {
 	private generation = 0;
 
 	/**
+	 * Per-account invalidation, bumped when *that* account's routing changes.
+	 *
+	 * Separate from `generation`, which is service-wide and belongs to locks.
+	 * `forgetAccount` used to bump the global counter, and the cost was not "a
+	 * few re-fetches": account B's auto-confirm POST could succeed on Steam's
+	 * side and then be *reported as failed* because account A's proxy was saved
+	 * while the reply was in the air — a false failure on an accepted,
+	 * irreversible action, feeding B's backoff and the ten-strike halt.
+	 */
+	private readonly epochs = new Map<string, number>();
+
+	/**
 	 * One operation at a time per account.
 	 *
 	 * `act` reads the pending list, talks to Steam, then removes what it acted on.
@@ -175,15 +187,15 @@ export class ConfirmationsService {
 		// has not started yet was still *requested* before the lock, and reading the
 		// generation once it finally runs would read the value the lock already
 		// changed — making the guard agree with itself and catch nothing.
-		const generation = this.generation;
+		const grant = this.grantFor(steamId64);
 
 		return this.serialise(steamId64, async () => {
-			const { account, client, cookie } = await this.connect(steamId64, generation);
+			const { account, client, cookie } = await this.connect(steamId64, grant);
 			const { confirmations, unreadable } = await client.list(account, cookie);
 
 			// Checked *after* the await, before anything is written back. If the vault
 			// locked while this was in flight, these nonces are no longer ours to keep.
-			this.requireGeneration(generation);
+			this.requireGrant(steamId64, grant);
 
 			// Remembered so `act` can resolve an id back to its nonce and type without
 			// the renderer ever holding either.
@@ -209,7 +221,7 @@ export class ConfirmationsService {
 			throw new ConfirmationsError('nothing was selected');
 		}
 
-		const generation = this.generation;
+		const grant = this.grantFor(steamId64);
 
 		return this.serialise(steamId64, async () => {
 			const resolved: Confirmation[] = [];
@@ -224,10 +236,10 @@ export class ConfirmationsService {
 				resolved.push({ id, nonce: entry.nonce, type: entry.type });
 			}
 
-			const { account, client, cookie } = await this.connect(steamId64, generation);
+			const { account, client, cookie } = await this.connect(steamId64, grant);
 			await client.act(account, cookie, action, resolved);
 
-			this.requireGeneration(generation);
+			this.requireGrant(steamId64, grant);
 
 			// Acted on, so no longer pending. Read fresh rather than held across the
 			// await: a map captured beforehand could have been replaced, leaving the
@@ -253,10 +265,10 @@ export class ConfirmationsService {
 	 * timer firing during a manual action, or during a lock, cannot interleave.
 	 */
 	async runAutoConfirm(steamId64: string): Promise<AutoConfirmOutcome> {
-		const generation = this.generation;
+		const grant = this.grantFor(steamId64);
 
 		return this.serialise(steamId64, async () => {
-			const { account, client, cookie } = await this.connect(steamId64, generation);
+			const { account, client, cookie } = await this.connect(steamId64, grant);
 
 			// Nothing enabled means nothing to do, and no reason to have asked Steam.
 			if (!account.autoConfirm.marketListings && !account.autoConfirm.trades) {
@@ -273,7 +285,7 @@ export class ConfirmationsService {
 			// that failed to parse could be the account-recovery confirmation. Silence
 			// is the one response that cannot be right.
 			const { confirmations, unreadable } = await client.list(account, cookie);
-			this.requireGeneration(generation);
+			this.requireGrant(steamId64, grant);
 
 			// **The settings are re-read here, after the await.** `connect` copied
 			// them before the list request went out, and that request takes as long
@@ -296,7 +308,7 @@ export class ConfirmationsService {
 			};
 
 			const { approved, held } = await client.autoConfirm(account, cookie, confirmations);
-			this.requireGeneration(generation);
+			this.requireGrant(steamId64, grant);
 
 			// The full list is remembered so the UI can act on what was held back
 			// without fetching again, minus anything just approved.
@@ -332,7 +344,7 @@ export class ConfirmationsService {
 	 * restart.
 	 */
 	async signIn(steamId64: string, password: string): Promise<void> {
-		const generation = this.generation;
+		const grant = this.grantFor(steamId64);
 
 		return this.serialise(steamId64, async () => {
 			const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
@@ -361,7 +373,7 @@ export class ConfirmationsService {
 					: err;
 			}
 
-			this.requireGeneration(generation);
+			this.requireGrant(steamId64, grant);
 
 			await this.vault.mutate((draft) => {
 				const account = draft.accounts.find((entry) => entry.steamId64 === steamId64);
@@ -394,16 +406,19 @@ export class ConfirmationsService {
 	 * leaving it would let the old session keep working over the new route.
 	 */
 	forgetAccount(steamId64: string): void {
-		// Bumped for the same reason `forget` bumps it, and it was missing here:
-		// clearing the maps does nothing to a mint or a list already awaiting the
-		// network, which happily writes its result back afterwards — repopulating
-		// `sessions` with a session established over the *previous* route, which is
-		// exactly the linkage a routing change exists to break.
+		// Bumped for the same reason `forget` bumps the generation, and it was
+		// missing here: clearing the maps does nothing to a mint or a list already
+		// awaiting the network, which happily writes its result back afterwards —
+		// repopulating `sessions` with a session established over the *previous*
+		// route, which is exactly the linkage a routing change exists to break.
 		//
-		// Global rather than per-account. The counter is one number for the whole
-		// service, so a routing change costs every in-flight call; that is a few
-		// re-fetches against silently reviving a session that was meant to be gone.
-		this.generation++;
+		// **Per-account, not global.** An earlier version bumped the service-wide
+		// generation, and the cost was not "a few re-fetches": account B's
+		// auto-confirm POST could succeed on Steam and then be reported as failed
+		// because account A's proxy was saved while B's reply was in the air — a
+		// false failure on an accepted, irreversible action, counted toward B's
+		// ten-strike halt.
+		this.epochs.set(steamId64, (this.epochs.get(steamId64) ?? 0) + 1);
 		this.sessions.delete(steamId64);
 		this.pending.delete(steamId64);
 	}
@@ -470,10 +485,28 @@ export class ConfirmationsService {
 		}
 	}
 
+	/** This account's permission as it stands right now. */
+	private grantFor(steamId64: string): { generation: number; epoch: number } {
+		return { generation: this.generation, epoch: this.epochs.get(steamId64) ?? 0 };
+	}
+
+	/**
+	 * Refuse to keep anything produced before a lock — or before *this*
+	 * account's routing changed. Another account's change is not a reason.
+	 */
+	private requireGrant(steamId64: string, grant: { generation: number; epoch: number }): void {
+		this.requireGeneration(grant.generation);
+		if ((this.epochs.get(steamId64) ?? 0) !== grant.epoch) {
+			throw new ConfirmationsError(
+				"this account's routing changed while the request was in the air. Try again."
+			);
+		}
+	}
+
 	/** The account, a routed client, and a live session cookie. */
 	private async connect(
 		steamId64: string,
-		generation: number
+		grant: { generation: number; epoch: number }
 	): Promise<{
 		account: ConfirmationAccount;
 		client: ConfirmationsClient;
@@ -493,7 +526,7 @@ export class ConfirmationsService {
 			stored.steamId64,
 			stored.refreshToken,
 			transport,
-			generation
+			grant
 		);
 
 		return {
@@ -518,7 +551,7 @@ export class ConfirmationsService {
 		steamId64: string,
 		refreshToken: string | undefined,
 		transport: Awaited<ReturnType<SteamTransportFactory['forAccount']>>,
-		generation: number
+		grant: { generation: number; epoch: number }
 	): Promise<string> {
 		const cached = this.sessions.get(steamId64);
 		if (cached && cached.expiresAtMs - RENEW_MARGIN_MS > this.now()) {
@@ -542,10 +575,11 @@ export class ConfirmationsService {
 			throw err;
 		}
 
-		// A mint is a network round trip, so the vault may have locked during it.
-		// Caching the token now would put a live Steam credential back into a
-		// session that has already ended.
-		this.requireGeneration(generation);
+		// A mint is a network round trip, so the vault may have locked during it —
+		// or this account's own routing may have changed. Caching the token now
+		// would put a live Steam credential back into a session that has already
+		// ended, or one established over the route the change was breaking.
+		this.requireGrant(steamId64, grant);
 
 		// The token says when it expires; trusting it beats guessing an hour.
 		const expiry = jwtExpiry(accessToken);

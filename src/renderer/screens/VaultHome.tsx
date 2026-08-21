@@ -362,7 +362,11 @@ export function VaultHome({
 																message: messageOf(err)
 															});
 														})
-														.finally(() => setCopying(undefined));
+														.finally(() =>
+															// Only this account's flag. Clearing unconditionally re-enabled
+															// every button, including one whose own copy was still in flight.
+															setCopying((prev) => (prev === account.steamId64 ? undefined : prev))
+														);
 												}}
 											>
 												{copying === account.steamId64
@@ -408,7 +412,9 @@ export function VaultHome({
 														message: `It could not be saved: ${messageOf(err)}`
 													});
 												})
-												.finally(() => setExporting(undefined));
+												.finally(() =>
+													setExporting((prev) => (prev === account.steamId64 ? undefined : prev))
+												);
 										}}
 										title="Save this account as a .maFile, readable by SDA and anything else in the ecosystem."
 									>

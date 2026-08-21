@@ -186,3 +186,29 @@ describe('unknown fields from a newer build', () => {
 		expect((account.autoConfirm as Record<string, unknown>).futureAutoConfirmField).toBe('kept');
 	});
 });
+
+describe('one Steam identity, one stored account', () => {
+	it('refuses a vault listing the same account twice', () => {
+		const entry = {
+			steamId64: '76561198000000001',
+			accountName: 'trader',
+			sharedSecret: 'c2hhcmVk',
+			identitySecret: 'aWRlbnRpdHk=',
+			status: 'active',
+			addedAt: '2026-08-08T00:00:00.000Z',
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		};
+		const result = vaultContentsSchema.safeParse({
+			seq: 1,
+			accounts: [entry, { ...entry, accountName: 'trader-again' }],
+			createdAt: '2026-08-08T00:00:00.000Z',
+			updatedAt: '2026-08-08T00:00:00.000Z'
+		});
+		expect(result.success).toBe(false);
+		if (!result.success) {
+			// Named, because the person holding this file needs to know which
+			// account to deduplicate — "not valid" alone is a lockout.
+			expect(JSON.stringify(result.error.issues)).toContain('76561198000000001');
+		}
+	});
+});

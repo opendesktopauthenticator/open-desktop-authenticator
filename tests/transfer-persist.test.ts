@@ -69,6 +69,8 @@ function harness(
 		signInGate?: () => Promise<void> | undefined;
 		/** The same for the irreversible submission. */
 		continueGate?: Promise<void>;
+		/** And for the challenge, so a test can hold the text request open. */
+		startChallengeGate?: () => Promise<void>;
 	} = {}
 ): {
 	service: TransferService;
@@ -106,7 +108,10 @@ function harness(
 			return { refreshToken: TOKEN, steamId64: STEAM_ID };
 		},
 		mintAccessToken: () => Promise.resolve('access'),
-		startChallenge: (() => Promise.resolve({ sent: true, shape: 'protobuf' })) as never,
+		startChallenge: (async () => {
+			await options.startChallengeGate?.();
+			return { sent: true, shape: 'protobuf' };
+		}) as never,
 		continueChallenge: (async (
 			_t: unknown,
 			_a: unknown,
@@ -1103,5 +1108,50 @@ describe('abandoning during the SMS request', () => {
 
 		expect(() => h.service.cancel()).not.toThrow();
 		expect(h.service.current()).toBeUndefined();
+	});
+});
+
+/*
+ * The challenge and the submission must never run together.
+ *
+ * `authenticate` refuses both, but nothing stopped `completeTransfer` starting
+ * during a `startChallenge` still in the air, or the reverse — racing the
+ * request that asks Steam to text a code against the one that spends it, and
+ * possibly rotating the authenticator while another SMS was being provoked
+ * against it.
+ */
+describe('challenge and submission are mutually exclusive', () => {
+	it('refuses a submission while the challenge is in the air', async () => {
+		let releaseChallenge: (() => void) | undefined;
+		const challengeGate = new Promise<void>((resolve) => {
+			releaseChallenge = resolve;
+		});
+		const h = harness({ startChallengeGate: () => challengeGate });
+		await h.service.authenticate('account-a', 'pw', 'QK4TX');
+
+		const challenging = h.service.startChallenge();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/still being asked/i);
+
+		releaseChallenge?.();
+		await challenging;
+	});
+
+	it('refuses a second text while the code is being submitted', async () => {
+		let releaseContinue: (() => void) | undefined;
+		const continueGate = new Promise<void>((resolve) => {
+			releaseContinue = resolve;
+		});
+		const h = harness({ continueGate });
+		await h.service.authenticate('account-a', 'pw', 'QK4TX');
+
+		const submitting = h.service.completeTransfer('12345').catch(() => undefined);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		await expect(h.service.startChallenge()).rejects.toThrow(/already being submitted/i);
+
+		releaseContinue?.();
+		await submitting;
 	});
 });
