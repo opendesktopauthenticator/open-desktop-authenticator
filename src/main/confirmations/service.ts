@@ -57,6 +57,20 @@ export interface ConfirmationsServiceOptions {
 /** Re-mint this long before expiry rather than discovering it mid-request. */
 const RENEW_MARGIN_MS = 5 * 60_000;
 
+/**
+ * One account's pending confirmations, as the renderer receives them.
+ *
+ * `unreadable` travels with the list rather than being logged and dropped: a
+ * screen showing three confirmations when Steam sent five is telling the user
+ * something untrue, and the two entries it cannot describe are exactly the ones
+ * it has no other way to warn about.
+ */
+export interface ConfirmationListing {
+	confirmations: ConfirmationSummary[];
+	/** Entries Steam sent that this version could not read. */
+	unreadable: number;
+}
+
 /** What one automatic pass did, and what it deliberately did not. */
 export interface AutoConfirmOutcome {
 	/**
@@ -66,6 +80,18 @@ export interface AutoConfirmOutcome {
 	approved: ConfirmationSummary[];
 	/** Left for a human, each with the reason S16 refused it. */
 	held: { confirmation: ConfirmationSummary; reason: string }[];
+	/**
+	 * Entries Steam sent that this build could not read.
+	 *
+	 * Reported rather than dropped, and that is the whole point of it being here.
+	 * When entries stopped being parsed all-or-nothing, this path started
+	 * discarding the count on the reasoning that the interactive list would show
+	 * it — which is exactly backwards for a pass that runs unattended. Nobody is
+	 * looking at a screen during automatic confirmation, and an unreadable entry
+	 * may be the account-recovery confirmation this application exists to shout
+	 * about.
+	 */
+	unreadable: number;
 }
 
 export class ConfirmationsError extends Error {
@@ -144,7 +170,7 @@ export class ConfirmationsService {
 	}
 
 	/** Pending confirmations for one account, as the renderer may see them. */
-	async list(steamId64: string): Promise<ConfirmationSummary[]> {
+	async list(steamId64: string): Promise<ConfirmationListing> {
 		// Captured here, at the call, rather than inside the queued work. Work that
 		// has not started yet was still *requested* before the lock, and reading the
 		// generation once it finally runs would read the value the lock already
@@ -153,7 +179,7 @@ export class ConfirmationsService {
 
 		return this.serialise(steamId64, async () => {
 			const { account, client, cookie } = await this.connect(steamId64, generation);
-			const confirmations = await client.list(account, cookie);
+			const { confirmations, unreadable } = await client.list(account, cookie);
 
 			// Checked *after* the await, before anything is written back. If the vault
 			// locked while this was in flight, these nonces are no longer ours to keep.
@@ -166,7 +192,7 @@ export class ConfirmationsService {
 				new Map(confirmations.map((entry) => [entry.id, { nonce: entry.nonce, type: entry.type }]))
 			);
 
-			return confirmations.map(toSummary);
+			return { confirmations: confirmations.map(toSummary), unreadable };
 		});
 	}
 
@@ -234,10 +260,19 @@ export class ConfirmationsService {
 
 			// Nothing enabled means nothing to do, and no reason to have asked Steam.
 			if (!account.autoConfirm.marketListings && !account.autoConfirm.trades) {
-				return { approved: [], held: [] };
+				return { approved: [], held: [], unreadable: 0 };
 			}
 
-			const confirmations = await client.list(account, cookie);
+			// `unreadable` travels with the outcome. It has no `ConfirmationSummary` to
+			// attach to and must not go through `onFailure`, which counts toward the
+			// ten-strike halt — so the activity log gets an entry kind of its own.
+			//
+			// It was briefly dropped here, on the reasoning that the interactive list
+			// already warns. That is the wrong way round for this path: automatic
+			// confirmation is the one that runs while nobody is watching, and an entry
+			// that failed to parse could be the account-recovery confirmation. Silence
+			// is the one response that cannot be right.
+			const { confirmations, unreadable } = await client.list(account, cookie);
 			this.requireGeneration(generation);
 
 			const { approved, held } = await client.autoConfirm(account, cookie, confirmations);
@@ -257,7 +292,8 @@ export class ConfirmationsService {
 				held: held.map((entry) => ({
 					confirmation: toSummary(entry.confirmation),
 					reason: entry.reason
-				}))
+				})),
+				unreadable
 			};
 		});
 	}
@@ -373,13 +409,35 @@ export class ConfirmationsService {
 		// The predecessor's failure is its caller's problem, not a reason to skip
 		// this one — hence swallowing it here and only here.
 		const next = previous.then(work, work);
-		this.queues.set(
-			steamId64,
-			next.then(
-				() => undefined,
-				() => undefined
-			)
+		const tail = next.then(
+			() => undefined,
+			() => undefined
 		);
+		this.queues.set(steamId64, tail);
+
+		// Dropped once nothing is waiting behind it. Entries were only ever added,
+		// so the map kept one settled promise per SteamID the process had ever
+		// touched — through account removal, re-routing and vault locks alike.
+		//
+		// The identity check is what makes this safe: if another operation queued
+		// while this chain was still running, `queues` already holds *its* tail, and
+		// deleting then would let a later call start a second chain alongside a
+		// running one. `tail` swallows both outcomes, so this can never reject.
+		void tail.finally(() => {
+			if (this.queues.get(steamId64) === tail) {
+				this.queues.delete(steamId64);
+			}
+		});
+
+		// Dropped once nothing is waiting behind it. Entries were only ever added,
+		// so the map kept one settled promise per SteamID the process had ever
+		// touched — through account removal, re-routing and vault locks alike.
+		//
+		// The identity check is what makes this safe: if another operation queued
+		// while this chain was still running, `queues` already holds *its* tail, and
+		// deleting then would let a later call start a second chain alongside a
+		// running one. `tail` swallows both outcomes, so this can never reject.
+
 		return next;
 	}
 

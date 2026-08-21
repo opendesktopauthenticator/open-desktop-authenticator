@@ -52,7 +52,9 @@ function harness(options: {
 	const failures: { steamId64: string; reason: string }[] = [];
 
 	const runAutoConfirm = vi.fn(
-		options.run ?? ((): Promise<AutoConfirmOutcome> => Promise.resolve({ approved: [], held: [] }))
+		options.run ??
+			((): Promise<AutoConfirmOutcome> =>
+				Promise.resolve({ approved: [], held: [], unreadable: 0 }))
 	);
 
 	const vault = {
@@ -298,7 +300,8 @@ describe('reporting', () => {
 							},
 							reason: 'Account recovery confirmations are never approved automatically.'
 						}
-					]
+					],
+					unreadable: 0
 				})
 		});
 
@@ -382,7 +385,9 @@ describe('halting after repeated failure', () => {
 		const { engine, runAutoConfirm, advance } = harness({
 			accounts: [account({ trades: true })],
 			run: () =>
-				shouldFail ? Promise.reject(new Error('nope')) : Promise.resolve({ approved: [], held: [] })
+				shouldFail
+					? Promise.reject(new Error('nope'))
+					: Promise.resolve({ approved: [], held: [], unreadable: 0 })
 		});
 
 		// Nine failures, then one success, then nine more must not reach the halt.
@@ -435,7 +440,7 @@ describe('the scheduler chain', () => {
 			confirmations: {
 				runAutoConfirm: async (): Promise<AutoConfirmOutcome> => {
 					await gate;
-					return { approved: [], held: [] };
+					return { approved: [], held: [], unreadable: 0 };
 				}
 			} as unknown as ConfirmationsService,
 			now: () => NOW,
@@ -505,17 +510,33 @@ describe('stopping while a sweep is in the air', () => {
 				if (shouldFail) {
 					throw new Error('the request was aborted');
 				}
-				return { approved: [], held: [] };
+				return { approved: [], held: [], unreadable: 0 };
 			}
 		});
 		return { harness: parkedHarness, release: (fail = false) => settle?.(fail) };
 	}
+
+	/**
+	 * Let a sweep actually reach the parked request.
+	 *
+	 * `tick` awaits the Steam clock before it does anything, so the first turn of
+	 * the loop yields before a single account is visited. Calling `stop` right
+	 * after `tick()` therefore disowns a sweep that had not started — which makes
+	 * "stopped while a request was in the air" tests pass without ever putting a
+	 * request in the air, and two of them below assert an absence.
+	 */
+	const inFlight = async (): Promise<void> => {
+		for (let i = 0; i < 5; i += 1) {
+			await Promise.resolve();
+		}
+	};
 
 	it('does not score a failure against an account when the lock caused it', async () => {
 		// The compounding one. Nothing here can tell "Steam refused us" from "we
 		// aborted our own request on lock", so a lock must not count at all.
 		const { harness, release } = parked();
 		const sweep = harness.engine.tick();
+		await inFlight();
 
 		harness.engine.stop();
 		release(true);
@@ -530,6 +551,7 @@ describe('stopping while a sweep is in the air', () => {
 		// so the next unlock inherits a schedule from a session that has ended.
 		const { harness, release } = parked();
 		const sweep = harness.engine.tick();
+		await inFlight();
 
 		harness.engine.stop();
 		release(false);
@@ -543,11 +565,91 @@ describe('stopping while a sweep is in the air', () => {
 		// on it, so the activity log has to say so.
 		const { harness, release } = parked();
 		const sweep = harness.engine.tick();
+		await inFlight();
 
 		harness.engine.stop();
 		release(false);
 		await sweep;
 
 		expect(harness.outcomes).toHaveLength(1);
+	});
+});
+
+/*
+ * The Steam clock, before anything is signed.
+ *
+ * A confirmation is authorised by an HMAC over Steam-corrected time. Every
+ * interactive path awaits the clock in its IPC handler, but the engine calls
+ * `runAutoConfirm` directly and so awaited nothing — and unlock starts the sync
+ * without waiting for it, then the first pass fires ten seconds later, inside a
+ * thirty-second transport timeout. On a skewed machine that pass signed with an
+ * offset of zero, and every confirmation in it was refused.
+ */
+describe('the clock is checked before a pass signs anything', () => {
+	it('waits for the clock before asking Steam', async () => {
+		const order: string[] = [];
+		let releaseClock: (() => void) | undefined;
+		const clockDone = new Promise<void>((resolve) => {
+			releaseClock = resolve;
+		});
+
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts: [account({ trades: true })] })
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () => {
+					order.push('steam');
+					return Promise.resolve({ approved: [], held: [], unreadable: 0 });
+				}
+			} as unknown as ConfirmationsService,
+			ensureClock: async () => {
+				order.push('clock');
+				await clockDone;
+			},
+			now: () => NOW,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		const sweep = engine.tick();
+		// Steam has not been asked while the clock is still outstanding.
+		expect(order).toEqual(['clock']);
+
+		releaseClock?.();
+		await sweep;
+
+		expect(order).toEqual(['clock', 'steam']);
+	});
+
+	it('abandons the pass if the vault locked while the clock was being checked', async () => {
+		// The sync is network I/O and can take a transport timeout. A lock during it
+		// means the user left, and nothing may be approved on their behalf after
+		// that — the same rule the rest of the sweep already follows.
+		const runAutoConfirm = vi.fn(() => Promise.resolve({ approved: [], held: [], unreadable: 0 }));
+		let releaseClock: (() => void) | undefined;
+		const clockDone = new Promise<void>((resolve) => {
+			releaseClock = resolve;
+		});
+
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts: [account({ trades: true })] })
+			} as unknown as VaultService,
+			confirmations: { runAutoConfirm } as unknown as ConfirmationsService,
+			ensureClock: () => clockDone,
+			now: () => NOW,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		const sweep = engine.tick();
+		engine.stop();
+		releaseClock?.();
+		await sweep;
+
+		expect(runAutoConfirm).not.toHaveBeenCalled();
 	});
 });

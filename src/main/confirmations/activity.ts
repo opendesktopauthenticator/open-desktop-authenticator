@@ -30,19 +30,42 @@ export type ActivityEntry =
 	| { kind: 'held'; at: string; confirmation: ConfirmationSummary; reason: string }
 	| { kind: 'failed'; at: string; reason: string }
 	/** Too many failures in a row; this account is no longer being polled. */
-	| { kind: 'halted'; at: string; reason: string };
+	| { kind: 'halted'; at: string; reason: string }
+	/**
+	 * Steam sent entries this build could not parse, and the pass skipped them.
+	 *
+	 * A count, because there is nothing else to say: an entry that failed to parse
+	 * has no type and no summary. That is precisely why it is recorded — the pass
+	 * cannot rule out that what it skipped was an account-recovery confirmation.
+	 */
+	| { kind: 'unreadable'; at: string; count: number };
 
 export class ActivityLog {
 	private readonly entries = new Map<string, ActivityEntry[]>();
 
 	/**
-	 * When the user last looked. Everything at or before this is no longer urgent.
+	 * A counter, not a timestamp, deciding what counts as unseen.
 	 *
-	 * Zero means never, so a fresh process treats every entry as unseen — which is
-	 * right: the log survives a lock, and an unlock is exactly when an unread
-	 * warning should be shown again.
+	 * `Date.parse(entry.at) > acknowledgedAtMs` looked equivalent and was not: two
+	 * events in the same millisecond compare equal, so a security-critical hold
+	 * recorded in the *same millisecond* as an acknowledgement was treated as
+	 * already seen. `hasUrgent` returned false for an entry sitting right there in
+	 * the log — and an automatic pass finishing as the user closes the Activity
+	 * screen is exactly when those two land together.
+	 *
+	 * A sequence has no granularity to fall through. It also stops depending on
+	 * `at` being parseable, which is a display string.
 	 */
-	private acknowledgedAtMs = 0;
+	private sequence = 0;
+	/**
+	 * How far the user has looked. Zero means never, so a fresh process treats
+	 * every entry as unseen — right, because the log survives a lock and an unlock
+	 * is exactly when an unread warning should be shown again.
+	 */
+	private acknowledgedSeq = 0;
+	/** Each entry's position in that sequence. Weak so trimming drops them too. */
+	private readonly order = new WeakMap<object, number>();
+
 	private readonly now: () => number;
 
 	constructor(now: () => number = () => Date.now()) {
@@ -53,9 +76,18 @@ export class ActivityLog {
 	recordPass(
 		steamId64: string,
 		approved: ConfirmationSummary[],
-		held: { confirmation: ConfirmationSummary; reason: string }[]
+		held: { confirmation: ConfirmationSummary; reason: string }[],
+		/** Entries Steam sent that this build could not read. */
+		unreadable = 0
 	): void {
 		const at = new Date(this.now()).toISOString();
+
+		if (unreadable > 0) {
+			// Recorded first, above whatever the pass did manage to do. It is the entry
+			// that says this record is incomplete, and a caveat printed under the
+			// findings it qualifies has already let the reader draw a conclusion.
+			this.push(steamId64, { kind: 'unreadable', at, count: unreadable });
+		}
 
 		if (approved.length > 0) {
 			this.push(steamId64, { kind: 'approved', at, confirmations: approved });
@@ -113,8 +145,15 @@ export class ActivityLog {
 	hasUrgent(): boolean {
 		return this.all().some(
 			({ entry }) =>
-				Date.parse(entry.at) > this.acknowledgedAtMs &&
-				((entry.kind === 'held' && entry.confirmation.securityCritical) || entry.kind === 'halted')
+				(this.order.get(entry) ?? 0) > this.acknowledgedSeq &&
+				((entry.kind === 'held' && entry.confirmation.securityCritical) ||
+					entry.kind === 'halted' ||
+					// **Counts as urgent, because it cannot be ruled out.** An entry that
+					// failed to parse has no type, so there is no way to know it was not
+					// the account-recovery confirmation. Treating "we could not read it"
+					// as ordinary would be assuming the best about the one case where
+					// this application's whole purpose is to assume the worst.
+					entry.kind === 'unreadable')
 		);
 	}
 
@@ -130,8 +169,23 @@ export class ActivityLog {
 	 *
 	 * Entries are kept — this changes what counts as *unseen*, not what happened.
 	 */
-	acknowledge(): void {
-		this.acknowledgedAtMs = this.now();
+	acknowledge(upTo: number = this.sequence): void {
+		// **Only as far as the caller actually saw.**
+		//
+		// Listing and acknowledging are two IPC round trips. Advancing to the latest
+		// global sequence marked entries recorded *between* them as seen — and an
+		// automatic pass finishing in that gap is exactly how a held account-recovery
+		// confirmation got acknowledged by somebody who was never shown it. The
+		// renderer sends back the high-water mark of the snapshot it rendered.
+		//
+		// Clamped, because the value arrives from the renderer: never past what has
+		// happened, and never backwards, which would resurrect a discharged alert.
+		this.acknowledgedSeq = Math.max(this.acknowledgedSeq, Math.min(upTo, this.sequence));
+	}
+
+	/** The high-water mark of what `all()` would return right now. */
+	watermark(): number {
+		return this.sequence;
 	}
 
 	/** Drop everything. Called on quit. */
@@ -140,6 +194,8 @@ export class ActivityLog {
 	}
 
 	private push(steamId64: string, entry: ActivityEntry): void {
+		this.sequence += 1;
+		this.order.set(entry, this.sequence);
 		const list = this.entries.get(steamId64) ?? [];
 		list.push(entry);
 		if (list.length > MAX_ENTRIES_PER_ACCOUNT) {

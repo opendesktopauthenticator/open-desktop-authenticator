@@ -102,7 +102,9 @@ function service(vault: VaultService, transports: SteamTransportFactory): Confir
 describe('listing', () => {
 	it('never hands the renderer a nonce', async () => {
 		const { transports } = fakeNetwork();
-		const listed = await service(fakeVault([account()]), transports).list('76561198000000001');
+		const { confirmations: listed } = await service(fakeVault([account()]), transports).list(
+			'76561198000000001'
+		);
 
 		// The nonce is the credential half of acting on a confirmation. The UI has
 		// no use for it and therefore never gets it.
@@ -118,7 +120,9 @@ describe('listing', () => {
 		// A confirmation whose type is 6 must read "Account recovery" however
 		// reassuringly its `type_name` is worded.
 		const { transports } = fakeNetwork([{ ...TRADE, type: 6, type_name: 'Totally Safe Thing' }]);
-		const listed = await service(fakeVault([account()]), transports).list('76561198000000001');
+		const { confirmations: listed } = await service(fakeVault([account()]), transports).list(
+			'76561198000000001'
+		);
 
 		expect(listed[0]?.typeName).toBe('Account recovery');
 		expect(listed[0]?.steamTypeName).toBe('Totally Safe Thing');
@@ -129,7 +133,9 @@ describe('listing', () => {
 
 	it('flags an account-recovery confirmation as security critical', async () => {
 		const { transports } = fakeNetwork();
-		const listed = await service(fakeVault([account()]), transports).list('76561198000000001');
+		const { confirmations: listed } = await service(fakeVault([account()]), transports).list(
+			'76561198000000001'
+		);
 
 		const recovery = listed.find((entry) => entry.id === '33');
 		expect(recovery?.typeName).toBe('Account recovery');
@@ -506,5 +512,119 @@ describe('the access token a sign-in returns', () => {
 		await confirmations.list('76561198000000001');
 
 		expect(sent.some((request) => request.url.includes('GenerateAccessTokenForApp'))).toBe(true);
+	});
+});
+
+/*
+ * The per-account queue map is not allowed to grow forever.
+ *
+ * Every operation wrote an entry keyed by SteamID and nothing ever removed one —
+ * not completion, not account removal, not a routing change, not a vault lock.
+ * A process that adds, uses and removes accounts over a long session accumulated
+ * one settled promise per SteamID it had ever touched, for as long as it ran.
+ */
+describe('the account queue map drains', () => {
+	/** The map is private; its size is the only thing under test. */
+	const sizeOf = (svc: ConfirmationsService): number =>
+		(svc as unknown as { queues: Map<string, unknown> }).queues.size;
+
+	it('holds nothing once an operation has finished', async () => {
+		const { transports } = fakeNetwork();
+		const confirmations = service(fakeVault([account()]), transports);
+
+		await confirmations.list('76561198000000001');
+
+		expect(sizeOf(confirmations)).toBe(0);
+	});
+
+	it('holds nothing after a failed operation either', async () => {
+		// A rejection still settles the chain, and a failure is exactly when an
+		// entry would be most tempting to leave behind.
+		const { transports } = fakeNetwork();
+		const confirmations = service(fakeVault([]), transports);
+
+		await confirmations.list('76561198000000001').catch(() => undefined);
+
+		expect(sizeOf(confirmations)).toBe(0);
+	});
+
+	it('does not grow across many accounts used in turn', async () => {
+		const { transports } = fakeNetwork();
+		const confirmations = service(
+			fakeVault([account(), { ...account(), steamId64: '76561198000000002' }]),
+			transports
+		);
+
+		await confirmations.list('76561198000000001');
+		await confirmations.list('76561198000000002');
+		await confirmations.list('76561198000000001');
+
+		expect(sizeOf(confirmations)).toBe(0);
+	});
+
+	it('still serialises two overlapping operations on one account', async () => {
+		// The cleanup must not become a way for a second call to start a chain
+		// beside a running one — the ordering guarantee is the reason the map
+		// exists at all.
+		const { transports } = fakeNetwork();
+		const confirmations = service(fakeVault([account()]), transports);
+
+		const both = Promise.all([
+			confirmations.list('76561198000000001'),
+			confirmations.list('76561198000000001')
+		]);
+		// While they are in flight the entry is present; that is the point of it.
+		expect(sizeOf(confirmations)).toBe(1);
+
+		await both;
+
+		expect(sizeOf(confirmations)).toBe(0);
+	});
+});
+
+/*
+ * An unreadable entry during an *unattended* pass.
+ *
+ * When entries stopped being all-or-nothing, this path dropped the count on the
+ * reasoning that the interactive list already warns. That is backwards for the
+ * one pass that runs while nobody is watching: an entry that failed to parse has
+ * no type, so it cannot be ruled out as the account-recovery confirmation, and
+ * the automatic pass was the only thing that would ever have seen it.
+ */
+describe('what an automatic pass reports about entries it could not read', () => {
+	const enabled = (): Account =>
+		account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } });
+
+	it('carries the count out of the pass', async () => {
+		const { transports } = fakeNetwork([TRADE, { id: '77', nonce: 'n', type: '6' }]);
+		const outcome = await service(fakeVault([enabled()]), transports).runAutoConfirm(
+			'76561198000000001'
+		);
+
+		expect(outcome.unreadable).toBe(1);
+	});
+
+	it('reports it even when nothing readable was left', async () => {
+		// The worst case, and the one that used to be completely silent: the only
+		// entry Steam sent was one this build cannot parse.
+		const { transports } = fakeNetwork([{ id: '77', nonce: 'n', type: '6' }]);
+		const outcome = await service(fakeVault([enabled()]), transports).runAutoConfirm(
+			'76561198000000001'
+		);
+
+		expect(outcome.approved).toHaveLength(0);
+		expect(outcome.held).toHaveLength(0);
+		// Without this the pass records nothing at all, and the account-recovery
+		// confirmation it skipped is never mentioned to anybody.
+		expect(outcome.unreadable).toBe(1);
+	});
+
+	it('reports zero when everything parsed', async () => {
+		const { transports } = fakeNetwork();
+		const outcome = await service(fakeVault([enabled()]), transports).runAutoConfirm(
+			'76561198000000001'
+		);
+
+		expect(outcome.unreadable).toBe(0);
 	});
 });

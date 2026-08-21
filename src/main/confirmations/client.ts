@@ -9,6 +9,7 @@ import {
 	tagForAction,
 	type Confirmation,
 	type ConfirmationAction,
+	type ConfirmationList,
 	type RequestIdentity
 } from './protocol';
 import {
@@ -116,8 +117,11 @@ export class ConfirmationsClient {
 		this.offset = options.timeOffsetSeconds ?? ((): number => 0);
 	}
 
-	/** Pending confirmations for one account. */
-	async list(account: ConfirmationAccount, cookie: string): Promise<Confirmation[]> {
+	/**
+	 * Pending confirmations for one account, with the count of what could not be
+	 * read alongside them — see `parseListResponse`.
+	 */
+	async list(account: ConfirmationAccount, cookie: string): Promise<ConfirmationList> {
 		const identity = this.identityFor(account, CONFIRMATION_TAGS.list);
 		const response = await this.transport({
 			method: 'GET',

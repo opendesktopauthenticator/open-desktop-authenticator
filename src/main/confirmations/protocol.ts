@@ -95,7 +95,14 @@ export type Confirmation = z.infer<typeof confirmationSchema>;
 
 const listResponseSchema = z.object({
 	success: z.boolean(),
-	conf: z.array(confirmationSchema).optional(),
+	/**
+	 * Deliberately **not** `z.array(confirmationSchema)`.
+	 *
+	 * A typed array here is all-or-nothing: one entry Steam sent in an unexpected
+	 * shape fails the whole parse, and the user is shown nothing at all. See
+	 * `parseListResponse` for why that is the wrong trade on this particular list.
+	 */
+	conf: z.array(z.unknown()).optional(),
 	needauth: z.boolean().optional(),
 	message: z.string().max(1024).optional(),
 	detail: z.string().max(1024).optional()
@@ -214,13 +221,49 @@ export function operationUrl(): string {
 }
 
 /**
+ * A confirmation list, and the count of what could not be read.
+ *
+ * Two fields rather than a bare array because `unreadable` is not a diagnostic
+ * — it is the difference between "you have nothing pending" and "there is
+ * something here we could not read". A caller that drops it is making the second
+ * look like the first.
+ */
+export interface ConfirmationList {
+	confirmations: Confirmation[];
+	/** Entries Steam sent that this version could not parse. */
+	unreadable: number;
+}
+
+/**
  * Read a `getlist` response.
  *
- * @throws ConfirmationProtocolError — never returns an empty list to stand in
- * for a failure. "Nothing pending" and "we could not ask" must not look the same
- * to a user deciding whether to trust what is on screen.
+ * ## Entries are validated one at a time, on purpose
+ *
+ * The envelope is still all-or-nothing — a reply that is not recognisably a
+ * confirmation list throws, and always should. But the **entries** inside it are
+ * parsed individually, and one that fails no longer takes the others with it.
+ *
+ * This started as `z.array(confirmationSchema)`, which reads as the stricter and
+ * therefore safer choice. It is the opposite here. Refusing the whole list is
+ * fail-closed for a *trade* — nothing gets approved — and fail-blind for the
+ * thing this application most needs to show: `policy.ts` calls an account
+ * recovery confirmation "the single most urgent thing this application can show
+ * anybody", and under the old rule a single malformed sibling entry hid it
+ * completely.
+ *
+ * Nor does that need an attacker. Any shape Valve changes — a `type` sent as a
+ * string, an `icon` URL past 2048 characters, a twenty-first summary line —
+ * would empty **every user's** list at once, until a new build shipped, on an
+ * application whose one job is confirmations.
+ *
+ * What must not happen is a silent drop, so the count comes back with the list
+ * and the screen says so. The original rule holds in the form that mattered:
+ * "nothing pending" and "we could not read it" still never look the same.
+ *
+ * @throws ConfirmationProtocolError when the response as a whole is not a
+ * confirmation list, or Steam refused it.
  */
-export function parseListResponse(raw: string): Confirmation[] {
+export function parseListResponse(raw: string): ConfirmationList {
 	const parsed = readJson(raw);
 	const result = listResponseSchema.safeParse(parsed);
 
@@ -242,7 +285,21 @@ export function parseListResponse(raw: string): Confirmation[] {
 	}
 
 	// `success: true` with no `conf` is Steam's way of saying "none pending".
-	return result.data.conf ?? [];
+	const confirmations: Confirmation[] = [];
+	let unreadable = 0;
+
+	for (const entry of result.data.conf ?? []) {
+		const parsedEntry = confirmationSchema.safeParse(entry);
+		if (parsedEntry.success) {
+			confirmations.push(parsedEntry.data);
+		} else {
+			// Counted, never described. The reason an entry failed is a schema detail;
+			// what the user needs is that something is there and cannot be shown.
+			unreadable += 1;
+		}
+	}
+
+	return { confirmations, unreadable };
 }
 
 /** Read the response to an accept or deny. */

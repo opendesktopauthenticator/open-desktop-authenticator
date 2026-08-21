@@ -98,7 +98,7 @@ describe('the accept/deny request', () => {
 
 describe('reading a list response', () => {
 	it('reads a pending confirmation', () => {
-		const conf = parseListResponse(
+		const { confirmations: conf } = parseListResponse(
 			JSON.stringify({
 				success: true,
 				conf: [
@@ -127,17 +127,20 @@ describe('reading a list response', () => {
 		// the value by then, so the coercion preserves a number that is no longer
 		// the one Steam sent — and acting on a mangled id acts on the wrong
 		// confirmation.
-		expect(() =>
+		// The entry is refused, not coerced. It is now counted rather than thrown,
+		// so a sibling confirmation survives it — but it must never appear in the
+		// list, because an id read wrong acts on the wrong confirmation.
+		expect(
 			parseListResponse(
 				JSON.stringify({ success: true, conf: [{ id: 7290123456789, nonce: '1', type: 3 }] })
 			)
-		).toThrow(ConfirmationProtocolError);
+		).toEqual({ confirmations: [], unreadable: 1 });
 
-		expect(() =>
+		expect(
 			parseListResponse(
 				JSON.stringify({ success: true, conf: [{ id: '1', nonce: 12345, type: 3 }] })
 			)
-		).toThrow(ConfirmationProtocolError);
+		).toEqual({ confirmations: [], unreadable: 1 });
 	});
 
 	it('drops a numeric creator id instead of showing a wrong one', () => {
@@ -146,7 +149,7 @@ describe('reading a list response', () => {
 		// the wrong counterparty would.
 		// Written as raw JSON text: a literal that large cannot survive being typed
 		// as a JavaScript number, which is precisely the problem under test.
-		const conf = parseListResponse(
+		const { confirmations: conf } = parseListResponse(
 			'{"success":true,"conf":[{"id":"1","nonce":"n","type":2,"creator_id":76561198000000001}]}'
 		);
 
@@ -154,7 +157,7 @@ describe('reading a list response', () => {
 	});
 
 	it('keeps a string creator id', () => {
-		const conf = parseListResponse(
+		const { confirmations: conf } = parseListResponse(
 			JSON.stringify({
 				success: true,
 				conf: [{ id: '1', nonce: 'n', type: 2, creator_id: '76561198000000001' }]
@@ -165,14 +168,22 @@ describe('reading a list response', () => {
 	});
 
 	it('reads an empty list as an empty list', () => {
-		expect(parseListResponse(JSON.stringify({ success: true }))).toEqual([]);
-		expect(parseListResponse(JSON.stringify({ success: true, conf: [] }))).toEqual([]);
+		// `unreadable: 0` is the half that makes this genuinely empty rather than
+		// merely short.
+		expect(parseListResponse(JSON.stringify({ success: true }))).toEqual({
+			confirmations: [],
+			unreadable: 0
+		});
+		expect(parseListResponse(JSON.stringify({ success: true, conf: [] }))).toEqual({
+			confirmations: [],
+			unreadable: 0
+		});
 	});
 
 	it('caps text a counterparty controls', () => {
 		// Not about injection — React escapes. About a counterparty being unable to
 		// push a megabyte through the UI.
-		const conf = parseListResponse(
+		const { confirmations: conf } = parseListResponse(
 			JSON.stringify({
 				success: true,
 				conf: [{ id: '1', nonce: 'n', type: 2, headline: 'x'.repeat(5000) }]
@@ -185,7 +196,7 @@ describe('reading a list response', () => {
 	it('keeps a type it does not recognise rather than dropping it', () => {
 		// S16 decides what may be *done* with a type. Losing the confirmation here
 		// would hide it from the user entirely, which is the opposite of the point.
-		const conf = parseListResponse(
+		const { confirmations: conf } = parseListResponse(
 			JSON.stringify({ success: true, conf: [{ id: '1', nonce: 'n', type: 6 }] })
 		);
 		expect(conf[0]?.type).toBe(6);
@@ -237,8 +248,52 @@ describe('reading a list response', () => {
 		});
 
 		it('when a confirmation is missing what identifies it', () => {
+			// No longer a throw, and still not an empty inbox: the count is what keeps
+			// those two apart now that one bad entry cannot refuse the whole list.
+			expect(parseListResponse(JSON.stringify({ success: true, conf: [{ type: 2 }] }))).toEqual({
+				confirmations: [],
+				unreadable: 1
+			});
+		});
+	});
+
+	/*
+	 * One entry must never hide the others.
+	 *
+	 * This was found by auditing rather than by a failure, and it is the reason
+	 * entries are parsed one at a time. Under `z.array(confirmationSchema)` the
+	 * whole response was refused, so a single malformed sibling hid the account
+	 * recovery confirmation beside it — the one thing `policy.ts` calls the most
+	 * urgent thing this application can show anybody.
+	 *
+	 * The trigger needs no attacker. Any field shape Valve changes empties every
+	 * user's list at once, until a new build ships.
+	 */
+	describe('one unreadable entry does not hide the rest', () => {
+		const mixed = JSON.stringify({
+			success: true,
+			conf: [
+				{ id: '111', nonce: 'aaa', type: 6, headline: 'Account recovery' },
+				// Steam sent `type` as a string; this build cannot read it.
+				{ id: '222', nonce: 'bbb', type: '2' },
+				{ id: '333', nonce: 'ccc', type: 2, headline: 'Trade' }
+			]
+		});
+
+		it('still surfaces the account-recovery confirmation beside it', () => {
+			const { confirmations } = parseListResponse(mixed);
+			expect(confirmations.map((entry) => entry.id)).toEqual(['111', '333']);
+		});
+
+		it('reports how many it could not read, so the gap is never silent', () => {
+			expect(parseListResponse(mixed).unreadable).toBe(1);
+		});
+
+		it('still refuses a reply that is not a confirmation list at all', () => {
+			// The envelope stays all-or-nothing. Only the entries inside it are
+			// tolerated individually.
 			expect(() =>
-				parseListResponse(JSON.stringify({ success: true, conf: [{ type: 2 }] }))
+				parseListResponse(JSON.stringify({ success: true, conf: 'not an array' }))
 			).toThrow(ConfirmationProtocolError);
 		});
 	});

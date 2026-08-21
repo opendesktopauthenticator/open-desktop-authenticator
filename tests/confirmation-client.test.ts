@@ -67,7 +67,7 @@ describe('listing', () => {
 
 		return client(transport)
 			.list(account(), COOKIE)
-			.then((confirmations) => {
+			.then(({ confirmations }) => {
 				expect(confirmations).toHaveLength(1);
 
 				const url = new URL(sent[0]?.url ?? '');

@@ -263,6 +263,7 @@ describe('S2 — no long-term secret has a path to the renderer', () => {
 		// the schema is what makes that true rather than a convention in one mapper.
 		const parsed = confirmationsListResponse.parse({
 			signInRequired: false,
+			unreadable: 0,
 			confirmations: [
 				{
 					id: '11',

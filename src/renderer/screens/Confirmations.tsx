@@ -25,6 +25,41 @@ import { SteamSignIn } from './SteamSignIn';
  * rule the main process enforces — this just avoids presenting a button that
  * would be refused.
  */
+/**
+ * The warning that the list on this screen is not all of it.
+ *
+ * Exported and pure so it can be asserted directly. The screen derives `count`
+ * from a fetch inside an effect, and the renderer tests here render statically —
+ * so a warning reachable only through that effect is a warning no test can see,
+ * on the one piece of this screen whose entire job is to be seen.
+ *
+ * Renders nothing at zero rather than making every caller guard, so "no
+ * unreadable entries" cannot accidentally draw an empty box.
+ */
+export function IncompleteListNotice({ count }: { count: number }): React.JSX.Element | null {
+	if (count <= 0) {
+		return null;
+	}
+
+	const one = count === 1;
+	return (
+		<div className="notice">
+			<strong>
+				{one ? 'One confirmation could not be read' : `${count} confirmations could not be read`}
+			</strong>
+			<p>
+				Steam sent {one ? 'a confirmation' : 'confirmations'} in a shape this version does not
+				recognise, so {one ? 'it is' : 'they are'} not shown here. That usually means Steam has
+				changed something and this app needs an update — check Settings.
+			</p>
+			<p>
+				Until then, <strong>treat this list as incomplete.</strong> If you were not expecting any
+				activity on this account, check it in the Steam mobile app as well.
+			</p>
+		</div>
+	);
+}
+
 export function Confirmations({
 	account,
 	onList,
@@ -47,6 +82,15 @@ export function Confirmations({
 	 * the screen turns into the way to fix it.
 	 */
 	const [signInReason, setSignInReason] = useState<string | undefined>();
+	/**
+	 * Confirmations Steam sent that this build could not read.
+	 *
+	 * Shown rather than logged. Every other state on this screen describes a list
+	 * we can vouch for; this is the one that says the list is incomplete, and a
+	 * user deciding whether anything is wrong with their account needs to know
+	 * that before they read "Nothing pending" as an all-clear.
+	 */
+	const [unreadable, setUnreadable] = useState(0);
 
 	/**
 	 * The callbacks live in a ref, and the effect below depends on the **account**
@@ -83,6 +127,7 @@ export function Confirmations({
 		// account it had not been able to ask.
 		setConfirmations(result.signInRequired ? undefined : result.confirmations);
 		setSignInReason(result.signInRequired ? (result.reason ?? '') : undefined);
+		setUnreadable(result.signInRequired ? 0 : result.unreadable);
 	}, []);
 
 	/** Used by the Refresh button, where showing "working" is the whole point. */
@@ -106,8 +151,14 @@ export function Confirmations({
 			.current()
 			.then((result) => {
 				if (!cancelled) {
-					setConfirmations(result.confirmations);
+					// Guarded exactly as `load` guards it. This path stored the empty
+					// array the sign-in response carries, so the moment `signInReason`
+					// cleared the screen said "Nothing pending — checked just now" about
+					// an account it had never managed to ask. `load` was fixed for that
+					// and the first fetch was left behind.
+					setConfirmations(result.signInRequired ? undefined : result.confirmations);
 					setSignInReason(result.signInRequired ? (result.reason ?? '') : undefined);
+					setUnreadable(result.signInRequired ? 0 : result.unreadable);
 				}
 			})
 			.catch((err: unknown) => {
@@ -216,6 +267,12 @@ export function Confirmations({
 				/>
 			)}
 
+			{/* Above the confirmations, not below them: this says the list underneath
+			    is incomplete, and a warning placed after the list has already let the
+			    reader finish forming their conclusion. Suppressed during sign-in,
+			    where there is no list for it to qualify. */}
+			{signInReason === undefined && <IncompleteListNotice count={unreadable} />}
+
 			{critical.map((entry) => (
 				<div className="ceremony" key={entry.id}>
 					<h2>{entry.typeName} — check this carefully</h2>
@@ -264,7 +321,11 @@ export function Confirmations({
 				error === undefined ? (
 					<p className="muted">Asking Steam…</p>
 				) : null
-			) : confirmations.length === 0 && error === undefined ? (
+			) : confirmations.length === 0 && error === undefined && unreadable === 0 ? (
+				// **`unreadable === 0` is part of the condition, not decoration.** This
+				// block states that nothing is pending and that the answer is fresh. With
+				// entries we could not read, the first half is a claim this screen is in
+				// no position to make — the warning above is the whole answer instead.
 				<div className="empty">
 					<h2>Nothing pending</h2>
 					<p>

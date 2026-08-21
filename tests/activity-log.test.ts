@@ -179,3 +179,161 @@ describe('bounds and ordering', () => {
 		expect(JSON.stringify(activity.all())).not.toContain('nonce');
 	});
 });
+
+/*
+ * Entries the pass could not read.
+ *
+ * Its own kind because there is nothing else to say about it: an entry that
+ * failed to parse has no type and no summary. That is exactly why it is
+ * recorded — the pass cannot rule out that what it skipped was the
+ * account-recovery confirmation, and automatic confirmation is the path where
+ * nobody is watching.
+ */
+describe('confirmations that could not be read', () => {
+	it('records nothing when everything parsed', () => {
+		const activity = new ActivityLog(() => NOW);
+		activity.recordPass('76561198000000001', [confirmation()], [], 0);
+
+		expect(activity.for('76561198000000001').some((e) => e.kind === 'unreadable')).toBe(false);
+	});
+
+	it('records the count when entries were skipped', () => {
+		const activity = new ActivityLog(() => NOW);
+		activity.recordPass('76561198000000001', [], [], 2);
+
+		const entry = activity.for('76561198000000001').find((e) => e.kind === 'unreadable');
+		expect(entry).toBeDefined();
+		expect(entry?.kind === 'unreadable' && entry.count).toBe(2);
+	});
+
+	it('counts as urgent, because what it skipped cannot be classified', () => {
+		// The whole point. Treating "we could not read it" as ordinary would be
+		// assuming the best about the one case this application exists to assume the
+		// worst about.
+		const activity = new ActivityLog(() => NOW);
+		activity.recordPass('76561198000000001', [], [], 1);
+
+		expect(activity.hasUrgent()).toBe(true);
+	});
+
+	it('is recorded even when the pass did nothing else', () => {
+		// The silent case before this existed: the only entry Steam sent was one
+		// this build could not parse, so the pass approved nothing, held nothing,
+		// and wrote nothing at all.
+		const activity = new ActivityLog(() => NOW);
+		activity.recordPass('76561198000000001', [], [], 1);
+
+		expect(activity.for('76561198000000001')).toHaveLength(1);
+	});
+
+	it('can be acknowledged like any other alert', () => {
+		const activity = new ActivityLog(() => NOW);
+		activity.recordPass('76561198000000001', [], [], 1);
+		activity.acknowledge();
+
+		expect(activity.hasUrgent()).toBe(false);
+	});
+});
+
+/*
+ * Two events in the same millisecond.
+ *
+ * Urgency compared `Date.parse(entry.at) > acknowledgedAtMs`. Equal timestamps
+ * fail a strict comparison, so a security-critical hold recorded in the *same
+ * millisecond* as an acknowledgement was treated as already seen — and an
+ * automatic pass finishing as the user closes the Activity screen is exactly
+ * when those two land together.
+ *
+ * A sequence has no granularity to fall through.
+ */
+describe('an alert raised in the same millisecond as an acknowledgement', () => {
+	/** A clock that never advances, so every entry shares one timestamp. */
+	const frozen = (): ActivityLog => new ActivityLog(() => NOW);
+
+	it('is still urgent', () => {
+		const activity = frozen();
+		activity.acknowledge();
+		activity.recordPass('76561198000000001', [], [{ confirmation: recovery, reason: 'never' }]);
+
+		expect(activity.hasUrgent()).toBe(true);
+	});
+
+	it('is still urgent when it is an unreadable entry', () => {
+		const activity = frozen();
+		activity.acknowledge();
+		activity.recordPass('76561198000000001', [], [], 1);
+
+		expect(activity.hasUrgent()).toBe(true);
+	});
+
+	it('still clears when the acknowledgement genuinely comes last', () => {
+		// The other half. Ordering by sequence must not make an alert undismissable.
+		const activity = frozen();
+		activity.recordPass('76561198000000001', [], [{ confirmation: recovery, reason: 'never' }]);
+		activity.acknowledge();
+
+		expect(activity.hasUrgent()).toBe(false);
+	});
+
+	it('does not depend on the timestamp being parseable at all', () => {
+		// `at` is a display string. Urgency should not be decided by parsing it.
+		const activity = frozen();
+		activity.recordPass('76561198000000001', [], [{ confirmation: recovery, reason: 'never' }]);
+		activity.acknowledge();
+		activity.recordPass('76561198000000002', [], [{ confirmation: recovery, reason: 'never' }]);
+
+		expect(activity.hasUrgent()).toBe(true);
+	});
+});
+
+/*
+ * Acknowledging only what was actually shown.
+ *
+ * Listing and acknowledging are two IPC round trips. `acknowledge()` advanced to
+ * the latest global sequence, so an automatic pass finishing *between* them was
+ * marked seen by a user who was never shown it — and what it marks seen may be a
+ * held account-recovery confirmation.
+ */
+describe('acknowledging a snapshot rather than the present', () => {
+	it('leaves an entry recorded after the snapshot urgent', () => {
+		const activity = new ActivityLog(() => NOW);
+		activity.recordPass('76561198000000001', [confirmation()], []);
+		// What the renderer received and drew.
+		const shown = activity.watermark();
+
+		// The pass that lands while the user is reading.
+		activity.recordPass('76561198000000002', [], [{ confirmation: recovery, reason: 'never' }]);
+		activity.acknowledge(shown);
+
+		expect(activity.hasUrgent()).toBe(true);
+	});
+
+	it('still clears everything the snapshot did contain', () => {
+		const activity = new ActivityLog(() => NOW);
+		activity.recordPass('76561198000000001', [], [{ confirmation: recovery, reason: 'never' }]);
+		activity.acknowledge(activity.watermark());
+
+		expect(activity.hasUrgent()).toBe(false);
+	});
+
+	it('never moves backwards', () => {
+		// The value arrives from the renderer. Replaying an old one must not
+		// resurrect an alert the user has already discharged.
+		const activity = new ActivityLog(() => NOW);
+		activity.recordPass('76561198000000001', [], [{ confirmation: recovery, reason: 'never' }]);
+		activity.acknowledge(activity.watermark());
+		activity.acknowledge(0);
+
+		expect(activity.hasUrgent()).toBe(false);
+	});
+
+	it('never runs ahead of what has happened', () => {
+		// Likewise: a renderer claiming a future watermark must not silence entries
+		// that have not been recorded yet.
+		const activity = new ActivityLog(() => NOW);
+		activity.acknowledge(Number.MAX_SAFE_INTEGER);
+		activity.recordPass('76561198000000001', [], [{ confirmation: recovery, reason: 'never' }]);
+
+		expect(activity.hasUrgent()).toBe(true);
+	});
+});

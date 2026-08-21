@@ -52,6 +52,20 @@ export interface AutoConfirmEngineOptions {
 	/** Told when a pass failed, with the reason already made presentable. */
 	/** @param halted true when the engine has given up on this account entirely. */
 	onFailure?: (steamId64: string, reason: string, halted: boolean) => void;
+	/**
+	 * Makes sure Steam's clock has been checked before a pass signs anything.
+	 *
+	 * Every interactive path already awaits this in its IPC handler. The engine
+	 * does not go through those handlers — it calls `runAutoConfirm` directly — so
+	 * it was the one caller signing confirmations without ever waiting for the
+	 * offset. Unlock starts the sync without awaiting it and the first tick lands
+	 * ten seconds later, well inside a thirty-second transport timeout, so on a
+	 * skewed machine that pass signed with an offset of zero and Steam refused it.
+	 *
+	 * Cheap to call every pass: it returns immediately unless the reading is stale,
+	 * which is also what keeps a long-running tray session from drifting.
+	 */
+	ensureClock?: () => Promise<void>;
 	/** Injected for testability. */
 	now?: () => number;
 	setTimer?: (callback: () => void, ms: number) => NodeJS.Timeout;
@@ -79,6 +93,7 @@ export class AutoConfirmEngine {
 	private readonly confirmations: ConfirmationsService;
 	private readonly onOutcome: (steamId64: string, outcome: AutoConfirmOutcome) => void;
 	private readonly onFailure: (steamId64: string, reason: string, halted: boolean) => void;
+	private readonly ensureClock: () => Promise<void>;
 	private readonly now: () => number;
 	private readonly setTimer: (callback: () => void, ms: number) => NodeJS.Timeout;
 	private readonly clearTimer: (handle: NodeJS.Timeout) => void;
@@ -114,6 +129,7 @@ export class AutoConfirmEngine {
 		this.confirmations = options.confirmations;
 		this.onOutcome = options.onOutcome ?? ((): void => undefined);
 		this.onFailure = options.onFailure ?? ((): void => undefined);
+		this.ensureClock = options.ensureClock ?? ((): Promise<void> => Promise.resolve());
 		this.now = options.now ?? ((): number => Date.now());
 		this.setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
 		this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
@@ -178,6 +194,20 @@ export class AutoConfirmEngine {
 
 		this.running = true;
 		try {
+			// Before the first request of the pass, not after it. A confirmation is
+			// signed with an HMAC over Steam-corrected time, so a pass that runs
+			// before the offset is known signs with zero — and on a skewed machine
+			// every one of those is refused, counted as a failure, and backed off
+			// from. Awaited inside `running`, so the heartbeat cannot stack passes
+			// behind a slow sync.
+			await this.ensureClock();
+
+			// Re-checked: the sync above is network I/O, and the vault can lock while
+			// it is in flight.
+			if (this.generation !== generation || !this.vault.isUnlocked()) {
+				return;
+			}
+
 			for (const account of this.dueAccounts()) {
 				// Re-checked between accounts as well as inside `runOne`: a lock partway
 				// through a sweep must not mean the rest of the list is still visited.

@@ -1,7 +1,7 @@
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { ConfirmationsError, type ConfirmationsService } from './service';
-import type { VaultService } from '../vault/service';
+import { VaultLockedError, type VaultService } from '../vault/service';
 import type { ActivityLog } from './activity';
 import type { SteamClock } from '../steam/clock';
 
@@ -31,13 +31,17 @@ export function registerConfirmationHandlers(
 		await clock?.ensureSynced();
 
 		try {
-			return { confirmations: await confirmations.list(steamId64), signInRequired: false };
+			const listing = await confirmations.list(steamId64);
+			return { ...listing, signInRequired: false };
 		} catch (err) {
 			// "You need to sign in" is not a failure to report — it is a step the
 			// user can take, so it comes back as a state the screen can act on.
 			// Everything else still throws.
 			if (err instanceof ConfirmationsError && err.needsSignIn) {
-				return { confirmations: [], signInRequired: true, reason: err.message };
+				// `unreadable: 0` because nothing was read at all. The screen renders
+				// the sign-in prompt instead of a list, so a count here would describe
+				// a list that is not on screen.
+				return { confirmations: [], signInRequired: true, reason: err.message, unreadable: 0 };
 			}
 			throw err;
 		}
@@ -46,12 +50,29 @@ export function registerConfirmationHandlers(
 	registerHandler(CHANNELS.activityList, () => {
 		// No `vault.touch()`: this is polled to drive the alert badge, so treating it
 		// as interaction would hold the vault open forever.
+		//
+		// **But a locked vault gets nothing.** The log deliberately survives locking
+		// — it is how "what happened while I was away" gets answered — and that made
+		// it the one thing in this application readable without the passphrase. It
+		// names accounts and describes their trades, so answering while locked is a
+		// smaller lock than the one the user thinks they set.
+		if (!vault.isUnlocked()) {
+			return { entries: [], urgent: false, seq: 0 };
+		}
 		const entries = activity.all();
-		return { entries, urgent: activity.hasUrgent() };
+		// Read with the entries, so the pair describes one moment.
+		return { entries, urgent: activity.hasUrgent(), seq: activity.watermark() };
 	});
 
-	registerHandler(CHANNELS.activityAcknowledge, () => {
-		activity.acknowledge();
+	registerHandler(CHANNELS.activityAcknowledge, ({ upTo }) => {
+		// Refused rather than ignored while locked. Acknowledging is destructive in
+		// the quietest possible way: it clears the alert that says an account-recovery
+		// confirmation was held back, and clearing it before the owner has unlocked
+		// means the warning is gone before anybody entitled to see it ever did.
+		if (!vault.isUnlocked()) {
+			throw new VaultLockedError();
+		}
+		activity.acknowledge(upTo);
 		return { ok: true as const };
 	});
 
