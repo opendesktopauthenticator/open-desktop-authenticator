@@ -989,3 +989,72 @@ describe('when Steam has acted and the vault write fails', () => {
 		expect(message).not.toContain('EACCES');
 	});
 });
+
+/*
+ * Two overlapping email-code submissions.
+ *
+ * `submitEmailCode` had no in-progress guard: both calls captured the same
+ * pending login, both awaited the same authentication, and both entered
+ * `enrol` — whose vault duplicate check runs before its first await, so both
+ * passed it and `AddAuthenticator` went to Steam twice for one account. The
+ * second call must be refused at the door, before it can touch Steam.
+ */
+describe('a double-pressed email-code button', () => {
+	it('sends AddAuthenticator exactly once', async () => {
+		let starts = 0;
+		let releaseAuth: (() => void) | undefined;
+		const listeners: Record<string, ((arg?: unknown) => void)[]> = {};
+		const session: LoginSessionLike = {
+			startWithCredentials: () =>
+				Promise.resolve({
+					actionRequired: true,
+					validActions: [{ type: 2, detail: 'example.com' }]
+				}),
+			// Authenticates only when the test says so, holding both submissions in
+			// the window the guard has to cover.
+			submitSteamGuardCode: () => {
+				queueMicrotask(() => {
+					releaseAuth = () => listeners.authenticated?.forEach((fn) => fn());
+				});
+				return Promise.resolve();
+			},
+			on: (event: string, listener: (arg?: unknown) => void) => {
+				(listeners[event] ??= []).push(listener);
+			},
+			cancelLoginAttempt: () => undefined,
+			refreshToken: MOBILE,
+			accessToken: MOBILE,
+			steamID: { getSteamID64: () => STEAM_ID }
+		};
+
+		const { vault } = fakeVault();
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => session,
+			startEnrollment: () => {
+				starts += 1;
+				return Promise.resolve(STARTED);
+			},
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		await service.begin('trader', 'a-password');
+
+		const first = service.submitEmailCode('12345');
+		const second = service.submitEmailCode('12345').then(
+			() => 'resolved',
+			(err: Error) => err.message
+		);
+
+		// Give both a chance to reach the authentication wait, then let it finish.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		releaseAuth?.();
+
+		await first;
+		await expect(second).resolves.toMatch(/already being checked/i);
+		expect(starts).toBe(1);
+	});
+});

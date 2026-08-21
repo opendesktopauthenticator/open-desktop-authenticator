@@ -47,14 +47,21 @@ export const AUTO_CONFIRM_DEFAULTS = {
 	pollIntervalSeconds: 15
 } as const;
 
-export const autoConfirmSchema = z.object({
-	/** Market listings. Off by default (§12 F6). */
-	marketListings: z.boolean().default(AUTO_CONFIRM_DEFAULTS.marketListings),
-	/** Trades. Off by default, sterner consent (§12 F6). */
-	trades: z.boolean().default(AUTO_CONFIRM_DEFAULTS.trades),
-	/** Seconds. Minimum 10 enforced by the engine, not here. */
-	pollIntervalSeconds: z.number().int().min(10).default(AUTO_CONFIRM_DEFAULTS.pollIntervalSeconds)
-});
+// `.passthrough()` on every persisted object, not just accounts. The promise at
+// the top of this file — a vault written by a newer build survives an older one
+// — held only for account-level fields; unknown settings and top-level fields
+// were silently stripped by the next `mutate()`, which validates and writes the
+// stripped object back.
+export const autoConfirmSchema = z
+	.object({
+		/** Market listings. Off by default (§12 F6). */
+		marketListings: z.boolean().default(AUTO_CONFIRM_DEFAULTS.marketListings),
+		/** Trades. Off by default, sterner consent (§12 F6). */
+		trades: z.boolean().default(AUTO_CONFIRM_DEFAULTS.trades),
+		/** Seconds. Minimum 10 enforced by the engine, not here. */
+		pollIntervalSeconds: z.number().int().min(10).default(AUTO_CONFIRM_DEFAULTS.pollIntervalSeconds)
+	})
+	.passthrough();
 
 export const accountSchema = z
 	.object({
@@ -135,34 +142,38 @@ export const VAULT_SETTINGS_DEFAULTS = {
 	updateCheck: true
 } as const;
 
-export const vaultSettingsSchema = z.object({
-	autoLockMinutes: z
-		.number()
-		.int()
-		.min(1)
-		.max(240)
-		.default(VAULT_SETTINGS_DEFAULTS.autoLockMinutes),
-	clipboardClearSeconds: z
-		.number()
-		.int()
-		.min(5)
-		.max(300)
-		.default(VAULT_SETTINGS_DEFAULTS.clipboardClearSeconds),
-	/** Off by default; refused entirely on Linux without a real keyring (§10.3). */
-	convenienceUnlock: z.boolean().default(VAULT_SETTINGS_DEFAULTS.convenienceUnlock),
-	launchAtStartup: z.boolean().default(VAULT_SETTINGS_DEFAULTS.launchAtStartup),
-	startMinimised: z.boolean().default(VAULT_SETTINGS_DEFAULTS.startMinimised),
-	updateCheck: z.boolean().default(VAULT_SETTINGS_DEFAULTS.updateCheck)
-});
+export const vaultSettingsSchema = z
+	.object({
+		autoLockMinutes: z
+			.number()
+			.int()
+			.min(1)
+			.max(240)
+			.default(VAULT_SETTINGS_DEFAULTS.autoLockMinutes),
+		clipboardClearSeconds: z
+			.number()
+			.int()
+			.min(5)
+			.max(300)
+			.default(VAULT_SETTINGS_DEFAULTS.clipboardClearSeconds),
+		/** Off by default; refused entirely on Linux without a real keyring (§10.3). */
+		convenienceUnlock: z.boolean().default(VAULT_SETTINGS_DEFAULTS.convenienceUnlock),
+		launchAtStartup: z.boolean().default(VAULT_SETTINGS_DEFAULTS.launchAtStartup),
+		startMinimised: z.boolean().default(VAULT_SETTINGS_DEFAULTS.startMinimised),
+		updateCheck: z.boolean().default(VAULT_SETTINGS_DEFAULTS.updateCheck)
+	})
+	.passthrough();
 
-export const vaultContentsSchema = z.object({
-	/** Monotonic, incremented on every save. Detects a lost or rolled-back write. */
-	seq: z.number().int().nonnegative(),
-	accounts: z.array(accountSchema),
-	settings: vaultSettingsSchema.default(VAULT_SETTINGS_DEFAULTS),
-	createdAt: z.string(),
-	updatedAt: z.string()
-});
+export const vaultContentsSchema = z
+	.object({
+		/** Monotonic, incremented on every save. Detects a lost or rolled-back write. */
+		seq: z.number().int().nonnegative(),
+		accounts: z.array(accountSchema),
+		settings: vaultSettingsSchema.default(VAULT_SETTINGS_DEFAULTS),
+		createdAt: z.string(),
+		updatedAt: z.string()
+	})
+	.passthrough();
 
 export type Account = z.infer<typeof accountSchema>;
 export type AccountStatus = z.infer<typeof accountStatusSchema>;

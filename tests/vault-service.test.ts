@@ -563,3 +563,117 @@ describe('backup recovery', () => {
 		expect(readFileSync(file, 'utf8')).not.toBe(readFileSync(`${file}.bak`, 'utf8'));
 	});
 });
+
+/*
+ * The idle deadline against a movable clock.
+ *
+ * `lastActivity + timeout - now()` trusted the wall clock alone, so setting the
+ * system clock *backwards* made the remaining time grow: an hour's adjustment
+ * turned a 30-second deadline into an hour and a half, and `enforceAutoLock`
+ * kept the vault open. The deadline now takes the larger of the wall-clock and
+ * monotonic elapsed readings — a clock game can lock the vault sooner, never
+ * later.
+ */
+describe('idle auto-lock against a moved clock', () => {
+	let mono: number;
+	const monotonic = () => mono;
+
+	beforeEach(() => {
+		mono = 1_000;
+	});
+
+	function monoService(): VaultService {
+		return new VaultService({ file, now, monotonic });
+	}
+
+	it('a backwards clock does not extend the deadline', async () => {
+		const v = monoService();
+		await v.create(PASS);
+		await v.mutate((d) => (d.settings.autoLockMinutes = 1));
+
+		clock += 30_000;
+		mono += 30_000;
+		expect(v.msUntilAutoLock()).toBe(30_000);
+
+		// The adjustment: one hour backwards. The wall-clock arithmetic now says
+		// sixty minutes and thirty seconds remain.
+		clock -= 60 * 60_000;
+		expect(v.msUntilAutoLock()).toBe(30_000);
+
+		mono += 31_000;
+		expect(v.enforceAutoLock()).toBe(true);
+		expect(v.isUnlocked()).toBe(false);
+	});
+
+	it('time asleep still counts, even if the monotonic clock missed it', async () => {
+		// The reverse trap: some platforms pause the monotonic clock during
+		// suspend. A machine that slept through the timeout must still lock, which
+		// is what keeping the wall-clock reading in the maximum preserves.
+		const v = monoService();
+		await v.create(PASS);
+		await v.mutate((d) => (d.settings.autoLockMinutes = 1));
+
+		clock += 2 * 60_000; // slept through it
+		// mono unchanged — the sleep was invisible to it.
+		expect(v.enforceAutoLock()).toBe(true);
+	});
+
+	it('touch resets both readings', async () => {
+		const v = monoService();
+		await v.create(PASS);
+		await v.mutate((d) => (d.settings.autoLockMinutes = 1));
+
+		clock += 50_000;
+		mono += 50_000;
+		v.touch();
+		clock += 50_000;
+		mono += 50_000;
+		expect(v.enforceAutoLock()).toBe(false);
+		expect(v.msUntilAutoLock()).toBe(10_000);
+	});
+});
+
+/*
+ * Two creations racing.
+ *
+ * `create` checked for an existing vault, then spent deliberate seconds deriving
+ * a key, and never looked again. Two concurrent calls both saw nothing, both
+ * derived, and both wrote — the second silently replacing the first while both
+ * callers were told their passphrase worked. Exactly one passphrase opened what
+ * was left.
+ */
+describe('concurrent creation', () => {
+	it('refuses a second create while the first is deriving', async () => {
+		const v = service();
+		let secondOutcome: Promise<unknown> | undefined;
+		duringDerive = () => {
+			secondOutcome = expect(v.create('another long passphrase')).rejects.toThrow(
+				/already being created/
+			);
+			return Promise.resolve();
+		};
+
+		await v.create(PASS);
+		expect(secondOutcome).toBeDefined();
+		await secondOutcome;
+
+		// The survivor is the first passphrase's vault.
+		const reopened = service();
+		await expect(reopened.unlock(PASS)).resolves.toBeUndefined();
+	});
+
+	it('refuses to overwrite a vault that appeared during the derivation', async () => {
+		// A different instance — another window, a restored backup — is not stopped
+		// by the in-flight flag. The existence re-check after the derivation is.
+		const v = service();
+		duringDerive = async () => {
+			await new VaultService({ file, now }).create('another long passphrase');
+		};
+
+		await expect(v.create(PASS)).rejects.toThrow(/appeared at this location/);
+
+		// What is on disk is the other creation's vault, untouched.
+		const reopened = service();
+		await expect(reopened.unlock('another long passphrase')).resolves.toBeUndefined();
+	});
+});

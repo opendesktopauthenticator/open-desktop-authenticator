@@ -275,6 +275,26 @@ export class ConfirmationsService {
 			const { confirmations, unreadable } = await client.list(account, cookie);
 			this.requireGeneration(generation);
 
+			// **The settings are re-read here, after the await.** `connect` copied
+			// them before the list request went out, and that request takes as long
+			// as Steam takes — long enough for somebody to open Settings and turn
+			// automatic confirmation off. Approving from the copy meant "disable"
+			// did not apply to the pass already in flight: the toggle saved, the
+			// screen said off, and the trade was approved anyway. Reading the vault
+			// again costs nothing and makes the setting mean what it says.
+			const fresh = this.vault
+				.read()
+				.accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm;
+			if (fresh === undefined) {
+				// Removed from the vault while the list was loading. Nothing may be
+				// approved for an account that no longer exists here.
+				return { approved: [], held: [], unreadable };
+			}
+			account.autoConfirm = {
+				marketListings: fresh.marketListings,
+				trades: fresh.trades
+			};
+
 			const { approved, held } = await client.autoConfirm(account, cookie, confirmations);
 			this.requireGeneration(generation);
 

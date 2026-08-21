@@ -134,6 +134,16 @@ export class ImportService {
 	private readonly onAccountStored: (account: Account) => void;
 	private staged: StagedEntry[] = [];
 	private stagedAt = 0;
+
+	/**
+	 * The last discard was the expiry sweep, not the user.
+	 *
+	 * Set only by `enforceExpiry`, cleared by every other discard. Without it, a
+	 * passphrase typed a moment after the sweep was answered with "none of the
+	 * chosen files are encrypted" — true of the emptied arrays, and a lie about
+	 * what happened.
+	 */
+	private tookTooLong = false;
 	/** Encrypted files from this scan, awaiting a passphrase. */
 	private locked: LockedFile[] = [];
 	/** Files rejected during the scan, carried so `unlock` can re-report them. */
@@ -272,7 +282,7 @@ export class ImportService {
 		// to prevent, arrived at by a different door.
 		this.assertUnlocked();
 
-		if (this.expired()) {
+		if (this.tookTooLong || this.expired()) {
 			this.discard();
 			throw new ImportError(
 				'this import took too long and the files were dropped for safety. Choose them again.'
@@ -361,7 +371,14 @@ export class ImportService {
 		}
 
 		this.locked = stillLocked;
-		return this.finish(parsedFiles, failures);
+		// Remembered, not merely reported. These files are gone from `locked`, so
+		// only `this.rejected` can carry them into the *next* report — and each
+		// passphrase attempt rebuilds the whole report the renderer shows. Keeping
+		// them in the local array alone meant a file rejected on the first
+		// passphrase vanished from the screen the moment a second passphrase
+		// succeeded, and the user imported the rest believing everything was in.
+		this.rejected = [...this.rejected, ...failures];
+		return this.finish(parsedFiles);
 	}
 
 	/**
@@ -521,7 +538,7 @@ export class ImportService {
 	 * believes succeeded. Staging is cleared afterwards either way.
 	 */
 	async commit(selections: ImportSelection[]): Promise<ImportOutcome[]> {
-		if (this.expired()) {
+		if (this.tookTooLong || this.expired()) {
 			this.discard();
 			throw new ImportError(
 				'this import took too long and the files were dropped for safety. Choose them again.'
@@ -730,16 +747,40 @@ export class ImportService {
 		this.locked = [];
 		this.rejected = [];
 		this.stagedAt = 0;
+		this.tookTooLong = false;
+	}
+
+	/**
+	 * Drop the staged secrets if their time is up. Polled from the same
+	 * once-a-second sweep as the vault's idle lock.
+	 *
+	 * This is what makes the TTL true. Before it, `expired()` was only ever
+	 * *consulted* — the counts reported zero and the next action refused — while
+	 * the shared secrets themselves stayed in the arrays until another import ran
+	 * or the screen unmounted. A TTL that hides material without dropping it is a
+	 * claim, not a control.
+	 */
+	enforceExpiry(): boolean {
+		if (!this.expired()) {
+			return false;
+		}
+		this.discard();
+		// After `discard`, which clears it: the flag is what lets the next action
+		// explain *why* the files are gone instead of claiming none were chosen.
+		this.tookTooLong = true;
+		return true;
 	}
 
 	/** How many candidates are staged. Zero once expired. */
 	stagedCount(): number {
-		return this.expired() ? 0 : this.staged.length;
+		this.enforceExpiry();
+		return this.staged.length;
 	}
 
 	/** How many encrypted files are waiting for a passphrase. Zero once expired. */
 	lockedCount(): number {
-		return this.expired() ? 0 : this.locked.length;
+		this.enforceExpiry();
+		return this.locked.length;
 	}
 
 	/**

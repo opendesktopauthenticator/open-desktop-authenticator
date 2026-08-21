@@ -118,6 +118,9 @@ export class EnrollmentService {
 	 * which session, and getting that wrong attaches an authenticator to the
 	 * wrong account.
 	 */
+	/** Guards `submitEmailCode` against overlapping submissions. */
+	private submittingEmailCode = false;
+
 	private pendingLogin: PendingLogin | undefined;
 
 	/** Access tokens for accounts mid-enrollment, so activation need not sign in again. */
@@ -332,6 +335,23 @@ export class EnrollmentService {
 
 	/** Answer the emailed Steam Guard code, then enrol. */
 	async submitEmailCode(code: string): Promise<BeginOutcome> {
+		// One submission at a time. Without this, two overlapping calls captured
+		// the same pending login, both awaited the same authentication, and both
+		// entered `enrol` — whose duplicate check runs before an await, so both
+		// passed it and `AddAuthenticator` was sent twice for one account. A
+		// double-pressed button is all it takes.
+		if (this.submittingEmailCode) {
+			throw new EnrollmentError('That code is already being checked. Wait for it.', false);
+		}
+		this.submittingEmailCode = true;
+		try {
+			return await this.submitEmailCodeOnce(code);
+		} finally {
+			this.submittingEmailCode = false;
+		}
+	}
+
+	private async submitEmailCodeOnce(code: string): Promise<BeginOutcome> {
 		const pending = this.pendingLogin;
 		if (!pending || this.now() - pending.startedAtMs > PENDING_TTL_MS) {
 			this.discardPending();

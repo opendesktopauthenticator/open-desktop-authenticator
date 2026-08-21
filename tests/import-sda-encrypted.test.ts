@@ -548,3 +548,59 @@ describe('not leaving ciphertext lying about', () => {
 		expect(serialised).not.toContain(SDA_PASS);
 	});
 });
+
+/*
+ * A final rejection must survive later passphrase attempts.
+ *
+ * `unlock` collected newly final failures in a local array, removed those files
+ * from `locked`, and reported them once. The next passphrase attempt rebuilt the
+ * report from scratch — and the renderer replaces the whole previous report — so
+ * a file rejected on the first passphrase vanished the moment a second
+ * passphrase succeeded. The user then imported the rest believing everything
+ * made it in.
+ */
+describe('a rejection across passphrase attempts', () => {
+	/** Encrypts arbitrary text the way SDA does, under any passphrase. */
+	function encryptedText(
+		name: string,
+		passphrase: string,
+		plaintext: string
+	): { file: StagedFile; entry: Record<string, string> } {
+		const salt = randomBytes(8);
+		const iv = randomBytes(16);
+		const key = pbkdf2Sync(passphrase, salt, 50_000, 32, 'sha1');
+		const cipher = createCipheriv('aes-256-cbc', key, iv);
+		const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]).toString(
+			'base64'
+		);
+		return {
+			file: { name, text: ciphertext },
+			entry: {
+				filename: name,
+				encryption_iv: iv.toString('base64'),
+				encryption_salt: salt.toString('base64')
+			}
+		};
+	}
+
+	it('still lists the first passphrase’s rejected file after the second succeeds', () => {
+		// Decrypts under the first passphrase into valid JSON that is not a maFile
+		// — deterministically final, no retry can help.
+		const rejected = encryptedText('broken.maFile', 'first passphrase', '{"not":"a maFile"}');
+		// Decrypts under the second passphrase into a real account.
+		const good = encryptedPair('76561198000000001.maFile', 'second passphrase');
+
+		imports.stage([rejected.file, good.file, manifest([rejected.entry, good.entry])]);
+
+		const afterFirst = imports.unlock('first passphrase');
+		expect(afterFirst.rejected.some((entry) => entry.sourceName === 'broken.maFile')).toBe(true);
+
+		const afterSecond = imports.unlock('second passphrase');
+		expect(afterSecond.candidates.some((c) => c.sourceName === '76561198000000001.maFile')).toBe(
+			true
+		);
+		// The report the user acts on is this one. The file that was finally
+		// rejected two keystrokes ago must still be in it.
+		expect(afterSecond.rejected.some((entry) => entry.sourceName === 'broken.maFile')).toBe(true);
+	});
+});

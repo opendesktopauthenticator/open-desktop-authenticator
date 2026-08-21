@@ -95,3 +95,16 @@ describe('the vault directory is pinned, not inherited', () => {
 		).toBeUndefined();
 	});
 });
+
+describe('the once-a-second sweep', () => {
+	it('enforces the import TTL, not just the vault idle lock', () => {
+		// `stagedCount`/`lockedCount` have no caller, so this poll is the only
+		// thing that ever *drops* staged shared secrets whose ten minutes are up.
+		// Without it the TTL was a claim: the counts would have reported zero
+		// while the secrets sat in memory until another import ran.
+		const sweep = /setInterval\(\(\) => \{[\s\S]*?\}, 1000\)/.exec(mainSource)?.[0];
+		expect(sweep).toBeDefined();
+		expect(sweep).toContain('vault.enforceAutoLock()');
+		expect(sweep).toContain('imports.enforceExpiry()');
+	});
+});

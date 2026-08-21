@@ -134,3 +134,55 @@ describe('passphrase policy', () => {
 		expect(passphraseProblem('a'.repeat(MIN_PASSPHRASE_LENGTH - 1))).toBeDefined();
 	});
 });
+
+/*
+ * The unknown-field promise, at every level it applies to.
+ *
+ * The file header says a vault written by a newer build must survive an older
+ * one, but only `accountSchema` had `.passthrough()`. Unknown settings,
+ * auto-confirm fields and top-level fields were stripped by the very next
+ * `mutate()`, which validates and writes the stripped object — deleting data a
+ * newer build stored, silently, on the first save an older build made.
+ */
+describe('unknown fields from a newer build', () => {
+	it('survive validation at the top level, in settings, and in auto-confirm', () => {
+		const parsed = vaultContentsSchema.parse({
+			seq: 3,
+			accounts: [
+				{
+					steamId64: '76561198000000001',
+					accountName: 'trader',
+					sharedSecret: 'c2hhcmVk',
+					identitySecret: 'aWRlbnRpdHk=',
+					status: 'active',
+					addedAt: '2026-08-08T00:00:00.000Z',
+					autoConfirm: {
+						marketListings: false,
+						trades: false,
+						pollIntervalSeconds: 15,
+						futureAutoConfirmField: 'kept'
+					},
+					futureAccountField: 'kept'
+				}
+			],
+			settings: {
+				autoLockMinutes: 10,
+				clipboardClearSeconds: 20,
+				convenienceUnlock: false,
+				launchAtStartup: false,
+				startMinimised: false,
+				updateCheck: true,
+				futureSetting: 'kept'
+			},
+			createdAt: '2026-08-08T00:00:00.000Z',
+			updatedAt: '2026-08-08T00:00:00.000Z',
+			futureTopLevelField: 'kept'
+		}) as Record<string, unknown>;
+
+		expect(parsed.futureTopLevelField).toBe('kept');
+		expect((parsed.settings as Record<string, unknown>).futureSetting).toBe('kept');
+		const account = (parsed.accounts as Record<string, unknown>[])[0] as Record<string, unknown>;
+		expect(account.futureAccountField).toBe('kept');
+		expect((account.autoConfirm as Record<string, unknown>).futureAutoConfirmField).toBe('kept');
+	});
+});

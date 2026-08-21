@@ -59,6 +59,16 @@ export interface VaultServiceOptions {
 	file: string;
 	/** Injected for testability. Defaults to the wall clock. */
 	now?: () => number;
+	/**
+	 * Injected for testability. Defaults to `performance.now()`.
+	 *
+	 * The idle deadline cannot be trusted to the wall clock alone: setting the
+	 * system clock backwards made `lastActivity + timeout - now()` *grow*, so a
+	 * one-hour adjustment turned a 30-second deadline into an hour and a half —
+	 * and `enforceAutoLock` kept a vault open that everyone believed would lock
+	 * itself. A monotonic reading cannot be adjusted.
+	 */
+	monotonic?: () => number;
 	/** Called whenever the vault locks, so the UI and pollers can react. */
 	onLock?: (reason: LockReason) => void;
 }
@@ -68,11 +78,14 @@ interface UnlockedState {
 	key: Buffer;
 	kdf: Kdf;
 	lastActivity: number;
+	/** The same instant on the monotonic clock. See `msUntilAutoLock`. */
+	lastActivityMono: number;
 }
 
 export class VaultService {
 	private readonly file: string;
 	private readonly now: () => number;
+	private readonly monotonic: () => number;
 	private readonly onLock: (reason: LockReason) => void;
 	private state: UnlockedState | undefined;
 
@@ -91,9 +104,13 @@ export class VaultService {
 	 */
 	private generation = 0;
 
+	/** Guards `create` against a concurrent second creation. */
+	private creating = false;
+
 	constructor(options: VaultServiceOptions) {
 		this.file = options.file;
 		this.now = options.now ?? (() => Date.now());
+		this.monotonic = options.monotonic ?? (() => performance.now());
 		this.onLock = options.onLock ?? (() => undefined);
 	}
 
@@ -127,6 +144,13 @@ export class VaultService {
 	 * and "create" is not a word anyone expects to be destructive.
 	 */
 	async create(passphrase: string): Promise<void> {
+		// One creation at a time. The existence check below runs before a key
+		// derivation that takes deliberate seconds, so two concurrent calls both
+		// observed "no vault", both derived, and both wrote — the second silently
+		// replacing the first, with both callers told their passphrase worked.
+		if (this.creating) {
+			throw new VaultServiceError('a vault is already being created');
+		}
 		if (this.exists()) {
 			throw new VaultServiceError(
 				'a vault already exists at this location; refusing to overwrite it'
@@ -148,7 +172,24 @@ export class VaultService {
 
 		const contents = emptyVault(new Date(this.now()));
 		const generation = this.generation;
-		const key = await deriveKey(passphrase, salt, kdf);
+		this.creating = true;
+		let key: Buffer;
+		try {
+			key = await deriveKey(passphrase, salt, kdf);
+		} finally {
+			this.creating = false;
+		}
+		// Checked again with the derivation behind us. The guard above stops two
+		// calls racing inside this process; a vault that appeared on disk some
+		// other way — restored from a backup, another instance — must still not
+		// be overwritten by a create that started before it existed.
+		if (this.exists()) {
+			wipe(key);
+			throw new VaultServiceError(
+				'a vault appeared at this location while this one was being created; refusing to ' +
+					'overwrite it'
+			);
+		}
 		try {
 			writeEnvelope(this.file, sealWithKey(JSON.stringify(contents), key, kdf));
 		} catch (err) {
@@ -165,7 +206,13 @@ export class VaultService {
 
 		// Leave it unlocked: the user just proved they know the passphrase, and
 		// making them immediately retype it teaches nothing.
-		this.state = { contents, key, kdf, lastActivity: this.now() };
+		this.state = {
+			contents,
+			key,
+			kdf,
+			lastActivity: this.now(),
+			lastActivityMono: this.monotonic()
+		};
 	}
 
 	/** Unlock an existing vault. */
@@ -206,7 +253,13 @@ export class VaultService {
 			wipe(this.state.key);
 		}
 
-		this.state = { contents, key, kdf, lastActivity: this.now() };
+		this.state = {
+			contents,
+			key,
+			kdf,
+			lastActivity: this.now(),
+			lastActivityMono: this.monotonic()
+		};
 	}
 
 	/**
@@ -266,6 +319,7 @@ export class VaultService {
 	touch(): void {
 		if (this.state) {
 			this.state.lastActivity = this.now();
+			this.state.lastActivityMono = this.monotonic();
 		}
 	}
 
@@ -275,7 +329,18 @@ export class VaultService {
 			return undefined;
 		}
 		const timeout = this.state.contents.settings.autoLockMinutes * 60_000;
-		return Math.max(0, this.state.lastActivity + timeout - this.now());
+		// **The larger of two elapsed readings.** The wall clock counts time the
+		// machine spent suspended, which the monotonic clock may not; the monotonic
+		// clock cannot be set backwards, which the wall clock can. Trusting either
+		// alone leaves a way to hold the vault open — a backwards adjustment made
+		// the wall-clock version report *more* time remaining than the whole
+		// timeout. Taking the maximum means a clock game can only ever lock the
+		// vault sooner, never later.
+		const elapsed = Math.max(
+			this.now() - this.state.lastActivity,
+			this.monotonic() - this.state.lastActivityMono
+		);
+		return Math.max(0, timeout - elapsed);
 	}
 
 	/**
@@ -321,6 +386,7 @@ export class VaultService {
 
 		state.contents = validated;
 		state.lastActivity = this.now();
+		state.lastActivityMono = this.monotonic();
 	}
 
 	/**
@@ -394,6 +460,7 @@ export class VaultService {
 		state.kdf = kdf;
 		state.contents = contents;
 		state.lastActivity = this.now();
+		state.lastActivityMono = this.monotonic();
 	}
 
 	/**
@@ -577,7 +644,13 @@ export class VaultService {
 		if (this.state) {
 			wipe(this.state.key);
 		}
-		this.state = { contents, key, kdf, lastActivity: this.now() };
+		this.state = {
+			contents,
+			key,
+			kdf,
+			lastActivity: this.now(),
+			lastActivityMono: this.monotonic()
+		};
 	}
 
 	private require(): UnlockedState {

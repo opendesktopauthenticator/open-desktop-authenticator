@@ -859,3 +859,49 @@ describe('a session across a routing change', () => {
 		expect(vault.read().accounts[0]?.refreshToken).toBe('unrouted-and-fine');
 	});
 });
+
+/*
+ * The TTL actually drops the material.
+ *
+ * `expired()` was only ever consulted: the counts reported zero, the next
+ * action refused — and the parsed shared secrets sat in the arrays regardless,
+ * until another import ran or the screen unmounted. `enforceExpiry` is polled
+ * from the same once-a-second sweep as the vault's idle lock, and discards.
+ */
+describe('staging expiry enforcement', () => {
+	it('drops staged secrets once the TTL passes', () => {
+		imports.stage([file()]);
+		expect(imports.enforceExpiry()).toBe(false);
+
+		clock += 11 * 60_000;
+		expect(imports.enforceExpiry()).toBe(true);
+
+		// Actually gone, not merely reported as zero. This reaches into the
+		// service because the defect was precisely a divergence between what the
+		// counts said and what memory held.
+		const internals = imports as unknown as { staged: unknown[]; locked: unknown[] };
+		expect(internals.staged).toHaveLength(0);
+		expect(internals.locked).toHaveLength(0);
+	});
+
+	it('reading a count is enough to trigger the drop', () => {
+		imports.stage([file()]);
+		clock += 11 * 60_000;
+		expect(imports.stagedCount()).toBe(0);
+
+		const internals = imports as unknown as { staged: unknown[] };
+		expect(internals.staged).toHaveLength(0);
+	});
+
+	it('explains an expiry-swept staging as expired, not as never chosen', async () => {
+		imports.stage([file()]);
+		clock += 11 * 60_000;
+		imports.enforceExpiry();
+
+		// Without the flag, the emptied arrays answered "none of the chosen files
+		// are encrypted" — true of the arrays, a lie about what happened.
+		await expect(
+			imports.commit([{ stagingId: 'any', replaceExisting: false, adoptProxy: false }])
+		).rejects.toThrow(/took too long/);
+	});
+});

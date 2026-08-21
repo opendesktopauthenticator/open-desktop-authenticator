@@ -628,3 +628,114 @@ describe('what an automatic pass reports about entries it could not read', () =>
 		expect(outcome.unreadable).toBe(0);
 	});
 });
+
+/*
+ * Turning a permission off applies to the pass already in flight.
+ *
+ * `connect` copies the account's auto-confirm settings before the list request
+ * goes out, and the list takes as long as Steam takes. Approving from that copy
+ * meant "disable trades" saved, the screen said off, and the trade already being
+ * fetched was approved anyway. The settings are re-read from the vault after the
+ * list returns, immediately before anything is approved.
+ */
+describe('a permission disabled while the list is in flight', () => {
+	const enabled = (): Account =>
+		account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } });
+
+	it('holds the trade instead of approving it from the stale copy', async () => {
+		const accounts = [enabled()];
+		let releaseList: (() => void) | undefined;
+		const listGate = new Promise<void>((resolve) => {
+			releaseList = resolve;
+		});
+		let listStarted: (() => void) | undefined;
+		const listRequested = new Promise<void>((resolve) => {
+			listStarted = resolve;
+		});
+
+		const sent: SteamRequest[] = [];
+		const transport = async (request: SteamRequest): Promise<SteamResponse> => {
+			sent.push(request);
+			if (request.url.includes('GenerateAccessTokenForApp')) {
+				return {
+					status: 200,
+					text: JSON.stringify({ response: { access_token: ACCESS } })
+				};
+			}
+			if (request.url.includes('getlist')) {
+				// Held open until the test has changed the settings underneath it —
+				// the window in which a real user opens Settings and turns trades off.
+				// Signalled first, so the test flips the settings only once `connect`
+				// has demonstrably taken its copy: flipping earlier hits the ordinary
+				// "nothing enabled" early return and proves nothing.
+				listStarted?.();
+				await listGate;
+				return { status: 200, text: JSON.stringify({ success: true, conf: [TRADE] }) };
+			}
+			return { status: 200, text: JSON.stringify({ success: true }) };
+		};
+		const transports = {
+			forAccount: () => Promise.resolve(transport)
+		} as unknown as SteamTransportFactory;
+
+		const pass = service(fakeVault(accounts), transports).runAutoConfirm('76561198000000001');
+
+		// Saved while the list request is provably in the air.
+		await listRequested;
+		(accounts[0] as Account).autoConfirm = {
+			marketListings: false,
+			trades: false,
+			pollIntervalSeconds: 15
+		};
+		releaseList?.();
+
+		const outcome = await pass;
+
+		expect(outcome.approved).toHaveLength(0);
+		// Nothing that approves may have gone out after the disable.
+		expect(sent.some((request) => request.url.includes('ajaxop'))).toBe(false);
+	});
+
+	it('approves nothing for an account removed while the list was loading', async () => {
+		const accounts = [enabled()];
+		let releaseList: (() => void) | undefined;
+		const listGate = new Promise<void>((resolve) => {
+			releaseList = resolve;
+		});
+		let listStarted: (() => void) | undefined;
+		const listRequested = new Promise<void>((resolve) => {
+			listStarted = resolve;
+		});
+
+		const sent: SteamRequest[] = [];
+		const transport = async (request: SteamRequest): Promise<SteamResponse> => {
+			sent.push(request);
+			if (request.url.includes('GenerateAccessTokenForApp')) {
+				return {
+					status: 200,
+					text: JSON.stringify({ response: { access_token: ACCESS } })
+				};
+			}
+			if (request.url.includes('getlist')) {
+				listStarted?.();
+				await listGate;
+				return { status: 200, text: JSON.stringify({ success: true, conf: [TRADE] }) };
+			}
+			return { status: 200, text: JSON.stringify({ success: true }) };
+		};
+		const transports = {
+			forAccount: () => Promise.resolve(transport)
+		} as unknown as SteamTransportFactory;
+
+		const pass = service(fakeVault(accounts), transports).runAutoConfirm('76561198000000001');
+
+		await listRequested;
+		accounts.length = 0;
+		releaseList?.();
+
+		const outcome = await pass;
+
+		expect(outcome.approved).toHaveLength(0);
+		expect(sent.some((request) => request.url.includes('ajaxop'))).toBe(false);
+	});
+});

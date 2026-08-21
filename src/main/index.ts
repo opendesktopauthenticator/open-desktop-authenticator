@@ -539,7 +539,13 @@ function start(): void {
 		// Polled rather than scheduled: a setTimeout would keep firing on the old
 		// timeout after a settings change, and would carry a stale deadline across
 		// a machine suspend. One second is far finer than a one-minute minimum.
-		const autoLockPoll = setInterval(() => vault.enforceAutoLock(), 1000);
+		const autoLockPoll = setInterval(() => {
+			vault.enforceAutoLock();
+			// The import TTL rides the same second-hand: staged shared secrets whose
+			// ten minutes are up must actually be dropped, not merely reported as
+			// zero by counts that nothing polls.
+			imports.enforceExpiry();
+		}, 1000);
 		autoLockPoll.unref();
 
 		app.on('before-quit', () => {
