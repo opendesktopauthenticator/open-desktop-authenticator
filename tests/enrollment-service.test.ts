@@ -1058,3 +1058,117 @@ describe('a double-pressed email-code button', () => {
 		expect(starts).toBe(1);
 	});
 });
+
+/*
+ * `begin` during an in-flight email-code submission.
+ *
+ * `beginOnce` starts by discarding the pending login, so a begin arriving while
+ * a code submission was mid-air cancelled the very session that submission was
+ * riding — then opened a second one, with both able to reach `enrol`. The
+ * mirror of the guard `submitEmailCode` itself carries.
+ */
+describe('begin while an email code is being checked', () => {
+	it('is refused instead of cancelling the submission underneath', async () => {
+		let starts = 0;
+		let releaseAuth: (() => void) | undefined;
+		const listeners: Record<string, ((arg?: unknown) => void)[]> = {};
+		const session: LoginSessionLike = {
+			startWithCredentials: () =>
+				Promise.resolve({
+					actionRequired: true,
+					validActions: [{ type: 2, detail: 'example.com' }]
+				}),
+			submitSteamGuardCode: () => {
+				queueMicrotask(() => {
+					releaseAuth = () => listeners.authenticated?.forEach((fn) => fn());
+				});
+				return Promise.resolve();
+			},
+			on: (event: string, listener: (arg?: unknown) => void) => {
+				(listeners[event] ??= []).push(listener);
+			},
+			cancelLoginAttempt: () => undefined,
+			refreshToken: MOBILE,
+			accessToken: MOBILE,
+			steamID: { getSteamID64: () => STEAM_ID }
+		};
+
+		const { vault } = fakeVault();
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => session,
+			startEnrollment: () => {
+				starts += 1;
+				return Promise.resolve(STARTED);
+			},
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		await service.begin('trader', 'a-password');
+		const submission = service.submitEmailCode('12345');
+
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		await expect(service.begin('other', 'a-password')).rejects.toThrow(/already in progress/);
+
+		releaseAuth?.();
+		await submission;
+		expect(starts).toBe(1);
+	});
+});
+
+/*
+ * A double-pressed removal.
+ *
+ * `deactivate` starts with a passphrase check that is deliberately slow, so a
+ * second press landed a second `RemoveAuthenticator` — answered for an
+ * authenticator already gone, surfacing an error for an operation that had in
+ * fact succeeded.
+ */
+describe('deactivating twice at once', () => {
+	it('refuses the second call while the first is in flight', async () => {
+		const { vault, accounts } = fakeVault();
+		accounts.push({
+			steamId64: STEAM_ID,
+			accountName: 'trader',
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345',
+			refreshToken: MOBILE,
+			status: 'active',
+			addedAt: '2026-08-08T00:00:00.000Z',
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+		(vault as { verifyPassphrase?: unknown }).verifyPassphrase = () =>
+			new Promise((resolve) => setTimeout(resolve, 10));
+
+		let removals = 0;
+		const transports = {
+			forAccount: () =>
+				Promise.resolve(() =>
+					Promise.resolve({
+						status: 200,
+						text: JSON.stringify({ response: { access_token: MOBILE } })
+					})
+				)
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			removeAuthenticator: () => {
+				removals += 1;
+				return Promise.resolve();
+			},
+			// Minting is bypassed by the cached-token path being empty; supply the
+			// pieces the flow needs without any network.
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		const first = service.deactivate(STEAM_ID, 'correct');
+		await expect(service.deactivate(STEAM_ID, 'correct')).rejects.toThrow(/already being removed/);
+		await first;
+		expect(removals).toBe(1);
+	});
+});

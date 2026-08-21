@@ -129,6 +129,9 @@ export class EnrollmentService {
 	/** Accounts with an activation in flight. See the guard in `activate`. */
 	private readonly activating = new Set<string>();
 
+	/** Accounts with a removal in flight. See the guard in `deactivate`. */
+	private readonly deactivating = new Set<string>();
+
 	/**
 	 * True from the first line of `begin` until it settles.
 	 *
@@ -195,7 +198,13 @@ export class EnrollmentService {
 	 */
 	async begin(accountName: string, password: string, proxyUrl?: string): Promise<BeginOutcome> {
 		// Set before anything is awaited, which is the whole point — see `beginning`.
-		if (this.beginning) {
+		//
+		// `submittingEmailCode` counts too. `beginOnce` starts by discarding the
+		// pending login, and a begin arriving while a code submission was mid-air
+		// cancelled the very session that submission was riding — then went on to
+		// open a second one, with both able to reach `enrol`. The mirror of the
+		// guard `submitEmailCode` itself carries.
+		if (this.beginning || this.submittingEmailCode) {
 			throw new EnrollmentError('another sign-in is already in progress.');
 		}
 		this.beginning = true;
@@ -540,6 +549,23 @@ export class EnrollmentService {
 	 * avoid, arrived at from the other direction.
 	 */
 	async deactivate(steamId64: string, passphrase: string): Promise<void> {
+		// One at a time per account, exactly as `activate` guards itself: the
+		// passphrase check below is deliberately slow, so a double-pressed confirm
+		// sent `RemoveAuthenticator` twice — the second answered for an
+		// authenticator already gone, and its failure surfaced as an error for an
+		// operation that had in fact succeeded.
+		if (this.deactivating.has(steamId64)) {
+			throw new EnrollmentError('that account is already being removed.');
+		}
+		this.deactivating.add(steamId64);
+		try {
+			await this.deactivateOnce(steamId64, passphrase);
+		} finally {
+			this.deactivating.delete(steamId64);
+		}
+	}
+
+	private async deactivateOnce(steamId64: string, passphrase: string): Promise<void> {
 		// Verified against the file, not against "the session happens to be open".
 		await this.vault.verifyPassphrase(passphrase);
 

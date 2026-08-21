@@ -717,11 +717,23 @@ export class SteamTransportFactory {
 			);
 
 			handle.on('response', (response) => {
-				const chunks: string[] = [];
+				// Bytes, decoded **once** at the end — never chunk by chunk. Chromium
+				// hands the body over in whatever pieces the network produced, and a
+				// TCP boundary is perfectly happy to land inside a multi-byte UTF-8
+				// character. Decoding each chunk on its own turned both halves of a
+				// split character into U+FFFD — and Steam's confirmation payloads are
+				// full of multi-byte characters, because item names are (★, ™, and
+				// every accented letter). A mangled name in the text a user reads
+				// before approving a trade is not a cosmetic defect.
+				const chunks: Buffer[] = [];
 				let length = 0;
 
 				response.on('data', (chunk) => {
-					length += chunk.length;
+					const bytes =
+						typeof chunk === 'string'
+							? Buffer.from(chunk, request.binary === true ? 'latin1' : 'utf8')
+							: chunk;
+					length += bytes.length;
 					if (length > MAX_RESPONSE_BYTES) {
 						// Steam's answers are kilobytes. Anything of this size is a captive
 						// portal or a proxy error page, and it is not going to parse.
@@ -740,11 +752,7 @@ export class SteamTransportFactory {
 						finish(() => reject(new EgressError('Steam sent an implausibly large response.')));
 						return;
 					}
-					chunks.push(
-						typeof chunk === 'string'
-							? chunk
-							: chunk.toString(request.binary === true ? 'latin1' : 'utf8')
-					);
+					chunks.push(bytes);
 				});
 				response.on('error', (error) =>
 					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough))))
@@ -758,7 +766,7 @@ export class SteamTransportFactory {
 						const eresult = Number(Array.isArray(raw) ? raw[0] : raw);
 						resolve({
 							status: response.statusCode,
-							text: chunks.join(''),
+							text: Buffer.concat(chunks).toString(request.binary === true ? 'latin1' : 'utf8'),
 							...(Number.isFinite(eresult) ? { eresult } : {})
 						});
 					})

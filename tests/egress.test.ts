@@ -140,6 +140,8 @@ function fakeElectron(
 		resolvesTo?: string;
 		/** Leaves the request hanging, so a lock has something in flight to cancel. */
 		neverSettles?: boolean;
+		/** Delivers the body in these exact pieces instead of one string chunk. */
+		bodyChunks?: Buffer[];
 	} = {}
 ): {
 	electron: ElectronNetworking;
@@ -334,9 +336,14 @@ function fakeElectron(
 						};
 						listeners.response?.forEach((fn) => (fn as (r: NetResponseHandle) => void)(response));
 						queueMicrotask(() => {
-							responseListeners.data?.forEach((fn) =>
-								(fn as (c: string) => void)(reply.body ?? '{"success":true}')
-							);
+							const pieces: (string | Buffer)[] = reply.bodyChunks ?? [
+								reply.body ?? '{"success":true}'
+							];
+							for (const piece of pieces) {
+								responseListeners.data?.forEach((fn) =>
+									(fn as (c: string | Buffer) => void)(piece)
+								);
+							}
 							responseListeners.end?.forEach((fn) => (fn as () => void)());
 						});
 					});
@@ -1445,5 +1452,56 @@ describe('reading the endpoint Chromium will actually use', () => {
 
 	it('is not fooled by leading whitespace', () => {
 		expect(routedEndpoint(`  SOCKS5 ${INTENDED}`)).toBe(INTENDED);
+	});
+});
+
+/*
+ * A UTF-8 character split across two network chunks.
+ *
+ * Chromium delivers the body in whatever pieces the network produced, and a TCP
+ * boundary lands inside a multi-byte character whenever it feels like it.
+ * Decoding chunk by chunk turned both halves of a split character into U+FFFD —
+ * and Steam's confirmation payloads are full of multi-byte characters, because
+ * item names are (★, ™, every accented letter). The item name is the text a
+ * user reads before approving a trade; it must arrive intact.
+ */
+describe('multi-byte characters across chunk boundaries', () => {
+	it('reassembles a character the network split in two', async () => {
+		const star = Buffer.from('★ StatTrak™ Karambit', 'utf8');
+		const { electron } = fakeElectron({
+			// Split inside the middle of ★ (three bytes: e2 98 85).
+			bodyChunks: [star.subarray(0, 1), star.subarray(1)]
+		});
+		const transport = await new SteamTransportFactory(electron).forAccount({
+			steamId64: '76561198000000002'
+		});
+
+		const response = await transport({
+			method: 'GET',
+			url: 'https://steamcommunity.com/mobileconf/getlist',
+			cookie: ''
+		});
+
+		expect(response.text).toBe('★ StatTrak™ Karambit');
+		expect(response.text).not.toContain('�');
+	});
+
+	it('keeps binary responses byte-faithful chunk by chunk', async () => {
+		const bytes = Buffer.from([0x08, 0x96, 0x01, 0xff, 0xe2]);
+		const { electron } = fakeElectron({
+			bodyChunks: [bytes.subarray(0, 2), bytes.subarray(2)]
+		});
+		const transport = await new SteamTransportFactory(electron).forAccount({
+			steamId64: '76561198000000002'
+		});
+
+		const response = await transport({
+			method: 'GET',
+			url: 'https://steamcommunity.com/mobileconf/getlist',
+			cookie: '',
+			binary: true
+		});
+
+		expect(Buffer.from(response.text, 'latin1')).toEqual(bytes);
 	});
 });

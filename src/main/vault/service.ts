@@ -590,6 +590,19 @@ export class VaultService {
 		const generation = this.generation;
 		const { plaintext, key, kdf } = await unseal(envelope, passphrase);
 
+		// **Refused while the vault is open** — checked after the derivation, so an
+		// unlock that landed during it is caught too, and before `setAside`, so
+		// nothing on disk has moved yet. Only the unlock screen offers this, but
+		// "only the renderer offers it" is not a control: called while unlocked it
+		// would swap the live file out underneath anything mid-write and replace
+		// state the user believes is saved with the older copy.
+		if (this.state) {
+			wipe(key);
+			throw new VaultServiceError(
+				'the vault is open. Restoring the backup replaces the live vault, so lock it first.'
+			);
+		}
+
 		let contents: VaultContents;
 		try {
 			contents = vaultContentsSchema.parse(JSON.parse(plaintext));
@@ -641,9 +654,10 @@ export class VaultService {
 			throw new VaultServiceError(LOCKED_DURING_OPEN);
 		}
 
-		if (this.state) {
-			wipe(this.state.key);
-		}
+		// No unlocked state can exist here: it was refused above, before the file
+		// swap, and `stillCurrent` has just ruled out everything a lock could have
+		// interleaved. Installing directly keeps that reasoning checkable in one
+		// place.
 		this.state = {
 			contents,
 			key,

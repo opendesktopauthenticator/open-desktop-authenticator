@@ -677,3 +677,42 @@ describe('concurrent creation', () => {
 		await expect(reopened.unlock('another long passphrase')).resolves.toBeUndefined();
 	});
 });
+
+/*
+ * Restoring the backup while the vault is open.
+ *
+ * Only the unlock screen offers a restore, but "only the renderer offers it" is
+ * not a control. Called while unlocked it swapped the live file out underneath
+ * anything mid-write and replaced state the user believes is saved with the
+ * older copy — silently, under a passphrase check that proved nothing about
+ * intent.
+ */
+describe('restore while unlocked', () => {
+	it('is refused before anything on disk moves', async () => {
+		const v = service();
+		await v.create(PASS);
+		// Two writes so a .bak exists to restore from.
+		await v.mutate((d) => d.accounts.push(account));
+		await v.mutate((d) => (d.settings.autoLockMinutes = 30));
+		expect(v.backupAvailable()).toBeDefined();
+
+		await expect(v.restoreFromBackup(PASS)).rejects.toThrow(/lock it first/);
+
+		// Nothing rolled back: the live contents still hold both writes.
+		expect(v.read().accounts).toHaveLength(1);
+		expect(v.read().settings.autoLockMinutes).toBe(30);
+	});
+
+	it('still restores normally when locked', async () => {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+		await v.mutate((d) => (d.settings.autoLockMinutes = 30));
+		v.lock('manual');
+
+		// The backup is the state before the last write.
+		await v.restoreFromBackup(PASS);
+		expect(v.isUnlocked()).toBe(true);
+		expect(v.read().settings.autoLockMinutes).not.toBe(30);
+	});
+});
