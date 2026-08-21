@@ -6,6 +6,17 @@ import {
 	type LoginSessionLike
 } from '../src/main/steam/login';
 import { steamSessionProxy } from '../src/main/net/egress';
+// **Statically, not with `await import` inside the test.**
+//
+// `steam-session` is a heavy real dependency and takes ~600ms to load cold. Done
+// inside the test body it was charged against vitest's five-second default, and
+// under a full parallel run — sixty-nine files competing for CPU — that
+// occasionally lost. The result was an intermittent failure in the one command
+// the release workflow uses as a gate, on a test about a constant.
+//
+// Loading it here pays the cost during collection instead, where it belongs, and
+// the assertion below is unchanged.
+import { EAuthTokenPlatformType } from 'steam-session';
 
 /**
  * Signing in with a password, once (§12 F3).
@@ -440,11 +451,9 @@ describe('proxy options for steam-session', () => {
 });
 
 describe('the platform type', () => {
-	it('is MobileApp, and the library agrees', async () => {
+	it('is MobileApp, and the library agrees', () => {
 		// Confirmations cannot be driven by any other scope (F-13). Checked against
 		// the library's own enum rather than restated from memory.
-		const { EAuthTokenPlatformType } = await import('steam-session');
-
 		expect(PLATFORM_MOBILE_APP).toBe(3);
 		expect(EAuthTokenPlatformType.MobileApp).toBe(PLATFORM_MOBILE_APP);
 	});

@@ -38,7 +38,10 @@ export const tradeHolds = {
 		dateModified: '2026-08-14',
 		mainEntityOfPage: `${s.origin}/steam-guard-trade-holds`
 	}),
-	body: (s) => `
+	// No `s` parameter: this page quotes Valve throughout and never interpolates
+	// anything from the site config. Declaring one anyway failed `npm run lint`,
+	// which the release workflow runs as a gate.
+	body: () => `
 		<article class="guide numbered">
 			<h1>Steam trade holds: every restriction, and how long each lasts</h1>
 			<p class="lede">
