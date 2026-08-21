@@ -259,11 +259,16 @@ export const verify = {
 
 			<h2>2. Compute the hash of what you downloaded</h2>
 			<h3>Windows (PowerShell)</h3>
-			<pre><code>Get-FileHash -Algorithm SHA256 .\\OpenDesktopAuthenticator-Setup.exe</code></pre>
+			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-0.1.0-x64-setup.exe</code></pre>
 			<h3>Linux or macOS</h3>
-			<pre><code>sha256sum OpenDesktopAuthenticator.AppImage</code></pre>
-			<p>Or check every file at once against the list:</p>
+			<pre><code>sha256sum open-desktop-authenticator-0.1.0-x86_64.AppImage</code></pre>
+			<p>Or check every file at once, from the folder you downloaded into:</p>
 			<pre><code>sha256sum --check SHA256SUMS.txt</code></pre>
+			<p>
+				PowerShell prints its hash in upper case and the list is in lower case. That
+				is the same value written two ways, not a mismatch &mdash; compare the
+				characters, not the capitals.
+			</p>
 
 			<h2>3. Compare</h2>
 			<p>

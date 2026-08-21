@@ -73,6 +73,20 @@ function requireStoreIdentity() {
 const wantsAppx = process.argv.some((arg) => arg.includes('appx'));
 
 export default {
+	/*
+	 * **Artifact names use `${name}`, not `${productName}`.**
+	 *
+	 * `productName` is "Open Desktop Authenticator", with spaces — and GitHub
+	 * replaces spaces with dots when it stores a release asset. `SHA256SUMS.txt`
+	 * is generated in CI from the staging directory, before that rename, so every
+	 * filename in it disagreed with the file a user actually downloads. The
+	 * documented way to use it is `sha256sum --check SHA256SUMS.txt`, which then
+	 * reports "No such file or directory" for every line — the one file whose
+	 * whole job is verification, failing at it.
+	 *
+	 * Found by verifying a real download by hand, which is the only way it could
+	 * have been found: every hash in the file was correct.
+	 */
 	appId: 'com.opendesktopauthenticator.desktop',
 	productName: 'Open Desktop Authenticator',
 	copyright: `Copyright © ${new Date().getFullYear()} MASTERPANEL LLC`,
@@ -132,11 +146,11 @@ export default {
 		// A vault is not application data. Uninstalling must not destroy the thing
 		// the user would need to get back into their accounts.
 		deleteAppDataOnUninstall: false,
-		artifactName: '${productName}-${version}-${arch}-setup.${ext}'
+		artifactName: '${name}-${version}-${arch}-setup.${ext}'
 	},
 
 	portable: {
-		artifactName: '${productName}-${version}-portable.${ext}'
+		artifactName: '${name}-${version}-portable.${ext}'
 	},
 
 	appx: wantsAppx ? requireStoreIdentity() : store,
@@ -159,7 +173,7 @@ export default {
 			{ target: 'AppImage', arch: ['x64'] },
 			{ target: 'deb', arch: ['x64'] }
 		],
-		artifactName: '${productName}-${version}-${arch}.${ext}'
+		artifactName: '${name}-${version}-${arch}.${ext}'
 	},
 
 	// Releases are published by the workflow from a tag, never from a developer's
