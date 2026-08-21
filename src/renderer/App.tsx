@@ -257,6 +257,37 @@ export function App(): React.JSX.Element {
 	}, [api, status?.unlocked]);
 
 	/**
+	 * Go straight back to an unfinished transfer after unlocking.
+	 *
+	 * A lock reloads the window, which is how a transfer that had already rotated
+	 * the authenticator lost the screen that was asking to save it. Recovering
+	 * *when the screen happens to be opened* is not enough: the user has no reason
+	 * to suspect there is anything to come back to, and the secrets Steam will
+	 * never reissue are held in memory until the process exits.
+	 *
+	 * So the app opens it for them. This is the only place a view is chosen
+	 * without the user asking, and the justification is the size of the loss —
+	 * every other screen can wait.
+	 */
+	useEffect(() => {
+		if (!api || !status?.unlocked) {
+			return;
+		}
+		let cancelled = false;
+		void api
+			.getTransferStatus()
+			.then((transfer) => {
+				if (!cancelled && transfer.awaiting) {
+					setView('move');
+				}
+			})
+			.catch(() => undefined);
+		return () => {
+			cancelled = true;
+		};
+	}, [api, status?.unlocked]);
+
+	/**
 	 * Ask once per unlock, not on a timer.
 	 *
 	 * The main process caches the answer for hours, so this is cheap — but asking
@@ -446,8 +477,10 @@ export function App(): React.JSX.Element {
 				<Activity
 					accounts={accounts}
 					onLoad={() => api.listActivity()}
-					onSeen={() => {
-						void api.acknowledgeActivity().then(() => setActivityUrgent(false));
+					onSeen={(seq) => {
+						// The snapshot's own high-water mark, not "everything up to now": a
+						// pass finishing between the fetch and this call must stay unseen.
+						void api.acknowledgeActivity(seq).then(() => setActivityUrgent(false));
 					}}
 					onOpenAccount={(openFor) => {
 						setView('accounts');
@@ -492,7 +525,7 @@ export function App(): React.JSX.Element {
 					onStartChallenge={() => api.startTransferChallenge()}
 					onComplete={(smsCode) => api.completeTransfer(smsCode)}
 					onRetryPersist={() => api.retryTransferPersist()}
-					onRetryDecode={() => api.retryTransferDecode()}
+					onStatus={() => api.getTransferStatus()}
 					onCancel={() => api.cancelTransfer()}
 					onClose={() => setView('accounts')}
 				/>

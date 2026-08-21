@@ -56,6 +56,12 @@ function harness(
 		mutateThrows?: boolean;
 		readsBackWrong?: boolean;
 		writeRecoveryThrows?: boolean;
+		/** The disk refuses the copy of an undecodable reply, so memory is all there is. */
+		unreadableWriteThrows?: boolean;
+		/** Holds the sign-in open, so a lock can land while it is awaiting Steam. */
+		signInGate?: Promise<void>;
+		/** The same for the irreversible submission. */
+		continueGate?: Promise<void>;
 	} = {}
 ): {
 	service: TransferService;
@@ -88,11 +94,20 @@ function harness(
 
 	const service = new TransferService(vault, transports, () => 0, {
 		now: options.now ?? (() => 1_700_000_000_000),
-		signIn: () => Promise.resolve({ refreshToken: TOKEN, steamId64: STEAM_ID }),
+		signIn: async () => {
+			await options.signInGate;
+			return { refreshToken: TOKEN, steamId64: STEAM_ID };
+		},
 		mintAccessToken: () => Promise.resolve('access'),
 		startChallenge: (() => Promise.resolve({ sent: true, shape: 'protobuf' })) as never,
-		continueChallenge: ((_t: unknown, _a: unknown, _c: unknown, onRaw?: (body: Buffer) => void) => {
+		continueChallenge: (async (
+			_t: unknown,
+			_a: unknown,
+			_c: unknown,
+			onRaw?: (body: Buffer) => void
+		) => {
 			continueCalls += 1;
+			await options.continueGate;
 			if (options.rawReply) {
 				onRaw?.(options.rawReply);
 			}
@@ -124,6 +139,21 @@ function harness(
 async function readyToSubmit(h: { service: TransferService }): Promise<void> {
 	await h.service.authenticate('someone', 'pw', 'QK4TX');
 }
+
+/**
+ * Let a submission reach the request that actually rotates the authenticator.
+ *
+ * `completeTransfer` mints an access token before it calls Steam, and both are
+ * awaits. Locking immediately after calling it therefore lands *before the mint*
+ * — where dropping the session correctly aborts a request that was never sent,
+ * which is not the window these tests mean. The dangerous window is the one
+ * after the mint, while Steam is being asked to rotate.
+ */
+const untilSending = async (): Promise<void> => {
+	for (let i = 0; i < 5; i += 1) {
+		await Promise.resolve();
+	}
+};
 
 describe('storing a replacement Steam has issued', () => {
 	it('writes the recovery file before the vault', async () => {
@@ -207,29 +237,52 @@ describe('when Steam answers but the reply cannot be read', () => {
 	 * it is the bytes that just failed to parse. Losing them costs the account.
 	 */
 	it('does not say it failed, because it probably did not', async () => {
-		const h = harness({ continueThrows: true });
+		// A reply *arrived* and could not be parsed. `rawReply` matters: without it
+		// this is the connection-lost case below, which is a different statement.
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow(
-			/probably been replaced already/
+			/Steam replaced the authenticator/
 		);
 	});
 
-	it('keeps the reply so it can be read again', async () => {
+	it('reports it as a dead end rather than something to retry', async () => {
+		// `decodeContinueResponse` is pure: the same bytes produce the same failure
+		// every time, so there was never a retry that could succeed. What used to be
+		// offered here was a button that could not work, on the screen where the
+		// user is most desperate for one.
 		const h = harness({ continueThrows: true, rawReply: goodReply() });
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
-		expect(h.service.hasUnreadReply()).toBe(true);
+
+		expect(h.service.awaiting()).toBe('unreadable');
 	});
 
-	it('can decode and store it on a second attempt, without asking Steam', async () => {
+	it('says Steam Support, because there is no other route', async () => {
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/Steam Support/);
+	});
+
+	it('keeps no secret material behind', async () => {
+		// The bytes were retained so a future build might read them, and nothing was
+		// ever built that could. Holding raw shared and identity secrets for a reader
+		// that does not exist is cost without benefit.
 		const h = harness({ continueThrows: true, rawReply: goodReply() });
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
 
-		const result = await h.service.retryDecode();
-		expect(result.revocationCode).toBe('R55555');
-		expect(h.stored).toHaveLength(1);
-		expect(h.continueCalls).toBe(1);
+		expect(JSON.stringify(h.service)).not.toContain('shared');
+		expect(h.stored).toHaveLength(0);
+	});
+
+	it('drops the Steam session with it', async () => {
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
+
+		await expect(h.service.startChallenge()).rejects.toThrow();
 	});
 });
 
@@ -282,29 +335,6 @@ describe('bugs found by reading the flow rather than exercising it', () => {
 		expect(stored.filter((a) => a.steamId64 === STEAM_ID)).toHaveLength(1);
 	});
 
-	/*
-	 * The pending record must not lapse while secrets are unstored.
-	 *
-	 * `live()` drops the pending transfer once the TTL passes, and `retryDecode`
-	 * needs it for the SteamID it validates against. The status channel calls
-	 * `current()`, which calls `live()` — so a poll fifteen minutes after a failed
-	 * decode silently destroys the ability to read a reply whose secrets exist
-	 * nowhere else. The authenticator has already rotated by then.
-	 */
-	it('keeps the transfer alive while an unread reply is held', async () => {
-		let clock = 1_700_000_000_000;
-		const h = harness({ continueThrows: true, rawReply: goodReply(), now: () => clock });
-		await readyToSubmit(h);
-		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
-
-		// The user reads the error, finds their phone, comes back.
-		clock += 20 * 60_000;
-		h.service.current();
-
-		expect(h.service.hasUnreadReply()).toBe(true);
-		await expect(h.service.retryDecode()).resolves.toMatchObject({ revocationCode: 'R55555' });
-	});
-
 	it('keeps the transfer alive while unsaved secrets are held', async () => {
 		let clock = 1_700_000_000_000;
 		const h = harness({ mutateThrows: true, now: () => clock });
@@ -351,7 +381,7 @@ describe('when Steam refuses the request outright', () => {
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
 		expect(h.service.hasUnsaved()).toBe(false);
-		expect(h.service.hasUnreadReply()).toBe(false);
+		expect(h.service.awaiting()).toBeUndefined();
 	});
 });
 
@@ -383,7 +413,7 @@ describe('the guards around holding secrets', () => {
 		});
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/did not accept/);
-		expect(h.service.hasUnreadReply()).toBe(false);
+		expect(h.service.awaiting()).toBeUndefined();
 	});
 });
 
@@ -435,5 +465,488 @@ describe('what it refuses before touching Steam', () => {
 		const h = harness({ continueResult: { success: false } });
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/Nothing has changed/);
+	});
+});
+
+/*
+ * What a vault lock is allowed to throw away.
+ *
+ * Locking is the app's clearest statement that nobody is present, and every
+ * other service drops its credentials on it. Transfer was the one missing from
+ * that list, so a signed-in transfer kept a live refresh token and access token
+ * across every lock.
+ *
+ * But the same call must do nothing once Steam has rotated the authenticator.
+ * What is held then is the only copy of a replacement Steam will not issue
+ * again, and an idle lock happens *by itself, while the user is away*. Wiping
+ * secrets on that event would turn a walk to the kettle into an account only
+ * Steam Support can recover — which is why this is `forgetIfIdle` and not
+ * `cancel`, and why the distinction is asserted rather than assumed.
+ */
+describe('what a lock does to a transfer', () => {
+	it('drops a signed-in transfer that has not changed anything', async () => {
+		const h = harness();
+		await readyToSubmit(h);
+
+		expect(h.service.forgetIfIdle()).toBe(true);
+
+		// The tokens went with it: there is no transfer left to report.
+		expect(h.service.current()).toBeUndefined();
+		expect(h.service.awaiting()).toBeUndefined();
+	});
+
+	it('KEEPS a replacement that is decoded but not yet stored', async () => {
+		// The vault write failed, so the only copy of the new authenticator is the
+		// one being held. A lock must not be what destroys it.
+		const h = harness({ mutateThrows: true });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		expect(h.service.awaiting()).toBe('persist');
+		expect(h.service.forgetIfIdle()).toBe(false);
+		// Unchanged by the attempt, so a second lock cannot erode it either.
+		expect(h.service.awaiting()).toBe('persist');
+		expect(h.service.hasUnsaved()).toBe(true);
+	});
+
+	it('ends the transfer when the reply cannot be used', async () => {
+		// It used to be kept for a retry that could not work. Ending it here is what
+		// lets the lock drop the session too — there is nothing left to ask Steam.
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		expect(h.service.awaiting()).toBe('unreadable');
+		// Nothing irreplaceable is held, so a lock may tidy up freely.
+		expect(h.service.forgetIfIdle()).toBe(true);
+		// And the account it concerns is still named, so the screen can explain it.
+		expect(h.service.current()?.accountName).toBe('someone');
+	});
+
+	it('reports nothing outstanding once the transfer has been stored', async () => {
+		const h = harness();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345');
+
+		expect(h.service.awaiting()).toBeUndefined();
+	});
+});
+
+/*
+ * What must not be thrown away, and what must not be overwritten.
+ *
+ * A retained reply is only meaningful beside the `pending` it belongs to: that
+ * is where the SteamID it is validated against lives, along with the account
+ * name and routing the stored account is built from. Two paths could separate
+ * them, and both ended with secrets Steam will not reissue held under the wrong
+ * identity or none at all.
+ */
+describe('holding on to a transfer that is mid-flight', () => {
+	it('refuses to forget while the code is being submitted', async () => {
+		// Nothing is held *yet* — `unsaved` and `rawReply` are both undefined while
+		// the request is in the air — so this looked idle and cleared `pending`. If
+		// Steam then answered with a body this build cannot decode, the bytes were
+		// kept and the identity they belong to was not.
+		const h = harness({
+			continueGate: Promise.resolve(),
+			continueThrows: true,
+			rawReply: goodReply()
+		});
+		await readyToSubmit(h);
+
+		const submitting = h.service.completeTransfer('12345').catch(() => undefined);
+		await untilSending();
+		// A lock landing here is the whole point: the one request that rotates an
+		// authenticator is when this must not tidy up.
+		expect(h.service.forgetIfIdle()).toBe(false);
+		await submitting;
+
+		// And the transfer is reported as the dead end it is, against the right
+		// account — which is what the refusal to clear `pending` protected.
+		expect(h.service.awaiting()).toBe('unreadable');
+		expect(h.service.current()?.steamId64).toBe(STEAM_ID);
+		expect(h.service.awaiting()).toBe('unreadable');
+	});
+
+	it('refuses a new sign-in while a replacement is unsaved', async () => {
+		const h = harness({ mutateThrows: true });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		await expect(h.service.authenticate('someone-else', 'pw', 'QK4TX')).rejects.toThrow(
+			/has not finished/
+		);
+	});
+
+	it('refuses a new sign-in while a reply is unread', async () => {
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		await expect(h.service.authenticate('someone-else', 'pw', 'QK4TX')).rejects.toThrow(
+			/has not finished/
+		);
+	});
+
+	it('leaves the held transfer pointing at the account it belongs to', async () => {
+		// The damage the refusal prevents: `authenticate` assigned `pending`
+		// unconditionally, so the bytes stayed with account A while the identity
+		// they are validated against became account B.
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+		const before = h.service.current();
+
+		await h.service.authenticate('someone-else', 'pw', 'QK4TX').catch(() => undefined);
+
+		expect(h.service.current()).toEqual(before);
+	});
+});
+
+/*
+ * When no reply ever arrived.
+ *
+ * A timeout, a reset or a dead proxy rejects before `onRaw` is called, so there
+ * are no bytes and nothing to hold. Every non-`TransferApiError` was classified
+ * as "Steam answered", which produced a message claiming details were held here
+ * when none had ever been stored — and, worse, left `awaiting()` empty so the
+ * screen concluded nothing had happened and re-offered both Cancel and a second
+ * irreversible submission.
+ *
+ * The request may well have reached Steam. Absence of a reply is not evidence of
+ * absence of a rotation.
+ */
+describe('when the connection dies before Steam answers', () => {
+	const lost = (): ReturnType<typeof harness> =>
+		harness({ continueThrows: true, continueError: new Error('ETIMEDOUT') });
+
+	it('does not claim anything is held', async () => {
+		const h = lost();
+		await readyToSubmit(h);
+
+		await expect(h.service.completeTransfer('12345')).rejects.not.toThrow(/held in memory/);
+	});
+
+	it('does not claim the reply could not be read', async () => {
+		// There was no reply. Saying otherwise sends the user looking for a retry
+		// that has nothing to work on.
+		const h = lost();
+		await readyToSubmit(h);
+
+		await expect(h.service.completeTransfer('12345')).rejects.not.toThrow(
+			/could not read the reply/
+		);
+	});
+
+	it('refuses to say the authenticator is untouched', async () => {
+		const h = lost();
+		await readyToSubmit(h);
+
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/cannot tell/i);
+	});
+
+	it('tells the user how to find out for themselves', async () => {
+		// The only check available to them, and it is a good one.
+		const h = lost();
+		await readyToSubmit(h);
+
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/Steam mobile app/);
+	});
+
+	it('writes nothing, because there is nothing to write', async () => {
+		const h = lost();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		expect(h.recoveryWrites).toHaveLength(0);
+	});
+});
+
+/*
+ * A replacement that decodes and still cannot be used.
+ *
+ * The durable copy was written only when the *decoder* threw. A reply that
+ * parses cleanly and then fails validation — a mismatched SteamID, or a Guard
+ * scheme this build does not know — is every bit as unusable and every bit as
+ * irreplaceable, and it stayed in memory alone.
+ */
+describe('a decoded reply this build cannot use', () => {
+	/** Decodes fine; the SteamID inside belongs to somebody else. */
+	const mismatched = (): ReturnType<typeof harness> =>
+		harness({
+			rawReply: goodReply(),
+			continueResult: {
+				success: true,
+				replacementToken: { ...REPLACEMENT, steamId64: '76561198000000999' }
+			}
+		});
+
+	it('is saved rather than left in memory', async () => {
+		const h = mismatched();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+	});
+
+	it('saves the exact bytes Steam sent', async () => {
+		const h = mismatched();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+	});
+
+	it('says the authenticator was replaced anyway', async () => {
+		// Steam rotated it before sending this. Reporting only "invalid reply" would
+		// read as "nothing happened".
+		const h = mismatched();
+		await readyToSubmit(h);
+
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(
+			/Steam replaced the authenticator/
+		);
+	});
+});
+
+/*
+ * Nothing may take `pending` away while a request is in the air.
+ *
+ * `pending` carries the SteamID a retained reply is validated against and the
+ * account name it would be stored under. Two callers could remove it mid-flight
+ * — `cancel`, which the screen hides but the IPC channel still exposes, and the
+ * lock handler by way of a sign-in that resolves afterwards.
+ */
+describe('what may not be pulled out from under a request', () => {
+	it('refuses to cancel while the code is being submitted', async () => {
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+
+		const submitting = h.service.completeTransfer('12345').catch(() => undefined);
+		expect(() => h.service.cancel()).toThrow(/cannot be abandoned/);
+		await submitting;
+
+		// The identity survived, so the retained reply is still usable.
+		expect(h.service.current()?.steamId64).toBe(STEAM_ID);
+		expect(h.service.awaiting()).toBe('unreadable');
+	});
+
+	it('still allows cancelling before anything has been sent', async () => {
+		// The guard must not make an abandonable transfer unabandonable.
+		const h = harness();
+		await readyToSubmit(h);
+
+		expect(() => h.service.cancel()).not.toThrow();
+		expect(h.service.current()).toBeUndefined();
+	});
+
+	it('does not install sign-in credentials that a lock has disowned', async () => {
+		// `signIn` resolves with a refresh token and an access token. Installing them
+		// after a lock would undo the teardown that just dropped everything else,
+		// and they would sit there for the whole locked period.
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const h = harness({ signInGate: gate });
+
+		const signingIn = h.service.authenticate('someone', 'pw', 'QK4TX').catch((err: unknown) => err);
+		// The lock lands while the sign-in is still awaiting Steam.
+		expect(h.service.forgetIfIdle()).toBe(true);
+		release?.();
+
+		await expect(signingIn).resolves.toMatchObject({ message: expect.stringMatching(/locked/i) });
+		expect(h.service.current()).toBeUndefined();
+	});
+
+	it('keeps nothing at all after such a lock', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const h = harness({ signInGate: gate });
+
+		const signingIn = h.service.authenticate('someone', 'pw', 'QK4TX').catch(() => undefined);
+		h.service.forgetIfIdle();
+		release?.();
+		await signingIn;
+
+		expect(h.service.awaiting()).toBeUndefined();
+		expect(h.service.hasUnsaved()).toBe(false);
+	});
+});
+
+/*
+ * An unanswered submission is a *state*, not just a message.
+ *
+ * The first attempt at this fixed the wording and left the state machine alone:
+ * `awaiting()` still said nothing was outstanding, so the screen concluded the
+ * submission had not happened, cleared its committed flag, and re-offered both
+ * Cancel and a second irreversible submit — for a request that may already have
+ * rotated the authenticator.
+ */
+describe('an unanswered submission stays visible', () => {
+	const lost = (): ReturnType<typeof harness> =>
+		harness({ continueThrows: true, continueError: new Error('ETIMEDOUT') });
+
+	it('reports itself as unknown rather than as nothing', async () => {
+		const h = lost();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		expect(h.service.awaiting()).toBe('unanswered');
+	});
+
+	it('still names the account the user has to go and check', async () => {
+		const h = lost();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		expect(h.service.current()?.steamId64).toBe(STEAM_ID);
+	});
+
+	it('survives a lock, because it holds no credential', async () => {
+		// The tokens go. The warning is the only remaining record that a submission
+		// went out unanswered, and it costs nothing to keep.
+		const h = lost();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		expect(h.service.forgetIfIdle()).toBe(true);
+		expect(h.service.awaiting()).toBe('unanswered');
+		expect(h.service.current()?.accountName).toBe('someone');
+	});
+
+	it('is cleared when the user says they have checked', async () => {
+		// Cancel is allowed here — nothing is held — and is how the user discharges
+		// it. Without that the warning would be permanent.
+		const h = lost();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		h.service.cancel();
+
+		expect(h.service.awaiting()).toBeUndefined();
+		expect(h.service.current()).toBeUndefined();
+	});
+
+	it('is not reported when Steam explicitly refused the code', async () => {
+		// Steam answered. Nothing rotated, and claiming uncertainty would send the
+		// user to check a phone that has not changed.
+		const h = harness({ continueResult: { success: false } });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		expect(h.service.awaiting()).toBeUndefined();
+	});
+});
+
+/*
+ * A second submission is not useless here — it is destructive.
+ *
+ * Steam answers a spent code with `success: false`, and that branch clears
+ * `rawReply` because for a *first* attempt an explicit refusal means nothing
+ * rotated and the reply holds nothing worth keeping. Reached with a retained
+ * reply, it deletes the only copy of a bundle Steam has already issued.
+ */
+describe('resubmitting while something is held', () => {
+	it('refuses once a reply is being held', async () => {
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(
+			/could not read what it sent back/i
+		);
+	});
+
+	it('does not turn a dead end into a fresh transfer', async () => {
+		// Before the guard, a second attempt reached Steam, was refused, and cleared
+		// the record of what had happened on the way out — so the screen went back
+		// to offering an ordinary transfer for an account whose authenticator had
+		// already been rotated away.
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		expect(h.service.awaiting()).toBe('unreadable');
+	});
+
+	it('never asks Steam a second time', async () => {
+		const h = harness({ continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		expect(h.continueCalls).toBe(1);
+	});
+
+	it('refuses while a decoded replacement is waiting to be stored', async () => {
+		const h = harness({ mutateThrows: true });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/already replaced/i);
+		expect(h.service.hasUnsaved()).toBe(true);
+	});
+
+	it('refuses while the last submission is unresolved', async () => {
+		// Sending another guess about an unanswered irreversible request is the
+		// worst available response to not knowing.
+		const h = harness({ continueThrows: true, continueError: new Error('ETIMEDOUT') });
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345').catch(() => undefined);
+
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/never answered/i);
+	});
+});
+
+/*
+ * A lock during submission keeps the identity and must drop the session.
+ *
+ * `forgetIfIdle` refuses to clear `pending` while a submission is in the air,
+ * because `pending` is what a retained reply is validated against. It also holds
+ * a refresh token and an access token, and nothing stripped those when the
+ * request settled — leaving a live Steam session usable for as long as the vault
+ * stayed shut.
+ */
+describe('credentials do not outlive a lock taken mid-submission', () => {
+	it('cannot start another challenge afterwards', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const h = harness({ continueGate: gate, continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+
+		const submitting = h.service.completeTransfer('12345').catch(() => undefined);
+		await untilSending();
+		// The lock cannot clear `pending` here, and must not.
+		expect(h.service.forgetIfIdle()).toBe(false);
+		release?.();
+		await submitting;
+
+		// Refused, whichever guard answers first. Both are correct and both mean the
+		// same thing to the user: this transfer cannot reach Steam again. The
+		// credential drop itself is asserted against the source below, because with
+		// secrets held the more specific refusal fires before the session is
+		// consulted at all.
+		await expect(h.service.startChallenge()).rejects.toThrow();
+	});
+
+	it('keeps the identity a retained reply needs', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const h = harness({ continueGate: gate, continueThrows: true, rawReply: goodReply() });
+		await readyToSubmit(h);
+
+		const submitting = h.service.completeTransfer('12345').catch(() => undefined);
+		await untilSending();
+		h.service.forgetIfIdle();
+		release?.();
+		await submitting;
+
+		// The whole reason `forgetIfIdle` refused: this still works.
+		expect(h.service.awaiting()).toBe('unreadable');
 	});
 });

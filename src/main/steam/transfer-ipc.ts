@@ -78,20 +78,26 @@ export function registerTransferHandlers(transfer: TransferService, vault: Vault
 		return transfer.retryPersist();
 	});
 
-	/**
-	 * Read again a reply that arrived but could not be decoded.
-	 *
-	 * The bytes are the ones Steam already sent. Nothing is requested, because
-	 * nothing could be — the code is spent and the secrets are issued once.
-	 */
-	registerHandler(CHANNELS.transferRetryDecode, async () => {
-		requireUnlocked();
-		return transfer.retryDecode();
-	});
-
 	registerHandler(CHANNELS.transferStatus, () => {
+		// **Nothing while locked.** The lock handler deliberately keeps a transfer
+		// that is holding replacement material, which is right — but it left this
+		// channel answering with the account name, the SteamID and whether secrets
+		// were outstanding, to a renderer that has proved nothing. The activity log
+		// was gated for exactly this reason a moment ago; this surface is newer and
+		// was missed.
+		//
+		// Costs the recovery flow nothing: every caller reads it after unlocking.
+		if (!vault.isUnlocked()) {
+			return Promise.resolve({});
+		}
 		const current = transfer.current();
-		return Promise.resolve(current ? { transfer: current } : {});
+		if (!current) {
+			return Promise.resolve({});
+		}
+		// `live()` never expires a transfer while secrets are held, so whenever
+		// `awaiting` is set there is a `current` to report it against.
+		const awaiting = transfer.awaiting();
+		return Promise.resolve(awaiting ? { transfer: current, awaiting } : { transfer: current });
 	});
 
 	/**
@@ -103,6 +109,14 @@ export function registerTransferHandlers(transfer: TransferService, vault: Vault
 	 * that step gets its own channel rather than sharing this one.
 	 */
 	registerHandler(CHANNELS.transferCancel, () => {
+		// **Gated like the status it discharges.** Cancelling clears the
+		// unanswered-submission warning, and status is deliberately silent while
+		// locked — so without this, code in a locked renderer could erase the one
+		// record telling the owner to go and check their phone, before they ever
+		// unlocked to see it.
+		if (!vault.isUnlocked()) {
+			throw new VaultLockedError();
+		}
 		transfer.cancel();
 		return Promise.resolve({});
 	});

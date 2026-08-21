@@ -28,8 +28,19 @@ vi.mock('electron', () => ({
 
 const STEAM_ID = '76561198000000001';
 
-function harness(options: { unlocked?: boolean; authenticate?: unknown } = {}): {
-	transfer: { cancel: ReturnType<typeof vi.fn>; authenticate: ReturnType<typeof vi.fn> };
+function harness(
+	options: {
+		unlocked?: boolean;
+		authenticate?: unknown;
+		/** What the service says it is still waiting on, if anything. */
+		awaiting?: 'persist' | 'unanswered' | 'unreadable';
+	} = {}
+): {
+	transfer: {
+		cancel: ReturnType<typeof vi.fn>;
+		authenticate: ReturnType<typeof vi.fn>;
+		awaiting: ReturnType<typeof vi.fn>;
+	};
 	touched: () => number;
 } {
 	let touches = 0;
@@ -41,7 +52,8 @@ function harness(options: { unlocked?: boolean; authenticate?: unknown } = {}): 
 	const transfer = {
 		authenticate,
 		cancel: vi.fn(),
-		current: vi.fn(() => ({ steamId64: STEAM_ID, accountName: 'someone' }))
+		current: vi.fn(() => ({ steamId64: STEAM_ID, accountName: 'someone' })),
+		awaiting: vi.fn(() => options.awaiting)
 	};
 	const vault = {
 		isUnlocked: () => options.unlocked !== false,
@@ -144,5 +156,84 @@ describe('status and cancellation', () => {
 		const { transfer } = harness();
 		await expect(call(CHANNELS.transferCancel)).resolves.toEqual({});
 		expect(transfer.cancel).toHaveBeenCalledOnce();
+	});
+});
+
+/*
+ * Telling the renderer that a retry is owed.
+ *
+ * Every vault lock reloads the window, and the knowledge that a transfer was
+ * waiting to be saved lived only in that document's React state. Steam has
+ * already rotated the authenticator by then, so what the reload stranded was the
+ * only copy of a replacement Steam will not issue again — held in the main
+ * process, unreachable, until the process exited and took it with it.
+ *
+ * `awaiting` is what closes that: it names a step, carries no secret, and is the
+ * one signal that survives the reload.
+ */
+describe('reporting an outstanding retry', () => {
+	it('says nothing is owed on an ordinary pending transfer', async () => {
+		const { transfer } = harness();
+		await expect(call(CHANNELS.transferStatus, {})).resolves.toEqual({
+			transfer: { steamId64: STEAM_ID, accountName: 'someone' }
+		});
+		expect(transfer.awaiting).toHaveBeenCalled();
+	});
+
+	it('reports a decoded authenticator waiting to be written', async () => {
+		harness({ awaiting: 'persist' });
+		await expect(call(CHANNELS.transferStatus, {})).resolves.toMatchObject({
+			awaiting: 'persist'
+		});
+	});
+
+	it('reports a transfer that ended without a usable authenticator', async () => {
+		harness({ awaiting: 'unreadable' });
+		await expect(call(CHANNELS.transferStatus, {})).resolves.toMatchObject({
+			awaiting: 'unreadable'
+		});
+	});
+
+	it('carries no secret with it', async () => {
+		harness({ awaiting: 'persist' });
+		const status = await call(CHANNELS.transferStatus, {});
+		// It names a step. Everything else about the held secrets stays where it is.
+		expect(Object.keys(status as object).sort()).toEqual(['awaiting', 'transfer']);
+	});
+});
+
+/*
+ * The status channel while the vault is locked.
+ *
+ * The lock handler deliberately keeps a transfer that is holding replacement
+ * material — correct, and the reason it exists. But this channel then answered a
+ * locked renderer with the account name, the SteamID and whether secrets were
+ * outstanding. The activity log was gated for exactly this reason; this surface
+ * is newer and was missed.
+ */
+describe('transfer status while locked', () => {
+	it('answers normally while unlocked', async () => {
+		harness({ awaiting: 'persist' });
+		await expect(call(CHANNELS.transferStatus, {})).resolves.toMatchObject({
+			awaiting: 'persist'
+		});
+	});
+
+	it('says nothing at all while locked', async () => {
+		harness({ awaiting: 'persist', unlocked: false });
+		await expect(call(CHANNELS.transferStatus, {})).resolves.toEqual({});
+	});
+
+	it('does not name the account while locked', async () => {
+		harness({ awaiting: 'unreadable', unlocked: false });
+		expect(JSON.stringify(await call(CHANNELS.transferStatus, {}))).not.toContain(STEAM_ID);
+	});
+
+	it('does not ask the service anything while locked', async () => {
+		// The gate is ahead of the read, so a locked renderer cannot even learn that
+		// a transfer exists by timing the answer.
+		const { transfer } = harness({ awaiting: 'persist', unlocked: false });
+		await call(CHANNELS.transferStatus, {});
+		expect(transfer.awaiting).not.toHaveBeenCalled();
 	});
 });

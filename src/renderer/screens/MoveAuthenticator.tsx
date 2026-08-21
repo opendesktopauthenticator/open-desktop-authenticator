@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type {
 	TransferAuthenticated,
 	TransferComplete,
-	TransferStartChallenge
+	TransferStartChallenge,
+	TransferStatus
 } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
@@ -39,7 +40,7 @@ export function MoveAuthenticator({
 	onStartChallenge,
 	onComplete,
 	onRetryPersist,
-	onRetryDecode,
+	onStatus,
 	onClose
 }: {
 	onAuthenticate: (
@@ -56,8 +57,15 @@ export function MoveAuthenticator({
 	onComplete: (smsCode: string) => Promise<TransferComplete>;
 	/** Stores a replacement Steam already issued. Steam is not asked again. */
 	onRetryPersist: () => Promise<TransferComplete>;
-	/** Reads a reply that arrived but could not be decoded. Steam is not contacted. */
-	onRetryDecode: () => Promise<TransferComplete>;
+	/**
+	 * Asks the main process what, if anything, this transfer is still waiting on.
+	 *
+	 * The screen cannot answer that itself after a vault lock: locking reloads the
+	 * window, and every piece of state below is gone. The secrets are not — they
+	 * are held in the main process, and this is how the screen finds out it is
+	 * supposed to come back for them.
+	 */
+	onStatus: () => Promise<TransferStatus>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [accountName, setAccountName] = useState('');
@@ -79,6 +87,51 @@ export function MoveAuthenticator({
 	 * anything here succeeds afterwards.
 	 */
 	const [committed, setCommitted] = useState(false);
+	/**
+	 * The retry the main process says is outstanding, straight from its own state.
+	 *
+	 * Authoritative in a way nothing else on this screen is. Everything above is
+	 * lost when the vault locks and reloads the window; this is read back
+	 * afterwards, which is what lets a rotated-but-unsaved authenticator be
+	 * finished instead of stranded.
+	 */
+	const [awaiting, setAwaiting] = useState<'persist' | 'unanswered' | 'unreadable' | undefined>(
+		undefined
+	);
+
+	/**
+	 * Asked once on mount.
+	 *
+	 * Through a ref because the parent re-renders every second to drive the
+	 * auto-lock countdown, handing down a fresh callback each time — the same trap
+	 * that had the confirmations screen polling Steam once a second.
+	 */
+	const statusRef = useRef(onStatus);
+	useEffect(() => {
+		statusRef.current = onStatus;
+	}, [onStatus]);
+
+	useEffect(() => {
+		let cancelled = false;
+		statusRef
+			.current()
+			.then((status) => {
+				if (cancelled || !status.awaiting) {
+					return;
+				}
+				// Steam has already rotated the authenticator, whatever this document
+				// happens to know. Saying so is the whole point of asking.
+				setAwaiting(status.awaiting);
+				setCommitted(true);
+			})
+			.catch(() => {
+				// A status check that fails is not worth a message. The user either has
+				// a normal transfer to start, or will find out from the retry itself.
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, []);
 
 	const submit = async (event: React.FormEvent): Promise<void> => {
 		event.preventDefault();
@@ -124,18 +177,42 @@ export function MoveAuthenticator({
 		}
 		setBusy(true);
 		setError(undefined);
+		// Set *before* the request, and that is deliberate: a request that times out
+		// may still have rotated the authenticator, so the pessimistic assumption is
+		// the safe one. What follows in the catch is how it gets taken back.
 		setCommitted(true);
 		try {
 			setDone(await onComplete(smsCode));
 			setSmsCode('');
 		} catch (err) {
 			setError(messageOf(err));
+			// **Ask whether anything is actually held.**
+			//
+			// A mistyped code is the ordinary failure here, and Steam rejects it
+			// without changing a thing. The screen used to keep `committed` anyway,
+			// so it hid Close, announced that the authenticator had been replaced,
+			// and offered "Try saving again" — which calls `retryPersist`, which
+			// throws "There is no unsaved authenticator to store." The user was told
+			// an irreversible thing had happened, then trapped on the screen saying
+			// so, over a typo.
+			//
+			// The main process knows the truth: nothing held means nothing happened.
+			try {
+				const status = await statusRef.current();
+				setAwaiting(status.awaiting);
+				if (!status.awaiting) {
+					setCommitted(false);
+				}
+			} catch {
+				// Unreachable in practice, and if it is not, the pessimistic state is
+				// the one to keep. Leaving `committed` set costs the user a Close
+				// button; clearing it wrongly would offer to cancel a transfer that
+				// really had gone through.
+			}
 		} finally {
 			setBusy(false);
 		}
 	};
-
-	const unread = /could not be read/.test(error ?? '');
 
 	const retrySave = async (): Promise<void> => {
 		if (busy) {
@@ -144,9 +221,11 @@ export function MoveAuthenticator({
 		setBusy(true);
 		setError(undefined);
 		try {
-			// Whichever stage failed, the way forward is the same button: read the
-			// reply if it was never understood, store it if it was.
-			setDone(await (unread ? onRetryDecode() : onRetryPersist()));
+			// Storage is the only stage that can be retried at all — see `awaiting`.
+			setDone(await onRetryPersist());
+			// Nothing is outstanding any more. Cleared explicitly so the recovery
+			// branch cannot re-assert itself over the success screen.
+			setAwaiting(undefined);
 		} catch (err) {
 			setError(messageOf(err));
 		} finally {
@@ -160,6 +239,147 @@ export function MoveAuthenticator({
 	 * Shown only once the secrets are provably on disk, and it will not let the
 	 * user leave by pretending. Steam issues this code once; the account it
 	 * belongs to now depends on this machine.
+	 */
+	/*
+	 * Picking a transfer back up after the window reloaded under it.
+	 *
+	 * Reached when the main process reports an outstanding retry and this document
+	 * has no memory of the transfer — which is exactly the state a vault lock
+	 * leaves behind, because locking reloads the window and everything above is
+	 * per-document. Steam has already rotated the authenticator by this point, so
+	 * the only copy of the replacement is the one being held for this screen.
+	 *
+	 * Placed before `done` and `authenticated` because neither survives a reload:
+	 * without it the screen offered a fresh sign-in form and the held secrets were
+	 * unreachable until the process exited and took them with it.
+	 */
+	if (awaiting === 'unreadable' && !done) {
+		return (
+			<main className="shell">
+				<h1>This transfer cannot be completed</h1>
+				<p className="lede">
+					Steam replaced the authenticator on this account, and this version could not read what it
+					sent back.
+				</p>
+				<div className="notice">
+					<strong>The account still has Steam Guard, and nothing here holds it.</strong>
+					<p className="hint">
+						There is nothing to retry: the reply was already read as carefully as this version knows
+						how, and reading it again would do exactly the same thing. Steam Support is the route
+						back into the account.
+					</p>
+				</div>
+				{error ? <p className="error">{error}</p> : undefined}
+				<div className="controls">
+					<button
+						type="button"
+						className="secondary"
+						onClick={() => {
+							void onCancel().catch(() => undefined);
+							onClose();
+						}}
+					>
+						Close
+					</button>
+				</div>
+			</main>
+		);
+	}
+
+	/*
+	 * A submission that went out and was never answered.
+	 *
+	 * Nothing is held, and that is what makes it dangerous rather than harmless:
+	 * the request may have reached Steam and rotated the authenticator. Reported
+	 * separately because every other state here can say what happened, and this
+	 * one cannot — the only way to find out is the phone.
+	 */
+	if (awaiting === 'unanswered' && !done) {
+		return (
+			<main className="shell">
+				<h1>This transfer was not answered</h1>
+				<p className="lede">
+					The code was submitted and the connection failed before Steam replied. This application
+					cannot tell whether the authenticator was replaced.
+				</p>
+				<div className="notice">
+					<strong>Do not assume it went through, and do not assume it did not.</strong>
+					<p className="hint">
+						Open the Steam mobile app and look at this account. If it still shows a Steam Guard
+						code, nothing changed and you can start again. If it no longer does, the transfer
+						reached Steam and the new authenticator was never delivered here — Steam Support is the
+						route back in.
+					</p>
+				</div>
+				{error ? <p className="error">{error}</p> : undefined}
+				<div className="controls">
+					{/* No retry, and no second submission. The code is spent either way,
+					    and sending another would be a second irreversible request made on
+					    a guess about the first. Closing is the only honest control. */}
+					<button
+						type="button"
+						className="secondary"
+						onClick={() => {
+							void onCancel().catch(() => undefined);
+							onClose();
+						}}
+					>
+						I have checked the Steam app
+					</button>
+				</div>
+			</main>
+		);
+	}
+
+	// **`=== 'persist'`, not a truthy check.**
+	//
+	// This was `awaiting && !authenticated`, which caught every outstanding state
+	// — including the two above it that have their own screens. `authenticated` is
+	// undefined after the reload a lock causes, so a transfer that had ended
+	// unusably landed here instead: on a screen telling the user secrets were held
+	// and would be lost if they quit, offering a "Save it now" that calls
+	// `retryPersist` and throws "There is no unsaved authenticator to store".
+	//
+	// Exactly the trap removing the decode retry was meant to close, reintroduced
+	// by the order these branches sit in.
+	if (awaiting === 'persist' && !authenticated && !done) {
+		return (
+			<main className="shell">
+				<h1>Finish moving this authenticator</h1>
+				<p className="lede">
+					Steam has already replaced the authenticator on this account. The new one has not been
+					saved here yet — it was interrupted, most likely by the vault locking.
+				</p>
+				<div className="notice">
+					<strong>Do not close this window until it is saved.</strong>
+					<p className="hint">
+						Steam issues these secrets once and will not send them again. They are held in memory
+						and will be lost if this application exits.
+					</p>
+				</div>
+				<p className="hint">
+					The new authenticator was read successfully and still needs writing to the vault. Trying
+					again only stores it; Steam is not contacted.
+				</p>
+				{error ? <p className="error">{error}</p> : undefined}
+				<div className="controls">
+					<button type="button" disabled={busy} onClick={() => void retrySave()}>
+						{busy ? 'Working…' : 'Save it now'}
+					</button>
+				</div>
+			</main>
+		);
+	}
+
+	/*
+	 * Steam rotated the authenticator and sent back something this build cannot
+	 * use — a reply that would not decode, or a replacement it would not validate.
+	 *
+	 * A dead end, and the screen says so. An earlier version kept the bytes and
+	 * offered to try again: the retry ran the same pure decoder over the same
+	 * bytes and could only fail the same way, and the encrypted copy it wrote had
+	 * nothing anywhere able to read it. Offering a recovery that cannot recover is
+	 * worse than saying plainly that there is none.
 	 */
 	if (done) {
 		return (
@@ -213,10 +433,21 @@ export function MoveAuthenticator({
 		return (
 			<main className="shell">
 				<h1>Signed in to {authenticated.accountName}</h1>
-				<p className="lede">
-					Nothing on the Steam account has changed yet, and the authenticator on your phone is still
-					the one in charge.
-				</p>
+				{/* Conditional, because the same branch renders after a submission that
+				    failed to save. Unconditionally, this reassured the user that nothing
+				    had changed while the controls beside it offered to retry storing an
+				    authenticator Steam had already rotated — the same contradiction the
+				    removed "nothing will happen" line created one step further down. */}
+				{committed ? (
+					<p className="lede">
+						Steam has already replaced the authenticator on this account. It is not saved here yet.
+					</p>
+				) : (
+					<p className="lede">
+						Nothing on the Steam account has changed yet, and the authenticator on your phone is
+						still the one in charge.
+					</p>
+				)}
 
 				<div className="notice">
 					<strong>The next step is the one that cannot be undone.</strong>
@@ -264,10 +495,6 @@ export function MoveAuthenticator({
 								again in a few minutes.
 							</p>
 						)}
-						<p className="hint">
-							Submitting that code is not built yet, so nothing further will happen to this account.
-							The authenticator on your phone is still the one in charge.
-						</p>
 					</div>
 				) : (
 					<p className="hint">
@@ -314,7 +541,10 @@ export function MoveAuthenticator({
 							{busy ? 'Working…' : 'Replace the authenticator'}
 						</button>
 					) : undefined}
-					{committed && error ? (
+					{committed && error && awaiting !== 'unreadable' ? (
+						// Storage only. A decode failure is deterministic, so a button for
+						// it would be a button that cannot succeed — the text above says so
+						// instead.
 						<button type="button" disabled={busy} onClick={() => void retrySave()}>
 							Try saving again
 						</button>

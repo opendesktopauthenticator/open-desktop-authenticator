@@ -316,7 +316,24 @@ export const transferCompleteResponse = z.object({
 
 /** The transfer in progress, if one is still live. */
 export const transferStatusResponse = z.object({
-	transfer: z.object({ steamId64: z.string(), accountName: z.string() }).optional()
+	transfer: z.object({ steamId64: z.string(), accountName: z.string() }).optional(),
+	/**
+	 * The retry this transfer is waiting on, when it is waiting on one.
+	 *
+	 * Carries no secret — it names a *step*, and both steps are already their own
+	 * channel. It exists because every vault lock reloads the renderer, and the
+	 * knowledge that a retry was owed lived only in React state that the reload
+	 * destroyed. Steam had already rotated the authenticator by then, so what the
+	 * reload stranded was the only copy of the replacement.
+	 *
+	 * `persist` — decoded, and the vault refused it. Retrying storage works, and
+	 *   this is the only one of the three that can still be finished here.
+	 * `unanswered` — the request went out and nothing came back, so whether the
+	 *   authenticator was replaced is genuinely not known.
+	 * `unreadable` — Steam answered, so it rotated, and this build cannot use what
+	 *   it sent. A dead end: the account needs Steam Support.
+	 */
+	awaiting: z.enum(['persist', 'unanswered', 'unreadable']).optional()
 });
 
 export type TransferAuthenticated = z.infer<typeof transferAuthenticateResponse>;
@@ -606,7 +623,17 @@ export const confirmationsListResponse = z.object({
 	 */
 	signInRequired: z.boolean(),
 	/** Why, in terms the user can act on. Present when `signInRequired`. */
-	reason: z.string().optional()
+	reason: z.string().optional(),
+	/**
+	 * How many entries Steam sent that this build could not read.
+	 *
+	 * Required rather than optional, so a handler cannot omit it and leave the
+	 * screen quietly reporting a short list as a complete one. Carries a count and
+	 * nothing else — the reason an entry failed to parse is a schema detail the
+	 * renderer has no use for, and echoing unparsed content back would hand
+	 * attacker-influenced text to the UI without passing the caps in `protocol.ts`.
+	 */
+	unreadable: z.number().int().min(0)
 });
 
 /**
@@ -629,13 +656,32 @@ export const activityEntry = z.discriminatedUnion('kind', [
 		reason: z.string()
 	}),
 	z.object({ kind: z.literal('failed'), at: z.string(), reason: z.string() }),
-	z.object({ kind: z.literal('halted'), at: z.string(), reason: z.string() })
+	z.object({ kind: z.literal('halted'), at: z.string(), reason: z.string() }),
+	/**
+	 * Steam sent confirmations this build could not read.
+	 *
+	 * Its own kind because it is neither an approval nor a hold: there is no
+	 * confirmation to name, only a count of entries that were skipped. Automatic
+	 * confirmation runs while nobody is watching, so without this the pass would
+	 * simply record nothing — and what it skipped might have been the
+	 * account-recovery confirmation.
+	 */
+	z.object({ kind: z.literal('unreadable'), at: z.string(), count: z.number().int().min(1) })
 ]);
 
 export const activityListResponse = z.object({
 	entries: z.array(z.object({ steamId64: z.string(), entry: activityEntry })),
 	/** True while something is waiting that a person genuinely needs to look at. */
-	urgent: z.boolean()
+	urgent: z.boolean(),
+	/**
+	 * How far this snapshot goes.
+	 *
+	 * Sent back when acknowledging, so the alert is discharged only for what was
+	 * actually on screen. Listing and acknowledging are separate round trips, and
+	 * an automatic pass finishing between them would otherwise be marked seen by
+	 * somebody who never saw it.
+	 */
+	seq: z.number().int().min(0)
 });
 
 export const confirmationsActRequest = z
@@ -694,10 +740,6 @@ export const IPC_CONTRACT = {
 		response: transferCompleteResponse
 	},
 	[CHANNELS.transferRetryPersist]: {
-		request: emptyRequest,
-		response: transferCompleteResponse
-	},
-	[CHANNELS.transferRetryDecode]: {
 		request: emptyRequest,
 		response: transferCompleteResponse
 	},
@@ -871,7 +913,11 @@ export const IPC_CONTRACT = {
 	[CHANNELS.codeCopy]: { request: codeCopyRequest, response: codeCopyResponse },
 
 	[CHANNELS.activityList]: { request: emptyRequest, response: activityListResponse },
-	[CHANNELS.activityAcknowledge]: { request: emptyRequest, response: okResponse },
+	[CHANNELS.activityAcknowledge]: {
+		// The snapshot the user actually read, not "everything up to now".
+		request: z.object({ upTo: z.number().int().min(0) }).strict(),
+		response: okResponse
+	},
 
 	[CHANNELS.confirmationsList]: {
 		request: z.object({ steamId64: z.string() }).strict(),
@@ -962,7 +1008,6 @@ export interface RendererApi {
 	startTransferChallenge(): Promise<TransferStartChallenge>;
 	completeTransfer(smsCode: string): Promise<TransferComplete>;
 	retryTransferPersist(): Promise<TransferComplete>;
-	retryTransferDecode(): Promise<TransferComplete>;
 	getTransferStatus(): Promise<TransferStatus>;
 	cancelTransfer(): Promise<object>;
 	beginEnrollment(accountName: string, password: string, proxyUrl?: string): Promise<EnrollBegin>;
@@ -1039,7 +1084,11 @@ export interface RendererApi {
 	/** What automatic confirmation did while nobody was watching. */
 	listActivity(): Promise<ActivityList>;
 	/** Mark the log as seen, so the "needs you" alert can be discharged. */
-	acknowledgeActivity(): Promise<{ ok: true }>;
+	/**
+	 * @param upTo the `seq` from the listing the user actually saw. Anything
+	 * recorded after that snapshot stays unacknowledged.
+	 */
+	acknowledgeActivity(upTo: number): Promise<{ ok: true }>;
 	/** Pending confirmations for one account. */
 	listConfirmations(steamId64: string): Promise<ConfirmationsList>;
 	/** Approve or deny by id. The nonce never leaves the main process. */

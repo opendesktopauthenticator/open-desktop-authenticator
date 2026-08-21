@@ -99,8 +99,6 @@ const api: RendererApi = {
 		ipcRenderer.invoke(CHANNELS.transferComplete, { smsCode }) as Promise<TransferComplete>,
 	retryTransferPersist: () =>
 		ipcRenderer.invoke(CHANNELS.transferRetryPersist, {}) as Promise<TransferComplete>,
-	retryTransferDecode: () =>
-		ipcRenderer.invoke(CHANNELS.transferRetryDecode, {}) as Promise<TransferComplete>,
 	getTransferStatus: () =>
 		ipcRenderer.invoke(CHANNELS.transferStatus, {}) as Promise<TransferStatus>,
 	cancelTransfer: () => ipcRenderer.invoke(CHANNELS.transferCancel, {}) as Promise<object>,
@@ -176,8 +174,8 @@ const api: RendererApi = {
 		}>,
 
 	listActivity: () => ipcRenderer.invoke(CHANNELS.activityList, {}) as Promise<ActivityList>,
-	acknowledgeActivity: () =>
-		ipcRenderer.invoke(CHANNELS.activityAcknowledge, {}) as Promise<{ ok: true }>,
+	acknowledgeActivity: (upTo: number) =>
+		ipcRenderer.invoke(CHANNELS.activityAcknowledge, { upTo }) as Promise<{ ok: true }>,
 	listConfirmations: (steamId64: string) =>
 		ipcRenderer.invoke(CHANNELS.confirmationsList, { steamId64 }) as Promise<ConfirmationsList>,
 	actOnConfirmations: (steamId64: string, action: 'allow' | 'cancel', ids: string[]) =>

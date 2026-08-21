@@ -7,7 +7,7 @@ import {
 	TransferApiError,
 	type StartChallengeResult
 } from './transfer-api';
-import { decodeContinueResponse, type ReplacementToken } from './transfer-proto';
+import type { ReplacementToken } from './transfer-proto';
 import {
 	accountFromReplacement,
 	offsetFrom,
@@ -82,6 +82,65 @@ function scrub(message: string, secrets: string[]): string {
 	return out;
 }
 
+/**
+ * The saved session, or a refusal that says why it is gone.
+ *
+ * A transfer that was locked partway through keeps its identity and loses its
+ * credentials, so every call that would reach Steam has to stop here rather than
+ * discover an `undefined` further down.
+ */
+function requireSession(refreshToken: string | undefined): string {
+	if (refreshToken === undefined) {
+		throw new TransferError(
+			'The vault locked during this transfer, so its Steam session was dropped. Sign in again ' +
+				'to continue.',
+			false
+		);
+	}
+	return refreshToken;
+}
+
+/**
+ * A transfer that ended without a usable authenticator.
+ *
+ * Two shapes, and the difference is the whole point of recording it:
+ *
+ *  - `unanswered` — the request went out and nothing came back. Steam may or may
+ *    not have acted. The user has to look at their phone to find out.
+ *  - `unreadable` — Steam answered, so it rotated, and this build cannot use
+ *    what it sent. That is a dead end, and the account needs Steam Support.
+ *
+ * Holds a name and an id, never a credential, so it can outlive a lock — losing
+ * it would cost the user the only record that either happened.
+ */
+interface TerminalTransfer {
+	steamId64: string;
+	accountName: string;
+	kind: 'unanswered' | 'unreadable';
+}
+
+/**
+ * What to tell somebody whose reply this build could not use.
+ *
+ * One sentence, said the same way from both places that reach it — a decoder
+ * that threw and a replacement that would not validate are the same situation
+ * to the person reading it.
+ *
+ * It says Steam Support without softening, because there is no other route. An
+ * earlier version kept the bytes and offered to try again; the retry ran the
+ * same pure decoder over the same bytes, and the copy it saved had nothing able
+ * to read it. Offering a recovery that cannot recover is worse than saying
+ * plainly that there is none.
+ */
+function unreadableMessage(accountName: string, reason?: string): string {
+	return (
+		`Steam replaced the authenticator on ${accountName}, and this version could not read what ` +
+		`it sent back${reason ? ` (${reason})` : ''}. That cannot be recovered here. The account ` +
+		'still has Steam Guard — it is now an authenticator nothing holds — so Steam Support is ' +
+		'the route back into it.'
+	);
+}
+
 /** How long an authenticated-but-unfinished transfer stays usable. */
 const PENDING_TTL_MS = 15 * 60_000;
 
@@ -145,7 +204,18 @@ export interface TransferServiceOptions {
 interface PendingTransfer {
 	steamId64: string;
 	accountName: string;
-	refreshToken: string;
+	/**
+	 * **Dropped when a lock happens mid-submission.**
+	 *
+	 * `forgetIfIdle` refuses to clear `pending` while a submission is in the air,
+	 * because `pending` is the identity a retained reply is validated against —
+	 * but it also holds a refresh token and an access token, and nothing stripped
+	 * those when the request settled. A lock therefore left a live Steam session
+	 * behind, usable to start another challenge, for as long as the vault stayed
+	 * shut. What recovery needs is the identity; what it does not need is the
+	 * credentials.
+	 */
+	refreshToken: string | undefined;
 	accessToken: string | undefined;
 	/** Carried so every later call in this transfer takes the same route. */
 	proxyUrl: string | undefined;
@@ -167,8 +237,32 @@ export class TransferService {
 	/** At most one transfer at a time. A second would race the first over storage. */
 	private pending: PendingTransfer | undefined;
 
+	/**
+	 * A submission that ended without a usable authenticator.
+	 *
+	 * Set when the irreversible request failed with no reply at all — a timeout, a
+	 * reset, a dead proxy. Steam may well have received it and rotated the
+	 * authenticator; absence of an answer is not evidence of absence of an action.
+	 *
+	 * Held **separately from `pending`** so a lock can drop the tokens and still
+	 * leave the warning standing. It carries no credential — a name and an id — so
+	 * outliving a lock costs nothing, and losing it would cost the user the only
+	 * hint that they need to go and look at their phone.
+	 */
+	private terminal: TerminalTransfer | undefined;
+
 	/** Guards against a double-clicked button starting two sign-ins. */
 	private authenticating = false;
+
+	/**
+	 * Bumped whenever a lock disowns this transfer.
+	 *
+	 * Work already in the air cannot be recalled, only refused on arrival. An
+	 * operation captures this before it awaits and checks it after; a changed
+	 * value means "a lock happened while I was working", and the only correct
+	 * response is to keep nothing.
+	 */
+	private generation = 0;
 
 	/** The same guard for the challenge, where a double press costs a text message. */
 	private challenging = false;
@@ -185,19 +279,6 @@ export class TransferService {
 	 * once.
 	 */
 	private unsaved: { account: Account; token: ReplacementToken } | undefined;
-
-	/**
-	 * Steam's reply, exactly as it arrived, kept until it is safely stored.
-	 *
-	 * Decoding is the one step between Steam rotating an authenticator and this
-	 * application holding anything at all, and a parse failure there would
-	 * otherwise destroy the only copy of secrets that are issued once. Held so
-	 * that `retryDecode` can have another go — at a bug, a schema surprise, or
-	 * anything else that made the first attempt throw.
-	 *
-	 * Memory only. It is raw secret material and never touches disk unsealed.
-	 */
-	private rawReply: Buffer | undefined;
 
 	constructor(
 		vault: VaultService,
@@ -237,6 +318,28 @@ export class TransferService {
 		if (this.authenticating) {
 			throw new TransferError('A sign-in for this transfer is already in progress.', false);
 		}
+		// **Refused while a replacement is still held.**
+		//
+		// An unstored replacement is only meaningful next to the `pending` it belongs
+		// to: that is the account name and routing it is stored under, and the
+		// SteamID it was validated against. Signing in as somebody else overwrote all
+		// of it while the replacement stayed the same, so what was held for account A
+		// was suddenly labelled account B — recovery
+		// then either refused on a SteamID mismatch or ran with the wrong context.
+		//
+		// There is no safe merge here. The only correct answer is to finish the
+		// transfer that is already outstanding.
+		if (this.unsaved !== undefined || this.terminal !== undefined) {
+			throw new TransferError(
+				'Another transfer has not finished: Steam has already replaced an authenticator and it ' +
+					'is not saved yet. Finish that one before signing in to a different account.',
+				false
+			);
+		}
+		// Captured before anything is awaited. Read after the sign-in instead and it
+		// would be the value the lock already changed, so the guard would agree with
+		// itself and catch nothing.
+		const generation = this.generation;
 		const code = steamGuardCode.trim().toUpperCase();
 		if (!code) {
 			throw new TransferError('Enter the Steam Guard code shown in the Steam mobile app.', false);
@@ -280,6 +383,22 @@ export class TransferService {
 			 */
 			this.refuseIfAlreadyHeld(steamId64);
 
+			/*
+			 * **Disowned by a lock that happened while this was in the air.**
+			 *
+			 * `result` holds a MobileApp refresh token and an access token —
+			 * credentials as real as the password that produced them. Installing them
+			 * now would undo the lock that has just dropped everything else, and they
+			 * would sit there for as long as the vault stayed shut. Nothing is kept:
+			 * the user signs in again, which costs them one form.
+			 */
+			if (this.generation !== generation) {
+				throw new TransferError(
+					'The vault locked while signing in, so nothing was kept. Unlock and start again.',
+					false
+				);
+			}
+
 			this.pending = {
 				steamId64,
 				accountName,
@@ -311,6 +430,13 @@ export class TransferService {
 				false
 			);
 		}
+		if (this.unsaved !== undefined || this.terminal !== undefined) {
+			throw new TransferError(
+				'This transfer has not finished. Asking Steam to text another code cannot help, and ' +
+					'spends a message and a rate limit that the unfinished one may still need.',
+				false
+			);
+		}
 		if (this.challenging) {
 			throw new TransferError('Steam has already been asked for a code.', false);
 		}
@@ -331,7 +457,9 @@ export class TransferService {
 			const accessToken = await this.mint(
 				transport,
 				pending.steamId64,
-				pending.refreshToken,
+				// Absent when a lock dropped the session mid-transfer. Nothing may talk
+				// to Steam again on this transfer without a fresh sign-in.
+				requireSession(pending.refreshToken),
 				this.now()
 			);
 			pending.accessToken = accessToken;
@@ -359,6 +487,23 @@ export class TransferService {
 	 * nothing claims to have worked.
 	 */
 	async completeTransfer(smsCode: string): Promise<TransferComplete> {
+		// **Before `live()`.** A lock clears `pending` while keeping `uncertain`, so
+		// placed after the expiry check this said "that transfer has expired" for a
+		// submission whose outcome is unknown — technically true and exactly the
+		// wrong thing to tell somebody who needs to go and look at their phone.
+		if (this.terminal !== undefined) {
+			// Two different dead ends, and one message for both would be wrong for
+			// whichever it was not: `unanswered` means go and look at the phone,
+			// `unreadable` means the account needs Steam Support.
+			throw new TransferError(
+				this.terminal.kind === 'unanswered'
+					? 'The last submission was never answered, so this application cannot tell whether ' +
+							'the authenticator was replaced. Check the Steam mobile app before trying ' +
+							'anything else.'
+					: unreadableMessage(this.terminal.accountName),
+				false
+			);
+		}
 		const pending = this.live();
 		if (!pending) {
 			throw new TransferError(
@@ -369,6 +514,24 @@ export class TransferService {
 		}
 		if (this.submitting) {
 			throw new TransferError('That code is already being submitted.', false);
+		}
+		/*
+		 * **Refused once anything is outstanding.**
+		 *
+		 * A second submission cannot help and can mislead. Steam answers a spent
+		 * code with `success: false`, which this reads — correctly, for a *first*
+		 * attempt — as "nothing rotated". Reached after a transfer that already
+		 * ended, it would report an account whose authenticator has been rotated
+		 * away as though the transfer had simply been refused.
+		 *
+		 * The screen no longer offers the button; this is the channel behind it.
+		 */
+		if (this.unsaved !== undefined || this.terminal !== undefined) {
+			throw new TransferError(
+				'Steam has already replaced this authenticator and the result is still unsaved. ' +
+					'Sending the code again cannot help and would discard what it sent back.',
+				false
+			);
 		}
 		const code = smsCode.trim();
 		if (!code) {
@@ -388,7 +551,9 @@ export class TransferService {
 			const accessToken = await this.mint(
 				transport,
 				pending.steamId64,
-				pending.refreshToken,
+				// Absent when a lock dropped the session mid-transfer. Nothing may talk
+				// to Steam again on this transfer without a fresh sign-in.
+				requireSession(pending.refreshToken),
 				this.now()
 			);
 
@@ -399,8 +564,21 @@ export class TransferService {
 			 * read the reply, because Steam may have rotated the authenticator
 			 * anyway. That is surfaced as an uncertain outcome, not a failed one.
 			 */
-			const result = await this.performContinue(transport, accessToken, code, (body) => {
-				this.rawReply = body;
+			/*
+			 * Whether a body arrived, not the body itself.
+			 *
+			 * The bytes used to be retained so a "read it again" retry could be
+			 * offered. That retry could never work: `decodeContinueResponse` is pure,
+			 * so a reply that failed once fails identically every time, and there was
+			 * never anything able to read the copy it was saved to. What is actually
+			 * needed here is the *distinction* — a reply that arrived and could not be
+			 * understood is a different statement from no reply at all — and a boolean
+			 * carries that without keeping secret material nothing can use.
+			 */
+			let bodyArrived = false;
+
+			const result = await this.performContinue(transport, accessToken, code, () => {
+				bodyArrived = true;
 			}).catch((err: unknown) => {
 				/*
 				 * Two very different failures arrive here, and telling them apart is
@@ -414,89 +592,195 @@ export class TransferService {
 				 * frightening in a way that invites the wrong reaction.
 				 */
 				if (err instanceof TransferApiError) {
-					this.rawReply = undefined;
 					throw new TransferError(err.message, false);
 				}
 
 				/*
-				 * Anything else is a reply that arrived and could not be understood.
-				 * Steam was not refusing, so the authenticator has very likely rotated
-				 * already, and what replaced it is sitting in `rawReply` and nowhere
-				 * else. Saying "it failed" here would invite closing the window.
+				 * **No body ever arrived.** A timeout, a reset or a dead proxy rejects
+				 * before `onRaw` is called — but the request may well have reached
+				 * Steam and been acted on. Absence of a reply is not evidence of
+				 * absence of a rotation.
+				 *
+				 * Recorded rather than merely described: `awaiting()` answering
+				 * "nothing outstanding" is what let the screen conclude the submission
+				 * had not happened and re-offer both Cancel and a second irreversible
+				 * submit.
 				 */
-				throw new TransferError(
-					'Steam answered but the reply could not be read. Your authenticator has probably ' +
-						'been replaced already, and the details are still held here — do not close this ' +
-						'window. Use Try again to store them.',
-					false
-				);
+				if (!bodyArrived) {
+					this.finish(pending, 'unanswered');
+					throw new TransferError(
+						'The connection failed before Steam answered, so this application cannot tell ' +
+							'whether the authenticator was replaced. Do not assume it was not. Check the ' +
+							'Steam mobile app: if it no longer shows a code for this account, the ' +
+							'transfer went through and you will need Steam Support to recover it.',
+						false
+					);
+				}
+
+				/*
+				 * A reply arrived and could not be understood. Steam was not refusing,
+				 * so the authenticator has rotated and this build cannot use what
+				 * replaced it. That is a dead end, and saying so is the only honest
+				 * thing left — see `finish`.
+				 */
+				this.finish(pending, 'unreadable');
+				throw new TransferError(unreadableMessage(pending.accountName), false);
 			});
 			if (!result.success) {
-				/*
-				 * Steam read the request and refused it, so nothing rotated and the
-				 * reply holds nothing worth keeping.
-				 *
-				 * Dropping it matters: a retained `rawReply` makes `hasUnreadReply`
-				 * answer yes and stops the pending transfer ever lapsing, so a
-				 * mistyped code would leave the session immortal and the screen
-				 * offering to "read the reply again" when there is nothing in it.
-				 */
-				this.rawReply = undefined;
+				// Steam read the request and refused it, so nothing rotated.
 				throw new TransferError(
 					'Steam did not accept that code. Nothing has changed — check the code and try again.',
 					false
 				);
 			}
 
-			validateReplacement(result.replacementToken, pending.steamId64);
-			const account = accountFromReplacement(
-				result.replacementToken,
-				pending.accountName,
-				pending.proxyUrl,
-				new Date(this.now()).toISOString()
-			);
+			/*
+			 * **Decoded is not the same as usable, and both are irreplaceable.**
+			 *
+			 * A reply can parse perfectly and still fail here — a SteamID that does
+			 * not match, or a replacement built on a Guard scheme this build does not
+			 * know. Steam has rotated the authenticator either way, and these bytes
+			 * are still the only copy of what replaced it. Saving only on a decoder
+			 * exception left exactly this case in memory, to be lost on quit.
+			 */
+			let account: Account;
+			try {
+				validateReplacement(result.replacementToken, pending.steamId64);
+				account = accountFromReplacement(
+					result.replacementToken,
+					pending.accountName,
+					pending.proxyUrl,
+					new Date(this.now()).toISOString()
+				);
+			} catch (err) {
+				// Decoded and still unusable — a SteamID that does not match, or a Guard
+				// scheme this build does not know. Steam rotated the authenticator
+				// either way, so this is the same dead end as a reply that would not
+				// parse, and it gets the same answer.
+				//
+				// The reason is carried through: "a replacement issued for a different
+				// account" and "no login secret" say different things about what went
+				// wrong, and a support conversation starts from whichever it was.
+				this.finish(pending, 'unreadable');
+				throw new TransferError(
+					unreadableMessage(pending.accountName, err instanceof Error ? err.message : undefined),
+					false
+				);
+			}
 			this.unsaved = { account, token: result.replacementToken };
 
 			return await this.persist();
 		} finally {
 			this.submitting = false;
+			// The lock could not clear `pending` while this was running, so it does it
+			// here instead — keeping the identity a retained reply needs and dropping
+			// the session that has no business outliving the lock.
 		}
 	}
 
 	/**
-	 * Have another go at reading a reply that could not be decoded.
+	 * Which retry, if any, this transfer is waiting on.
 	 *
-	 * Separate from `retryPersist` because the failure is at a different stage:
-	 * nothing has been understood yet, so there is no account to store. Steam is
-	 * not contacted — the bytes are the ones it already sent.
+	 * Exists so the *renderer* can find out. Every lock reloads the window, which
+	 * destroys the React state that was the only record that a retry was owed —
+	 * and the status channel could not express it, so a reload after a failed
+	 * persist left one-time secrets held here with nothing able to ask for them
+	 * again. They then died with the process, on an account whose authenticator
+	 * Steam had already rotated.
 	 */
-	async retryDecode(): Promise<TransferComplete> {
-		const body = this.rawReply;
-		const pending = this.pending;
-		if (!body || !pending) {
-			throw new TransferError('There is no unread reply from Steam to retry.', false);
-		}
-
-		const result = decodeContinueResponse(body);
-		if (!result.success) {
-			throw new TransferError("Steam's reply says the transfer did not complete.", false);
-		}
-		validateReplacement(result.replacementToken, pending.steamId64);
-		this.unsaved = {
-			account: accountFromReplacement(
-				result.replacementToken,
-				pending.accountName,
-				pending.proxyUrl,
-				new Date(this.now()).toISOString()
-			),
-			token: result.replacementToken
-		};
-		return this.persist();
+	/**
+	 * Forget the Steam session while keeping who the transfer is for.
+	 *
+	 * Called when a lock lands during the one request that cannot be interrupted.
+	 * Afterwards `retryPersist` still works — it needs a name, a SteamID and a
+	 * route — while nothing can talk to Steam again without a fresh sign-in.
+	 */
+	private finish(pending: PendingTransfer, kind: TerminalTransfer['kind']): void {
+		// The session goes with `pending`: there is nothing left to ask Steam, and a
+		// refresh token sitting in memory after a dead end is exactly the credential
+		// a lock exists to remove.
+		this.terminal = { steamId64: pending.steamId64, accountName: pending.accountName, kind };
+		this.pending = undefined;
 	}
 
-	/** True when a reply arrived that could not be decoded. */
-	hasUnreadReply(): boolean {
-		return this.rawReply !== undefined && this.unsaved === undefined;
+	private dropCredentials(): void {
+		if (this.pending) {
+			this.pending.refreshToken = undefined;
+			this.pending.accessToken = undefined;
+		}
+	}
+
+	awaiting(): 'persist' | 'unanswered' | 'unreadable' | undefined {
+		// The one state that can still be recovered: decoded, and the vault refused
+		// it. Retrying storage genuinely works.
+		if (this.unsaved !== undefined) {
+			return 'persist';
+		}
+		// The two that cannot. Reported so the screen can say which, because they
+		// call for different things from the user — one is "go and look at your
+		// phone", the other is "this account needs Steam Support".
+		return this.terminal?.kind;
+	}
+
+	/**
+	 * Drop a transfer that has not yet changed anything, and keep one that has.
+	 *
+	 * The lock handler's counterpart to `EnrollmentService.forget`. Before the SMS
+	 * code is submitted this holds a live refresh token and access token, which
+	 * are credentials as real as any other and had no business outliving a lock.
+	 *
+	 * **After it, the same call must do nothing.** What is held then is the only
+	 * copy of a replacement Steam will not reissue, and an idle lock — something
+	 * that happens by itself, while the user is away — is the last event that
+	 * should be allowed to destroy it. So this is deliberately not `cancel()`,
+	 * which throws in that situation: a lock is not a mistake to report, it is
+	 * simply not a reason to discard anything.
+	 */
+	forgetIfIdle(): boolean {
+		// **`submitting` counts as held, even though nothing is held yet.**
+		//
+		// Mid-submission the request is in the air: `unsaved` is still undefined, so
+		// this looked idle and cleared `pending` — and `pending` is the identity the
+		// outcome is reported against. An answer arriving a moment later then had
+		// no account to name.
+		//
+		// A lock during the one request that rotates an authenticator is exactly
+		// when this must not tidy up.
+		// **Bumped first, whatever this call decides.** The generation records that a
+		// *lock happened*, not that this managed to clear anything.
+		//
+		// A sign-in may be awaiting Steam right now, and it finishes by installing a
+		// refresh token and an access token into `pending`. Clearing alone let that
+		// land *after* the lock, so the credentials this call exists to drop
+		// reappeared a second later and stayed for the whole locked period. The
+		// generation is how the resolving sign-in learns it has been disowned — the
+		// same shape the vault uses for a key derived across a lock.
+		//
+		// Bumping it twice, once here and once on the clearing path, was harmless
+		// and misleading: it read as though the two cases were different events.
+		this.generation += 1;
+
+		// **Always, whatever this call decides about `pending`.**
+		//
+		// The first version of this dropped the session only when a lock landed
+		// *during* a submission, which covered one scenario and left the more likely
+		// one beside it: a lock arriving while a decoded replacement sits waiting to
+		// be stored keeps `pending` — correctly, that is the identity a retry needs —
+		// and kept its refresh token with it. `startChallenge` then succeeded, and
+		// spent an SMS, with the vault locked.
+		//
+		// Nothing in flight breaks: both callers capture their access token in a
+		// local before this can run, and `retryPersist` needs a name, a SteamID and
+		// a route, never a credential.
+		this.dropCredentials();
+
+		if (this.submitting || this.unsaved !== undefined) {
+			return false;
+		}
+		this.pending = undefined;
+		// `uncertain` deliberately survives. It holds no credential, and it is the
+		// only remaining record that a submission went out unanswered.
+		return true;
 	}
 
 	/**
@@ -592,7 +876,6 @@ export class TransferService {
 		}
 
 		this.unsaved = undefined;
-		this.rawReply = undefined;
 		this.pending = undefined;
 
 		return {
@@ -611,20 +894,46 @@ export class TransferService {
 	 */
 	current(): { steamId64: string; accountName: string } | undefined {
 		const pending = this.live();
-		return pending ? { steamId64: pending.steamId64, accountName: pending.accountName } : undefined;
+		if (pending) {
+			return { steamId64: pending.steamId64, accountName: pending.accountName };
+		}
+		// An unresolved submission outlives its tokens, so the screen can still name
+		// the account it is telling the user to go and check.
+		return this.terminal
+			? { steamId64: this.terminal.steamId64, accountName: this.terminal.accountName }
+			: undefined;
 	}
 
 	/**
 	 * Abandon a transfer that has not yet asked Steam to change anything.
 	 *
 	 * Refuses once secrets are held, rather than obliging. By then the
-	 * authenticator has rotated and `pending` is what `retryDecode` validates
-	 * against, so discarding it would strip the user of the only route back to
+	 * authenticator has rotated and `pending` is the account the replacement is
+	 * stored under, so discarding it would strip the user of the only route back to
 	 * secrets Steam will not reissue — on a channel the renderer can reach at any
 	 * time, for a button the screen is merely careful not to show.
 	 */
 	cancel(): void {
-		if (this.unsaved !== undefined || this.rawReply !== undefined) {
+		// **`submitting` and `authenticating` count, even with nothing held yet.**
+		//
+		// `pending` carries the SteamID and account name a failure is reported
+		// against. Clearing it while the irreversible request is in the air meant an
+		// answer arriving a moment later had nothing to name. The screen hides this
+		// button then, but the channel stays callable.
+		if (this.submitting || this.authenticating) {
+			throw new TransferError(
+				'This transfer is in the middle of a request to Steam and cannot be abandoned yet.',
+				false
+			);
+		}
+		// **`unsaved` only — a terminal transfer is the one this discharges.**
+		//
+		// Refusing while secrets are held is right: they are irreplaceable and the
+		// retry is the way out. A transfer that ended without them holds nothing,
+		// and cancelling is how the user says "I have read this and checked my
+		// phone". Guarding on it too would trap them on a screen whose only button
+		// calls this.
+		if (this.unsaved !== undefined) {
 			throw new TransferError(
 				'This transfer cannot be abandoned: Steam has already replaced the authenticator and ' +
 					'the new one is not saved yet. Use the retry on this screen.',
@@ -632,6 +941,9 @@ export class TransferService {
 			);
 		}
 		this.pending = undefined;
+		// The user's way out of an unresolved submission: they have checked their
+		// phone and are telling this application to stop asking.
+		this.terminal = undefined;
 	}
 
 	/**
@@ -650,16 +962,15 @@ export class TransferService {
 		 *
 		 * The TTL exists to drop an abandoned sign-in, which costs nothing. Once
 		 * Steam has answered it is the opposite: the authenticator has rotated, the
-		 * only copy of its replacement is in `unsaved` or `rawReply`, and
-		 * `retryDecode` needs the pending record for the SteamID it validates
-		 * against.
+		 * only copy of its replacement is in `unsaved`, and `retryPersist` needs the
+		 * pending record for the account it stores under.
 		 *
 		 * Without this, the status channel was enough to lose an account. It calls
 		 * `current()`, which calls this — so one poll fifteen minutes after a failed
 		 * decode would clear the record and leave the reply unreadable, while the
 		 * user was still reading the error telling them not to close the window.
 		 */
-		if (this.unsaved !== undefined || this.rawReply !== undefined) {
+		if (this.unsaved !== undefined || this.terminal !== undefined) {
 			return this.pending;
 		}
 		if (this.now() - this.pending.startedAtMs > PENDING_TTL_MS) {

@@ -243,6 +243,33 @@ function start(): void {
 			// omission is visible next time something is added.
 			enrollment.forget();
 
+			// The same for a transfer that has not asked Steam to change anything —
+			// it holds a refresh token and an access token exactly as enrollment
+			// does, and was the one teardown missing from this list.
+			//
+			// **Deliberately `forgetIfIdle` and not `cancel`.** Once Steam has
+			// rotated the authenticator, what this service holds is the only copy of
+			// a replacement Steam will not issue again, and an idle lock is something
+			// that happens *by itself while the user is away*. Discarding secrets on
+			// that event would turn a walk to the kettle into an account only Steam
+			// Support can recover. The reload below destroys the screen that was
+			// asking for a retry, so `transferStatus` reports `awaiting` and the
+			// renderer picks the flow back up after unlocking.
+			transfer.forgetIfIdle();
+
+			// The same for a transfer that has not asked Steam to change anything —
+			// it holds a refresh token and an access token exactly as enrollment
+			// does, and was the one teardown missing from this list.
+			//
+			// **Deliberately `forgetIfIdle` and not `cancel`.** Once Steam has
+			// rotated the authenticator, what this service holds is the only copy of
+			// a replacement Steam will not issue again, and an idle lock is something
+			// that happens *by itself while the user is away*. Discarding secrets on
+			// that event would turn a walk to the kettle into an account only Steam
+			// Support can recover. The reload below destroys the screen that was
+			// asking for a retry, so `transferStatus` reports `awaiting` and the
+			// renderer picks the flow back up after unlocking.
+
 			// Reload the renderer on every lock, so the passphrase is always typed
 			// into a FRESH page.
 			//
@@ -352,8 +379,14 @@ function start(): void {
 	const autoConfirm = new AutoConfirmEngine({
 		vault,
 		confirmations,
+		// The engine calls `runAutoConfirm` directly rather than through an IPC
+		// handler, so it was the one caller that never waited for the Steam clock.
+		// Unlock starts the sync without awaiting it and the first pass lands ten
+		// seconds later — inside the transport timeout — so on a skewed machine that
+		// pass signed with a zero offset and Steam refused every confirmation in it.
+		ensureClock: () => clock.ensureSynced(),
 		onOutcome: (steamId64, outcome) =>
-			activity.recordPass(steamId64, outcome.approved, outcome.held),
+			activity.recordPass(steamId64, outcome.approved, outcome.held, outcome.unreadable),
 		onFailure: (steamId64, reason, halted) => activity.recordFailure(steamId64, reason, halted)
 	});
 
@@ -434,7 +467,20 @@ function start(): void {
 						? dialog.showOpenDialog(parent, options)
 						: dialog.showOpenDialog(options));
 					const chosen = result.canceled ? undefined : result.filePaths[0];
-					return chosen === undefined ? undefined : readFileSync(chosen, 'utf8');
+					if (chosen === undefined) {
+						return undefined;
+					}
+					// **The raw error must not cross IPC.** `ENOENT`/`EACCES` messages
+					// quote the absolute path they failed on, and this module's own rule
+					// is that no filesystem path travels to the renderer in either
+					// direction — a path names the user's account and folder layout to a
+					// process that has no use for either. The user picked this file a
+					// moment ago in a dialog, so nothing is lost by not repeating it back.
+					try {
+						return readFileSync(chosen, 'utf8');
+					} catch {
+						throw new Error('that recovery file could not be read.');
+					}
 				}
 			}
 		);

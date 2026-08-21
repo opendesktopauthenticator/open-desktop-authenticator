@@ -19,6 +19,7 @@ const props = {
 			accountName: 'someone'
 		})
 	),
+	onStatus: () => Promise.resolve({}),
 	onCancel: () => Promise.resolve({}),
 	onStartChallenge: () => Promise.resolve({ shape: 'protobuf' as const, sent: true, eresult: 1 }),
 	onComplete: () =>
