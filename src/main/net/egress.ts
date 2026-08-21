@@ -28,6 +28,37 @@ const SUPPORTED = new Set(['http:', 'https:', 'socks5:', 'socks5h:', 'socks4:', 
  * `ERR_NO_SUPPORTED_PROXIES`, so the translation is mandatory rather than
  * cosmetic.
  */
+/**
+ * The port Chromium uses when a proxy rule does not name one.
+ *
+ * Measured, not assumed — `setProxy` with each rule below and then
+ * `resolveProxy('https://api.steampowered.com/x')`:
+ *
+ *   socks5://proxy.example  ->  SOCKS5 proxy.example:1080
+ *   socks4://proxy.example  ->  SOCKS  proxy.example:1080
+ *   http://proxy.example    ->  PROXY  proxy.example:80
+ *   https://proxy.example   ->  HTTPS  proxy.example:443
+ *
+ * It matters because `resolveProxy` **always** reports a port, whether or not
+ * the rule carried one, and `assertRouted` compares its answer to `endpoint`.
+ * Leaving the port off a portless proxy made those two strings disagree for a
+ * proxy that was working perfectly, and the routing check refuses on any
+ * disagreement — so every request on that account was blocked, with a message
+ * that said "a different proxy is applied to it" about the very same proxy.
+ *
+ * Filled in here rather than tolerated at the comparison so `proxyRules` and
+ * `endpoint` keep being built from one string. Two independent notions of the
+ * port is how they came to disagree.
+ */
+const DEFAULT_PORT: Record<string, string> = {
+	'http:': '80',
+	'https:': '443',
+	'socks5:': '1080',
+	'socks5h:': '1080',
+	'socks4:': '1080',
+	'socks4a:': '1080'
+};
+
 const CHROMIUM_SCHEME: Record<string, string> = {
 	'http:': 'http',
 	'https:': 'https',
@@ -290,9 +321,11 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 	}
 
 	const scheme = CHROMIUM_SCHEME[url.protocol] as string;
-	// Chromium takes the port from the rule; without one it guesses per scheme,
-	// and guessing wrong on a SOCKS proxy is a silent connection failure.
-	const host = url.port === '' ? url.hostname : `${url.hostname}:${url.port}`;
+	// Always ported. Chromium fills its own default in when a rule omits one and
+	// then reports that filled-in port back through `resolveProxy`, so a portless
+	// `endpoint` can never match what the routing check is handed.
+	const port = url.port === '' ? (DEFAULT_PORT[url.protocol] as string) : url.port;
+	const host = `${url.hostname}:${port}`;
 
 	const plan: ProxyPlan = {
 		proxyRules: `${scheme}://${host}`,

@@ -465,6 +465,18 @@ export class TransferService {
 		if (this.challenging) {
 			throw new TransferError('Steam has already been asked for a code.', false);
 		}
+		// **And not while a sign-in is still in the air.** `authenticate` refuses to
+		// start beside a challenge; without the mirror of that here, a challenge for
+		// account A could start during a sign-in for B, and B was installed as
+		// `pending` the moment the sign-in landed. A's text message had already gone
+		// out, the screen showed A's challenge, and the code typed from A's phone was
+		// then submitted against B's session.
+		if (this.authenticating) {
+			throw new TransferError(
+				'A sign-in for this transfer is still in progress. Wait for it to finish.',
+				false
+			);
+		}
 
 		this.challenging = true;
 		try {

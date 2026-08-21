@@ -47,9 +47,35 @@ describe('planning a proxy', () => {
 		expect(planProxy('socks5h://10.0.0.1:1080').proxyRules).toBe('socks5://10.0.0.1:1080');
 	});
 
-	it('keeps the port, because a guessed one fails silently', () => {
+	it('keeps the port, and fills in the one Chromium would have guessed', () => {
 		expect(planProxy('http://proxy.example:8080').proxyRules).toBe('http://proxy.example:8080');
-		expect(planProxy('http://proxy.example').proxyRules).toBe('http://proxy.example');
+
+		// Not left off. Chromium fills its own default in and then reports that
+		// filled-in port back through `resolveProxy`, which `assertRouted` compares
+		// against `endpoint` — so a portless endpoint could never match, and every
+		// request on a perfectly good portless proxy was refused.
+		expect(planProxy('http://proxy.example').proxyRules).toBe('http://proxy.example:80');
+		expect(planProxy('https://proxy.example').proxyRules).toBe('https://proxy.example:443');
+		expect(planProxy('socks5://proxy.example').proxyRules).toBe('socks5://proxy.example:1080');
+		expect(planProxy('socks4://proxy.example').proxyRules).toBe('socks4://proxy.example:1080');
+		expect(planProxy('socks5h://proxy.example').proxyRules).toBe('socks5://proxy.example:1080');
+	});
+
+	it('gives a portless proxy an endpoint that matches what Chromium reports', () => {
+		// The right-hand strings are measured, not guessed: `setProxy` with each
+		// rule, then `resolveProxy('https://api.steampowered.com/x')` on Electron 43.
+		// This is the pairing `assertRouted` depends on, and it is the pairing that
+		// broke when the endpoint comparison stopped being a substring test.
+		const measured: ReadonlyArray<readonly [string, string]> = [
+			['socks5://proxy.example', 'SOCKS5 proxy.example:1080'],
+			['socks4://proxy.example', 'SOCKS proxy.example:1080'],
+			['http://proxy.example', 'PROXY proxy.example:80'],
+			['https://proxy.example', 'HTTPS proxy.example:443'],
+			['socks5://[::1]:1080', 'SOCKS5 [::1]:1080']
+		];
+		for (const [url, resolved] of measured) {
+			expect(routedEndpoint(resolved)).toBe(planProxy(url).endpoint);
+		}
 	});
 
 	it('decodes percent-encoded credentials', () => {

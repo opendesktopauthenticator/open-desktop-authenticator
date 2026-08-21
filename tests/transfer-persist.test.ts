@@ -1017,6 +1017,40 @@ describe('a second sign-in cannot interleave with an unfinished transfer', () =>
 		});
 	});
 
+	/*
+	 * The mirror of the guard above, and the half the first fix left open.
+	 *
+	 * `authenticate` was taught to refuse while a challenge is in the air. Nothing
+	 * taught `startChallenge` the reverse, so a challenge for account A could
+	 * start during a sign-in for B — and B became `pending` the moment that
+	 * sign-in landed. A's text message had already gone out, the screen showed A's
+	 * challenge, and the code typed off A's phone was submitted against B.
+	 *
+	 * Guarded at the challenge rather than after it, because refusing afterwards
+	 * would already have spent the message.
+	 */
+	it('will not ask Steam for a text while a sign-in is still in the air', async () => {
+		let releaseSignIn: (() => void) | undefined;
+		const signInGate = new Promise<void>((resolve) => {
+			releaseSignIn = resolve;
+		});
+		let calls = 0;
+		const h = harness({ signInGate: () => (calls++ === 0 ? undefined : signInGate) });
+
+		await h.service.authenticate('account-a', 'pw', 'QK4TX');
+
+		const signingIn = h.service.authenticate('account-b', 'pw', 'QK4TX').catch(() => undefined);
+
+		await expect(h.service.startChallenge()).rejects.toThrow(/sign-in .* still in progress/i);
+
+		releaseSignIn?.();
+		await signingIn;
+
+		// And it is offered again once the sign-in is done — the guard is about the
+		// request in flight, not a state the transfer is stuck in.
+		await expect(h.service.startChallenge()).resolves.toMatchObject({ sent: true });
+	});
+
 	it('keeps the older outcome attached to the older account', async () => {
 		let releaseSignIn: (() => void) | undefined;
 		const signInGate = new Promise<void>((resolve) => {
