@@ -417,6 +417,13 @@ describe('the secret scanner', () => {
 		).toBeGreaterThan(0);
 	});
 
+	it('keeps refusing a structured paste however short the value', () => {
+		// `shared_secret: x` is a config line whatever follows the colon — nobody
+		// writes that in a sentence — so the value is not examined there.
+		expect(service.validate(detail('identity_secret = wOkX2Lm9')).errors.length).toBeGreaterThan(0);
+		expect(service.validate(detail('shared_secret: x')).errors.length).toBeGreaterThan(0);
+	});
+
 	it('does not refuse an ordinary description of the same problem', () => {
 		// The value half has to look like one. Without that, "the shared secret is
 		// wrong" — a normal way to report a bug — would be refused as if it
@@ -424,6 +431,11 @@ describe('the secret scanner', () => {
 		for (const body of [
 			'I cannot log in and my codes are always wrong, please help',
 			'the shared secret is wrong somehow and I do not know why',
+			// The one that caught me: `incorrect` is nine letters, and an earlier
+			// version of this pattern refused it as if it were a pasted secret.
+			'the shared secret is incorrect for one of my accounts',
+			'the identity secret is unreadable after importing',
+			'the shared secret is different from what SDA showed',
 			'the import failed with an error mentioning secrets'
 		]) {
 			expect([body, service.validate(detail(body)).errors.length]).toEqual([body, 0]);

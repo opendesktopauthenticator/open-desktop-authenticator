@@ -598,19 +598,26 @@ function validate(form) {
  * message would have missed exactly that.
  */
 /*
- * The separator between a secret's name and its value.
+ * How a secret's name is joined to its value.
  *
- * `[:=]` alone assumed a paste of JSON or a key=value line. The person this
- * check exists for is not pasting a config file — they are frightened and
- * typing a sentence, and "my shared_secret is wOkX..." sailed straight through
- * while `shared_secret=wOkX...` was refused. The form promises this will not
- * happen, so the pattern has to match how people actually write it.
+ * Two shapes, with deliberately different bars.
  *
- * The value half is required, and has to look like one: eight or more base64
- * characters. Without that, "the shared secret is wrong" — an ordinary way to
- * describe a bug — would be refused as if it contained one.
+ * A **separator** — `shared_secret:` or `shared_secret=` — is a config line or
+ * a JSON fragment. Nobody writes that in a sentence, so the name and the
+ * separator are enough on their own and the value is not examined.
+ *
+ * **Prose** — "my shared_secret is wOkX…" — is how a frightened person types
+ * it, and it used to sail through while the key=value form was refused. But
+ * matching any word after "is" would refuse "the shared secret is incorrect",
+ * an ordinary bug report, as though it had leaked something. So here the value
+ * must look like one: sixteen or more base64 characters with at least one
+ * digit or `+/=` among them. A real secret is base64 of twenty bytes —
+ * twenty-eight characters ending in `=` — and an English word is neither.
+ *
+ * Turning a real report away with an accusation the reporter cannot act on is
+ * worse than missing a paste, which is why the two bars differ.
  */
-const NAMED = String.raw`\s*(?::|=|\b(?:is|was)\b)\s*['"]?[A-Za-z0-9+/=_-]{8,}`;
+const NAMED = String.raw`(?:\s*[:=]|\s*\b(?:is|was)\b\s*['"]?(?=[A-Za-z0-9+/=_-]*[0-9+/=])[A-Za-z0-9+/=_-]{16,})`;
 
 const SECRETS = [
 	[new RegExp(String.raw`"?shared[ _-]?secret"?` + NAMED, 'i'), 'a shared_secret'],

@@ -321,10 +321,19 @@ export function Confirmations({
 						// is in flight — and the one in flight here is precisely the stale
 						// answer that would report this account as still needing a
 						// password. Claiming a newer ticket disowns it.
+						//
+						// The error handling is `refresh`'s, deliberately: without a
+						// `catch` a failed reload is an unhandled rejection that the user
+						// never sees, on a screen they have just successfully signed into.
 						listing.current += 1;
-						void load().finally(() => {
-							listing.current -= 1;
-						});
+						setBusy(true);
+						setError(undefined);
+						void load()
+							.catch((err: unknown) => setError(messageOf(err)))
+							.finally(() => {
+								listing.current -= 1;
+								setBusy(false);
+							});
 						return result;
 					}}
 					onCancel={onClose}

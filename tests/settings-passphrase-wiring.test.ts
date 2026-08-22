@@ -275,3 +275,36 @@ describe('the recovery screen', () => {
 		expect(service).toMatch(/when the file was last written/);
 	});
 });
+
+describe('promise chains in the renderer', () => {
+	it('never fire-and-forget a `.finally` without a `.catch`', () => {
+		// `.finally` re-throws, so `void work().finally(...)` is an unhandled
+		// rejection wearing the look of deliberate fire-and-forget — and on a
+		// screen the user is actively using, the failure it swallows is one they
+		// needed to see. Caught once already, in the reload that runs after a
+		// successful Steam sign-in.
+		for (const file of [
+			'App.tsx',
+			'screens/Confirmations.tsx',
+			'screens/VaultHome.tsx',
+			'screens/Settings.tsx',
+			'screens/MoveAuthenticator.tsx',
+			'screens/AddAuthenticator.tsx',
+			'screens/Activity.tsx'
+		]) {
+			const source = readFileSync(join(__dirname, '../src/renderer', file), 'utf8');
+			const bare = /void\s+\w+\([^)]*\)\s*\n?\s*\.finally\(/.test(source);
+			expect([file, bare]).toEqual([file, false]);
+		}
+	});
+
+	it('keeps the confirmations listing counter balanced', () => {
+		const source = readFileSync(
+			join(__dirname, '../src/renderer/screens/Confirmations.tsx'),
+			'utf8'
+		);
+		const ups = (source.match(/listing\.current \+= 1;/g) ?? []).length;
+		const downs = (source.match(/listing\.current -= 1;/g) ?? []).length;
+		expect(downs).toBe(ups);
+	});
+});
