@@ -123,10 +123,16 @@ describe('lists that must not be overwritten by a stale answer', () => {
 		// is disabled for the mount fetch; the ref is what `refresh` tests, so the
 		// guard survives a re-fetch when the account changes.
 		expect(screen).toMatch(/const \[busy, setBusy\] = useState\(true\);/);
-		expect(screen).toMatch(/const listing = useRef\(true\);/);
-		expect(screen).toMatch(/if \(busy \|\| listing\.current\) \{/);
-		// Cleared on both paths, or the screen locks itself out.
-		expect(screen.match(/listing\.current = false;/g) ?? []).toHaveLength(2);
+		// **A count, not a boolean.** StrictMode runs the mount effect twice, so a
+		// boolean was cleared by whichever fetch settled first — unlocking the
+		// guard while the second was still in the air, which is the race itself.
+		expect(screen).toMatch(/const listing = useRef\(1\);/);
+		expect(screen).toMatch(/if \(busy \|\| listing\.current > 0\) \{/);
+		// Every path that increments must decrement, or the screen locks itself out.
+		const ups = screen.match(/listing\.current \+= 1;/g) ?? [];
+		const downs = screen.match(/listing\.current -= 1;/g) ?? [];
+		expect(ups).toHaveLength(2);
+		expect(downs).toHaveLength(2);
 	});
 });
 

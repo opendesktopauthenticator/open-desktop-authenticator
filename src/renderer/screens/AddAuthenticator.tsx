@@ -114,12 +114,15 @@ export function AddAuthenticator({
 	const submitCredentials = (event: React.FormEvent): void => {
 		event.preventDefault();
 		run(async () => {
-			// **In a `finally`, so a throw clears them too.** Sign-in can fail by
-			// rejecting rather than returning an outcome — an IPC failure, a schema
-			// refusal, a dead proxy — and the clears below only ran on the success
-			// path, leaving the password and the proxy's own credentials in
-			// component state, and in the DOM, for the rest of a flow that can sit
-			// open for fifteen minutes waiting on an email.
+			// **Cleared in a `finally`, so a throw clears them too.**
+			//
+			// The password is single-use — the refresh token Steam issues is what
+			// keeps the account working — and the proxy URL routinely carries a
+			// username and password of its own. Both used to be cleared only on the
+			// success path, so a sign-in that *rejected* (an IPC failure, a schema
+			// refusal, a dead proxy) left them in component state, and in the DOM,
+			// for the rest of a flow that can sit open for fifteen minutes waiting on
+			// an email. Retyping after a failure is the cost, and it is the right one.
 			const outcome = await onBegin(
 				accountName.trim(),
 				password,
@@ -128,14 +131,6 @@ export function AddAuthenticator({
 				setPassword('');
 				setProxyUrl('');
 			});
-			// Dropped the instant it has been used. It is never needed again — the
-			// refresh token Steam issued is what keeps this account working.
-			setPassword('');
-			// The proxy goes with it. It routinely carries a username and password of
-			// its own, it has already been stored against the account, and leaving it
-			// in a field keeps a credential on screen for the rest of a flow that can
-			// sit open for fifteen minutes waiting on an email.
-			setProxyUrl('');
 			applyOutcome(outcome);
 		});
 	};

@@ -85,13 +85,21 @@ export function Confirmations({
 	 */
 	const [busy, setBusy] = useState(true);
 	/**
-	 * The same fact, readable without a render.
+	 * How many lists are in flight, readable without a render.
 	 *
 	 * `busy` drives the button; this is what `refresh` actually tests, so the
 	 * guard holds even on a re-fetch triggered by the account changing, where
 	 * state has not been re-raised.
+	 *
+	 * **A count, not a boolean.** A boolean was cleared by whichever fetch
+	 * finished first, and under StrictMode the mount effect runs twice — so the
+	 * first run's `finally` unlocked the guard while the second run's fetch was
+	 * still going, reopening the very race this closes. Starts at one because
+	 * the mount effect below is already counted.
 	 */
-	const listing = useRef(true);
+	const listing = useRef(1);
+	/** Whether the mount effect below is on its first run — see `listing`. */
+	const first = useRef(true);
 	const [error, setError] = useState<string | undefined>();
 	/**
 	 * Set when Steam says the saved session is gone. Kept separate from `error`
@@ -149,16 +157,16 @@ export function Confirmations({
 
 	/** Used by the Refresh button, where showing "working" is the whole point. */
 	const refresh = useCallback((): void => {
-		if (busy || listing.current) {
+		if (busy || listing.current > 0) {
 			return;
 		}
-		listing.current = true;
+		listing.current += 1;
 		setBusy(true);
 		setError(undefined);
 		load()
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => {
-				listing.current = false;
+				listing.current -= 1;
 				setBusy(false);
 			});
 	}, [busy, load]);
@@ -169,9 +177,13 @@ export function Confirmations({
 	useEffect(() => {
 		let cancelled = false;
 		// The ref, not `setBusy` — a synchronous `setState` in an effect triggers
-		// a cascading render, and `busy` already starts true for the mount case.
-		// This covers the re-fetch when the account changes.
-		listing.current = true;
+		// a cascading render, and `busy` already starts true (and the count at
+		// one) for the mount case. This covers the re-fetch when the account
+		// changes, and the second run of StrictMode's double invoke.
+		if (!first.current) {
+			listing.current += 1;
+		}
+		first.current = false;
 		listRef
 			.current()
 			.then((result) => {
@@ -192,7 +204,7 @@ export function Confirmations({
 				}
 			})
 			.finally(() => {
-				listing.current = false;
+				listing.current -= 1;
 				if (!cancelled) {
 					setBusy(false);
 				}
