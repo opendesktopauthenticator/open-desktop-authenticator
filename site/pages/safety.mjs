@@ -259,9 +259,9 @@ export const verify = {
 
 			<h2>2. Compute the hash of what you downloaded</h2>
 			<h3>Windows (PowerShell)</h3>
-			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-0.1.0-x64-setup.exe</code></pre>
+			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-1.0.0-x64-setup.exe</code></pre>
 			<h3>Linux or macOS</h3>
-			<pre><code>sha256sum open-desktop-authenticator-0.1.0-x86_64.AppImage</code></pre>
+			<pre><code>sha256sum open-desktop-authenticator-1.0.0-x86_64.AppImage</code></pre>
 			<p>Or check every file at once, from the folder you downloaded into:</p>
 			<pre><code>sha256sum --check SHA256SUMS.txt</code></pre>
 			<p>

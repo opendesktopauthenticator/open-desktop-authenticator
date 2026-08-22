@@ -47,7 +47,26 @@ const store = {
 	...storeIdentity,
 	// Tiles inherit the icon; a name burned into the tile art would have to be
 	// regenerated for every rename and would disagree with `branding` in between.
-	showNameOnTiles: false
+	showNameOnTiles: false,
+
+	/*
+	 * **The floor is Chromium's, not electron-builder's.**
+	 *
+	 * electron-builder defaults both fields to `10.0.14316.0` — Windows 10 1607.
+	 * Electron 43 carries a Chromium that has required Windows 10 1809 (build
+	 * 17763) since Chrome 110, so on anything in the 14316-17762 band the package
+	 * installs and then fails to launch. The Store treats MinVersion as an
+	 * acquisition gate, so the default does not merely allow that case: it
+	 * advertises the app to those machines and hands them a build that cannot
+	 * start. Whoever is on Windows 10 1607 in 2026 gets a broken install and no
+	 * explanation for it.
+	 *
+	 * Found by reading the manifest out of the built appx rather than the config,
+	 * which is the only place the value appears — nothing in this repository sets
+	 * it, so nothing in this repository showed it.
+	 */
+	minVersion: '10.0.17763.0',
+	maxVersionTested: '10.0.22621.0'
 };
 
 /**

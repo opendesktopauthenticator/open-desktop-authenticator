@@ -10,7 +10,7 @@ public post-mortem — what broke, when we detected it, and what we changed.
 
 ## [Unreleased]
 
-## [0.1.0] — first packaged build
+## [1.0.0] — first packaged build
 
 The first version that exists as an installable file rather than as source.
 
