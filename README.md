@@ -5,7 +5,7 @@ A maintained successor to SDA.
 
 Built and maintained by **MASTERPANEL LLC** · [opendesktopauthenticator.com](https://opendesktopauthenticator.com)
 
-> **Pre-release.** Feature-complete for 0.1 and **exercised end to end against
+> **1.0.** Feature-complete and **exercised end to end against
 > live Steam accounts** by the maintainer — import from SDA, enrollment, codes,
 > confirmations, backup and recovery — with the defects that surfaced fixed.
 >
@@ -70,7 +70,7 @@ items; they are deliberate non-goals.
 | Phase 1 — app shell, security posture, CI, docs    | **done**    |
 | 0.1 — vault, import, codes, confirmations          | **done**    |
 | 0.1 — sign-in, tray, settings, auto-confirm        | **done**    |
-| 1.0 — signed releases, Windows + Linux             | not started |
+| 1.0 — signed releases, Windows + Linux             | in progress |
 
 **macOS is not supported.** Signing it requires Apple Developer enrollment as an
 organization, which we have not completed. We will not ship an unsigned macOS
