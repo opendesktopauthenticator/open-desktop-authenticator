@@ -17,7 +17,19 @@
  */
 
 /** Schemes we accept from a user or a maFile. */
-const SUPPORTED = new Set(['http:', 'https:', 'socks5:', 'socks5h:', 'socks4:', 'socks4a:']);
+/**
+ * Schemes we accept from a user or a maFile.
+ *
+ * **`socks4a` is deliberately absent.** It is the SOCKS4 dialect that carries a
+ * hostname instead of an address, and the two halves of this application
+ * disagree about it: `socks-proxy-agent` honours it, while Chromium has no
+ * `socks4a` rule at all and the nearest thing — `socks4` — resolves on the
+ * machine's own resolver. Accepting it would mean sign-in resolving Steam at
+ * the proxy while confirmations resolved it locally, which is precisely the
+ * split this application spent a release closing. `socks5` is supported
+ * everywhere, does remote DNS on both stacks, and is the answer.
+ */
+const SUPPORTED = new Set(['http:', 'https:', 'socks5:', 'socks5h:', 'socks4:']);
 
 /**
  * How each maps onto Chromium's proxy-rule vocabulary.
@@ -64,8 +76,7 @@ const CHROMIUM_SCHEME: Record<string, string> = {
 	'https:': 'https',
 	'socks5:': 'socks5',
 	'socks5h:': 'socks5',
-	'socks4:': 'socks4',
-	'socks4a:': 'socks4'
+	'socks4:': 'socks4'
 };
 
 export class EgressError extends Error {
@@ -147,8 +158,7 @@ export type SteamSessionProxy = { httpProxy: string } | { socksProxy: string };
 const NODE_SOCKS_SCHEME: Record<string, string> = {
 	'socks5:': 'socks5h',
 	'socks5h:': 'socks5h',
-	'socks4:': 'socks4',
-	'socks4a:': 'socks4a'
+	'socks4:': 'socks4'
 };
 
 export function steamSessionProxy(proxyUrl: string): SteamSessionProxy {
@@ -361,6 +371,32 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 	}
 	if (url.hostname === '') {
 		throw new EgressError('a proxy address needs a host');
+	}
+
+	/*
+	 * **Credentials on a SOCKS proxy are refused, because only half of this
+	 * application can send them.**
+	 *
+	 * `steam-session` hands the whole URL to `socks-proxy-agent`, which
+	 * authenticates happily. Chromium cannot: its SOCKS5 client implements no
+	 * authentication methods, and the `login` event this transport listens for is
+	 * an HTTP 407 mechanism that a SOCKS handshake never produces. So a stored
+	 * `socks5://user:pass@host` signed in fine and then failed every
+	 * confirmation, every enrollment attach and every clock sync — and if the
+	 * proxy also allowed unauthenticated connections, it would instead succeed on
+	 * both while presenting two different identities to the operator.
+	 *
+	 * Refused here rather than discovered later: this is the one moment the user
+	 * is looking at the field they typed it into. HTTP and HTTPS proxies carry
+	 * credentials on both stacks and are unaffected.
+	 */
+	const socks = url.protocol.startsWith('socks');
+	if (socks && (url.username !== '' || url.password !== '')) {
+		throw new EgressError(
+			'a SOCKS proxy that needs a username and password cannot be used: Chromium, which ' +
+				'carries this app’s Steam traffic, cannot authenticate to one. Use an http or https ' +
+				'proxy for credentials, or a SOCKS proxy that allows this machine without them'
+		);
 	}
 
 	const scheme = CHROMIUM_SCHEME[url.protocol] as string;

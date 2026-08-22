@@ -331,9 +331,18 @@ export async function readRecoveryFile(text: string, passphrase: string): Promis
 		// Deliberately one message for both "wrong passphrase" and "damaged file",
 		// exactly as the vault does. Distinguishing them tells someone probing the
 		// file which of the two they are up against.
+		// **Not "when the account was created".** That was the old wording, and it
+		// was wrong in the one case where somebody is reading it: activation
+		// rewrites the file through `updateRecovery`, resealing it with whatever
+		// key the vault holds *then*. So an account enrolled under one passphrase
+		// and activated after a change opens with the newer one — and a user
+		// following the old sentence would try the old passphrase, watch it fail,
+		// and reasonably conclude their only backup was dead.
 		throw new RecoveryError(
-			'that passphrase did not open this file. Note it is the passphrase the vault had **when ' +
-				'the account was created**, which is not necessarily your current one.'
+			'that passphrase did not open this file. A recovery file is sealed with the vault ' +
+				'passphrase that was in use when the file was last written — usually your current ' +
+				'one, but an older one if you have changed it since this account was set up. Try ' +
+				'both.'
 		);
 	}
 

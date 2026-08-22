@@ -88,6 +88,12 @@ export function UnlockVault({
 			{backupAvailable && (
 				<BackupRestore
 					onRestore={onRestoreBackup}
+					// Both directions, like the create screen. Unlock and restore each
+					// end in a deliberate second of scrypt, and without this the two
+					// could run at once — two key derivations racing, with whichever
+					// finishes last installing its state over the other.
+					onBusy={setBusy}
+					siblingBusy={busy}
 					introduction="A backup of the previous vault is on disk. It is never loaded automatically, because doing so could quietly restore accounts you removed."
 				/>
 			)}

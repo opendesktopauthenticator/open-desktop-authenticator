@@ -82,6 +82,18 @@ export function VaultHome({
 	/** The account whose code is being copied, if any. */
 	const [copying, setCopying] = useState<string | undefined>();
 	/** The account being exported, and what came of the last one. */
+	/**
+	 * Which copy/export attempt owns the shared status slot.
+	 *
+	 * There is one `copied`/`copyError` pair and one `exported` for the whole
+	 * list, so two attempts on different rows raced: the first copy after an
+	 * unlock waits on the Steam clock sync and can take seconds, while another
+	 * row's button stays live. Whichever settled last won — so an older failure
+	 * could overwrite a newer success, leaving the row that actually worked
+	 * showing another row's error.
+	 */
+	const attempt = useRef(0);
+
 	const [exporting, setExporting] = useState<string | undefined>();
 	const [exported, setExported] = useState<{ steamId64: string; message: string } | undefined>();
 
@@ -343,16 +355,24 @@ export function VaultHome({
 												// looked inert and invited a second click.
 												disabled={copying === account.steamId64}
 												onClick={() => {
+													const mine = (attempt.current += 1);
+													const newest = (): boolean => attempt.current === mine;
 													setCopyError(undefined);
 													setCopying(account.steamId64);
 													onCopyCode(account.steamId64)
 														.then((result) => {
+															if (!newest()) {
+																return;
+															}
 															setCopied({
 																steamId64: account.steamId64,
 																seconds: result.clipboardClearsInSeconds
 															});
 														})
 														.catch((err: unknown) => {
+															if (!newest()) {
+																return;
+															}
 															setCopied(undefined);
 															// The shared helper, not a second copy of the same
 															// regex: two of them drift, and this one had already
@@ -394,10 +414,15 @@ export function VaultHome({
 										className="secondary"
 										disabled={exporting === account.steamId64}
 										onClick={() => {
+											const mine = (attempt.current += 1);
+											const newest = (): boolean => attempt.current === mine;
 											setExported(undefined);
 											setExporting(account.steamId64);
 											onExport(account)
 												.then((result) => {
+													if (!newest()) {
+														return;
+													}
 													setExported({
 														steamId64: account.steamId64,
 														message:
@@ -407,6 +432,9 @@ export function VaultHome({
 													});
 												})
 												.catch((err: unknown) => {
+													if (!newest()) {
+														return;
+													}
 													setExported({
 														steamId64: account.steamId64,
 														message: `It could not be saved: ${messageOf(err)}`

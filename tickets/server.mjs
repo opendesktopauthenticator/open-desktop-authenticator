@@ -597,12 +597,30 @@ function validate(form) {
  * paste a secret in answer to it, and a check that only guarded the first
  * message would have missed exactly that.
  */
+/*
+ * The separator between a secret's name and its value.
+ *
+ * `[:=]` alone assumed a paste of JSON or a key=value line. The person this
+ * check exists for is not pasting a config file — they are frightened and
+ * typing a sentence, and "my shared_secret is wOkX..." sailed straight through
+ * while `shared_secret=wOkX...` was refused. The form promises this will not
+ * happen, so the pattern has to match how people actually write it.
+ *
+ * The value half is required, and has to look like one: eight or more base64
+ * characters. Without that, "the shared secret is wrong" — an ordinary way to
+ * describe a bug — would be refused as if it contained one.
+ */
+const NAMED = String.raw`\s*(?::|=|\b(?:is|was)\b)\s*['"]?[A-Za-z0-9+/=_-]{8,}`;
+
 const SECRETS = [
-	[/"?shared_secret"?\s*[:=]/i, 'a shared_secret'],
-	[/"?identity_secret"?\s*[:=]/i, 'an identity_secret'],
-	[/"?revocation_code"?\s*[:=]|\bR\d{5}\b/i, 'a revocation code'],
+	[new RegExp(String.raw`"?shared[ _-]?secret"?` + NAMED, 'i'), 'a shared_secret'],
+	[new RegExp(String.raw`"?identity[ _-]?secret"?` + NAMED, 'i'), 'an identity_secret'],
+	[
+		/"?revocation[ _-]?code"?\s*(?::|=|\b(?:is|was)\b)\s*['"]?R?\d{5}|\bR\d{5}\b/i,
+		'a revocation code'
+	],
 	[/-----BEGIN [A-Z ]*PRIVATE KEY-----/, 'a private key'],
-	[/"?steamid"?\s*[:=]\s*"?7656119\d{10}/i, 'a maFile']
+	[/\b7656119\d{10}\b/, 'a SteamID or maFile']
 ];
 
 function secretsIn(text) {
@@ -1631,11 +1649,17 @@ async function handle(request, response, url) {
 		 * string is still accepted so that the emailed link keeps working.
 		 */
 		const fromQuery = url.searchParams.get('k') ?? '';
-		const offered = fromQuery || cookieKey(request, onTicket[1]);
+		const fromCookie = cookieKey(request, onTicket[1]);
+		// **Either credential opens it.** Preferring the query string meant a stale
+		// bookmark or a mistyped link answered 404 to a reporter whose cookie was
+		// perfectly good — and the fix, deleting the `?k=` from the address bar,
+		// is not one anybody would guess. Both are compared in constant time
+		// below; offering two candidates is not weaker than offering one.
+		const candidates = [fromQuery, fromCookie].filter((value) => value !== '');
 		const ticket =
 			found &&
 			typeof found.access_key === 'string' &&
-			sameSecret(Buffer.from(offered), Buffer.from(found.access_key))
+			candidates.some((value) => sameSecret(Buffer.from(value), Buffer.from(found.access_key)))
 				? found
 				: undefined;
 
@@ -1834,7 +1858,17 @@ async function handle(request, response, url) {
 					.run(ticket.id, body, 'reporter', stamp);
 				const wanted = attachmentIds(form.attachments).slice(0, MAX_FILES).length;
 				const claimed = claimAttachments(ticket.id, Number(note.lastInsertRowid), form.attachments);
-				const next = ticket.status === 'assigned' ? 'assigned' : 'open';
+				// **Re-read inside the transaction, not from the snapshot.** The row was
+				// loaded before `readForm` awaited the body, and an admin claiming or
+				// closing the report during that await had their decision silently
+				// undone: `assigned` became `open`, `resolved` became `assigned`.
+				const current = db
+					.prepare('SELECT status FROM tickets WHERE id = ?')
+					.get(ticket.id)?.status;
+				// A reply reopens a finished report and leaves a claimed one claimed —
+				// but only ever moving from a *closed* state, never out of one an admin
+				// just chose.
+				const next = current === 'assigned' ? 'assigned' : 'open';
 				db.prepare('UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?').run(
 					next,
 					stamp,
@@ -2123,13 +2157,33 @@ async function handleAdmin(request, response, url) {
 	if (url.pathname === '/admin/logout' && method === 'POST') {
 		// A POST with the session's own token, so another site cannot sign the
 		// administrator out by pointing them at a link.
-		if (
-			session &&
-			sameSecret(
+		//
+		// **The cookie is cleared only when the token matches.** It used to be
+		// cleared on every POST regardless, so a cross-site form still signed the
+		// administrator out: the CSRF check protected the server's session table
+		// and not the browser's cookie, which is the half the user experiences.
+		// Not an escalation — but a control that fails at the only thing it looks
+		// like it does is worse than no control.
+		// **The token is demanded only when there is something to take.** With a
+		// live session, clearing the cookie is the whole point of the attack, so
+		// it is refused without proof. With no session there is nothing to end —
+		// the cookie is already inert, `readSession` will not honour it — and
+		// clearing it is tidiness a stranger gains nothing from.
+		if (session) {
+			const proven = sameSecret(
 				Buffer.from(String((await readForm(request).catch(() => ({}))).csrf ?? '')),
 				Buffer.from(session.csrf)
-			)
-		) {
+			);
+			if (!proven) {
+				return send(
+					response,
+					403,
+					page({
+						title: 'Refused',
+						body: notice('callout-warn', ['Stale form. Reload and try again.'])
+					})
+				);
+			}
 			sessions.delete(session.id);
 		}
 		return send(response, 303, '', {

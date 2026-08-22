@@ -148,7 +148,7 @@ describe('enrolling', () => {
  * founder spotted that the flow never even asked.
  */
 describe('routing an enrollment', () => {
-	const PROXY = 'socks5://user:pass@10.0.0.1:1080';
+	const PROXY = 'http://user:pass@10.0.0.1:1080';
 
 	it('signs in through the proxy, not around it', async () => {
 		const { service, loginProxy } = harness();
@@ -1271,6 +1271,100 @@ describe('activation with the row removed mid-flight', () => {
 		accounts.length = 0;
 		releaseFinalize?.();
 
-		await expect(activating).rejects.toThrow(/removed from this vault/);
+		await expect(activating).rejects.toThrow(/no longer holds the authenticator/);
+	});
+});
+
+/*
+ * A continuation may only touch the row it was actually about.
+ *
+ * Activation and detachment snapshot an account, ask Steam about *those*
+ * secrets, and then found the row again by SteamID alone. An import-replace or
+ * a transfer persist landing during that await puts a different authenticator
+ * under the same identity — so activation marked somebody else's secrets
+ * activated, and deactivation deleted them for a removal that was never about
+ * them.
+ */
+describe('a row replaced while Steam is answering', () => {
+	const SHARED_B = 'ICEiIyQlJicoKSorLC0uLzAxMjM=';
+
+	function harnessFor(gate: Promise<void>, kind: 'activate' | 'deactivate') {
+		const { vault, accounts } = fakeVault();
+		accounts.push({
+			steamId64: STEAM_ID,
+			accountName: 'trader',
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345',
+			refreshToken: MOBILE,
+			status: kind === 'activate' ? 'pendingActivation' : 'active',
+			addedAt: '2026-08-01T00:00:00.000Z',
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+		(vault as { verifyPassphrase?: unknown }).verifyPassphrase = () => Promise.resolve();
+		const transports = {
+			forAccount: () =>
+				Promise.resolve(() =>
+					Promise.resolve({
+						status: 200,
+						text: JSON.stringify({ response: { access_token: MOBILE } })
+					})
+				)
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			finalizeEnrollment: async () => {
+				await gate;
+				return { state: 'activated' as const };
+			},
+			removeAuthenticator: async () => {
+				await gate;
+			}
+		});
+		return { service, accounts };
+	}
+
+	/** The replacement an import or a transfer would write. */
+	const replace = (accounts: Account[]) => {
+		accounts[0] = {
+			...(accounts[0] as Account),
+			sharedSecret: SHARED_B,
+			revocationCode: 'R99999'
+		};
+	};
+
+	it('does not mark a replacement activated', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { service, accounts } = harnessFor(gate, 'activate');
+
+		const activating = service.activate(STEAM_ID, '12345');
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		replace(accounts);
+		release?.();
+
+		await expect(activating).rejects.toThrow(/no longer holds the authenticator/);
+		// The replacement is untouched — still its own secrets, still unactivated.
+		expect(accounts[0]?.sharedSecret).toBe(SHARED_B);
+	});
+
+	it('does not delete a replacement it never detached', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { service, accounts } = harnessFor(gate, 'deactivate');
+
+		const removing = service.deactivate(STEAM_ID, 'correct').catch(() => undefined);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		replace(accounts);
+		release?.();
+		await removing;
+
+		// Steam detached the OLD authenticator. The replacement's secrets survive.
+		expect(accounts).toHaveLength(1);
+		expect(accounts[0]?.sharedSecret).toBe(SHARED_B);
 	});
 });

@@ -748,3 +748,58 @@ describe('scheduling two accounts on the same interval', () => {
 		expect(beats.length).toBeGreaterThan(4);
 	});
 });
+
+/*
+ * A halted account must stop costing anything.
+ *
+ * The cheap early-out reads `earliestDueAt`, and halting set `nextDueAt` to
+ * Infinity without recomputing it — so the beat kept firing against a stale
+ * value and deep-cloned the whole secret-bearing vault, once a second, for as
+ * long as the process ran. Steam was never contacted again; the cost was
+ * entirely local and entirely invisible.
+ */
+describe('after auto-confirm halts', () => {
+	it('stops reading the vault on every beat', async () => {
+		let at = 0;
+		let reads = 0;
+		const vault = {
+			isUnlocked: () => true,
+			read: () => {
+				reads += 1;
+				return {
+					accounts: [
+						{
+							steamId64: '76561198000000001',
+							autoConfirm: { marketListings: false, trades: true, pollIntervalSeconds: 15 }
+						}
+					]
+				};
+			}
+		} as unknown as VaultService;
+		const confirmations = {
+			runAutoConfirm: () => Promise.reject(new Error('the session is dead'))
+		} as unknown as ConfirmationsService;
+
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations,
+			now: () => at,
+			onFailure: () => undefined
+		});
+
+		// Ten consecutive failures is the documented halt threshold. Advance past
+		// each backoff so every tick actually attempts.
+		for (let i = 0; i < 10; i += 1) {
+			at += 20 * 60_000;
+			await engine.tick();
+		}
+		const atHalt = reads;
+
+		// Three more beats. Nothing is due — and nothing should be read.
+		for (let i = 0; i < 3; i += 1) {
+			at += 1000;
+			await engine.tick();
+		}
+		expect(reads).toBe(atHalt);
+	});
+});

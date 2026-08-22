@@ -23,13 +23,25 @@ import { messageOf } from '../ipc-message';
 export function BackupRestore({
 	onRestore,
 	introduction,
-	onBusy
+	onBusy,
+	siblingBusy = false
 }: {
 	onRestore: (passphrase: string) => Promise<void>;
 	/** What the surrounding screen has already told the user about the backup. */
 	introduction: string;
 	/** Told while a restore is in flight, so a sibling form can hold its own controls. */
 	onBusy?: (busy: boolean) => void;
+	/**
+	 * Whether the surrounding screen is already doing something slow.
+	 *
+	 * `onBusy` only reported *outwards*. Create and restore sit on one screen,
+	 * both end in a deliberate second of scrypt, and nothing stopped a user
+	 * opening this form and submitting it while "Creating…" was on screen — the
+	 * exact race the screen's own copy warns about, where whichever KDF finishes
+	 * first wins and a winning create leaves an empty vault whose next save
+	 * copies itself over the backup this form exists to read.
+	 */
+	siblingBusy?: boolean;
 }): React.JSX.Element {
 	const [open, setOpen] = useState(false);
 	const [passphrase, setPassphrase] = useState('');
@@ -41,7 +53,12 @@ export function BackupRestore({
 			<>
 				<p className="hint">{introduction}</p>
 				<div className="controls">
-					<button type="button" className="secondary" onClick={() => setOpen(true)}>
+					<button
+						type="button"
+						className="secondary"
+						onClick={() => setOpen(true)}
+						disabled={siblingBusy}
+					>
 						Use the backup instead
 					</button>
 				</div>
@@ -61,7 +78,7 @@ export function BackupRestore({
 			<form
 				onSubmit={(event) => {
 					event.preventDefault();
-					if (!passphrase || busy) {
+					if (!passphrase || busy || siblingBusy) {
 						return;
 					}
 					setBusy(true);
@@ -85,7 +102,7 @@ export function BackupRestore({
 					onChange={(event) => setPassphrase(event.target.value)}
 					autoComplete="off"
 					spellCheck={false}
-					disabled={busy}
+					disabled={busy || siblingBusy}
 					autoFocus
 				/>
 				{/* **Both directions, because the second one surprises people.** The
@@ -109,7 +126,7 @@ export function BackupRestore({
 				</p>
 
 				<div className="controls">
-					<button type="submit" disabled={busy || passphrase === ''}>
+					<button type="submit" disabled={busy || siblingBusy || passphrase === ''}>
 						{busy ? 'Restoring…' : 'Restore the backup and unlock'}
 					</button>
 					<button
@@ -119,7 +136,7 @@ export function BackupRestore({
 							setOpen(false);
 							setError(undefined);
 						}}
-						disabled={busy}
+						disabled={busy || siblingBusy}
 					>
 						Cancel
 					</button>

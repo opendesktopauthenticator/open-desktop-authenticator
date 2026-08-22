@@ -115,6 +115,13 @@ export function CreateVault({
 						// `.bak` the restore was reading: the backup this screen exists to
 						// protect, destroyed by the screen that warned about it.
 						onBusy={setBusy}
+						// **And back the other way.** `onBusy` alone was one-directional:
+						// this form could tell the screen it was busy, and nothing told
+						// *it* that Create was already running. Both end in a second of
+						// scrypt, so without this a user could start a create and then
+						// submit a restore — and a winning create leaves an empty vault
+						// whose next save copies itself over the backup.
+						siblingBusy={busy}
 						introduction="Restoring it makes it your vault, exactly as it was when it was written."
 					/>
 				</div>

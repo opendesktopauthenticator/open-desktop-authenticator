@@ -483,7 +483,14 @@ export class EnrollmentService {
 		let present = false;
 		try {
 			await this.vault.mutate((draft) => {
-				const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
+				// **Matched on the secret, not only on the SteamID.** Steam was asked
+				// about the shared secret this call snapshotted, and an import-replace
+				// or a transfer persist landing during that await can leave a
+				// different authenticator under the same identity. Marking *that* row
+				// activated attaches one authenticator's outcome to another's secrets.
+				const stored = draft.accounts.find(
+					(entry) => entry.steamId64 === steamId64 && entry.sharedSecret === account.sharedSecret
+				);
 				if (stored) {
 					present = true;
 					// Only now. Until Steam confirms, this account's authenticator is
@@ -513,10 +520,11 @@ export class EnrollmentService {
 		// authenticator Steam has just made live.
 		if (!present) {
 			throw new EnrollmentError(
-				`Steam activated the authenticator on ${account.accountName}, but the account was ` +
-					'removed from this vault while that was happening — so the secrets that drive it ' +
-					'are no longer stored here. The recovery file written at enrollment still holds ' +
-					'them: use "Recover from file" to restore the account.'
+				`Steam activated the authenticator on ${account.accountName}, but this vault no longer ` +
+					'holds the authenticator that was activated — it was removed, or replaced by a ' +
+					'different one for the same account, while Steam was answering. The recovery file ' +
+					'written at enrollment still holds those secrets: use "Recover from file" to ' +
+					'restore them.'
 			);
 		}
 
@@ -617,7 +625,15 @@ export class EnrollmentService {
 		// dropped by the routing hook the caller wires to removal.
 		try {
 			await this.vault.mutate((draft) => {
-				const index = draft.accounts.findIndex((entry) => entry.steamId64 === steamId64);
+				// **The row whose revocation code was actually spent.** Matching on the
+				// SteamID alone deleted whatever held that identity by the time Steam
+				// answered — and an import-replace during the detach puts a *different*
+				// authenticator there, whose secrets are then destroyed for a removal
+				// that was never about it.
+				const index = draft.accounts.findIndex(
+					(entry) =>
+						entry.steamId64 === steamId64 && entry.revocationCode === account.revocationCode
+				);
 				if (index >= 0) {
 					draft.accounts.splice(index, 1);
 				}

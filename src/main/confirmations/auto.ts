@@ -379,6 +379,11 @@ export class AutoConfirmEngine {
 				// failing forever at fifteen-minute intervals while the user believes
 				// this is working.
 				this.state.set(steamId64, { nextDueAt: Number.POSITIVE_INFINITY, failures, halted: true });
+				// **The cheap early-out depends on this.** Without it `earliestDueAt`
+				// stayed at the halted account's old due time, so every one-second beat
+				// went on deep-cloning the whole secret-bearing vault to rediscover
+				// that there was nothing to do — for as long as the process ran.
+				this.rememberEarliest();
 				// The flag, not the wording. The activity log used to decide whether
 				// this was a halt by running `/stopped/i` over the sentence below.
 				this.onFailure(

@@ -286,11 +286,11 @@ describe('parseMaFile', () => {
 	describe('proxy carried by the file (F-11)', () => {
 		it('keeps a usable proxy URL', () => {
 			const parsed = parseMaFile(
-				maFile({ steamid: '76561198000000001' }, { proxy: 'socks5://user:pass@127.0.0.1:1080' }),
+				maFile({ steamid: '76561198000000001' }, { proxy: 'http://user:pass@127.0.0.1:1080' }),
 				'x.maFile',
 				NOW
 			);
-			expect(parsed.proxyUrl).toBe('socks5://user:pass@127.0.0.1:1080');
+			expect(parsed.proxyUrl).toBe('http://user:pass@127.0.0.1:1080');
 		});
 
 		it('drops one we would not route through, rather than storing it', () => {
@@ -392,5 +392,33 @@ describe('a Session nested inside an unknown object', () => {
 			'"account_name":"trader","Session":{"SteamID":76561198000000001},' +
 			'"Session":{"SteamID":76561198000000002}}';
 		expect(parseMaFile(raw, 'c.maFile', Date.now()).steamId64).toBe('76561198000000002');
+	});
+});
+
+describe('a maFile carrying an authenticated SOCKS proxy', () => {
+	it('drops it with a warning rather than storing a route half the app cannot use', () => {
+		// SDA's own .NET stack authenticates to SOCKS proxies happily, so real
+		// files in the wild carry them. Chromium cannot, so storing one would give
+		// the account a route that signs in and then fails every confirmation.
+		// Dropped — but said out loud, because silently losing a setting the user
+		// had is its own defect.
+		// Written as text, not through `JSON.stringify`: a bare SteamID number
+		// literal loses its low digits before it is ever serialised, which is the
+		// F-01 mistake this parser exists to refuse.
+		const raw =
+			'{"shared_secret":"ASNFZ4mrze8BI0VniavN7wEjRWc=","identity_secret":"aWRlbnRpdHk=",' +
+			'"account_name":"trader","Session":{"SteamID":76561198000000001,' +
+			'"proxy":"socks5://user:pass@127.0.0.1:1080"}}';
+		const parsed = parseMaFile(raw, 'a.maFile', Date.now());
+		expect(parsed.proxyUrl).toBeUndefined();
+		expect(parsed.warnings.join(' ')).toMatch(/not a usable proxy/i);
+	});
+
+	it('keeps one it can honour on both stacks', () => {
+		const raw =
+			'{"shared_secret":"ASNFZ4mrze8BI0VniavN7wEjRWc=","identity_secret":"aWRlbnRpdHk=",' +
+			'"account_name":"trader","Session":{"SteamID":76561198000000001,' +
+			'"proxy":"socks5://127.0.0.1:1080"}}';
+		expect(parseMaFile(raw, 'b.maFile', Date.now()).proxyUrl).toBe('socks5://127.0.0.1:1080');
 	});
 });

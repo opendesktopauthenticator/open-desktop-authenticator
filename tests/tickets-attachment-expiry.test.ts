@@ -1,4 +1,4 @@
-import { Readable } from 'node:stream';
+import { PassThrough, Readable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -284,5 +284,181 @@ describe('an oversized reply', () => {
 		);
 		expect(out.status).toBe(413);
 		expect(out.body).toMatch(/too large/i);
+	});
+});
+
+/*
+ * A reply that was in flight must not undo a newer admin decision.
+ *
+ * The ticket row is loaded before `readForm` awaits the body, and an admin
+ * claiming or closing the report during that await had their decision silently
+ * reverted: `assigned` became `open`, `resolved` became `assigned`.
+ */
+describe('a reply arriving after an admin acted', () => {
+	/**
+	 * A body that arrives in two pieces, so something can happen in between.
+	 *
+	 * The interleaving is the whole finding: the ticket row is read before
+	 * `readForm` awaits the body, and an admin acting during that await had
+	 * their decision silently reverted. A test that changes the status *before*
+	 * the request proves nothing — the row would simply be read fresh.
+	 */
+	function slowPost(fields: Record<string, string>): {
+		request: Record<string, unknown>;
+		finish: () => void;
+	} {
+		const body = new URLSearchParams(fields).toString();
+		const stream = new PassThrough();
+		const request = stream as unknown as Record<string, unknown>;
+		request.method = 'POST';
+		request.headers = { origin: 'https://opendesktopauthenticator.com' };
+		request.socket = { remoteAddress: someAddress() };
+		// The first half now; the rest only when the test says so.
+		stream.write(body.slice(0, 10));
+		return {
+			request,
+			finish: () => {
+				stream.end(body.slice(10));
+			}
+		};
+	}
+
+	it('does not undo a status the admin set while the body was arriving', async () => {
+		const { reference, key } = await fileReport();
+		const ticket = service.db
+			.prepare('SELECT id FROM tickets WHERE reference = ?')
+			.get(reference) as { id: number };
+
+		const { request, finish } = slowPost({ body: 'One more thing I forgot.', k: key });
+		const { out, response } = capture();
+		const replying = service.handle(
+			request,
+			response,
+			at(`/support/ticket/${reference}/reply?k=${key}`)
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		// The admin resolves it *during* the await.
+		service.db
+			.prepare('UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?')
+			.run('resolved', new Date().toISOString(), ticket.id);
+
+		finish();
+		await replying;
+		expect(out.status).toBe(303);
+
+		const after = service.db.prepare('SELECT status FROM tickets WHERE id = ?').get(ticket.id) as {
+			status: string;
+		};
+		// A reply reopens a finished report, which is intended — but it must move
+		// from what the row says *now*. Reading the pre-await snapshot turned
+		// `resolved` into `assigned`, a state nobody chose.
+		expect(after.status).toBe('open');
+	});
+
+	it('leaves a report the admin claimed mid-flight still claimed', async () => {
+		const { reference, key } = await fileReport();
+		const ticket = service.db
+			.prepare('SELECT id FROM tickets WHERE reference = ?')
+			.get(reference) as { id: number };
+
+		const { request, finish } = slowPost({ body: 'Answering your question.', k: key });
+		const { response } = capture();
+		const replying = service.handle(
+			request,
+			response,
+			at(`/support/ticket/${reference}/reply?k=${key}`)
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		service.db
+			.prepare('UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?')
+			.run('assigned', new Date().toISOString(), ticket.id);
+		finish();
+		await replying;
+
+		const after = service.db.prepare('SELECT status FROM tickets WHERE id = ?').get(ticket.id) as {
+			status: string;
+		};
+		expect(after.status).toBe('assigned');
+	});
+});
+
+/*
+ * The secret scanner has to match how a frightened person writes.
+ *
+ * `[:=]` alone assumed a paste of JSON or a config line, so
+ * `shared_secret=…` was refused while "my shared_secret is …" — which is how
+ * somebody actually types it into a support form — went straight through and
+ * was stored. The form promises this will not happen.
+ */
+describe('the secret scanner', () => {
+	const detail = (body: string) => ({
+		kind: 'bug',
+		summary: 'A problem with importing my account',
+		detail: `${body} — and here is more detail so the length check passes.`,
+		contact: ''
+	});
+
+	it('refuses a secret written as prose, not only as key=value', () => {
+		for (const body of [
+			'shared_secret is wOkX2Lm9deadbeef==',
+			'my shared secret is wOkX2Lm9deadbeef==',
+			'identity_secret: aWRlbnRpdHkxMjM0NQ==',
+			'the revocation code is R12345',
+			'steamid is 76561198000000001'
+		]) {
+			expect([body, service.validate(detail(body)).errors.length > 0]).toEqual([body, true]);
+		}
+	});
+
+	it('still refuses the key=value forms it always did', () => {
+		expect(
+			service.validate(detail('shared_secret=wOkX2Lm9deadbeef==')).errors.length
+		).toBeGreaterThan(0);
+	});
+
+	it('does not refuse an ordinary description of the same problem', () => {
+		// The value half has to look like one. Without that, "the shared secret is
+		// wrong" — a normal way to report a bug — would be refused as if it
+		// carried a secret, and the person would have nowhere to go.
+		for (const body of [
+			'I cannot log in and my codes are always wrong, please help',
+			'the shared secret is wrong somehow and I do not know why',
+			'the import failed with an error mentioning secrets'
+		]) {
+			expect([body, service.validate(detail(body)).errors.length]).toEqual([body, 0]);
+		}
+	});
+});
+
+describe('a ticket URL carrying a wrong key', () => {
+	it('still opens for a holder whose cookie is good', async () => {
+		const { reference, key } = await fileReport();
+		// Spend the key into a cookie the way a browser would.
+		const spend = capture();
+		await service.handle(get(), spend.response, at(`/support/ticket/${reference}?k=${key}`));
+		const cookie = spend.out.headers['set-cookie'] ?? '';
+
+		// A stale bookmark or a mistyped link. Preferring the query string over a
+		// perfectly good cookie answered 404, and deleting the `?k=` by hand is
+		// not a fix anybody would guess.
+		const { out, response } = capture();
+		await service.handle(
+			{ ...get(), headers: { cookie } },
+			response,
+			at(`/support/ticket/${reference}?k=definitely-the-wrong-key`)
+		);
+		expect(out.status).not.toBe(404);
+	});
+
+	it('still refuses someone with neither', async () => {
+		const { reference } = await fileReport();
+		const { out, response } = capture();
+		await service.handle(
+			get(),
+			response,
+			at(`/support/ticket/${reference}?k=definitely-the-wrong-key`)
+		);
+		expect(out.status).toBe(404);
 	});
 });

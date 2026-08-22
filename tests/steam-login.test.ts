@@ -386,9 +386,9 @@ describe('signing in through a proxy', () => {
 	it('hands the account proxy to the session factory', async () => {
 		const factory = vi.fn(() => fakeSession().session);
 
-		await signIn(REQUEST, 'socks5://user:pass@10.0.0.1:1080', factory, at);
+		await signIn(REQUEST, 'http://user:pass@10.0.0.1:8080', factory, at);
 
-		expect(factory).toHaveBeenCalledWith('socks5://user:pass@10.0.0.1:1080');
+		expect(factory).toHaveBeenCalledWith('http://user:pass@10.0.0.1:8080');
 	});
 
 	it('passes no proxy for an account that is not routed', async () => {
@@ -420,8 +420,8 @@ describe('proxy options for steam-session', () => {
 		// Steam's hostnames up on the user's own resolver — at the exact moments
 		// an account was being tied to a route. Chromium's half of the app already
 		// resolves at the proxy for `socks5`; this makes the Node half agree.
-		expect(steamSessionProxy('socks5://user:pa55@1.2.3.4:1080')).toEqual({
-			socksProxy: 'socks5h://user:pa55@1.2.3.4:1080'
+		expect(steamSessionProxy('socks5://1.2.3.4:1080')).toEqual({
+			socksProxy: 'socks5h://1.2.3.4:1080'
 		});
 	});
 
@@ -432,9 +432,10 @@ describe('proxy options for steam-session', () => {
 		expect(steamSessionProxy('socks5h://1.2.3.4:1080')).toEqual({
 			socksProxy: 'socks5h://1.2.3.4:1080'
 		});
-		expect(steamSessionProxy('socks4a://1.2.3.4:1080')).toEqual({
-			socksProxy: 'socks4a://1.2.3.4:1080'
-		});
+		// `socks4a` is refused outright: Chromium has no such rule and its nearest
+		// equivalent resolves locally, so accepting it would mean sign-in and
+		// confirmations resolving Steam in two different places.
+		expect(() => steamSessionProxy('socks4a://1.2.3.4:1080')).toThrow(/not supported|use http/i);
 	});
 
 	it('produces URLs the real agent reads as remote-DNS', async () => {
@@ -529,9 +530,16 @@ describe('a portless SOCKS proxy', () => {
 		}
 	});
 
-	it('keeps credentials, including a password containing @', () => {
-		expect(steamSessionProxy('socks5://user:pa55%40word@1.2.3.4:1080')).toEqual({
-			socksProxy: 'socks5h://user:pa55%40word@1.2.3.4:1080'
+	it('refuses a SOCKS proxy that needs credentials', () => {
+		// Chromium's SOCKS5 client implements no authentication methods, so a
+		// stored `socks5://user:pass@…` signed in through Node and then failed
+		// every confirmation. Refused where the user can still see the field.
+		expect(() => steamSessionProxy('socks5://user:pa55@1.2.3.4:1080')).toThrow(
+			/cannot authenticate/i
+		);
+		// http and https carry credentials on both stacks and are unaffected.
+		expect(steamSessionProxy('http://user:pa55%40word@1.2.3.4:8080')).toEqual({
+			httpProxy: 'http://user:pa55%40word@1.2.3.4:8080'
 		});
 	});
 });

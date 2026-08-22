@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
 	describeNetworkError,
@@ -32,9 +34,9 @@ describe('planning a proxy', () => {
 		// Chromium's proxy rules have no syntax for credentials. A rule containing
 		// them is either rejected or parsed with `user:pass@` as part of the
 		// hostname, and the second outcome connects to nothing.
-		const plan = planProxy('socks5://alice:s3cret@10.0.0.1:1080');
+		const plan = planProxy('http://alice:s3cret@10.0.0.1:8080');
 
-		expect(plan.proxyRules).toBe('socks5://10.0.0.1:1080');
+		expect(plan.proxyRules).toBe('http://10.0.0.1:8080');
 		expect(plan.proxyRules).not.toContain('alice');
 		expect(plan.proxyRules).not.toContain('s3cret');
 		expect(plan.credentials).toEqual({ username: 'alice', password: 's3cret' });
@@ -81,15 +83,15 @@ describe('planning a proxy', () => {
 	it('decodes percent-encoded credentials', () => {
 		// Stored URLs encode them. Authenticating with the literal `%40` rather than
 		// the `@` the proxy expects is a failure with no useful error.
-		const plan = planProxy('socks5://user%40host:p%40ss%3Aword@10.0.0.1:1080');
+		const plan = planProxy('http://user%40host:p%40ss%3Aword@10.0.0.1:1080');
 
 		expect(plan.credentials).toEqual({ username: 'user@host', password: 'p@ss:word' });
 	});
 
 	it('redacts credentials for display rather than shortening them', () => {
-		const plan = planProxy('socks5://alice:s3cret@10.0.0.1:1080');
+		const plan = planProxy('http://alice:s3cret@10.0.0.1:8080');
 
-		expect(plan.redacted).toBe('socks5://***:***@10.0.0.1:1080');
+		expect(plan.redacted).toBe('http://***:***@10.0.0.1:8080');
 		expect(plan.redacted).not.toContain('s3cret');
 	});
 
@@ -564,7 +566,7 @@ describe('forgetting a session actually empties it', () => {
 
 		const first = await factory.forAccount({
 			...routed,
-			proxyUrl: 'socks5://a:secret-a@10.0.0.1:1080'
+			proxyUrl: 'http://a:secret-a@10.0.0.1:8080'
 		});
 		await first({ url: STEAM_URL, method: 'GET', cookie: '' });
 
@@ -572,7 +574,7 @@ describe('forgetting a session actually empties it', () => {
 
 		const second = await factory.forAccount({
 			...routed,
-			proxyUrl: 'socks5://b:secret-b@10.0.0.2:1080'
+			proxyUrl: 'http://b:secret-b@10.0.0.2:8080'
 		});
 		await second({ url: STEAM_URL, method: 'GET', cookie: '' });
 
@@ -584,7 +586,7 @@ describe('forgetting a session actually empties it', () => {
 		const { electron, sessions, requests } = fakeElectron();
 		const factory = new SteamTransportFactory(electron);
 
-		await factory.forAccount({ ...routed, proxyUrl: 'socks5://a:secret-a@10.0.0.1:1080' });
+		await factory.forAccount({ ...routed, proxyUrl: 'http://a:secret-a@10.0.0.1:8080' });
 		factory.forget(routed.steamId64);
 		const plain = await factory.forAccount({ steamId64: routed.steamId64 });
 		await plain({ url: STEAM_URL, method: 'GET', cookie: '' });
@@ -767,7 +769,7 @@ describe('proxy credentials that were never percent-encoded', () => {
 		// valid password. The sensible reading of an undecodable value is that it
 		// was never encoded.
 		for (const password of ['100%sure', 'bad%ZZ', '%']) {
-			const plan = planProxy(`socks5://user:${password}@10.0.0.1:1080`);
+			const plan = planProxy(`http://user:${password}@10.0.0.1:8080`);
 			expect(plan.credentials?.password, password).toBe(password);
 		}
 	});
@@ -787,10 +789,10 @@ describe('network error messages', () => {
 	it('names the proxy whenever there is one', () => {
 		const message = describeNetworkError(
 			err('ERR_TUNNEL_CONNECTION_FAILED'),
-			'socks5://***:***@10.0.0.1:1080'
+			'http://***:***@10.0.0.1:8080'
 		);
 
-		expect(message).toContain('10.0.0.1:1080');
+		expect(message).toContain('10.0.0.1:8080');
 		expect(message).toContain('routed through');
 		// The likely cause, not just the fact of failure.
 		expect(message).toMatch(/username or password|expired/i);
@@ -826,7 +828,7 @@ describe('network error messages', () => {
 		// Distinctive values: an earlier version of this test asserted the message
 		// did not contain "user", which the explanation's own word "username"
 		// satisfies by accident.
-		const plan = planProxy('socks5://zx9login:hunter2@10.0.0.1:1080');
+		const plan = planProxy('http://zx9login:hunter2@10.0.0.1:1080');
 		const message = describeNetworkError(err('ERR_TUNNEL_CONNECTION_FAILED'), plan.redacted);
 
 		expect(message).not.toContain('hunter2');
@@ -934,7 +936,7 @@ describe('verifying that a request is actually proxied', () => {
 		const { electron } = fakeElectron({ resolvesTo: 'DIRECT' });
 		const transport = await new SteamTransportFactory(electron).forAccount({
 			...routed,
-			proxyUrl: 'socks5://zx9login:hunter2@10.0.0.1:1080'
+			proxyUrl: 'http://zx9login:hunter2@10.0.0.1:1080'
 		});
 
 		const error = await transport({ url: STEAM_URL, method: 'GET', cookie: '' }).catch(
@@ -965,14 +967,14 @@ describe('what the account list is told about routing', () => {
 		const factory = new SteamTransportFactory(electron, () => 1_700_000_000_000);
 		const transport = await factory.forAccount({
 			...routed,
-			proxyUrl: 'socks5://user:secret@10.0.0.1:1080'
+			proxyUrl: 'http://user:secret@10.0.0.1:8080'
 		});
 
 		await transport({ url: STEAM_URL, method: 'GET', cookie: '' });
 
 		expect(factory.routingStatus(routed.steamId64)).toEqual({
 			state: 'verified',
-			via: 'socks5://***:***@10.0.0.1:1080',
+			via: 'http://***:***@10.0.0.1:8080',
 			checkedAtMs: 1_700_000_000_000
 		});
 	});
@@ -1559,5 +1561,55 @@ describe('the beforeSend hook', () => {
 			})
 		).rejects.toThrow(/consent was withdrawn/);
 		expect(requests).toHaveLength(0);
+	});
+});
+
+/*
+ * One stored URL has to mean one route.
+ *
+ * Two schemes could not honour that. A SOCKS proxy carrying credentials worked
+ * for `steam-session` — which hands the URL to socks-proxy-agent — and could
+ * never work for Chromium, whose SOCKS5 client implements no authentication
+ * methods and whose `login` event is an HTTP 407 mechanism a SOCKS handshake
+ * never produces. So sign-in succeeded and every confirmation, enrollment
+ * attach and clock sync failed. And `socks4a` is remote-DNS on Node while
+ * Chromium has no such rule at all, resolving locally instead — the exact split
+ * a previous release closed for `socks5`.
+ */
+describe('proxies the two network stacks would route differently', () => {
+	it('refuses a SOCKS proxy that carries credentials', () => {
+		for (const url of [
+			'socks5://user:pass@10.0.0.1:1080',
+			'socks5h://user:pass@10.0.0.1:1080',
+			'socks4://user@10.0.0.1:1080',
+			'socks5://:pass@10.0.0.1:1080'
+		]) {
+			expect(() => planProxy(url)).toThrow(/cannot authenticate/i);
+		}
+	});
+
+	it('still accepts a SOCKS proxy without them', () => {
+		expect(planProxy('socks5://10.0.0.1:1080').proxyRules).toBe('socks5://10.0.0.1:1080');
+	});
+
+	it('still accepts credentials on http and https, which carry them on both', () => {
+		expect(planProxy('http://user:pass@10.0.0.1:8080').credentials).toEqual({
+			username: 'user',
+			password: 'pass'
+		});
+		expect(planProxy('https://user:pass@10.0.0.1:8443').credentials).toBeDefined();
+	});
+
+	it('refuses socks4a outright', () => {
+		expect(() => planProxy('socks4a://10.0.0.1:1080')).toThrow();
+	});
+
+	it('does not offer the broken form as an example anywhere in the UI', () => {
+		// The routing screen's placeholder was `socks5://user:password@host:1080` —
+		// teaching the one shape that cannot work.
+		for (const screen of ['AccountRouting', 'AddAuthenticator', 'MoveAuthenticator']) {
+			const source = readFileSync(join(__dirname, `../src/renderer/screens/${screen}.tsx`), 'utf8');
+			expect(source).not.toMatch(/placeholder="socks[^"]*@/);
+		}
 	});
 });

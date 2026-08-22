@@ -93,7 +93,7 @@ export function AccountRouting({
 					type="password"
 					value={address}
 					onChange={(event) => setAddress(event.target.value)}
-					placeholder="socks5://user:password@host:1080"
+					placeholder="socks5://host:1080"
 					autoComplete="off"
 					spellCheck={false}
 					disabled={busy}

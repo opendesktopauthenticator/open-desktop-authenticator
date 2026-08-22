@@ -215,6 +215,18 @@ export class ConfirmationsClient {
 			// batch: a partial approval would be harder to explain than a refusal,
 			// and the next pass will approve whatever is still allowed.
 			const settings = consentStillGiven?.();
+			// **A missing row is not consent.** Returning early treated "the account
+			// is gone" as "nothing to check", so a trade could still be signed after
+			// the account was removed. The caller distinguishes the two: it passes no
+			// callback at all when consent does not apply.
+			if (consentStillGiven !== undefined && settings === undefined) {
+				throw new ConfirmationProtocolError({
+					kind: 'unreadable',
+					message:
+						'this account was removed from the vault while the request was being prepared, ' +
+						'so nothing was approved.'
+				});
+			}
 			if (settings === undefined) {
 				return;
 			}

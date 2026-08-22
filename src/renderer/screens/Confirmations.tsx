@@ -143,8 +143,22 @@ export function Confirmations({
 	 * Refresh disabled for as long as the screen stayed open, with no way to clear
 	 * it. Every caller now owns its own busy handling and shares this.
 	 */
+	/**
+	 * Which list may write the screen.
+	 *
+	 * A header Refresh started before a Steam sign-in was still in flight when
+	 * the sign-in succeeded — and its answer, fetched while the session was still
+	 * dead, put the password form straight back up. A successful sign-in
+	 * supersedes any list older than it.
+	 */
+	const listSeq = useRef(0);
+
 	const load = useCallback(async (): Promise<void> => {
+		const mine = (listSeq.current += 1);
 		const result = await listRef.current();
+		if (listSeq.current !== mine) {
+			return;
+		}
 		// **`undefined`, not the empty array the handler sends.** When Steam wants a
 		// sign-in the response carries `confirmations: []` — not a list, an absence.
 		// Storing it as a list meant that the moment `signInReason` cleared, the
@@ -303,7 +317,14 @@ export function Confirmations({
 						// account this app had not been able to ask.
 						setConfirmations(undefined);
 						setSignInReason(undefined);
-						refresh();
+						// **`load`, not `refresh`.** `refresh` declines while another list
+						// is in flight — and the one in flight here is precisely the stale
+						// answer that would report this account as still needing a
+						// password. Claiming a newer ticket disowns it.
+						listing.current += 1;
+						void load().finally(() => {
+							listing.current -= 1;
+						});
 						return result;
 					}}
 					onCancel={onClose}

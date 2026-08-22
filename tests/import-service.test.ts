@@ -635,7 +635,7 @@ describe('replacing an existing account', () => {
 			draft.accounts.push({
 				...existingAccount(),
 				autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 30 },
-				proxyUrl: 'socks5://kept:secret@127.0.0.1:1080'
+				proxyUrl: 'http://kept:secret@127.0.0.1:1080'
 			});
 		});
 
@@ -648,7 +648,7 @@ describe('replacing an existing account', () => {
 			trades: false,
 			pollIntervalSeconds: 30
 		});
-		expect(stored?.proxyUrl).toBe('socks5://kept:secret@127.0.0.1:1080');
+		expect(stored?.proxyUrl).toBe('http://kept:secret@127.0.0.1:1080');
 		// The account was added when it was added; re-importing is not adding it.
 		expect(stored?.addedAt).toBe('2026-08-01T00:00:00.000Z');
 	});
@@ -711,24 +711,24 @@ describe('replacing an existing account', () => {
 	 */
 	describe('a proxy inside a maFile', () => {
 		it('is not adopted unless asked for', async () => {
-			const id = stageOne(file({ Session: { proxy: 'socks5://user:secret@127.0.0.1:1080' } }));
+			const id = stageOne(file({ Session: { proxy: 'http://user:secret@127.0.0.1:1080' } }));
 			await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }]);
 
 			expect(vault.read().accounts[0]?.proxyUrl).toBeUndefined();
 		});
 
 		it('is adopted when asked for', async () => {
-			const id = stageOne(file({ Session: { proxy: 'socks5://user:secret@127.0.0.1:1080' } }));
+			const id = stageOne(file({ Session: { proxy: 'http://user:secret@127.0.0.1:1080' } }));
 			await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: true }]);
 
-			expect(vault.read().accounts[0]?.proxyUrl).toBe('socks5://user:secret@127.0.0.1:1080');
+			expect(vault.read().accounts[0]?.proxyUrl).toBe('http://user:secret@127.0.0.1:1080');
 		});
 
 		it('does not fire the routing hook when it was declined', async () => {
 			const onRoutingChanged = vi.fn();
 			imports = new ImportService(vault, { now: () => clock, onRoutingChanged });
 
-			const id = stageOne(file({ Session: { proxy: 'socks5://user:secret@127.0.0.1:1080' } }));
+			const id = stageOne(file({ Session: { proxy: 'http://user:secret@127.0.0.1:1080' } }));
 			await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }]);
 
 			expect(onRoutingChanged).not.toHaveBeenCalled();
@@ -740,14 +740,14 @@ describe('replacing an existing account', () => {
 			await vault.mutate((draft) => {
 				draft.accounts.push({
 					...existingAccount(),
-					proxyUrl: 'socks5://chosen:secret@127.0.0.1:1080'
+					proxyUrl: 'http://chosen:secret@127.0.0.1:1080'
 				});
 			});
 
 			const id = stageOne(file({ Session: { proxy: 'socks5://from-file@10.0.0.1:1080' } }));
 			await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
 
-			expect(vault.read().accounts[0]?.proxyUrl).toBe('socks5://chosen:secret@127.0.0.1:1080');
+			expect(vault.read().accounts[0]?.proxyUrl).toBe('http://chosen:secret@127.0.0.1:1080');
 		});
 	});
 
@@ -758,19 +758,19 @@ describe('replacing an existing account', () => {
 		await vault.mutate((draft) => {
 			draft.accounts.push({
 				...existingAccount(),
-				proxyUrl: 'socks5://old:secret@127.0.0.1:1080'
+				proxyUrl: 'http://old:secret@127.0.0.1:1080'
 			});
 		});
 
 		const id = stageOne(
 			file({
-				Session: { proxy: 'socks5://new:secret@10.0.0.1:1080' }
+				Session: { proxy: 'http://new:secret@10.0.0.1:1080' }
 			})
 		);
 		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: true }]);
 
 		expect(onRoutingChanged).toHaveBeenCalledWith('76561198000000001');
-		expect(vault.read().accounts[0]?.proxyUrl).toBe('socks5://new:secret@10.0.0.1:1080');
+		expect(vault.read().accounts[0]?.proxyUrl).toBe('http://new:secret@10.0.0.1:1080');
 	});
 
 	it('does not notify when the stored proxy URL is unchanged', async () => {
@@ -780,7 +780,7 @@ describe('replacing an existing account', () => {
 		await vault.mutate((draft) => {
 			draft.accounts.push({
 				...existingAccount(),
-				proxyUrl: 'socks5://kept:secret@127.0.0.1:1080'
+				proxyUrl: 'http://kept:secret@127.0.0.1:1080'
 			});
 		});
 
@@ -818,16 +818,16 @@ describe('a session across a routing change', () => {
 		await vault.mutate((draft) => {
 			draft.accounts.push({
 				...existingAccount(),
-				proxyUrl: 'socks5://old:secret@127.0.0.1:1080',
+				proxyUrl: 'http://old:secret@127.0.0.1:1080',
 				refreshToken: 'token-minted-over-the-old-route'
 			});
 		});
 
-		const id = stageOne(file({ Session: { proxy: 'socks5://new:secret@10.0.0.1:1080' } }));
+		const id = stageOne(file({ Session: { proxy: 'http://new:secret@10.0.0.1:1080' } }));
 		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: true }]);
 
 		const stored = vault.read().accounts[0];
-		expect(stored?.proxyUrl).toBe('socks5://new:secret@10.0.0.1:1080');
+		expect(stored?.proxyUrl).toBe('http://new:secret@10.0.0.1:1080');
 		expect(stored?.refreshToken).toBeUndefined();
 	});
 
@@ -837,12 +837,12 @@ describe('a session across a routing change', () => {
 		await vault.mutate((draft) => {
 			draft.accounts.push({
 				...existingAccount(),
-				proxyUrl: 'socks5://same:secret@127.0.0.1:1080',
+				proxyUrl: 'http://same:secret@127.0.0.1:1080',
 				refreshToken: 'still-valid'
 			});
 		});
 
-		const id = stageOne(file({ Session: { proxy: 'socks5://same:secret@127.0.0.1:1080' } }));
+		const id = stageOne(file({ Session: { proxy: 'http://same:secret@127.0.0.1:1080' } }));
 		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: true }]);
 
 		expect(vault.read().accounts[0]?.refreshToken).toBe('still-valid');

@@ -128,11 +128,13 @@ describe('lists that must not be overwritten by a stale answer', () => {
 		// guard while the second was still in the air, which is the race itself.
 		expect(screen).toMatch(/const listing = useRef\(1\);/);
 		expect(screen).toMatch(/if \(busy \|\| listing\.current > 0\) \{/);
-		// Every path that increments must decrement, or the screen locks itself out.
+		// Every path that increments must decrement, or the screen locks itself out
+		// of ever refreshing. Balance is the invariant, not a particular count —
+		// the post-sign-in reload legitimately added a third pair.
 		const ups = screen.match(/listing\.current \+= 1;/g) ?? [];
 		const downs = screen.match(/listing\.current -= 1;/g) ?? [];
-		expect(ups).toHaveLength(2);
-		expect(downs).toHaveLength(2);
+		expect(ups.length).toBeGreaterThanOrEqual(2);
+		expect(downs).toHaveLength(ups.length);
 	});
 });
 
@@ -200,5 +202,76 @@ describe('the activity badge', () => {
 		// some later poll happened to restore it.
 		expect(app).toMatch(/\.then\(\(result\) => setActivityUrgent\(result\.urgent\)\)/);
 		expect(app).not.toMatch(/setActivityUrgent\(false\)\)/);
+	});
+});
+
+describe('forms on one screen that each end in a key derivation', () => {
+	const restore = readFileSync(
+		join(__dirname, '../src/renderer/screens/BackupRestore.tsx'),
+		'utf8'
+	);
+
+	it('let the restore form know the screen is already busy', () => {
+		// `onBusy` only reported outwards. Create and restore sit together on the
+		// screen that warns not to create before restoring — and nothing stopped
+		// opening the restore form while "Creating…" was on screen. A winning
+		// create leaves an empty vault whose next save copies itself over the very
+		// backup the other form exists to read.
+		expect(restore).toMatch(/siblingBusy\?: boolean;/);
+		expect(restore).toMatch(/if \(!passphrase \|\| busy \|\| siblingBusy\)/);
+		// Including the opener, which is what actually admits the second flow.
+		expect(restore).toMatch(/onClick=\{\(\) => setOpen\(true\)\}\s*\n\s*disabled=\{siblingBusy\}/);
+	});
+
+	it('is wired from both screens that mount it', () => {
+		for (const screen of ['CreateVault', 'UnlockVault']) {
+			const source = readFileSync(join(__dirname, `../src/renderer/screens/${screen}.tsx`), 'utf8');
+			expect([screen, /onBusy=\{setBusy\}/.test(source)]).toEqual([screen, true]);
+			expect([screen, /siblingBusy=\{busy\}/.test(source)]).toEqual([screen, true]);
+		}
+	});
+});
+
+describe('the update-check toggle', () => {
+	it('freezes while a save is in flight, like the fields beside it', () => {
+		const source = readFileSync(join(__dirname, '../src/renderer/screens/Settings.tsx'), 'utf8');
+		// The number inputs were frozen and this was not, so unchecking during
+		// "Saving…" changed the screen without changing the request — and the
+		// success handler then wrote "Saved." beside a value never sent.
+		expect(source).toMatch(
+			/checked=\{checked\}\s*\n\s*disabled=\{disabled\}\s*\n\s*onChange=\{\(event\) => onChange/
+		);
+		expect(source).toMatch(/<UpdateCheckSetting[\s\S]*?disabled=\{busy\}/);
+	});
+});
+
+describe('copy and export status on the account list', () => {
+	it('is only written by the newest attempt', () => {
+		const source = readFileSync(join(__dirname, '../src/renderer/screens/VaultHome.tsx'), 'utf8');
+		// One status slot for the whole list: the first copy after an unlock waits
+		// on the Steam clock sync, and another row's button stays live meanwhile,
+		// so an older failure could overwrite a newer success.
+		expect(source).toMatch(/const attempt = useRef\(0\);/);
+		expect(source.match(/const mine = \(attempt\.current \+= 1\);/g) ?? []).toHaveLength(2);
+		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(4);
+	});
+});
+
+describe('the recovery screen', () => {
+	it('does not name a passphrase that activation may have replaced', () => {
+		const screen = readFileSync(
+			join(__dirname, '../src/renderer/screens/RecoverAccount.tsx'),
+			'utf8'
+		);
+		const service = readFileSync(join(__dirname, '../src/main/vault/recovery.ts'), 'utf8');
+		// Activation rewrites the file through `updateRecovery`, resealing it with
+		// whatever key the vault holds then — so "the passphrase when the account
+		// was created" was false in exactly the case where somebody is reading it,
+		// and following it would suggest the only backup was dead.
+		expect(screen).not.toMatch(/when the account was created/);
+		expect(screen).not.toMatch(/sealed once and never rewritten/);
+		expect(screen).toMatch(/when this file was last written/);
+		expect(service).not.toMatch(/when \*\*the account was created\*\*/);
+		expect(service).toMatch(/when the file was last written/);
 	});
 });

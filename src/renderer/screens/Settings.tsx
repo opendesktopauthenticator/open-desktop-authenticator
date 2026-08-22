@@ -161,6 +161,7 @@ export function Settings({
 					<UpdateCheckSetting
 						installedFromStore={installedFromStore}
 						checked={settings.updateCheck}
+						disabled={busy}
 						onChange={(updateCheck) => change({ updateCheck })}
 					/>
 
@@ -317,11 +318,20 @@ export function PassphraseChange({
 export function UpdateCheckSetting({
 	installedFromStore,
 	checked,
-	onChange
+	onChange,
+	disabled = false
 }: {
 	installedFromStore: boolean;
 	checked: boolean;
 	onChange: (value: boolean) => void;
+	/**
+	 * Held while a save is in flight.
+	 *
+	 * The number fields above were frozen and this was not, so unchecking it
+	 * during "Saving…" changed what the screen showed without changing what the
+	 * request carried — and the success handler then wrote "Saved." beside it.
+	 */
+	disabled?: boolean;
 }): React.JSX.Element {
 	if (installedFromStore) {
 		return (
@@ -337,6 +347,7 @@ export function UpdateCheckSetting({
 			<input
 				type="checkbox"
 				checked={checked}
+				disabled={disabled}
 				onChange={(event) => onChange(event.target.checked)}
 			/>
 			<span>

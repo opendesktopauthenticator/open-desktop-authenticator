@@ -667,7 +667,7 @@ export function MoveAuthenticator({
 					onChange={(event) => setProxyUrl(event.target.value)}
 					autoComplete="off"
 					spellCheck={false}
-					placeholder="socks5://user:pass@host:1080"
+					placeholder="socks5://host:1080"
 				/>
 				<p className="hint">
 					HTTP, HTTPS, SOCKS4 and SOCKS5 are all accepted — the example is only an example. Leave it

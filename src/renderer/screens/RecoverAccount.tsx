@@ -111,9 +111,11 @@ export function RecoverAccount({
 					disabled={busy}
 				/>
 				<p className="hint">
-					The passphrase the vault had <strong>when the account was created</strong>. If you have
-					changed it since, recovery files written before the change still use the old one — they
-					are sealed once and never rewritten.
+					The vault passphrase that was in use <strong>when this file was last written</strong> —
+					usually your current one. Finishing an account&rsquo;s activation rewrites its recovery
+					file, so a file is not always sealed with the passphrase you had when the account was
+					first set up. If your current one is refused and you have changed it since, try the
+					previous one.
 				</p>
 
 				<div className="controls">

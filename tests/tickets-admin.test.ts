@@ -377,3 +377,31 @@ describe('the queue does not lose old open reports', () => {
 		expect(open).toContain('ODA-OLD1-OPEN');
 	});
 });
+
+describe('signing out from another site', () => {
+	it('does not clear a live session’s cookie without the token', async () => {
+		// The CSRF check protected the server's session table and not the
+		// browser's cookie: every POST answered with `admin=; Max-Age=0`, so a
+		// cross-site form still signed the administrator out. Not an escalation,
+		// but a control that fails at the only thing it appears to do.
+		const login = Readable.from([
+			Buffer.from(new URLSearchParams({ passphrase: 'correct-horse-battery-staple' }).toString())
+		]) as unknown as Record<string, unknown>;
+		login.method = 'POST';
+		login.headers = { origin: 'https://opendesktopauthenticator.com' };
+		login.socket = { remoteAddress: '10.8.0.9' };
+		const session = capture();
+		await service.handleAdmin(login, session.response, at('/admin/login'));
+		const cookie = session.out.headers['set-cookie'] ?? '';
+		expect(cookie).toMatch(/admin=/);
+
+		const { out, response } = capture();
+		await service.handleAdmin(
+			req('POST', { csrf: 'not-the-real-token' }, { cookie, origin: 'https://evil.example' }),
+			response,
+			at('/admin/logout')
+		);
+		expect(out.status).toBe(403);
+		expect(out.headers['set-cookie']).toBeUndefined();
+	});
+});

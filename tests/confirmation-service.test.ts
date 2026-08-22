@@ -910,3 +910,54 @@ describe('consent withdrawn during route verification', () => {
 		expect(sent).toHaveLength(1);
 	});
 });
+
+/*
+ * A missing account is not consent.
+ *
+ * The last-moment hook returned early when the vault row was gone, treating
+ * "the account no longer exists" as "nothing to check" — so a trade could
+ * still be signed after the account was removed.
+ */
+describe('the account removed while the approval is being prepared', () => {
+	it('sends nothing', async () => {
+		const accounts = [
+			account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } })
+		];
+		let releaseRouting: (() => void) | undefined;
+		const routingGate = new Promise<void>((resolve) => {
+			releaseRouting = resolve;
+		});
+		let routingReached: (() => void) | undefined;
+		const atRouting = new Promise<void>((resolve) => {
+			routingReached = resolve;
+		});
+
+		const sent: SteamRequest[] = [];
+		const transport = async (request: SteamRequest): Promise<SteamResponse> => {
+			if (request.url.includes('GenerateAccessTokenForApp')) {
+				return { status: 200, text: JSON.stringify({ response: { access_token: ACCESS } }) };
+			}
+			if (request.url.includes('getlist')) {
+				return { status: 200, text: JSON.stringify({ success: true, conf: [TRADE] }) };
+			}
+			routingReached?.();
+			await routingGate;
+			request.beforeSend?.();
+			sent.push(request);
+			return { status: 200, text: JSON.stringify({ success: true }) };
+		};
+		const transports = {
+			forAccount: () => Promise.resolve(transport)
+		} as unknown as SteamTransportFactory;
+
+		const pass = service(fakeVault(accounts), transports).runAutoConfirm('76561198000000001');
+		await atRouting;
+
+		// Removed while the approval request is verifying its route.
+		accounts.length = 0;
+		releaseRouting?.();
+
+		await expect(pass).rejects.toThrow(/removed from the vault/i);
+		expect(sent).toHaveLength(0);
+	});
+});

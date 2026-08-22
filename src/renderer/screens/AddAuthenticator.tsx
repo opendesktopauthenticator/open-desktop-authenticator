@@ -265,7 +265,7 @@ export function AddAuthenticator({
 							type="text"
 							value={proxyUrl}
 							onChange={(event) => setProxyUrl(event.target.value)}
-							placeholder="socks5://user:pass@host:1080"
+							placeholder="socks5://host:1080"
 							autoComplete="off"
 							spellCheck={false}
 						/>
