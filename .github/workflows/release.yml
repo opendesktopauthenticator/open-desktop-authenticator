@@ -166,6 +166,41 @@ jobs:
       - name: Package
         run: npm run build && npx electron-builder --config electron-builder.config.mjs ${{ matrix.targets }} --publish never
 
+      # The Store package, built separately and **not published as a release
+      # asset**.
+      #
+      # It is not a file anyone downloads: an appx built for the Store is
+      # deliberately unsigned, because Microsoft re-signs it on ingestion, so a
+      # visitor who downloaded it could not install it. It goes to Partner
+      # Center by hand. Building it here anyway is what proves the Store
+      # identity still matches — a mismatch is rejected at upload, which is a
+      # slow and confusing place to learn about it.
+      #
+      # `continue-on-error`, because the direct-download channel must not stop
+      # shipping over a Store tool. The step's own conclusion still shows.
+      - name: Package for the Store
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        run: npx electron-builder --config electron-builder.config.mjs --win appx --publish never
+
+      - name: Collect the Store package
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p dist-store
+          find release -maxdepth 1 -type f -name '*.appx' -exec cp {} dist-store/ \;
+          ls -l dist-store || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        with:
+          name: store-package
+          path: dist-store/
+          if-no-files-found: warn
+          retention-days: 7
+
       # Installers and archives only. `release/` also holds the unpacked tree,
       # the block maps and builder metadata, none of which anybody should
       # download and all of which would otherwise be hashed and published.

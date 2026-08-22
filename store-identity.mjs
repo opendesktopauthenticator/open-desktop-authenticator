@@ -35,10 +35,18 @@ export const STORE_IDENTITY_PLACEHOLDER = '[FROM_PARTNER_CENTER]';
 
 export const storeIdentity = {
 	/** Assigned by Microsoft. Partner Center → Product Identity → Package/Identity/Name. */
-	identityName: STORE_IDENTITY_PLACEHOLDER,
+	identityName: 'TheMaster.OpenDesktopAuthenticator',
 
-	/** The full Distinguished Name. Partner Center → Product Identity → Publisher. */
-	publisher: STORE_IDENTITY_PLACEHOLDER,
+	/**
+	 * The full Distinguished Name. Partner Center → Product Identity → Publisher.
+	 *
+	 * A GUID rather than a readable name, and that is Microsoft's doing: the
+	 * Store issues one per publisher account and the package will not install if
+	 * a single character differs. It is not a secret — it ships inside every
+	 * package — and it is not the name users see, which is
+	 * `publisherDisplayName` below.
+	 */
+	publisher: 'CN=249BBF8E-FB90-4514-91E4-4A29DD6A669E',
 
 	/**
 	 * Shown to users in the Store and in Windows.

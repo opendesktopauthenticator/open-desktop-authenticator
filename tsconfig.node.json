@@ -23,6 +23,7 @@
     "electron.vite.config.mts",
     "vitest.config.mts",
     "tests/**/*.ts",
-    "tickets/*.d.mts"
+    "tickets/*.d.mts",
+    "store-identity.d.mts"
   ]
 }

@@ -113,3 +113,44 @@ describe('what the package is allowed to contain', () => {
 		expect(config).toContain("'!node_modules/{react,react-dom,scheduler}/**'");
 	});
 });
+
+/*
+ * The Store identity, now that Partner Center has issued it.
+ *
+ * These three values are Microsoft's, not ours, and the package will not
+ * install if a single character differs — `store-identity.mjs` says so in as
+ * many words. They are pinned here because the failure mode is remote and
+ * slow: a mismatch is rejected at upload, long after the build looked fine.
+ */
+describe('the Microsoft Store identity', () => {
+	it('is fully resolved — no placeholders left', async () => {
+		const store = await import('../store-identity.mjs');
+		expect(store.unresolvedStoreFields()).toEqual([]);
+		expect(store.hasUnresolvedStoreIdentity()).toBe(false);
+	});
+
+	it('carries exactly what Partner Center issued', async () => {
+		const { storeIdentity } = await import('../store-identity.mjs');
+		expect(storeIdentity.identityName).toBe('TheMaster.OpenDesktopAuthenticator');
+		// A GUID, because the Store issues one per publisher account. Not a
+		// secret — it ships inside every package — and not the name users see.
+		expect(storeIdentity.publisher).toBe('CN=249BBF8E-FB90-4514-91E4-4A29DD6A669E');
+		// Must match the Store account's legal name and `branding.company`.
+		expect(storeIdentity.publisherDisplayName).toBe('MASTERPANEL LLC');
+	});
+
+	it('is built in CI but never published as a release asset', () => {
+		const workflow = readFileSync(join(__dirname, '../.github/workflows/release.yml'), 'utf8');
+		// A Store appx is deliberately unsigned — Microsoft re-signs it on
+		// ingestion — so a visitor who downloaded one could not install it. It is
+		// uploaded as a workflow artifact for the maintainer, and the release's
+		// own collection step only ever globs exe/AppImage/deb.
+		expect(workflow).toContain('--win appx --publish never');
+		expect(workflow).toContain('name: store-package');
+		const collect = workflow.slice(
+			workflow.indexOf('Collect artifacts'),
+			workflow.indexOf('Collect the Store package')
+		);
+		expect(collect).not.toContain('appx');
+	});
+});
