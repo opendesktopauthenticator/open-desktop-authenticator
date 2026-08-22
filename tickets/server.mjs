@@ -50,7 +50,15 @@
 import { createServer } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+	createReadStream,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -1681,9 +1689,16 @@ async function handle(request, response, url) {
 					page({ title: 'Not found', body: notice('callout-warn', ['No such file.']) })
 				);
 			}
-			let bytes;
+			// **Streamed, and `Range`-aware.** `readFileSync` of a 20 MB video pulled
+			// the whole file into memory and blocked the single event loop for the
+			// duration — and every `<video preload="metadata">` seek re-requested it,
+			// because a handler that ignores `Range` and always answers 200 gives the
+			// browser no way to ask for part of it. Four concurrent views measured at
+			// 80 MB of RSS against a 256 MB service limit.
+			const filePath = fileFor(file.id);
+			let size;
 			try {
-				bytes = readFileSync(fileFor(file.id));
+				size = statSync(filePath).size;
 			} catch {
 				return send(
 					response,
@@ -1691,31 +1706,52 @@ async function handle(request, response, url) {
 					page({ title: 'Not found', body: notice('callout-warn', ['No such file.']) })
 				);
 			}
-			response.writeHead(200, {
-				// The type recorded from the file's own bytes, never a string the
-				// uploader chose, and `nosniff` so the browser does not go looking
-				// for a second opinion.
+
+			const common = {
 				'content-type': file.media_type,
-				'content-length': bytes.length,
 				'x-content-type-options': 'nosniff',
-				// Belt and braces: even if something got past the signature check,
-				// this response may load nothing, run nothing and reach nowhere.
-				//
-				// nginx adds the site policy to this response as well, so two
-				// content security policies arrive. Unlike two Referrer-Policy
-				// values — where the browser picks one and the order decides which —
-				// multiple policies are each enforced in full, so the effective
-				// result is the intersection and therefore this stricter one. That
-				// is the wanted outcome, so the upstream copy is deliberately not
-				// hidden in the proxy block the way the others are.
 				'content-security-policy': "default-src 'none'; sandbox; frame-ancestors 'none'",
 				'content-disposition': `inline; filename="${ticket.reference}-${file.id.slice(0, 8)}.${file.media_type.split('/')[1]}"`,
 				'cross-origin-resource-policy': 'same-origin',
 				'referrer-policy': 'same-origin',
-				// Somebody else's screenshot is not for a shared cache to hold.
-				'cache-control': 'private, no-store'
-			});
-			return response.end(bytes);
+				'cache-control': 'private, no-store',
+				'accept-ranges': 'bytes'
+			};
+
+			// One range only. Multipart ranges are a spec corner no browser needs for
+			// media playback, and refusing them keeps this handler small.
+			const range = /^bytes=(\d*)-(\d*)$/.exec(String(request.headers.range ?? ''));
+			if (range && size > 0) {
+				const startRaw = range[1];
+				const endRaw = range[2];
+				let from;
+				let to;
+				if (startRaw === '') {
+					// `bytes=-N`: the final N bytes.
+					const suffix = Number(endRaw);
+					if (!Number.isFinite(suffix) || suffix <= 0) {
+						return send(response, 416, '', { 'content-range': `bytes */${size}` });
+					}
+					from = Math.max(0, size - suffix);
+					to = size - 1;
+				} else {
+					from = Number(startRaw);
+					to = endRaw === '' ? size - 1 : Number(endRaw);
+				}
+				if (!Number.isFinite(from) || !Number.isFinite(to) || from > to || from >= size) {
+					return send(response, 416, '', { 'content-range': `bytes */${size}` });
+				}
+				to = Math.min(to, size - 1);
+				response.writeHead(206, {
+					...common,
+					'content-range': `bytes ${from}-${to}/${size}`,
+					'content-length': to - from + 1
+				});
+				return createReadStream(filePath, { start: from, end: to }).pipe(response);
+			}
+
+			response.writeHead(200, { ...common, 'content-length': size });
+			return createReadStream(filePath).pipe(response);
 		}
 
 		/* ---- the reporter adds to their own report ---- */
@@ -1741,6 +1777,21 @@ async function handle(request, response, url) {
 				);
 			}
 			const form = await readForm(request).catch(() => ({}));
+			// **Too large is its own answer**, exactly as the submit path gives.
+			// Falling through to the length check told somebody who sent 20 KB that
+			// their message needed "between 4 and 4000 characters" — describing the
+			// empty form the catch substituted, not what they actually sent — and
+			// invited them to retry the same oversized payload.
+			if (request.oversized) {
+				return send(
+					response,
+					413,
+					page({
+						title: 'Too large',
+						body: notice('callout-warn', ['That message was too large to accept.'])
+					})
+				);
+			}
 			const body = String(form.body ?? '').trim();
 			if (body.length < 4 || body.length > 4000) {
 				return send(
@@ -2152,19 +2203,23 @@ async function handleAdmin(request, response, url) {
 			.trim()
 			.slice(0, 2000);
 		const stamp = now();
-		db.prepare('UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?').run(
-			status,
-			stamp,
-			Number(act[1])
-		);
-		if (note) {
-			db.prepare('INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)').run(
-				Number(act[1]),
-				note,
-				'us',
-				stamp
+		// One transaction, like the public submit and reply paths. Un-wrapped, a
+		// notes INSERT that failed after the status UPDATE left the queue moved
+		// and the explanation missing — while the catch-all answered "Nothing was
+		// saved", so retrying looked like a second transition after the operator
+		// had been told the first did not happen.
+		transactionally(() => {
+			db.prepare('UPDATE tickets SET status = ?, updated_at = ? WHERE id = ?').run(
+				status,
+				stamp,
+				Number(act[1])
 			);
-		}
+			if (note) {
+				db.prepare(
+					'INSERT INTO notes (ticket_id, body, author, created_at) VALUES (?, ?, ?, ?)'
+				).run(Number(act[1]), note, 'us', stamp);
+			}
+		});
 		return send(response, 303, '', { location: '/admin' });
 	}
 

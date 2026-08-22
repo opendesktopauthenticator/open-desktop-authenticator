@@ -153,8 +153,10 @@ const NODE_SOCKS_SCHEME: Record<string, string> = {
 
 export function steamSessionProxy(proxyUrl: string): SteamSessionProxy {
 	const url = new URL(proxyUrl);
-	// Throws `EgressError` for anything `planProxy` would refuse.
-	planProxy(proxyUrl);
+	// Throws `EgressError` for anything `planProxy` would refuse — and its
+	// `endpoint` is the host:port pair with any default already filled in, which
+	// is what the SOCKS branch below needs.
+	const plan = planProxy(proxyUrl);
 
 	const scheme = CHROMIUM_SCHEME[url.protocol] as string;
 	if (scheme === 'http' || scheme === 'https') {
@@ -176,8 +178,22 @@ export function steamSessionProxy(proxyUrl: string): SteamSessionProxy {
 	// changes nothing about which proxies work — only where the lookup happens.
 	// SOCKS4 genuinely cannot carry a hostname, so it alone stays local; `4a`
 	// keeps its remote spelling instead of being downgraded.
+	// **Built from the plan's endpoint, not from the raw string.** A portless
+	// `socks5://proxy.example` is accepted everywhere else — `planProxy` fills in
+	// Chromium's default and confirmations route fine — but `socks-proxy-agent`
+	// parses the empty port as `parseInt('')`, i.e. `NaN`, and its own
+	// `if (port == null) port = 1080` default never fires because `NaN == null`
+	// is false. So sign-in, enrollment and transfer all failed on an address the
+	// routing screen had just validated, while confirmations kept working.
+	//
+	// Credentials still come from the original string; only the authority is
+	// replaced, so a password containing `@` or `%` is untouched.
 	const nodeScheme = NODE_SOCKS_SCHEME[url.protocol] as string;
-	return { socksProxy: `${nodeScheme}:${proxyUrl.slice(url.protocol.length)}` };
+	const credentials =
+		url.username === '' && url.password === ''
+			? ''
+			: `${url.username}${url.password === '' ? '' : `:${url.password}`}@`;
+	return { socksProxy: `${nodeScheme}://${credentials}${plan.endpoint}` };
 }
 
 /**

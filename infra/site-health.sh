@@ -22,6 +22,18 @@ code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 \
   https://opendesktopauthenticator.com/ 2>/dev/null)
 if [ "$code" != "200" ]; then log err "site returned $code from the origin"; fail=1; fi
 
+# The ticket service, which is the domain's only dynamic part.
+#
+# Checking nginx and `/` proves the static site is up and says nothing about
+# this: `/support` and `/admin` are `proxy_pass`ed to 127.0.0.1:8787, so when
+# the unit is dead or crash-looping those 502 while `/` still answers 200 — and
+# this job logged "ok" through an outage of report submission, reporter access
+# and the admin queue alike.
+if ! systemctl is-active --quiet tickets; then log err "tickets.service is NOT running"; fail=1; fi
+
+support=$(curl -s -o /dev/null -w '%{http_code}' -m 10   --resolve opendesktopauthenticator.com:443:127.0.0.1   https://opendesktopauthenticator.com/support 2>/dev/null)
+if [ "$support" != "200" ]; then log err "support returned $support from the origin"; fail=1; fi
+
 cert=/etc/letsencrypt/live/opendesktopauthenticator.com/cert.pem
 if [ -r "$cert" ]; then
   ends=$(date -d "$(openssl x509 -in "$cert" -noout -enddate | cut -d= -f2)" +%s)

@@ -250,3 +250,39 @@ describe('a submission whose attachment claim fails', () => {
 		expect(after).toBe(before);
 	});
 });
+
+/*
+ * An admin action is one transaction, and an oversized reply is 413.
+ */
+describe('an admin action whose note fails', () => {
+	it('runs the status change and the note in one transaction', () => {
+		// `transactionally` itself is proved to roll back by the submission
+		// sabotage test above; what this asserts is that the admin route uses it.
+		// Un-wrapped, a notes INSERT failing after the status UPDATE left the
+		// queue moved and the explanation missing — while the catch-all answered
+		// "Nothing was saved", so a retry looked like a second transition after
+		// the operator had been told the first had not happened.
+		const source = readFileSync(join(__dirname, '../tickets/server.mjs'), 'utf8');
+		const start = source.indexOf('const act = ');
+		const route = source.slice(start, source.indexOf("location: '/admin'", start));
+		expect(route).toBeDefined();
+		expect(route).toContain('transactionally(() => {');
+		expect(route).toMatch(
+			/transactionally\(\(\) => \{[\s\S]*UPDATE tickets SET status[\s\S]*INSERT INTO notes[\s\S]*\}\);/
+		);
+	});
+});
+
+describe('an oversized reply', () => {
+	it('is refused as too large, not as a length problem', async () => {
+		const { reference, key } = await fileReport();
+		const { out, response } = capture();
+		await service.handle(
+			post({ body: 'x'.repeat(20 * 1024), k: key }),
+			response,
+			at(`/support/ticket/${reference}/reply?k=${key}`)
+		);
+		expect(out.status).toBe(413);
+		expect(out.body).toMatch(/too large/i);
+	});
+});

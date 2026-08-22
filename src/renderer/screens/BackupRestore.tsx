@@ -22,11 +22,14 @@ import { messageOf } from '../ipc-message';
  */
 export function BackupRestore({
 	onRestore,
-	introduction
+	introduction,
+	onBusy
 }: {
 	onRestore: (passphrase: string) => Promise<void>;
 	/** What the surrounding screen has already told the user about the backup. */
 	introduction: string;
+	/** Told while a restore is in flight, so a sibling form can hold its own controls. */
+	onBusy?: (busy: boolean) => void;
 }): React.JSX.Element {
 	const [open, setOpen] = useState(false);
 	const [passphrase, setPassphrase] = useState('');
@@ -62,6 +65,7 @@ export function BackupRestore({
 						return;
 					}
 					setBusy(true);
+					onBusy?.(true);
 					setError(undefined);
 					onRestore(passphrase)
 						.then(() => setPassphrase(''))
@@ -69,6 +73,7 @@ export function BackupRestore({
 							setError(messageOf(err));
 							setPassphrase('');
 							setBusy(false);
+							onBusy?.(false);
 						});
 				}}
 			>

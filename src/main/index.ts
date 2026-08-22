@@ -193,11 +193,21 @@ function start(): void {
 	// it shells out to `reg`, and nothing about the caption on a toast should hold
 	// up a launch. See the module for what it writes and why it is that and not a
 	// Start Menu shortcut.
-	void registerWindowsIdentity({
-		appId: branding.appId,
-		displayName: branding.productName,
-		userDataPath: app.getPath('userData')
-	});
+	//
+	// **Not in the portable build.** That target's whole contract is "no
+	// installer, no writes outside its own directory" — the reason somebody runs
+	// it from a USB stick on a machine they do not control — and this writes two
+	// values under `HKCU\Software\Classes\AppUserModelId`, one of them a path
+	// pointing back at the copy they were only trying out. The cost of skipping
+	// it is a plainer caption on a toast notification, which is the right trade
+	// against leaving registry state on somebody else's machine.
+	if (portableDir === undefined) {
+		void registerWindowsIdentity({
+			appId: branding.appId,
+			displayName: branding.productName,
+			userDataPath: app.getPath('userData')
+		});
+	}
 
 	// **Also reaches the OS dialogs.** The file pickers this app opens — import,
 	// export, recovery — are drawn by Windows, not by us, and defaulted to light

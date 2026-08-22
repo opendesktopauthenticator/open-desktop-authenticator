@@ -422,6 +422,14 @@ export class VaultService {
 		draft.updatedAt = new Date(this.now()).toISOString();
 
 		const validated = vaultContentsSchema.parse(draft);
+		// **Bumped by every write, not only by locks.** `unlockOnce` snapshots the
+		// generation before its scrypt and installs `this.state` afterwards if the
+		// value still matches. Only `lock` and `restoreFromBackup` moved it, so an
+		// unlock racing a *save* passed that check and assigned state read from the
+		// envelope before this write — reverting the save in memory and then
+		// writing the stale copy back over the file. A save is exactly as much a
+		// reason to disown an older open as a lock is.
+		this.generation += 1;
 		writeEnvelope(this.file, sealWithKey(JSON.stringify(validated), state.key, state.kdf));
 
 		state.contents = validated;
@@ -509,6 +517,13 @@ export class VaultService {
 			wipe(newKey);
 			throw err;
 		}
+
+		// Same reasoning as `mutate`: an unlock that began before this rotation
+		// must not install the pre-rotation key and contents over it. Without
+		// this, `changePassphrase` reported success while the file it left behind
+		// still opened only with the old passphrase — the worst shape this class
+		// can produce, because the user is invited to discard the one that works.
+		this.generation += 1;
 
 		// Swap in the new key only once the write has succeeded.
 		wipe(state.key);

@@ -69,8 +69,19 @@ if [ -f /var/lib/tickets/tickets.db ]; then
     db.exec(\"VACUUM INTO '$snapshot/tickets.db'\");
     db.close();
   "
-  tar -czf "$tickets" -C "$snapshot" tickets.db \
-      -C /var/lib/tickets attachments 2>/dev/null
+  # **`attachments` only when it exists.** The service creates that directory
+  # lazily, on the first upload, so a fresh or text-only deployment has a
+  # database and no directory — and `tar` exits 1 on a path it cannot visit.
+  # Under `set -e` that killed the job before retention, chmod, snapshot
+  # cleanup and the success log, so systemd reported a failed backup every day
+  # while config archives piled up unpruned and the ticket archive that *was*
+  # written was never verified.
+  if [ -d /var/lib/tickets/attachments ]; then
+    tar -czf "$tickets" -C "$snapshot" tickets.db \
+        -C /var/lib/tickets attachments
+  else
+    tar -czf "$tickets" -C "$snapshot" tickets.db
+  fi
   rm -rf "$snapshot"
   chmod 600 "$tickets"
 else

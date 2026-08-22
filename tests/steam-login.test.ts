@@ -493,3 +493,45 @@ describe('SteamLoginError', () => {
 		expect(new SteamLoginError('x').permanent).toBe(true);
 	});
 });
+
+/*
+ * A portless SOCKS proxy has to work for `steam-session` too.
+ *
+ * `planProxy` fills in Chromium's default port, so confirmations routed fine —
+ * but the sign-in URL was built by slicing the *raw* string, and
+ * `socks-proxy-agent` parses an empty port as `parseInt('')`, i.e. `NaN`. Its
+ * own `if (port == null) port = 1080` default never fires, because
+ * `NaN == null` is false. So every sign-in, enrollment and transfer failed on
+ * an address the routing screen had just accepted.
+ */
+describe('a portless SOCKS proxy', () => {
+	it('carries the port steam-session needs', () => {
+		expect(steamSessionProxy('socks5://proxy.example')).toEqual({
+			socksProxy: 'socks5h://proxy.example:1080'
+		});
+		expect(steamSessionProxy('socks4://proxy.example')).toEqual({
+			socksProxy: 'socks4://proxy.example:1080'
+		});
+	});
+
+	it('produces a URL the real agent reads as a usable port', async () => {
+		const { SocksProxyAgent } = await import('socks-proxy-agent');
+		for (const stored of ['socks5://proxy.example', 'socks5h://proxy.example']) {
+			const options = steamSessionProxy(stored);
+			if (!('socksProxy' in options)) {
+				throw new Error('expected a socksProxy');
+			}
+			const agent = new SocksProxyAgent(options.socksProxy) as unknown as {
+				proxy: { port: number };
+			};
+			expect(Number.isFinite(agent.proxy.port)).toBe(true);
+			expect(agent.proxy.port).toBe(1080);
+		}
+	});
+
+	it('keeps credentials, including a password containing @', () => {
+		expect(steamSessionProxy('socks5://user:pa55%40word@1.2.3.4:1080')).toEqual({
+			socksProxy: 'socks5h://user:pa55%40word@1.2.3.4:1080'
+		});
+	});
+});

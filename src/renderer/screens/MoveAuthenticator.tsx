@@ -342,7 +342,16 @@ export function MoveAuthenticator({
 	//
 	// Exactly the trap removing the decode retry was meant to close, reintroduced
 	// by the order these branches sit in.
-	if (awaiting === 'persist' && !authenticated && !done) {
+	// **`!done`, but not `!authenticated`.** `authenticated` stays set for the
+	// whole flow — it is what proves the sign-in happened — so requiring it to be
+	// absent meant a persist failure never reached this screen: the user stayed
+	// on the code form, where "Replace the authenticator" was still enabled for
+	// an authenticator Steam had *already* rotated. Pressing it could only be
+	// refused, while "Try saving again" — the one button that can succeed — sat
+	// below it as a secondary control and the only copy of the new secrets lived
+	// in memory. `awaiting === 'persist'` is already the precise statement that
+	// Steam is done and the vault is not.
+	if (awaiting === 'persist' && !done) {
 		return (
 			<main className="shell">
 				<h1>Finish moving this authenticator</h1>

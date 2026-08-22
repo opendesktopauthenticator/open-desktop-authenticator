@@ -91,7 +91,14 @@ export function registerUpdateHandlers(deps: UpdateCheckDeps): void {
 		// this, opening Settings a few times would hammer GitHub's rate limit and
 		// earn a 403 that surfaces as "could not check".
 		const previous = cached;
-		if (previous && now() - previous.at < MIN_INTERVAL_MS) {
+		// `Math.abs`, because the clock can move backwards. `now() - previous.at`
+		// is negative for every reading after a rollback — a restored VM, a manual
+		// correction, a large NTP step — and negative is always less than the
+		// interval, so the cache never expired again for the life of the process.
+		// A banner about a security release could wait out the rollback plus six
+		// hours, or a restart. Treating a jump in either direction as "old enough
+		// to ask again" costs one request.
+		if (previous && Math.abs(now() - previous.at) < MIN_INTERVAL_MS) {
 			return previous.result;
 		}
 

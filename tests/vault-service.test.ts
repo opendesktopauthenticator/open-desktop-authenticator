@@ -919,3 +919,67 @@ describe('create and adopt while a session is open', () => {
 		expect(() => v.adoptFrom(source)).toThrow(/vault is open/i);
 	});
 });
+
+/*
+ * An unlock that outlives a write must not undo it.
+ *
+ * `unlockOnce` snapshots the generation before its scrypt and installs
+ * `this.state` afterwards if it still matches. Only `lock` and
+ * `restoreFromBackup` moved that counter, so an unlock racing a *save* passed
+ * the check and assigned state read from the envelope as it was before the
+ * write — reverting it in memory, then writing the stale copy back to disk on
+ * the next save. The passphrase case is the severe one: the rotation reported
+ * success while the file it left behind still opened only with the old phrase.
+ */
+describe('a stale unlock against newer state', () => {
+	it('cannot revert a save', async () => {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => (d.settings.autoLockMinutes = 10));
+
+		let release: (() => void) | undefined;
+		duringUnseal = () =>
+			new Promise((resolve) => {
+				release = resolve;
+			});
+		const stale = v.unlock(PASS).catch(() => undefined);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		await v.mutate((d) => (d.settings.autoLockMinutes = 99));
+		release?.();
+		await stale;
+
+		expect(v.read().settings.autoLockMinutes).toBe(99);
+		await v.mutate(() => undefined);
+		v.lock('manual');
+		const reopened = service();
+		await reopened.unlock(PASS);
+		expect(reopened.read().settings.autoLockMinutes).toBe(99);
+	});
+
+	it('cannot undo a passphrase change it reported as successful', async () => {
+		const NEXT = 'the replacement long passphrase';
+		const v = service();
+		await v.create(PASS);
+
+		let release: (() => void) | undefined;
+		duringUnseal = () =>
+			new Promise((resolve) => {
+				release = resolve;
+			});
+		const stale = v.unlock(PASS).catch(() => undefined);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		await v.changePassphrase(PASS, NEXT);
+		release?.();
+		await stale;
+
+		// A save now must seal under the NEW key, not the one the stale unlock
+		// carried — this is the write that used to make the lie permanent.
+		await v.mutate(() => undefined);
+		v.lock('manual');
+
+		await expect(service().unlock(NEXT)).resolves.toBeUndefined();
+		await expect(service().unlock(PASS)).rejects.toThrow();
+	});
+});

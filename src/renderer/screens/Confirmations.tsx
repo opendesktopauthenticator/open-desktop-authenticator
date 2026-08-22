@@ -74,7 +74,24 @@ export function Confirmations({
 	onClose: () => void;
 }): React.JSX.Element {
 	const [confirmations, setConfirmations] = useState<ConfirmationSummary[] | undefined>();
-	const [busy, setBusy] = useState(false);
+	/**
+	 * Starts true, because this screen always fetches on mount.
+	 *
+	 * Refresh used to be pressable during that first fetch, so the two raced and
+	 * the last writer won — a slow first list could overwrite, and hide, an
+	 * account-recovery confirmation Refresh had already put on screen. Starting
+	 * busy disables the button for exactly as long as the fetch runs, without a
+	 * synchronous `setState` inside the effect.
+	 */
+	const [busy, setBusy] = useState(true);
+	/**
+	 * The same fact, readable without a render.
+	 *
+	 * `busy` drives the button; this is what `refresh` actually tests, so the
+	 * guard holds even on a re-fetch triggered by the account changing, where
+	 * state has not been re-raised.
+	 */
+	const listing = useRef(true);
 	const [error, setError] = useState<string | undefined>();
 	/**
 	 * Set when Steam says the saved session is gone. Kept separate from `error`
@@ -132,14 +149,18 @@ export function Confirmations({
 
 	/** Used by the Refresh button, where showing "working" is the whole point. */
 	const refresh = useCallback((): void => {
-		if (busy) {
+		if (busy || listing.current) {
 			return;
 		}
+		listing.current = true;
 		setBusy(true);
 		setError(undefined);
 		load()
 			.catch((err: unknown) => setError(messageOf(err)))
-			.finally(() => setBusy(false));
+			.finally(() => {
+				listing.current = false;
+				setBusy(false);
+			});
 	}, [busy, load]);
 
 	// Fetch once per account. The screen already says "Asking Steam…" while
@@ -147,6 +168,10 @@ export function Confirmations({
 	const steamId64 = account.steamId64;
 	useEffect(() => {
 		let cancelled = false;
+		// The ref, not `setBusy` — a synchronous `setState` in an effect triggers
+		// a cascading render, and `busy` already starts true for the mount case.
+		// This covers the re-fetch when the account changes.
+		listing.current = true;
 		listRef
 			.current()
 			.then((result) => {
@@ -164,6 +189,12 @@ export function Confirmations({
 			.catch((err: unknown) => {
 				if (!cancelled) {
 					setError(messageOf(err));
+				}
+			})
+			.finally(() => {
+				listing.current = false;
+				if (!cancelled) {
+					setBusy(false);
 				}
 			});
 		return () => {

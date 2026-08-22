@@ -110,3 +110,33 @@ describe('the renderer half of consent', () => {
 		expect(appSource).toMatch(/updateBannerSuppressed\.current = !settings\.updateCheck;/);
 	});
 });
+
+describe('the cache against a clock that moved backwards', () => {
+	it('expires rather than becoming permanent', async () => {
+		let at = 10 * 24 * 60 * 60 * 1000;
+		let fetches = 0;
+		registerUpdateHandlers({
+			isEnabled: () => true,
+			isStoreBuild: () => false,
+			currentVersion: '0.1.0',
+			now: () => at,
+			fetchText: () => {
+				fetches += 1;
+				return Promise.resolve(RELEASE);
+			}
+		});
+		const call = invoke();
+		await call();
+		expect(fetches).toBe(1);
+
+		// A rollback: restored VM, manual correction, a large NTP step. Every
+		// later `now() - previous.at` is negative, and negative is always under
+		// the six-hour interval — so the cache never expired again.
+		at = 0;
+		for (let hour = 0; hour < 48; hour += 6) {
+			at = hour * 60 * 60 * 1000;
+			await call();
+		}
+		expect(fetches).toBeGreaterThan(1);
+	});
+});

@@ -105,6 +105,20 @@ export function writeEnvelope(file: string, envelope: Envelope): void {
 	const hadExisting = existsSync(file);
 	if (hadExisting) {
 		try {
+			// **Cleared first, on Windows.** `copyFileSync` carries the source's
+			// read-only attribute onto the destination, so one save attempted
+			// against a read-only `vault.json` stamped that attribute onto `.bak` —
+			// and every later save then died here, on the backup copy, even after
+			// the user had fixed the original file. Best effort: on POSIX this is a
+			// no-op against a file we are about to overwrite anyway, and a backup
+			// that cannot be un-marked is a reason to try the copy, not to skip it.
+			if (existsSync(paths.backup)) {
+				try {
+					chmodSync(paths.backup, 0o600);
+				} catch {
+					/* not supported here, or already writable */
+				}
+			}
 			copyFileSync(file, paths.backup);
 		} catch (err) {
 			throw new VaultStorageError('could not back up the existing vault before writing', err);

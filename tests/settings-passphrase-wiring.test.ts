@@ -80,3 +80,73 @@ describe('the create screen and an open session', () => {
 		expect(app).toMatch(/if \(!status\.exists && !status\.unlocked\)/);
 	});
 });
+
+describe('screens that must not keep a credential after a throw', () => {
+	it('clears the Steam password on the rejection path too', () => {
+		const source = readFileSync(join(__dirname, '../src/renderer/screens/SteamSignIn.tsx'), 'utf8');
+		// The comment says "whatever the outcome"; a throw — IPC failure, schema
+		// refusal, dead transport — is an outcome, and only `.then` cleared.
+		const rejection = source.slice(source.indexOf('.catch('));
+		expect(rejection).toMatch(/setPassword\(''\)/);
+	});
+
+	it('clears the enrollment password and proxy however onBegin settles', () => {
+		const source = readFileSync(
+			join(__dirname, '../src/renderer/screens/AddAuthenticator.tsx'),
+			'utf8'
+		);
+		expect(source).toMatch(
+			/\.finally\(\(\) => \{\s*setPassword\(''\);\s*setProxyUrl\(''\);\s*\}\)/
+		);
+	});
+});
+
+describe('lists that must not be overwritten by a stale answer', () => {
+	it('gives refresh a generation the poll and dialog closes both respect', () => {
+		const app = readFileSync(join(__dirname, '../src/renderer/App.tsx'), 'utf8');
+		// The poll skips a tick while its own is in flight, but dialog closes call
+		// refresh directly — and both wrote setAccounts, so the older answer could
+		// land last: imported accounts vanished, removed ones came back.
+		expect(app).toMatch(/const refreshSeq = useRef\(0\)/);
+		expect(app).toMatch(/const mine = \(refreshSeq\.current \+= 1\)/);
+		expect(app).toMatch(/if \(!newest\(\)\) \{\s*return;\s*\}\s*setAccounts\(listed\)/);
+	});
+
+	it('cannot start a second list beside its first fetch', () => {
+		const screen = readFileSync(
+			join(__dirname, '../src/renderer/screens/Confirmations.tsx'),
+			'utf8'
+		);
+		// Refresh was enabled while the mount fetch was still running, so the two
+		// raced and the last writer won — a slow first list could hide a recovery
+		// confirmation Refresh had already shown. `busy` starts true so the button
+		// is disabled for the mount fetch; the ref is what `refresh` tests, so the
+		// guard survives a re-fetch when the account changes.
+		expect(screen).toMatch(/const \[busy, setBusy\] = useState\(true\);/);
+		expect(screen).toMatch(/const listing = useRef\(true\);/);
+		expect(screen).toMatch(/if \(busy \|\| listing\.current\) \{/);
+		// Cleared on both paths, or the screen locks itself out.
+		expect(screen.match(/listing\.current = false;/g) ?? []).toHaveLength(2);
+	});
+});
+
+describe('the create screen and an in-flight restore', () => {
+	it('shares one busy flag across both forms', () => {
+		const screen = readFileSync(join(__dirname, '../src/renderer/screens/CreateVault.tsx'), 'utf8');
+		// Both forms end in a deliberate second of scrypt. With separate flags the
+		// user could submit the restore and then press Create, and whichever KDF
+		// finished first won — create winning installs an empty vault whose next
+		// save copies over the .bak the restore was reading.
+		expect(screen).toMatch(/onBusy=\{setBusy\}/);
+	});
+});
+
+describe('the portable build', () => {
+	it('does not write the Windows identity keys', () => {
+		const main = readFileSync(join(__dirname, '../src/main/index.ts'), 'utf8');
+		// "No installer, no writes outside its own directory" is the whole point
+		// of that target; this writes two values under HKCU, one of them a path
+		// pointing back at the copy the user was only trying out.
+		expect(main).toMatch(/if \(portableDir === undefined\) \{\s*void registerWindowsIdentity\(/);
+	});
+});

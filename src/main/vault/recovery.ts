@@ -1,4 +1,13 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import {
+	chmodSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { open } from './crypto';
@@ -151,12 +160,40 @@ export function writeRecoveryFile(path: string, envelope: unknown): string {
  * half-written recovery file is worse than a stale one.
  */
 export function updateRecoveryFile(path: string, envelope: unknown): void {
-	const temp = `${path}.tmp`;
-	writeFileSync(temp, `${JSON.stringify(envelope, null, 2)}\n`, {
-		encoding: 'utf8',
-		mode: 0o600
-	});
-	renameSync(temp, path);
+	// A unique name and `wx`, like the maFile export. A fixed `${path}.tmp`
+	// truncated whatever already sat there — a leftover from a crashed update, or
+	// any sibling — and then renamed it into place as the recovery file.
+	const temp = `${path}.${randomUUID()}.tmp`;
+	try {
+		writeFileSync(
+			temp,
+			`${JSON.stringify(envelope, null, 2)}
+`,
+			{
+				encoding: 'utf8',
+				mode: 0o600,
+				flag: 'wx'
+			}
+		);
+		renameSync(temp, path);
+	} catch (err) {
+		try {
+			rmSync(temp, { force: true });
+		} catch {
+			// Nothing useful to do; the throw below is the news.
+		}
+		throw err;
+	}
+	// **`mode` alone is not enough.** POSIX applies it only when the file is
+	// created, and `rename` keeps the inode — so an update over a file that was
+	// already world-readable left it world-readable, holding a shared secret and
+	// a revocation code. The vault's own writer narrows after its rename for
+	// exactly this reason; best effort, since Windows has no POSIX mode.
+	try {
+		chmodSync(path, 0o600);
+	} catch {
+		/* not supported here; the directory's own permissions still apply */
+	}
 }
 
 /**
@@ -255,8 +292,13 @@ export function recoveryFilesFor(userDataPath: string, steamId64: string): strin
 
 /** A sibling path that cannot collide, for a second file about the same account. */
 function supersededPath(path: string): string {
+	// The stamp alone is not unique: two writers in the same millisecond — an
+	// import and an enrollment finishing together — produced the same sibling
+	// path, and the second silently replaced the first encrypted backup. A short
+	// random suffix makes the name unique regardless of clock resolution.
 	const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-	return `${path.slice(0, -RECOVERY_EXTENSION.length)}.${stamp}${RECOVERY_EXTENSION}`;
+	const unique = randomUUID().slice(0, 8);
+	return `${path.slice(0, -RECOVERY_EXTENSION.length)}.${stamp}.${unique}${RECOVERY_EXTENSION}`;
 }
 
 export class RecoveryError extends Error {

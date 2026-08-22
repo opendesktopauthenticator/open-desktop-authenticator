@@ -62,7 +62,14 @@ export function SteamSignIn({
 					setHopeless(result.reason);
 				}
 			})
-			.catch((err: unknown) => setError(messageOf(err)))
+			.catch((err: unknown) => {
+				// **Cleared here too.** The comment above says "whatever the outcome",
+				// and a throw — an IPC failure, a schema refusal, a dead transport — is
+				// an outcome: without this the password stayed in component state, and
+				// in the DOM, until the next success or unmount.
+				setPassword('');
+				setError(messageOf(err));
+			})
 			.finally(() => setBusy(false));
 	};
 

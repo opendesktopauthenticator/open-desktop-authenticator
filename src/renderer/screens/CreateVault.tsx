@@ -107,6 +107,14 @@ export function CreateVault({
 					</p>
 					<BackupRestore
 						onRestore={onRestoreBackup}
+						// **The same busy flag as Create.** The two forms are on one
+						// screen and both end in a deliberate second of scrypt, so with
+						// separate flags a user could submit the restore and then press
+						// Create — and whichever KDF finished first won. Create winning
+						// installs an empty vault, and its next save copies that over the
+						// `.bak` the restore was reading: the backup this screen exists to
+						// protect, destroyed by the screen that warned about it.
+						onBusy={setBusy}
 						introduction="Restoring it makes it your vault, exactly as it was when it was written."
 					/>
 				</div>

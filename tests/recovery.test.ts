@@ -1,4 +1,4 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -365,5 +365,73 @@ describe('the file on disk', () => {
 		expect(() =>
 			writeRecoveryFile(path, vault.sealForBackup(recoveryContents(account(), NOW_ISO)))
 		).not.toThrow();
+	});
+});
+
+/*
+ * A recovery rewrite must not consume a leftover temp, and must narrow after.
+ *
+ * The update wrote to a fixed `${path}.tmp` with no `wx`: a leftover from a
+ * crashed update — or any sibling at that name — was truncated and then renamed
+ * into place as the recovery file. And `mode` applies only on create while
+ * `rename` keeps the inode, so an update over an already-permissive file left a
+ * shared secret and a revocation code readable by everyone.
+ */
+describe('updating a recovery file', () => {
+	it('refuses to consume a leftover temp file', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'recovery-tmp-'));
+		try {
+			const path = join(dir, `76561198000000001${RECOVERY_EXTENSION}`);
+			writeFileSync(path, '{"the":"original"}\n');
+			// A leftover from a crash, at the name the old code always used.
+			const stale = `${path}.tmp`;
+			writeFileSync(stale, 'somebody else’s bytes');
+
+			updateRecoveryFile(path, { sealed: 'replacement' });
+
+			// The leftover is untouched, and the destination holds the new envelope.
+			expect(readFileSync(stale, 'utf8')).toBe('somebody else’s bytes');
+			expect(readFileSync(path, 'utf8')).toContain('replacement');
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it('leaves no temp file behind', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'recovery-tmp2-'));
+		try {
+			const path = join(dir, `76561198000000002${RECOVERY_EXTENSION}`);
+			writeFileSync(path, '{"the":"original"}\n');
+			updateRecoveryFile(path, { sealed: 'replacement' });
+			expect(readdirSync(dir).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe('a second recovery file for one account', () => {
+	it('does not collide when two land in the same millisecond', () => {
+		const dir = mkdtempSync(join(tmpdir(), 'recovery-sib-'));
+		try {
+			const path = join(dir, `76561198000000003${RECOVERY_EXTENSION}`);
+			writeFileSync(path, '{"the":"first"}\n');
+			// The stamp is the only thing that used to make siblings unique, so a
+			// frozen clock is exactly the case that overwrote one encrypted backup
+			// with another.
+			const realNow = Date.now;
+			Date.now = () => 1_700_000_000_000;
+			try {
+				const a = writeRecoveryFile(path, { sealed: 'second' });
+				const b = writeRecoveryFile(path, { sealed: 'third' });
+				expect(a).not.toBe(b);
+				expect(readFileSync(a, 'utf8')).toContain('second');
+				expect(readFileSync(b, 'utf8')).toContain('third');
+			} finally {
+				Date.now = realNow;
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });

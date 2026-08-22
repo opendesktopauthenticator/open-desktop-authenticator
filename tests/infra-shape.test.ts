@@ -108,3 +108,41 @@ describe('what gets copied to the server', () => {
 		expect(checked, 'no ExecStart was examined, so this proved nothing').toBeGreaterThan(0);
 	});
 });
+
+/*
+ * The scheduled jobs have to survive the states a real box is actually in.
+ */
+describe('the backup job', () => {
+	const backup = readFileSync(join(__dirname, '../infra/oda-backup.sh'), 'utf8');
+
+	it('does not hand tar a directory that may not exist', () => {
+		// The service creates `attachments/` lazily on the first upload, so a
+		// fresh or text-only deployment has a database and no directory — and tar
+		// exits 1 on a path it cannot visit. Under `set -e` that killed the job
+		// before retention, chmod, snapshot cleanup and the success log, so
+		// systemd reported a failed backup every single day.
+		expect(backup).toContain('if [ -d /var/lib/tickets/attachments ]; then');
+		// And the fallback still archives the database itself.
+		expect(backup).toMatch(
+			/else\s*\n\s*tar -czf "\$tickets" -C "\$snapshot" tickets\.db\s*\n\s*fi/
+		);
+	});
+
+	it('no longer hides tar failures on the reports archive', () => {
+		const reports = backup.slice(backup.indexOf('# ── reports and attachments'));
+		expect(reports).not.toContain('attachments 2>/dev/null');
+	});
+});
+
+describe('the health job', () => {
+	const health = readFileSync(join(__dirname, '../infra/site-health.sh'), 'utf8');
+
+	it('checks the ticket service, not only nginx and /', () => {
+		// `/support` and `/admin` proxy_pass to 127.0.0.1:8787, so when the unit
+		// is dead they 502 while `/` still answers 200 — and this job logged "ok"
+		// through an outage of report submission, reporter access and the admin
+		// queue alike.
+		expect(health).toContain('systemctl is-active --quiet tickets');
+		expect(health).toContain('/support');
+	});
+});

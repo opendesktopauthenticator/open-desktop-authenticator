@@ -128,12 +128,31 @@ export function App(): React.JSX.Element {
 	 * to somebody who has accounts. A moment of a wrong empty state is worse than a
 	 * moment of a spinner.
 	 */
+	/**
+	 * Which refresh is newest.
+	 *
+	 * The poll skips a tick while one of its own is in flight, but dialog closes
+	 * call `refresh` directly — that is why they exist, so the list updates
+	 * without waiting a second — and those overlapped the poll freely. Both wrote
+	 * `setAccounts`, and the older answer could land last: newly imported
+	 * accounts vanished from the list, and a removed one reappeared, until some
+	 * later tick happened to correct it.
+	 */
+	const refreshSeq = useRef(0);
+
 	const refresh = useCallback(
 		async ({ includeCodes = true }: { includeCodes?: boolean } = {}): Promise<void> => {
 			if (!api) {
 				return;
 			}
+			const mine = (refreshSeq.current += 1);
+			/** True while this is still the newest refresh in flight. */
+			const newest = (): boolean => refreshSeq.current === mine;
+
 			const next = await api.getVaultStatus();
+			if (!newest()) {
+				return;
+			}
 			setStatus(next);
 			if (!next.unlocked) {
 				setAccounts([]);
@@ -143,13 +162,21 @@ export function App(): React.JSX.Element {
 				setActivityUrgent(false);
 				return;
 			}
-			setAccounts((await api.listAccounts()).accounts);
+			const listed = (await api.listAccounts()).accounts;
+			if (!newest()) {
+				return;
+			}
+			setAccounts(listed);
 			// Before the early return. The activity log is in memory and costs
 			// nothing, and it survives a lock — so skipping it on the unlock path
 			// meant an account that had been held back, or an engine that had given
 			// up, showed no alert until the next poll on the one screen the user is
 			// looking at hardest.
-			setActivityUrgent((await api.listActivity()).urgent);
+			const urgent = (await api.listActivity()).urgent;
+			if (!newest()) {
+				return;
+			}
+			setActivityUrgent(urgent);
 			if (!includeCodes) {
 				return;
 			}
@@ -157,7 +184,11 @@ export function App(): React.JSX.Element {
 			// A code is an HMAC over twenty bytes; recomputing one per second per
 			// account costs nothing, and it removes an entire class of bug where the
 			// displayed code and its countdown disagree about which window they are in.
-			setCodes(await api.listCodes());
+			const codesList = await api.listCodes();
+			if (!newest()) {
+				return;
+			}
+			setCodes(codesList);
 		},
 		[api]
 	);

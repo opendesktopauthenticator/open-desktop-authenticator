@@ -80,7 +80,7 @@ describe('an interrupted transfer is recoverable after unlocking', () => {
 	it('renders a recovery view when something is owed and the document has forgotten', () => {
 		// Ahead of `done` and `authenticated`, because neither survives the reload —
 		// placed after them, the screen would offer a fresh sign-in form instead.
-		const recovery = SCREEN.indexOf("if (awaiting === 'persist' && !authenticated && !done)");
+		const recovery = SCREEN.indexOf("if (awaiting === 'persist' && !done)");
 		expect(recovery).toBeGreaterThan(-1);
 		expect(recovery).toBeLessThan(SCREEN.indexOf('\tif (done) {'));
 	});
@@ -359,7 +359,7 @@ describe('every outstanding state reaches its own screen', () => {
 	};
 
 	it('matches persist exactly, never as a truthy catch-all', () => {
-		expect(SCREEN).toContain("if (awaiting === 'persist' && !authenticated && !done)");
+		expect(SCREEN).toContain("if (awaiting === 'persist' && !done)");
 		expect(SCREEN).not.toContain('if (awaiting && !authenticated && !done)');
 	});
 

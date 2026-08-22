@@ -1,7 +1,7 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 /**
@@ -45,17 +45,27 @@ const ORIGIN = { origin: 'https://opendesktopauthenticator.com' };
 
 function capture() {
 	const out = { status: 0, body: '', headers: {} as Record<string, string> };
-	const response = {
+	// A real Writable: attachment responses are streamed with `pipe`, which needs
+	// a destination that implements the stream contract rather than a plain
+	// object with `writeHead`/`end`.
+	const writable = new Writable({
+		write(_chunk, _encoding, callback) {
+			callback();
+		}
+	});
+	const response = Object.assign(writable, {
 		headersSent: false,
 		writeHead(status: number, headers?: Record<string, string>) {
 			out.headers = headers ?? {};
 			out.status = status;
-			return this;
+			return response;
 		},
-		end(body: string) {
+		end(body?: string) {
 			out.body = typeof body === 'string' ? body : '';
+			Writable.prototype.end.call(response, null, 'utf8', () => undefined);
+			return response;
 		}
-	};
+	});
 	return { out, response };
 }
 

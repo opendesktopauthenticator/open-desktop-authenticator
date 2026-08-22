@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
+import { Readable, Writable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 /**
@@ -59,23 +59,51 @@ function capture() {
 		raw: Buffer.alloc(0),
 		headers: {}
 	};
-	const response = {
+	// **A real Writable.** Attachments are streamed rather than read whole into
+	// memory, so `pipe(response)` needs a destination with the stream contract —
+	// a plain object with `writeHead`/`end` made `dest.on is not a function`.
+	// `finished` is exposed so a test can await the pipe rather than guess.
+	const chunks: Buffer[] = [];
+	let settle: (() => void) | undefined;
+	const finished = new Promise<void>((resolve) => {
+		settle = resolve;
+	});
+	const writable = new Writable({
+		write(chunk: Buffer, _encoding, callback) {
+			chunks.push(Buffer.from(chunk));
+			callback();
+		}
+	});
+	writable.on('finish', () => {
+		out.raw = Buffer.concat(chunks);
+		out.body = out.raw.toString('binary');
+		settle?.();
+	});
+	const response = Object.assign(writable, {
 		headersSent: false,
 		writeHead(status: number, headers: Record<string, string>) {
 			out.status = status;
 			out.headers = headers ?? {};
-			return this;
+			return response;
 		},
-		end(body: string | Buffer) {
-			if (Buffer.isBuffer(body)) {
-				out.raw = body;
-				out.body = body.toString('binary');
-			} else {
-				out.body = body ?? '';
+		end(body?: string | Buffer) {
+			if (body !== undefined) {
+				if (Buffer.isBuffer(body)) {
+					chunks.push(Buffer.from(body));
+				} else {
+					chunks.push(Buffer.from(body, 'utf8'));
+					// Text answers are compared as strings; keep the plain form too.
+					out.body = body;
+				}
 			}
+			Writable.prototype.end.call(response, null, 'utf8', () => undefined);
+			if (typeof body === 'string') {
+				out.raw = Buffer.concat(chunks);
+			}
+			return response;
 		}
-	};
-	return { out, response };
+	});
+	return { out, response, finished };
 }
 
 const at = (p: string) => new URL(`https://opendesktopauthenticator.com${p}`);
@@ -298,10 +326,13 @@ describe('who may fetch a file', () => {
 		const { id } = await upload(PNG);
 		const reference = await report(id);
 
-		const { out, response } = capture();
+		const { out, response, finished } = capture();
 		await service.handle(getRequest(), response, at(linkTo(reference, `/file/${id}`)));
+		// The body is piped, so it arrives after `handle` resolves.
+		await finished;
 		expect(out.status).toBe(200);
 		expect(out.headers['content-type']).toBe('image/png');
+		expect(out.headers['accept-ranges']).toBe('bytes');
 		expect(out.raw.subarray(0, 8)).toEqual(PNG.subarray(0, 8));
 	});
 
@@ -598,5 +629,42 @@ describe('a submission carrying more files than the limit', () => {
 				.get(reference),
 			'and writes no message'
 		).toMatchObject({ n: 0 });
+	});
+});
+
+/*
+ * Range requests, because a browser playing a video asks for one.
+ *
+ * The handler read the whole file with `readFileSync` and always answered 200,
+ * so every `<video preload="metadata">` seek re-fetched the entire attachment —
+ * blocking the single event loop and holding the whole file in memory against a
+ * 256 MB service limit.
+ */
+describe('range requests', () => {
+	it('answers a byte range with 206 and only those bytes', async () => {
+		const { id } = await upload(PNG);
+		const reference = await report(id);
+
+		const { out, response, finished } = capture();
+		const request = { ...getRequest(), headers: { range: 'bytes=0-7' } };
+		await service.handle(request, response, at(linkTo(reference, `/file/${id}`)));
+		await finished;
+
+		expect(out.status).toBe(206);
+		expect(out.headers['content-range']).toBe(`bytes 0-7/${PNG.length}`);
+		expect(out.headers['content-length']).toBe(8);
+		expect(out.raw).toEqual(PNG.subarray(0, 8));
+	});
+
+	it('refuses a range beyond the file', async () => {
+		const { id } = await upload(PNG);
+		const reference = await report(id);
+
+		const { out, response } = capture();
+		const request = { ...getRequest(), headers: { range: `bytes=${PNG.length + 10}-` } };
+		await service.handle(request, response, at(linkTo(reference, `/file/${id}`)));
+
+		expect(out.status).toBe(416);
+		expect(out.headers['content-range']).toBe(`bytes */${PNG.length}`);
 	});
 });
