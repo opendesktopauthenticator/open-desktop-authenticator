@@ -114,6 +114,32 @@ for (const size of PNG_SIZES) {
 }
 emit('icon.png', encodePng(1024, render(1024)));
 
+/*
+ * Microsoft Store tiles.
+ *
+ * These four names are exactly what electron-builder's appx target looks for,
+ * and **without them it substitutes its own `SampleAppx.*.png`** — placeholder
+ * art from 2019 that ships inside the packaging tool. The first Store package
+ * built here carried them, so the install prompt showed a generic Electron logo
+ * for an application whose entire argument is that a stranger can tell ours
+ * from somebody else's.
+ *
+ * Rendered at each size from the vector, like everything else here, rather than
+ * resampled from `icon.png` — the mark has fine detail at 44px and downscaling
+ * a 1024px bitmap to reach it is exactly how an icon goes soft.
+ */
+const STORE_SQUARES = [
+	['StoreLogo.png', 50],
+	['Square150x150Logo.png', 150],
+	['Square44x44Logo.png', 44]
+];
+for (const [name, size] of STORE_SQUARES) {
+	emit(`appx/${name}`, encodePng(size, render(size)));
+}
+// The wide tile is not a square, so the mark is centred on a transparent field
+// rather than stretched. `showNameOnTiles` is false, so nothing else goes on it.
+emit('appx/Wide310x150Logo.png', encodePng(310, renderInto(310, 150, 150, 80, 0), 150));
+
 // The tray.
 emit('tray/tray.ico', encodeIco(TRAY_SIZES.map((size) => ({ size, rgba: render(size) }))));
 for (const size of TRAY_SIZES) {

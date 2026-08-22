@@ -50,17 +50,29 @@ function chunk(type: string, body: Buffer): Buffer {
  * Filter 0 throughout — these are flat shapes, and deflate handles the long
  * transparent runs perfectly well without a filter to help it.
  */
-export function encodePng(size: number, rgba: Buffer | Uint8Array): Buffer {
+export function encodePng(
+	size: number,
+	rgba: Buffer | Uint8Array,
+	/**
+	 * Rows, when the image is not square. Defaults to `size`.
+	 *
+	 * Everything this encoder produced was square until the Store's wide tile —
+	 * 310x150 — needed writing, and a square-only encoder would have meant either
+	 * a second encoder or letting electron-builder substitute its own sample art
+	 * for that one asset.
+	 */
+	height: number = size
+): Buffer {
 	const pixels = Buffer.isBuffer(rgba) ? rgba : Buffer.from(rgba);
 	const stride = size * 4;
-	const raw = Buffer.alloc((stride + 1) * size);
-	for (let row = 0; row < size; row++) {
+	const raw = Buffer.alloc((stride + 1) * height);
+	for (let row = 0; row < height; row++) {
 		raw[row * (stride + 1)] = 0;
 		pixels.copy(raw, row * (stride + 1) + 1, row * stride, (row + 1) * stride);
 	}
 	const ihdr = Buffer.alloc(13);
 	ihdr.writeUInt32BE(size, 0);
-	ihdr.writeUInt32BE(size, 4);
+	ihdr.writeUInt32BE(height, 4);
 	ihdr[8] = 8; // bit depth
 	ihdr[9] = 6; // truecolour with alpha
 	return Buffer.concat([

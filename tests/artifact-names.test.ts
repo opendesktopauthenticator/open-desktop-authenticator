@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -152,5 +152,39 @@ describe('the Microsoft Store identity', () => {
 			workflow.indexOf('Collect the Store package')
 		);
 		expect(collect).not.toContain('appx');
+	});
+});
+
+/*
+ * The Store tiles must be ours.
+ *
+ * Without `build/appx/`, electron-builder falls back to its own bundled
+ * `SampleAppx.*.png` — placeholder art from 2019 that ships inside the
+ * packaging tool. The first Store package built here carried exactly that, and
+ * the install prompt showed a generic Electron logo for an application whose
+ * whole argument is that a stranger can tell ours from somebody else's.
+ */
+describe('the Store tile art', () => {
+	const required = [
+		['StoreLogo.png', 50, 50],
+		['Square150x150Logo.png', 150, 150],
+		['Square44x44Logo.png', 44, 44],
+		['Wide310x150Logo.png', 310, 150]
+	] as const;
+
+	it('exists for every asset electron-builder would otherwise substitute', () => {
+		// The four names are exactly what its appx target looks for. Miss one and
+		// it silently uses its own `SampleAppx.*.png` for that tile.
+		for (const [name] of required) {
+			expect(existsSync(join(__dirname, '../build/appx', name))).toBe(true);
+		}
+	});
+
+	it('is the right size in each case', () => {
+		for (const [name, width, height] of required) {
+			const png = readFileSync(join(__dirname, '../build/appx', name));
+			// PNG IHDR: width and height are big-endian 32-bit at offsets 16 and 20.
+			expect([name, png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([name, width, height]);
+		}
 	});
 });
