@@ -704,3 +704,47 @@ describe('one slow account does not block the others', () => {
 		await sweep;
 	});
 });
+
+/*
+ * Accounts must not poll in lockstep.
+ *
+ * The old jitter hashed the SteamID over `interval / 4` — under four seconds at
+ * the default interval — while the scheduler only sampled due work on a
+ * ten-second beat. Every account's next due time therefore landed inside the
+ * same beat and they polled together anyway, which is precisely what
+ * THREAT_MODEL says routing plus jitter prevents.
+ */
+describe('scheduling two accounts on the same interval', () => {
+	it('separates them onto different beats after the first sweep', async () => {
+		let at = 0;
+		const beats: number[] = [];
+		const accounts = ['76561198000000001', '76561198000000002'].map((steamId64) => ({
+			steamId64,
+			autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
+		}));
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts })
+		} as unknown as VaultService;
+		let ranThisBeat = 0;
+		const confirmations = {
+			runAutoConfirm: () => {
+				ranThisBeat += 1;
+				return Promise.resolve({ approved: [], held: [], unreadable: 0 });
+			}
+		} as unknown as ConfirmationsService;
+
+		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => at });
+		for (let second = 0; second < 120; second += 1) {
+			at = second * 1000;
+			ranThisBeat = 0;
+			await engine.tick();
+			if (ranThisBeat > 0) beats.push(ranThisBeat);
+		}
+
+		// The first sweep is necessarily joint — nothing is scheduled yet.
+		expect(beats[0]).toBe(2);
+		expect(beats.slice(1).every((n) => n === 1)).toBe(true);
+		expect(beats.length).toBeGreaterThan(4);
+	});
+});

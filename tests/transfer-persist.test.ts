@@ -1155,3 +1155,41 @@ describe('challenge and submission are mutually exclusive', () => {
 		await submitting;
 	});
 });
+
+/*
+ * A lock during the SMS request must not throw the transfer away.
+ *
+ * `forgetIfIdle` treated a challenge as idle, so a lock landing inside the SMS
+ * request cleared `pending` — the identity the challenge belongs to — while
+ * Steam went on sending the message and spending the account's rate-limit
+ * tolerance. After unlocking there was no transfer to come back to, and the
+ * text the user was about to read had nothing to be typed into. `cancel`
+ * already refuses in exactly this window.
+ */
+describe('locking while Steam is being asked for a code', () => {
+	it('keeps the transfer, and drops only the credentials', async () => {
+		let releaseChallenge: (() => void) | undefined;
+		const challengeGate = new Promise<void>((resolve) => {
+			releaseChallenge = resolve;
+		});
+		const h = harness({ startChallengeGate: () => challengeGate });
+		await h.service.authenticate('account-a', 'pw', 'QK4TX');
+
+		const challenging = h.service.startChallenge();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		// The idle timer fires while the SMS request is in the air.
+		expect(h.service.forgetIfIdle()).toBe(false);
+		expect(h.service.current()?.accountName).toBe('account-a');
+
+		releaseChallenge?.();
+		await challenging;
+	});
+
+	it('still forgets an idle transfer', async () => {
+		const h = harness();
+		await h.service.authenticate('account-a', 'pw', 'QK4TX');
+		expect(h.service.forgetIfIdle()).toBe(true);
+		expect(h.service.current()).toBeUndefined();
+	});
+});

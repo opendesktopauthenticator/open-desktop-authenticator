@@ -288,7 +288,13 @@ export function AddAuthenticator({
 
 						<p className="hint">
 							Already have an authenticator on your phone for this account?{' '}
-							<button type="button" className="link" onClick={onMove}>
+							{/* **Disabled while a sign-in is in the air.** Submit was guarded by
+							    `busy` and this was not, so pressing it during `onBegin` only
+							    changed the view: the component unmounted, the main process
+							    carried on, and Steam could attach an authenticator whose
+							    ceremony — the revocation code the user must write down — had
+							    no screen left to run on. */}
+							<button type="button" className="link" onClick={onMove} disabled={busy}>
 								Move it here instead
 							</button>{' '}
 							— adding a second one is not possible, and removing the first costs fifteen days of no

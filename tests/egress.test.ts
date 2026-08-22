@@ -1505,3 +1505,59 @@ describe('multi-byte characters across chunk boundaries', () => {
 		expect(Buffer.from(response.text, 'latin1')).toEqual(bytes);
 	});
 });
+
+/*
+ * The last-moment hook must run inside the transport, after routing.
+ *
+ * A consent check made by the caller happens before `assertRouted` awaits, and
+ * that await is real: a user turning automatic confirmation off during it still
+ * had their trade approved. `beforeSend` exists to close that window, so what
+ * matters is *where* the transport invokes it.
+ */
+describe('the beforeSend hook', () => {
+	it('runs after routing is verified and before anything is sent', async () => {
+		const order: string[] = [];
+		const { electron, requests } = fakeElectron();
+		const factory = new SteamTransportFactory({
+			...electron,
+			request: (options) => {
+				order.push('request-built');
+				return electron.request(options);
+			}
+		});
+		const transport = await factory.forAccount({
+			steamId64: '76561198000000001',
+			proxyUrl: 'socks5://10.0.0.1:1080'
+		});
+
+		await transport({
+			method: 'POST',
+			url: 'https://steamcommunity.com/mobileconf/multiajaxop',
+			cookie: '',
+			beforeSend: () => order.push('beforeSend')
+		});
+
+		expect(order).toEqual(['beforeSend', 'request-built']);
+		expect(requests).toHaveLength(1);
+	});
+
+	it('a throwing hook stops the request going out at all', async () => {
+		const { electron, requests } = fakeElectron();
+		const transport = await new SteamTransportFactory(electron).forAccount({
+			steamId64: '76561198000000001',
+			proxyUrl: 'socks5://10.0.0.1:1080'
+		});
+
+		await expect(
+			transport({
+				method: 'POST',
+				url: 'https://steamcommunity.com/mobileconf/multiajaxop',
+				cookie: '',
+				beforeSend: () => {
+					throw new Error('consent was withdrawn');
+				}
+			})
+		).rejects.toThrow(/consent was withdrawn/);
+		expect(requests).toHaveLength(0);
+	});
+});

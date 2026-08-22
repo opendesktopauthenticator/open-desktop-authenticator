@@ -606,6 +606,13 @@ export class SteamTransportFactory {
 		// case, one layer lower than where it was first noticed.
 		this.assertGranted(steamId64, granted);
 
+		// **The caller's own last word, at the same boundary.** A grant covers
+		// locks and routing; it says nothing about consent, which lives in the
+		// vault and can be withdrawn while `assertRouted` is awaiting. Running it
+		// here — after that await, before a byte is sent — is the difference
+		// between "we checked recently" and "we checked now".
+		request.beforeSend?.();
+
 		return new Promise<SteamResponse>((resolve, reject) => {
 			// Checked on every request, not once at construction. This function
 			// attaches a live Steam session cookie to whatever URL it is given;

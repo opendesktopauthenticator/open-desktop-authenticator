@@ -146,3 +146,27 @@ describe('the health job', () => {
 		expect(health).toContain('/support');
 	});
 });
+
+describe('the ticket health probe', () => {
+	const health = readFileSync(join(__dirname, '../infra/site-health.sh'), 'utf8');
+	const nginx = readFileSync(join(__dirname, '../infra/nginx/sites-available/oda'), 'utf8');
+
+	it('probes a route nginx actually proxies', () => {
+		// `/support` is served by `try_files` from support.html, so it answered
+		// 200 with the ticket service dead. Only the ticket and admin sub-paths
+		// reach Node.
+		expect(health).toContain('/support/ticket/');
+		expect(health).not.toMatch(/com\/support 2>/);
+	});
+
+	it('expects the answer only Node can give', () => {
+		// A 404 for an unknown reference comes from the service; a dead or hung
+		// one gives 502/504 from nginx instead.
+		expect(health).toMatch(/"\$ticket" != "404"/);
+	});
+
+	it('probes a path the nginx config really sends upstream', () => {
+		// The guard against picking another statically-served path next time.
+		expect(nginx).toMatch(/support\/ticket/);
+	});
+});

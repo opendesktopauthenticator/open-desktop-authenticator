@@ -819,3 +819,94 @@ describe('a routing change during another account’s pass', () => {
 		await expect(pass).rejects.toThrow(/routing changed|locked/i);
 	});
 });
+
+/*
+ * Consent must hold at the POST, not merely shortly before it.
+ *
+ * The pass rereads the vault after listing — but the approval request then
+ * awaits proxy-route verification inside the transport before a byte goes out,
+ * and a user turning automatic confirmation off during *that* await still had
+ * their trade approved. The check now runs inside the transport, after routing
+ * is verified and immediately before the request is built.
+ */
+describe('consent withdrawn during route verification', () => {
+	const enabled = (): Account =>
+		account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } });
+
+	it('sends no approval when the setting went off during the routing await', async () => {
+		const accounts = [enabled()];
+		let releaseRouting: (() => void) | undefined;
+		const routingGate = new Promise<void>((resolve) => {
+			releaseRouting = resolve;
+		});
+		let routingReached: (() => void) | undefined;
+		const atRouting = new Promise<void>((resolve) => {
+			routingReached = resolve;
+		});
+
+		const sent: SteamRequest[] = [];
+		// A transport that models the real one: it awaits routing verification
+		// before honouring the request, and calls `beforeSend` after that await.
+		const transport = async (request: SteamRequest): Promise<SteamResponse> => {
+			if (request.url.includes('GenerateAccessTokenForApp')) {
+				return { status: 200, text: JSON.stringify({ response: { access_token: ACCESS } }) };
+			}
+			if (request.url.includes('getlist')) {
+				return { status: 200, text: JSON.stringify({ success: true, conf: [TRADE] }) };
+			}
+			routingReached?.();
+			await routingGate;
+			request.beforeSend?.();
+			sent.push(request);
+			return { status: 200, text: JSON.stringify({ success: true }) };
+		};
+		const transports = {
+			forAccount: () => Promise.resolve(transport)
+		} as unknown as SteamTransportFactory;
+
+		const pass = service(fakeVault(accounts), transports).runAutoConfirm('76561198000000001');
+		await atRouting;
+
+		// Saved while the approval request is verifying its route.
+		(accounts[0] as Account).autoConfirm = {
+			marketListings: false,
+			trades: false,
+			pollIntervalSeconds: 15
+		};
+		releaseRouting?.();
+
+		await expect(pass).rejects.toThrow(/switched off/i);
+		expect(sent).toHaveLength(0);
+	});
+
+	it('still approves when consent is untouched', async () => {
+		const accounts = [enabled()];
+		const sent: SteamRequest[] = [];
+		const transport = (request: SteamRequest): Promise<SteamResponse> => {
+			if (request.url.includes('GenerateAccessTokenForApp')) {
+				return Promise.resolve({
+					status: 200,
+					text: JSON.stringify({ response: { access_token: ACCESS } })
+				});
+			}
+			if (request.url.includes('getlist')) {
+				return Promise.resolve({
+					status: 200,
+					text: JSON.stringify({ success: true, conf: [TRADE] })
+				});
+			}
+			request.beforeSend?.();
+			sent.push(request);
+			return Promise.resolve({ status: 200, text: JSON.stringify({ success: true }) });
+		};
+		const transports = {
+			forAccount: () => Promise.resolve(transport)
+		} as unknown as SteamTransportFactory;
+
+		const outcome = await service(fakeVault(accounts), transports).runAutoConfirm(
+			'76561198000000001'
+		);
+		expect(outcome.approved).toHaveLength(1);
+		expect(sent).toHaveLength(1);
+	});
+});

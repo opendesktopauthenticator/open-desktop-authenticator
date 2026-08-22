@@ -532,7 +532,12 @@ export function App(): React.JSX.Element {
 					onSeen={(seq) => {
 						// The snapshot's own high-water mark, not "everything up to now": a
 						// pass finishing between the fetch and this call must stay unseen.
-						void api.acknowledgeActivity(seq).then(() => setActivityUrgent(false));
+						// **The answer, not `false`.** An urgent entry recorded between the
+						// snapshot and this call is outside the watermark on purpose, so
+						// main keeps it urgent — and clearing the badge unconditionally
+						// hid a fresh account-recovery warning until some later poll
+						// happened to restore it.
+						void api.acknowledgeActivity(seq).then((result) => setActivityUrgent(result.urgent));
 					}}
 					onOpenAccount={(openFor) => {
 						setView('accounts');

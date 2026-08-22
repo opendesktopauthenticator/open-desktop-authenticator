@@ -73,7 +73,10 @@ export function registerConfirmationHandlers(
 			throw new VaultLockedError();
 		}
 		activity.acknowledge(upTo);
-		return { ok: true as const };
+		// Reported back rather than assumed by the caller: an urgent entry recorded
+		// after the snapshot the user read is deliberately outside this watermark,
+		// and it must keep its badge.
+		return { ok: true as const, urgent: activity.hasUrgent() };
 	});
 
 	registerHandler(CHANNELS.confirmationsAct, async ({ steamId64, action, ids }) => {

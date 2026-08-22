@@ -351,3 +351,46 @@ describe('jsonspan', () => {
 		expect(masked).toHaveLength('{"Session":{"SteamID":1},"Session":{"SteamID":2}}'.length);
 	});
 });
+
+/*
+ * A nested `Session` container must not substitute another account's identity.
+ *
+ * The raw-text scanner took the last `"Session": {` anywhere in the document,
+ * at any depth, while the schema parse used the real top-level one. A maFile
+ * carrying an unknown object with its own `Session` — which the schema strips —
+ * therefore bound its secrets to a SteamID the file never claimed, and an
+ * import set to replace would overwrite that other account's row with them.
+ */
+describe('a Session nested inside an unknown object', () => {
+	it('is ignored in favour of the top-level one', () => {
+		const raw = `{
+			"shared_secret": "ASNFZ4mrze8BI0VniavN7wEjRWc=",
+			"identity_secret": "aWRlbnRpdHk=",
+			"account_name": "trader",
+			"revocation_code": "R12345",
+			"Session": { "SteamID": 76561198000000001 },
+			"metadata": { "Session": { "SteamID": 76561198000000002 } }
+		}`;
+		const parsed = parseMaFile(raw, 'a.maFile', Date.now());
+		expect(parsed.steamId64).toBe('76561198000000001');
+	});
+
+	it('is ignored however deeply it is buried', () => {
+		const raw = `{
+			"shared_secret": "ASNFZ4mrze8BI0VniavN7wEjRWc=",
+			"identity_secret": "aWRlbnRpdHk=",
+			"account_name": "trader",
+			"Session": { "SteamID": 76561198000000001 },
+			"a": { "b": [ { "Session": { "SteamID": 76561198000000009 } } ] }
+		}`;
+		expect(parseMaFile(raw, 'b.maFile', Date.now()).steamId64).toBe('76561198000000001');
+	});
+
+	it('still follows JSON.parse for a genuine duplicate top-level key', () => {
+		const raw =
+			'{"shared_secret":"ASNFZ4mrze8BI0VniavN7wEjRWc=","identity_secret":"aWRlbnRpdHk=",' +
+			'"account_name":"trader","Session":{"SteamID":76561198000000001},' +
+			'"Session":{"SteamID":76561198000000002}}';
+		expect(parseMaFile(raw, 'c.maFile', Date.now()).steamId64).toBe('76561198000000002');
+	});
+});

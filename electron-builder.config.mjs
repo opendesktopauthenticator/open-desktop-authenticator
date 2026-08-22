@@ -114,8 +114,17 @@ export default {
 		'!node_modules/**/{test,tests,__tests__,spec,example,examples,doc,docs,.github}/**',
 		'!node_modules/**/*.{ts,md,markdown,flow,coffee}',
 		'!node_modules/**/.*',
-		// `.d.ts` sits under the same roots as the code that needs to stay.
-		'node_modules/**/*.d.ts'
+		// **Declarations, in every spelling.** `*.{ts,...}` above catches `.d.ts`
+		// and misses `.d.cts` and `.d.mts` entirely — a hundred-odd files that
+		// Electron can never load, since a package is entered through its
+		// compiled entry point and a declaration is a compile-time artifact.
+		'!node_modules/**/*.d.{ts,cts,mts}',
+		// **React is bundled, not required.** Vite compiles the renderer into a
+		// single file that already contains React and ReactDOM; main and preload
+		// import neither. Shipping the packages as well duplicated ~7.5 MB — half
+		// the ASAR — of code nothing in the running app resolves. They stay in
+		// `dependencies` because the renderer genuinely builds against them.
+		'!node_modules/{react,react-dom,scheduler}/**'
 	],
 
 	asar: true,

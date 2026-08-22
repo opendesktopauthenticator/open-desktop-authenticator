@@ -546,13 +546,31 @@ export class VaultService {
 	 * passphrase from a damaged file.
 	 */
 	async verifyPassphrase(passphrase: string): Promise<void> {
-		if (!this.state) {
+		const state = this.state;
+		if (!state) {
 			throw new VaultLockedError();
 		}
+		// Captured before the derivation. `unseal` is a deliberate second of
+		// scrypt, and a passphrase change completing inside it retires the very
+		// phrase being proved — so a proof that started against the old envelope
+		// resolved successfully afterwards, and the caller went on to reveal a
+		// revocation code, delete an account, or detach an authenticator on the
+		// strength of a password that no longer opens this vault.
+		const generation = this.generation;
 		const envelope = readEnvelope(this.file);
 		const result = await unseal(envelope, passphrase);
 		// Only the proof was wanted; the key is discarded immediately.
 		wipe(result.key);
+
+		// Every write bumps the generation, and a rotation is a write. A lock
+		// bumps it too, which is equally disqualifying: the session this proof was
+		// for is gone either way.
+		if (this.generation !== generation || this.state !== state) {
+			throw new VaultServiceError(
+				'the vault changed while this passphrase was being checked, so the check no longer ' +
+					'proves anything. Try again.'
+			);
+		}
 	}
 
 	/**

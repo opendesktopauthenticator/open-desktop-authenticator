@@ -175,7 +175,10 @@ const api: RendererApi = {
 
 	listActivity: () => ipcRenderer.invoke(CHANNELS.activityList, {}) as Promise<ActivityList>,
 	acknowledgeActivity: (upTo: number) =>
-		ipcRenderer.invoke(CHANNELS.activityAcknowledge, { upTo }) as Promise<{ ok: true }>,
+		ipcRenderer.invoke(CHANNELS.activityAcknowledge, { upTo }) as Promise<{
+			ok: true;
+			urgent: boolean;
+		}>,
 	listConfirmations: (steamId64: string) =>
 		ipcRenderer.invoke(CHANNELS.confirmationsList, { steamId64 }) as Promise<ConfirmationsList>,
 	actOnConfirmations: (steamId64: string, action: 'allow' | 'cancel', ids: string[]) =>

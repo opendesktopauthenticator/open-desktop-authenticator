@@ -30,6 +30,23 @@ import type { VaultService } from '../vault/service';
 /** Never poll faster than this, whatever the account says. */
 const MIN_INTERVAL_MS = 10_000;
 
+/**
+ * How often the scheduler *looks* for due work.
+ *
+ * Deliberately much finer than `MIN_INTERVAL_MS`, which is a floor on how often
+ * one account may be polled — a different quantity that used to share the same
+ * constant. Sampling on a ten-second beat quantised the jitter away: with a
+ * fifteen-second interval the spread is at most `interval / 4`, under four
+ * seconds, so every account's next due time landed inside the same beat and
+ * they polled in lockstep regardless. THREAT_MODEL claims the opposite, and the
+ * claim is the point — accounts on separate proxies that tick together are
+ * correlated by their timing whatever their exit addresses are.
+ *
+ * A one-second beat costs nothing: `tick` returns immediately, without reading
+ * the vault, on every beat where nothing is due.
+ */
+const SCHEDULER_TICK_MS = 1_000;
+
 /** After a failure, wait at least this long before trying that account again. */
 const BACKOFF_START_MS = 30_000;
 const BACKOFF_MAX_MS = 15 * 60_000;
@@ -99,6 +116,17 @@ export class AutoConfirmEngine {
 	private readonly clearTimer: (handle: NodeJS.Timeout) => void;
 
 	private readonly state = new Map<string, AccountState>();
+
+	/**
+	 * The soonest `nextDueAt` across every scheduled account, or 0 when the
+	 * schedule may have changed and has to be rebuilt from the vault.
+	 *
+	 * This is what makes a one-second beat cheap: without it every beat called
+	 * `dueAccounts`, which deep-clones the whole secret-bearing vault to answer
+	 * "not yet". Reset to 0 by anything that can add or change a schedule, so a
+	 * new or re-enabled account is never held back by it.
+	 */
+	private earliestDueAt = 0;
 	private ticker: NodeJS.Timeout | undefined;
 	/** Guards against a slow pass overlapping the next tick. */
 	private running = false;
@@ -165,6 +193,7 @@ export class AutoConfirmEngine {
 		// cannot reach because its timer has already fired.
 		this.chain += 1;
 		this.state.clear();
+		this.earliestDueAt = 0;
 	}
 
 	/**
@@ -175,6 +204,8 @@ export class AutoConfirmEngine {
 	 */
 	reset(steamId64: string): void {
 		this.state.delete(steamId64);
+		// The schedule just changed; the cached soonest time may no longer be it.
+		this.earliestDueAt = 0;
 	}
 
 	/**
@@ -185,10 +216,15 @@ export class AutoConfirmEngine {
 		if (this.running) {
 			return;
 		}
+		// Cheap early-out, before the vault is read. See `earliestDueAt`.
+		if (this.earliestDueAt > this.now()) {
+			return;
+		}
 		const generation = this.generation;
 		// A locked vault is the clearest possible statement that nobody is present.
 		if (!this.vault.isUnlocked()) {
 			this.state.clear();
+			this.earliestDueAt = 0;
 			return;
 		}
 
@@ -219,8 +255,8 @@ export class AutoConfirmEngine {
 				return;
 			}
 			await Promise.all(
-				due.map((account) =>
-					this.runOne(account.steamId64, account.pollIntervalSeconds, generation)
+				due.map((account, index) =>
+					this.runOne(account.steamId64, account.pollIntervalSeconds, generation, index)
 				)
 			);
 		} finally {
@@ -276,14 +312,20 @@ export class AutoConfirmEngine {
 	 * Cheap and non-cryptographic on purpose: this decides when to poll, not
 	 * anything a secret depends on.
 	 */
-	private jitterFor(steamId64: string, intervalMs: number): number {
-		let hash = 0;
-		for (let i = 0; i < steamId64.length; i += 1) {
-			hash = (hash * 31 + steamId64.charCodeAt(i)) % 1_000_003;
-		}
-		// Up to a quarter of the interval. Enough to break simultaneity without
-		// meaningfully delaying a confirmation anyone is waiting on.
-		return hash % Math.max(1, Math.floor(intervalMs / 4));
+	private staggerFor(index: number, intervalMs: number): number {
+		// **Whole beats, and distinct per account.** The old jitter was a hash of
+		// the SteamID over `interval / 4` — under four seconds at the default
+		// interval — and the scheduler only samples work on a beat, so every
+		// account's next due time landed inside the same beat and they polled
+		// together anyway. Randomness finer than the sampling interval is not
+		// jitter; it is rounding error.
+		//
+		// The index within one sweep is what separates them: account 0 comes due
+		// on its beat, account 1 one beat later, and because they share an
+		// interval they keep that separation for good. Capped at a quarter of the
+		// interval so a long account list cannot walk itself into the next cycle.
+		const beats = Math.max(1, Math.floor(intervalMs / 4 / SCHEDULER_TICK_MS));
+		return (index % beats) * SCHEDULER_TICK_MS;
 	}
 
 	/**
@@ -293,10 +335,12 @@ export class AutoConfirmEngine {
 	private async runOne(
 		steamId64: string,
 		pollIntervalSeconds: number,
-		generation = this.generation
+		generation = this.generation,
+		/** This account's position in the sweep. See `staggerFor`. */
+		index = 0
 	): Promise<void> {
 		const interval = Math.max(MIN_INTERVAL_MS, pollIntervalSeconds * 1000);
-		const jitter = this.jitterFor(steamId64, interval);
+		const jitter = this.staggerFor(index, interval);
 
 		try {
 			const outcome = await this.confirmations.runAutoConfirm(steamId64);
@@ -311,6 +355,7 @@ export class AutoConfirmEngine {
 
 			// No `backoffMs` and no `failures`: a success clears both penalties.
 			this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
+			this.rememberEarliest();
 			this.onOutcome(steamId64, outcome);
 		} catch (err) {
 			// **The failure is not recorded at all if a lock caused it.**
@@ -352,9 +397,26 @@ export class AutoConfirmEngine {
 					? BACKOFF_START_MS
 					: Math.min(BACKOFF_MAX_MS, previous.backoffMs * 2);
 			this.state.set(steamId64, { nextDueAt: this.now() + backoffMs, backoffMs, failures });
+			this.rememberEarliest();
 
 			this.onFailure(steamId64, reason, false);
 		}
+	}
+
+	/**
+	 * The soonest scheduled attempt, so most beats can skip the vault read.
+	 *
+	 * An empty map means "ask the vault", not "nothing to do" — an account that
+	 * has never run has no entry at all.
+	 */
+	private rememberEarliest(): void {
+		let soonest = Number.POSITIVE_INFINITY;
+		for (const entry of this.state.values()) {
+			if (entry.nextDueAt < soonest) {
+				soonest = entry.nextDueAt;
+			}
+		}
+		this.earliestDueAt = this.state.size === 0 ? 0 : soonest;
 	}
 
 	private schedule(chain: number): void {
@@ -373,7 +435,7 @@ export class AutoConfirmEngine {
 					this.schedule(chain);
 				}
 			});
-		}, MIN_INTERVAL_MS);
+		}, SCHEDULER_TICK_MS);
 		handle.unref?.();
 		this.ticker = handle;
 	}

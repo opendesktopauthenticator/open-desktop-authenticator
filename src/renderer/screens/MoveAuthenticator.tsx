@@ -147,11 +147,18 @@ export function MoveAuthenticator({
 			setAuthenticated(await onAuthenticate(accountName, password, code, proxyUrl));
 			// Held only as long as the request. Nothing about this screen needs the
 			// password again, and the code is single-use.
-			setPassword('');
-			setCode('');
 		} catch (err) {
 			setError(messageOf(err));
 		} finally {
+			// **Cleared however it settled.** The password is single-use, the Guard
+			// code is one-time and already spent by the attempt, and the proxy URL
+			// routinely carries credentials of its own — yet all three survived a
+			// rejection (bad credentials, an IPC error, a dead proxy) and sat in React
+			// state and the DOM until the field was edited or the screen went away.
+			// `SteamSignIn` and `AddAuthenticator` already do this.
+			setPassword('');
+			setCode('');
+			setProxyUrl('');
 			setBusy(false);
 		}
 	};

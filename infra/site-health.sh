@@ -25,14 +25,21 @@ if [ "$code" != "200" ]; then log err "site returned $code from the origin"; fai
 # The ticket service, which is the domain's only dynamic part.
 #
 # Checking nginx and `/` proves the static site is up and says nothing about
-# this: `/support` and `/admin` are `proxy_pass`ed to 127.0.0.1:8787, so when
-# the unit is dead or crash-looping those 502 while `/` still answers 200 — and
-# this job logged "ok" through an outage of report submission, reporter access
-# and the admin queue alike.
+# this: the ticket routes are `proxy_pass`ed to 127.0.0.1:8787, so when the unit
+# is dead or crash-looping those 502 while `/` still answers 200 — and this job
+# logged "ok" through an outage of report submission, reporter access and the
+# admin queue alike.
 if ! systemctl is-active --quiet tickets; then log err "tickets.service is NOT running"; fail=1; fi
 
-support=$(curl -s -o /dev/null -w '%{http_code}' -m 10   --resolve opendesktopauthenticator.com:443:127.0.0.1   https://opendesktopauthenticator.com/support 2>/dev/null)
-if [ "$support" != "200" ]; then log err "support returned $support from the origin"; fail=1; fi
+# A route nginx actually proxies. `/support` is served by `try_files` from
+# support.html, so it answered 200 with the ticket service dead — only
+# /support/submit, /support/attach, /support/ticket/* and /admin* reach
+# Node. An unknown reference is answered 404 *by Node*, which is the proof
+# wanted: a dead or hung service gives 502/504 from nginx instead.
+ticket=$(curl -s -o /dev/null -w '%{http_code}' -m 10 \
+  --resolve opendesktopauthenticator.com:443:127.0.0.1 \
+  https://opendesktopauthenticator.com/support/ticket/ODA-HEALTHCHECK 2>/dev/null)
+if [ "$ticket" != "404" ]; then log err "ticket service returned $ticket, expected 404"; fail=1; fi
 
 cert=/etc/letsencrypt/live/opendesktopauthenticator.com/cert.pem
 if [ -r "$cert" ]; then

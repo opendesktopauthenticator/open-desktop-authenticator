@@ -43,6 +43,16 @@ export interface SteamRequest {
 	/** The account's web session cookie. */
 	cookie: string;
 	/**
+	 * Run immediately before the request is handed to the network.
+	 *
+	 * The point is *where* it runs: inside the transport, after the proxy-route
+	 * verification that awaits before every request. A check made by the caller
+	 * happens before that await, and the window it leaves is real — a user
+	 * turning automatic confirmation off during route verification still had
+	 * their trade approved. Throwing here stops the request going out at all.
+	 */
+	beforeSend?: () => void;
+	/**
 	 * Keep the response bytes intact instead of reading them as UTF-8.
 	 *
 	 * Every call in this application but one answers with text, so UTF-8 is the
@@ -169,7 +179,18 @@ export class ConfirmationsClient {
 	async autoConfirm(
 		account: ConfirmationAccount,
 		cookie: string,
-		confirmations: readonly Confirmation[]
+		confirmations: readonly Confirmation[],
+		/**
+		 * Consent, re-read at the last possible moment.
+		 *
+		 * The caller already rereads the vault after listing — but the approval
+		 * request then awaits proxy-route verification before a byte goes out, and
+		 * a user turning automatic confirmation off during *that* await still had
+		 * their trade approved. This runs immediately before the POST, so the
+		 * window between the check and the irreversible act is as small as the
+		 * process can make it.
+		 */
+		consentStillGiven?: () => AutoConfirmSettings | undefined
 	): Promise<AutoConfirmResult> {
 		const { automatic, manual } = partitionForAutoConfirm(confirmations, account.autoConfirm);
 
@@ -189,7 +210,25 @@ export class ConfirmationsClient {
 			}
 		}
 
-		await this.send(account, cookie, 'allow', automatic);
+		await this.send(account, cookie, 'allow', automatic, () => {
+			// Re-read at the boundary. Anything no longer permitted stops the whole
+			// batch: a partial approval would be harder to explain than a refusal,
+			// and the next pass will approve whatever is still allowed.
+			const settings = consentStillGiven?.();
+			if (settings === undefined) {
+				return;
+			}
+			for (const entry of automatic) {
+				if (!mayAutoConfirm(entry, settings).act) {
+					throw new ConfirmationProtocolError({
+						kind: 'unreadable',
+						message:
+							'automatic confirmation was switched off for this account while the request ' +
+							'was being prepared, so nothing was approved.'
+					});
+				}
+			}
+		});
 		return { approved: [...automatic], held: manual };
 	}
 
@@ -197,14 +236,20 @@ export class ConfirmationsClient {
 		account: ConfirmationAccount,
 		cookie: string,
 		action: ConfirmationAction,
-		confirmations: readonly Confirmation[]
+		confirmations: readonly Confirmation[],
+		/** Runs immediately before the request is handed to the transport. */
+		beforeSending?: () => void
 	): Promise<void> {
 		const identity = this.identityFor(account, tagForAction(action));
 		const response = await this.transport({
 			method: 'POST',
 			url: operationUrl(),
 			body: buildOperationBody(identity, action, confirmations),
-			cookie
+			cookie,
+			// Carried into the transport rather than called here: the transport
+			// awaits proxy-route verification before it sends, and a check made on
+			// this side happens before that await.
+			...(beforeSending === undefined ? {} : { beforeSend: beforeSending })
 		});
 
 		parseOperationResponse(this.readBody(response));

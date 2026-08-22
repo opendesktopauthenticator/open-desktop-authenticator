@@ -829,7 +829,18 @@ export class TransferService {
 		// a route, never a credential.
 		this.dropCredentials();
 
-		if (this.submitting || this.unsaved !== undefined) {
+		// **`challenging` counts too.** A lock landing inside the SMS request left
+		// Steam sending the message and spending the account's rate-limit tolerance,
+		// while `pending` — the identity the challenge belongs to — was cleared:
+		// after unlocking there was no transfer to come back to, and the text the
+		// user was about to read had nothing to be typed into. `cancel` already
+		// refuses in exactly this window, and a lock is not a stronger reason to
+		// discard the work than an explicit abandonment is.
+		//
+		// The credentials go regardless — `dropCredentials` above runs first — so
+		// what survives is the identity and nothing that can reach Steam again
+		// without a fresh sign-in.
+		if (this.submitting || this.challenging || this.unsaved !== undefined) {
 			return false;
 		}
 		this.pending = undefined;

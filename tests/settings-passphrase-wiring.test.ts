@@ -156,3 +156,49 @@ describe('the portable build', () => {
 		expect(main).toMatch(/if \(portableDir === undefined\) \{\s*void registerWindowsIdentity\(/);
 	});
 });
+
+describe('navigation that would abandon an irreversible operation', () => {
+	it('disables "Move it here instead" while enrollment is in flight', () => {
+		const screen = readFileSync(
+			join(__dirname, '../src/renderer/screens/AddAuthenticator.tsx'),
+			'utf8'
+		);
+		// Submit was guarded by `busy` and this was not, so pressing it during
+		// `onBegin` only changed the view: the component unmounted, main carried
+		// on, and Steam could attach an authenticator whose revocation-code
+		// ceremony had no screen left to run on.
+		expect(screen).toMatch(/className="link" onClick=\{onMove\} disabled=\{busy\}/);
+	});
+});
+
+describe('the transfer sign-in form', () => {
+	it('clears the password, Guard code and proxy however the attempt settles', () => {
+		const screen = readFileSync(
+			join(__dirname, '../src/renderer/screens/MoveAuthenticator.tsx'),
+			'utf8'
+		);
+		// The password is single-use, the Guard code is one-time and already spent
+		// by the attempt, and the proxy URL routinely carries credentials of its
+		// own — yet all three survived a rejection and sat in state and the DOM.
+		const submit = screen.slice(
+			screen.indexOf('const submit = async'),
+			screen.indexOf('const requestCode')
+		);
+		const settle = submit.slice(submit.indexOf('} finally {'));
+		expect(settle).toMatch(/setPassword\(''\)/);
+		expect(settle).toMatch(/setCode\(''\)/);
+		expect(settle).toMatch(/setProxyUrl\(''\)/);
+	});
+});
+
+describe('the activity badge', () => {
+	it('follows what the acknowledgement reports, not an assumption', () => {
+		const app = readFileSync(join(__dirname, '../src/renderer/App.tsx'), 'utf8');
+		// An urgent entry recorded between the snapshot and the acknowledgement is
+		// outside the watermark on purpose, so main keeps it urgent — and clearing
+		// the badge unconditionally hid a fresh account-recovery warning until
+		// some later poll happened to restore it.
+		expect(app).toMatch(/\.then\(\(result\) => setActivityUrgent\(result\.urgent\)\)/);
+		expect(app).not.toMatch(/setActivityUrgent\(false\)\)/);
+	});
+});

@@ -307,7 +307,15 @@ export class ConfirmationsService {
 				trades: fresh.trades
 			};
 
-			const { approved, held } = await client.autoConfirm(account, cookie, confirmations);
+			const { approved, held } = await client.autoConfirm(
+				account,
+				cookie,
+				confirmations,
+				// Read from the vault each time it is asked, so the answer is the
+				// setting as it stands at the moment the request goes out — not the
+				// copy taken when the pass began, nor even the reread above.
+				() => this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm
+			);
 			this.requireGrant(steamId64, grant);
 
 			// The full list is remembered so the UI can act on what was held back

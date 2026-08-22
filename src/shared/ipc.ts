@@ -874,7 +874,16 @@ export const IPC_CONTRACT = {
 	[CHANNELS.activityAcknowledge]: {
 		// The snapshot the user actually read, not "everything up to now".
 		request: z.object({ upTo: z.number().int().min(0) }).strict(),
-		response: okResponse
+		/**
+		 * What is *still* urgent once this acknowledgement is applied.
+		 *
+		 * `ok: true` alone let the renderer clear its badge unconditionally — and
+		 * an entry recorded after the displayed snapshot is deliberately not
+		 * covered by the watermark, so main correctly kept it urgent while the UI
+		 * hid it until some later poll. The answer carries the truth now, so the
+		 * caller has nothing to assume.
+		 */
+		response: z.object({ ok: z.literal(true), urgent: z.boolean() }).strict()
 	},
 
 	[CHANNELS.confirmationsList]: {
@@ -1046,7 +1055,8 @@ export interface RendererApi {
 	 * @param upTo the `seq` from the listing the user actually saw. Anything
 	 * recorded after that snapshot stays unacknowledged.
 	 */
-	acknowledgeActivity(upTo: number): Promise<{ ok: true }>;
+	/** Answers with the urgency that remains, so the caller need not assume. */
+	acknowledgeActivity(upTo: number): Promise<{ ok: true; urgent: boolean }>;
 	/** Pending confirmations for one account. */
 	listConfirmations(steamId64: string): Promise<ConfirmationsList>;
 	/** Approve or deny by id. The nonce never leaves the main process. */

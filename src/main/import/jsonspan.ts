@@ -29,31 +29,84 @@ export interface Span {
 const SESSION_KEY = /"Session"\s*:\s*\{/g;
 
 /**
+ * Where every **top-level** `"Session": {` opens, in document order.
+ *
+ * Depth matters, and matching it by regex alone did not capture it. A maFile is
+ * free to contain unknown objects — the schema strips them — and one of those
+ * could carry its own `Session`. The scanner took the *last* opening anywhere
+ * in the text, so a nested `metadata.Session.SteamID` was read as the account's
+ * identity while the schema parse used the real top-level one: the file's
+ * secrets bound to a SteamID the file never claimed, and an import set to
+ * replace would overwrite that other account's row with them.
+ *
+ * Only depth 1 counts — a direct member of the root object, which is what
+ * `JSON.parse` resolves the top-level `Session` key to.
+ */
+function topLevelSessionOpenings(raw: string): number[] {
+	const openings: number[] = [];
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+
+	for (let i = 0; i < raw.length; i++) {
+		const ch = raw[i];
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (ch === '\\') {
+			escaped = true;
+			continue;
+		}
+		if (ch === '"') {
+			// A key can only open a Session object when it sits directly inside the
+			// root object, so the check happens before the quote flips state.
+			if (!inString && depth === 1) {
+				SESSION_KEY.lastIndex = i;
+				const match = SESSION_KEY.exec(raw);
+				if (match && match.index === i) {
+					openings.push(i);
+					// Continue from the brace itself, so the loop below counts it.
+					i = match.index + match[0].length - 2;
+					continue;
+				}
+			}
+			inString = !inString;
+			continue;
+		}
+		if (inString) {
+			continue;
+		}
+		if (ch === '{' || ch === '[') {
+			depth++;
+		} else if (ch === '}' || ch === ']') {
+			depth--;
+		}
+	}
+
+	return openings;
+}
+
+/**
  * How many `"Session": {` openings the document contains.
  *
  * More than one means duplicate keys. We read the last, as JSON parsers do, and
  * say so — nothing else about the file would hint at it.
  */
 export function countSessionObjects(raw: string): number {
-	SESSION_KEY.lastIndex = 0;
-	let count = 0;
-	while (SESSION_KEY.exec(raw) !== null) {
-		count++;
-	}
-	return count;
+	return topLevelSessionOpenings(raw).length;
 }
 
 /** Body span of the Nth (zero-based) Session object, or undefined if malformed. */
 function spanAt(raw: string, index: number): Span | undefined {
-	SESSION_KEY.lastIndex = 0;
-	let open: RegExpExecArray | null = null;
-	for (let i = 0; i <= index; i++) {
-		open = SESSION_KEY.exec(raw);
-		if (!open) {
-			return undefined;
-		}
+	const openings = topLevelSessionOpenings(raw);
+	const at = openings[index];
+	if (at === undefined) {
+		return undefined;
 	}
-	if (!open) {
+	SESSION_KEY.lastIndex = at;
+	const open = SESSION_KEY.exec(raw);
+	if (!open || open.index !== at) {
 		return undefined;
 	}
 

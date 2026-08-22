@@ -94,3 +94,22 @@ describe('a dispatched release builds the tag it names', () => {
 		expect(workflow).toContain('--verify-tag');
 	});
 });
+
+describe('what the package is allowed to contain', () => {
+	const config = readFileSync(join(__dirname, '../electron-builder.config.mjs'), 'utf8');
+
+	it('excludes declaration files in every spelling', () => {
+		// `*.{ts,...}` catches `.d.ts` and misses `.d.cts` and `.d.mts` entirely —
+		// a hundred-odd files Electron can never load, since a package is entered
+		// through its compiled entry point.
+		expect(config).toContain("'!node_modules/**/*.d.{ts,cts,mts}'");
+		expect(config).not.toMatch(/^\s*'node_modules\/\*\*\/\*\.d\.ts'/m);
+	});
+
+	it('excludes the React packages the renderer already bundles', () => {
+		// Vite compiles the renderer into a single file that contains React and
+		// ReactDOM; main and preload import neither. Shipping the packages too
+		// duplicated roughly half the ASAR.
+		expect(config).toContain("'!node_modules/{react,react-dom,scheduler}/**'");
+	});
+});

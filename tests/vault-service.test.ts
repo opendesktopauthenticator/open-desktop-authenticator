@@ -983,3 +983,58 @@ describe('a stale unlock against newer state', () => {
 		await expect(service().unlock(PASS)).rejects.toThrow();
 	});
 });
+
+/*
+ * A passphrase proof must not outlive the passphrase.
+ *
+ * `verifyPassphrase` reads the envelope and spends a deliberate second in
+ * scrypt. A rotation completing inside that window retires the very phrase
+ * being proved — and the proof still resolved, so the caller went on to reveal
+ * a revocation code, delete an account, or detach an authenticator on the
+ * strength of a password that no longer opens this vault.
+ */
+describe('verifyPassphrase against a concurrent rotation', () => {
+	it('refuses a proof the rotation invalidated', async () => {
+		const NEXT = 'the replacement long passphrase';
+		const v = service();
+		await v.create(PASS);
+
+		let release: (() => void) | undefined;
+		duringUnseal = () =>
+			new Promise((resolve) => {
+				release = resolve;
+			});
+		const proof = v.verifyPassphrase(PASS).then(
+			() => 'accepted',
+			(err: Error) => `refused: ${err.message}`
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		await v.changePassphrase(PASS, NEXT);
+		release?.();
+
+		await expect(proof).resolves.toMatch(/refused/);
+	});
+
+	it('still accepts an uncontested proof', async () => {
+		const v = service();
+		await v.create(PASS);
+		await expect(v.verifyPassphrase(PASS)).resolves.toBeUndefined();
+		await expect(v.verifyPassphrase('the wrong passphrase entirely')).rejects.toThrow();
+	});
+
+	it('refuses a proof a lock invalidated', async () => {
+		const v = service();
+		await v.create(PASS);
+		let release: (() => void) | undefined;
+		duringUnseal = () =>
+			new Promise((resolve) => {
+				release = resolve;
+			});
+		const proof = v.verifyPassphrase(PASS).catch((err: Error) => `refused: ${err.message}`);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		v.lock('idle');
+		release?.();
+		await expect(proof).resolves.toMatch(/refused|locked/i);
+	});
+});
