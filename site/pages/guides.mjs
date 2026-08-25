@@ -157,9 +157,11 @@ export const download = {
 					<a href="/code-signing-policy">our code signing policy</a>.
 				</li>
 				<li>
-					<strong>A signature over the checksum file.</strong> Every release lists
-					SHA-256 checksums, but nothing signs that list yet — so verify it against the
-					copy on the release page itself, not a copy someone sent you.
+					<strong>Reproducible builds are still missing</strong>, and so is an
+					independent audit — both below. The checksum list <em>is</em> now signed:
+					every release carries <code>SHA256SUMS.txt.sig</code> and a certificate, so
+					you can check the list came from our workflow rather than only that your
+					file matches it. <a href="/verify">Step 5 walks through it.</a>
 				</li>
 				<li>
 					<strong>Reproducible builds.</strong> You cannot yet rebuild the tag and

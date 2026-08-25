@@ -77,8 +77,8 @@ export default {
 					<span>
 						${
 							s.release.checksums && s.release.signed
-								? 'Checksums and signatures you can check against the source.'
-								: 'Public source, public CI, published checksums and build provenance. A signature over the checksum list is not done yet.'
+								? 'Published checksums, a signature over that list, and provenance naming the workflow and commit that built it.'
+								: 'Public source, public CI, published checksums with a signature over them, and build provenance. The binaries themselves are not code-signed yet.'
 						}
 					</span>
 				</li>

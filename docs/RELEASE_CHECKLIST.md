@@ -53,6 +53,11 @@ Platforms: **Windows and Linux** (D11 — macOS deferred).
 - [ ] Provenance attestations generated over every published binary. **Nothing
       is published that the attestation does not cover** — the workflow now
       fails rather than allowing it, after v1.0.0 published an unattested appx.
+- [ ] `SHA256SUMS.txt` is signed, and `SHA256SUMS.txt.sig` and
+      `SHA256SUMS.txt.pem` are published beside it. The workflow verifies its own
+      signature before creating the release, so this failing means the release
+      job failed — but confirm the two files are actually on the release page,
+      because "the step passed" and "the asset shipped" are different claims.
 - [ ] SBOM published.
 
 ### Not yet gates
@@ -65,7 +70,6 @@ of them while it is on this list.
 - Code-signing for the Windows direct downloads. Blocked on SignPath Foundation.
   The Store package is signed by Microsoft on ingestion, which is a different
   channel with a different guarantee.
-- A signature over `SHA256SUMS.txt`. No `.asc` is produced.
 - Reproducible builds.
 
 ## Manual verification — per platform
@@ -132,6 +136,8 @@ The trust story is only real if it works for someone who does not trust us.
 - [ ] Provenance verification succeeds on both platforms:
       `gh attestation verify <file> --owner opendesktopauthenticator`.
       There is no code signature on these files to check — see _Not yet gates_.
+- [ ] `cosign verify-blob` on the checksum list succeeds, run from the downloaded
+      copies rather than from the build directory.
 - [ ] The website's Windows button deep-links the Store listing, and its other
       buttons deep-link GitHub release assets. **The website hosts no binary.**
 - [ ] `/download` on a Windows browser leads with the Store, and on Linux leads

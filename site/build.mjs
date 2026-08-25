@@ -179,20 +179,36 @@ export const SITE = {
 		/** Artifacts are listed with SHA-256 checksums on the release page. */
 		checksums: true,
 		/*
-		 * **Still false, and the distinction matters.**
+		 * **`SHA256SUMS.txt` carries a signature.** True since the release
+		 * workflow began signing it with sigstore `cosign`, keylessly, under the
+		 * workflow's own OIDC identity.
 		 *
-		 * The Store build is signed — Microsoft re-signs every package it
-		 * distributes — but this flag is not about that. It asks whether
-		 * `SHA256SUMS.txt` carries a detached signature from a published key,
-		 * and it does not: the release workflow produces no `.asc`. What the
-		 * direct downloads carry instead is a sigstore build-provenance
-		 * attestation, which /verify documents by name.
-		 *
-		 * Flipping this to true because "the Store build is signed" would be
-		 * exactly the conflation the tripwire below exists to catch, and would
-		 * re-permit a `gpg --verify` instruction against a file nobody publishes.
+		 * This flag was one word doing three jobs, and splitting it was the
+		 * precondition for flipping any of them. "Signed" can mean the checksum
+		 * list is signed, or the binaries carry a code-signing certificate, or
+		 * that a `.asc` exists for someone reaching for `gpg --verify`. Only the
+		 * first is true, and a single flag would have licensed all three
+		 * phrasings the moment it flipped.
 		 */
-		signed: false,
+		signed: true,
+		/*
+		 * **The binaries are not code-signed**, and this is the flag that says
+		 * so. The Microsoft Store package carries Microsoft's signature because
+		 * Microsoft re-signs what it distributes; the `.exe`, `.AppImage` and
+		 * `.deb` on the release page carry none, so Windows warns on first run.
+		 * Blocked on the SignPath Foundation certificate — see
+		 * /code-signing-policy, which exists and says the same thing.
+		 */
+		codeSigned: false,
+		/*
+		 * **No `.asc`, and there never was one.** The signature is sigstore, not
+		 * GPG, so `gpg --verify` and `SHA256SUMS.txt.asc` remain instructions to
+		 * nobody — a reader who follows one gets "No such file or directory" and
+		 * has to guess whether that means the download is bad. /verify once
+		 * carried exactly that instruction, which is why the tripwire for it is
+		 * kept rather than deleted now that a different signature exists.
+		 */
+		gpgSignature: false,
 		/** Anyone can rebuild the tag and get the same bytes. Deferred (§P3). */
 		reproducible: false
 	},

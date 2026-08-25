@@ -318,8 +318,14 @@ const CLAIMS = [
 		patterns: [/every release (?:carries|is published with) checksums/i]
 	},
 	{
-		flag: 'signed',
-		says: 'releases are signed',
+		/*
+		 * Split from `signed` when the checksum list gained a sigstore
+		 * signature. The list being signed does not make the binaries signed,
+		 * and one flag covering both would have permitted "signed builds" the
+		 * moment `cosign` landed.
+		 */
+		flag: 'codeSigned',
+		says: 'the published binaries are code-signed',
 		/*
 		 * The last two are here because the first two were not enough.
 		 *
@@ -335,12 +341,18 @@ const CLAIMS = [
 		 * So the tripwire now also matches the artefacts of signing, not only
 		 * assertions about it.
 		 */
-		patterns: [
-			/every release[^.]{0,60}signature/i,
-			/releases are signed/i,
-			/gpg\s+--verify/i,
-			/SHA256SUMS\.txt\.asc/i
-		]
+		patterns: [/signed (?:binaries|installers?|executables?)/i, /releases are signed/i]
+	},
+	{
+		/*
+		 * Kept after the checksum list gained a signature, because it gained a
+		 * *sigstore* one. Telling a reader to run `gpg --verify` against a `.asc`
+		 * nobody publishes is the same lie told as a command, and it is the exact
+		 * instruction /verify used to carry.
+		 */
+		flag: 'gpgSignature',
+		says: 'a GPG signature is published',
+		patterns: [/gpg\s+--verify/i, /SHA256SUMS\.txt\.asc/i]
 	},
 	{
 		flag: 'published',
@@ -371,7 +383,7 @@ const CLAIMS = [
 const UNBUILT_CAPABILITY = [
 	{ flag: 'reproducible', phrase: /reproducible builds?/gi },
 	{ flag: 'checksums', phrase: /published checksums|checksums (?:are|is) published/gi },
-	{ flag: 'signed', phrase: /signed (?:builds?|releases?)/gi }
+	{ flag: 'codeSigned', phrase: /signed (?:builds?|binaries|installers?)/gi }
 ];
 
 /**

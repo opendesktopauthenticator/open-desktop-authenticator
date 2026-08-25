@@ -311,6 +311,55 @@ jobs:
           sha256sum -- * | sort -k2 > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
+      # ---------------------------------------------------------------------
+      # Sign the checksum list.
+      #
+      # The hashes prove a file was not altered on its way to you. They cannot
+      # prove the *list* is ours: whoever can replace a binary on a release page
+      # can usually replace the hash file sitting beside it, and /verify says so
+      # in as many words. This closes that.
+      #
+      # Keyless, deliberately. `cosign` mints a short-lived certificate bound to
+      # this workflow's OIDC identity — the same trust root as the provenance
+      # attestation below — so there is no private key for a single maintainer
+      # to hold, escrow, lose, or have stolen. MAINTENANCE.md names "the
+      # maintainer disappears" as this project's largest risk; a signing key
+      # that only one person can reproduce would have made that worse.
+      #
+      # Runs after the list is generated and before the release is created, so
+      # what ships is the signature of the file that ships.
+      # ---------------------------------------------------------------------
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Sign the checksum list
+        shell: bash
+        working-directory: staging
+        env:
+          # Non-interactive: the runner cannot answer a confirmation prompt, and
+          # a hung release job is worse than a failed one.
+          COSIGN_YES: 'true'
+        run: |
+          cosign sign-blob SHA256SUMS.txt \
+            --output-signature SHA256SUMS.txt.sig \
+            --output-certificate SHA256SUMS.txt.pem
+          echo "--- signature ---"
+          cat SHA256SUMS.txt.sig
+          echo
+
+      # Proving it here rather than trusting it. A signature nobody verified is
+      # a file with a confident extension, and the first person to check should
+      # not be a user deciding whether their download was tampered with.
+      - name: Verify the signature we just made
+        shell: bash
+        working-directory: staging
+        run: |
+          cosign verify-blob SHA256SUMS.txt \
+            --signature SHA256SUMS.txt.sig \
+            --certificate SHA256SUMS.txt.pem \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
       # Proof of *where* the bytes came from: which workflow, which commit,
       # which runner. This is the closest thing to a signature the direct
       # download channel has until the SignPath certificate exists, and unlike a
@@ -354,6 +403,15 @@ jobs:
           Verify on Windows PowerShell:
           \`\`\`
           Get-FileHash .\\<file> -Algorithm SHA256
+          \`\`\`
+
+          The checksum list itself is signed, so you can check the list came from this workflow rather than only that your file matches it:
+          \`\`\`
+          cosign verify-blob SHA256SUMS.txt \\
+            --signature SHA256SUMS.txt.sig \\
+            --certificate SHA256SUMS.txt.pem \\
+            --certificate-identity-regexp '^https://github.com/opendesktopauthenticator/' \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
           \`\`\`" \
             staging/*
           echo "Draft created. Nothing is public until a human publishes it."

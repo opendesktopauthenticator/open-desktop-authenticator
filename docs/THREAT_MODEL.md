@@ -90,9 +90,16 @@ Someone compromises a dependency, our build, or our release pipeline.
 - **Distribution is two channels with different guarantees, and conflating them
   is itself a risk.** The Microsoft Store package is signed, because Microsoft
   re-signs what it distributes. The GitHub builds are **not** code-signed: they
-  carry published SHA-256 checksums and a sigstore build-provenance attestation
-  naming the workflow, commit and tag that produced them. A binary that fails
-  the check appropriate to its channel is not ours.
+  carry published SHA-256 checksums, a sigstore signature over that checksum
+  list, and a sigstore build-provenance attestation naming the workflow, commit
+  and tag that produced them. A binary that fails the check appropriate to its
+  channel is not ours.
+- **The checksum list is signed keylessly, on purpose.** `cosign` mints a
+  short-lived certificate bound to the release workflow's OIDC identity, so
+  there is no long-lived private key for a single maintainer to hold, escrow or
+  lose. §2.4 and MAINTENANCE.md both name maintainer disappearance as this
+  project's largest risk; a signing key only one person can reproduce would have
+  deepened it rather than closing a gap.
 - `npm audit` and `osv-scanner` gate CI on production dependencies.
 
 **Resolved, and worth stating because an earlier version of this document said

@@ -336,7 +336,29 @@ export const verify = {
 				only tool here you may not already have.
 			</p>
 
-			<h2>5. On Windows, check the publisher</h2>
+			<h2>5. Check the checksum list is ours</h2>
+			<p>
+				Step 1 told you to take <code>SHA256SUMS.txt</code> from the release page rather
+				than from wherever you got the installer, and that advice was doing a lot of
+				work: a hash file proves nothing about itself. Anyone who could swap a binary on
+				a page could usually swap the list beside it. That list is now signed.
+			</p>
+			<pre><code>cosign verify-blob SHA256SUMS.txt   --signature SHA256SUMS.txt.sig   --certificate SHA256SUMS.txt.pem   --certificate-identity-regexp '^https://github.com/${s.githubOrg}/'   --certificate-oidc-issuer https://token.actions.githubusercontent.com</code></pre>
+			<p>
+				Both files are on the release beside the list itself. The signature is keyless —
+				there is no long-lived private key anywhere, because the certificate is minted
+				for the workflow run that produced the release and expires minutes later. That
+				is deliberate: a key held by one maintainer is a key that can be lost or taken,
+				and this project has one maintainer.
+			</p>
+			<p>
+				It needs <a href="https://docs.sigstore.dev/cosign/system_config/installation/" rel="noopener">cosign</a>.
+				If you would rather not install it, the checksums and the attestation above
+				still stand on their own — this step tells you the <em>list</em> came from our
+				workflow, not just that your file matches it.
+			</p>
+
+			<h2>6. On Windows, check the publisher</h2>
 			<pre><code>Get-AuthenticodeSignature .\\&lt;file&gt;.exe | Format-List Status, SignerCertificate</code></pre>
 			<p>
 				What you should see depends on where the file came from, and right now the
