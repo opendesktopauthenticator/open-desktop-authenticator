@@ -33,17 +33,40 @@ Platforms: **Windows and Linux** (D11 — macOS deferred).
 - [ ] If anything touched auto-confirm: the type allowlist still rejects unknown
       types, and `acceptAllConfirmations` appears nowhere.
 
-## Build and sign
+## Build
 
-- [ ] Tag is signed.
+> **What this section used to say, and why it was wrong.** It required a signed
+> Git tag and signed Windows artifacts, under a heading saying nothing here is
+> optional. v1.0.0 shipped with an unsigned tag and unsigned direct downloads,
+> so either the gates were not gates or the release should not have happened.
+> A checklist that is routinely overridden trains people to override it, which
+> is worse than not having one. The gates below are the ones that actually hold;
+> the aspirations moved to their own list and are marked as such.
+
 - [ ] Release workflow ran from the tag in public CI — never a local build.
 - [ ] Release workflow's third-party actions are pinned to **full commit SHAs**,
-      not tags. This job holds signing material.
-- [ ] Windows: NSIS installer and portable zip, signed. Portable is labelled as
+      not tags.
+- [ ] Windows: NSIS installer and portable `.exe`. Portable is labelled as
       manual-update.
 - [ ] Linux: AppImage and `.deb`.
 - [ ] `SHA256SUMS.txt` generated over **every** published asset.
-- [ ] Provenance attestations generated. SBOM published.
+- [ ] Provenance attestations generated over every published binary. **Nothing
+      is published that the attestation does not cover** — the workflow now
+      fails rather than allowing it, after v1.0.0 published an unattested appx.
+- [ ] SBOM published.
+
+### Not yet gates
+
+Written down so the distinction is deliberate rather than forgotten. Each is a
+real commitment; none of them blocks a release today, and no page may claim any
+of them while it is on this list.
+
+- Signed Git tags. The v1.0.0 tag is unsigned.
+- Code-signing for the Windows direct downloads. Blocked on SignPath Foundation.
+  The Store package is signed by Microsoft on ingestion, which is a different
+  channel with a different guarantee.
+- A signature over `SHA256SUMS.txt`. No `.asc` is produced.
+- Reproducible builds.
 
 ## Manual verification — per platform
 
@@ -92,7 +115,9 @@ The trust story is only real if it works for someone who does not trust us.
 - [ ] Download from the GitHub release page — not from a local build.
 - [ ] Follow `docs/verify-windows.md` / `verify-linux.md` exactly as written,
       copy-pasting the commands. Hashes match.
-- [ ] Signature verification succeeds on both platforms.
+- [ ] Provenance verification succeeds on both platforms:
+      `gh attestation verify <file> --owner opendesktopauthenticator`.
+      There is no code signature on these files to check — see _Not yet gates_.
 - [ ] The website's Windows button deep-links the Store listing, and its other
       buttons deep-link GitHub release assets. **The website hosts no binary.**
 - [ ] `/download` on a Windows browser leads with the Store, and on Linux leads

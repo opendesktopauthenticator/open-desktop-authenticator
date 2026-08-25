@@ -34,7 +34,7 @@ every time one gets reported.
 Open source alone does not fix this. Attackers compile open source with malware
 added. What fixes it is a chain a stranger can walk without trusting anyone:
 
-**website → company → GitHub org → source → public CI build → signed binary → published hash**
+**website → company → GitHub org → source → public CI build → published hash + provenance**
 
 So: every release is built in public CI from a tag, published with hashes and
 provenance, by a named company that does not hide where it came from. It reaches
@@ -87,7 +87,7 @@ items; they are deliberate non-goals.
 | Phase 1 — app shell, security posture, CI, docs    | **done** |
 | 0.1 — vault, import, codes, confirmations          | **done** |
 | 0.1 — sign-in, tray, settings, auto-confirm        | **done** |
-| 1.0 — signed releases, Windows + Linux             | **done** |
+| 1.0 — packaged public releases, Windows + Linux    | **done** |
 
 **macOS is not supported.** Signing it requires Apple Developer enrollment as an
 organization, which we have not completed. We will not ship an unsigned macOS

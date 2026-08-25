@@ -90,12 +90,17 @@ public workflow from this tag.
   tracks Valve's changes; writing our own bought nothing and cost a proxy bug.
   The Steam Guard code is still generated here, offline, and the session Steam
   returns is still checked to be mobile-scoped before it is stored.
-- **Proxies that require a username and password now work at all.** The
-  credentials were being handed to an Electron event that does not exist, so they
-  were never sent: every authenticating proxy failed before reaching Steam, with
-  an error indistinguishable from a wrong password. They are now supplied on the
-  request itself, and only ever to the proxy — never to whatever is at the other
-  end of the connection.
+- **http and https proxies that require a username and password now work at
+  all.** The credentials were being handed to an Electron event that does not
+  exist, so they were never sent: every authenticating proxy failed before
+  reaching Steam, with an error indistinguishable from a wrong password. They are
+  now supplied on the request itself, and only ever to the proxy — never to
+  whatever is at the other end of the connection.
+- **An authenticated SOCKS proxy is refused rather than half-supported.**
+  Chromium carries this application's Steam traffic and cannot authenticate to a
+  SOCKS proxy, so accepting the credentials would mean quietly routing traffic
+  somewhere other than where the user configured it. The error says so and names
+  the alternatives.
 - Network failures are now explained rather than passed through as Chromium's
   internal error codes, and a failure on a routed account **names the proxy**.
   `net::ERR_TUNNEL_CONNECTION_FAILED` told you nothing, least of all that a proxy

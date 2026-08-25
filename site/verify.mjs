@@ -387,6 +387,45 @@ const QUALIFIER =
 /** How far either side of the phrase a qualifier may sit and still count. */
 const QUALIFIER_WINDOW = 200;
 
+/*
+ * The same problem pointed the other way: claiming absence after the fact.
+ *
+ * Everything above guards against saying a capability exists before it does.
+ * Nothing guarded the inverse, and the inverse is what actually happened. The
+ * day v1.0.0 shipped, `SITE.release.published` flipped to true and the build
+ * stayed green while the homepage said "not yet released", /verify opened with
+ * "No release exists yet", and the donations page listed installers and
+ * checksums as still to come.
+ *
+ * The asymmetry was not deliberate — it is what you get from writing a checker
+ * during a pre-release, when every mistake you can imagine is an overclaim. A
+ * project only ever moves through this transition once per capability, which is
+ * exactly why nobody notices the missing half until it fires.
+ *
+ * These phrases are unconditionally wrong when the flag is true. There is no
+ * qualifier that rescues "there is no release yet" on a site with a release, so
+ * unlike the checks above this one takes no proximity window.
+ */
+const STALE_ABSENCE = [
+	{
+		flag: 'published',
+		patterns: [
+			/no (?:public )?(?:release|build|download)[^.]{0,30}\b(?:yet|exists)/gi,
+			/not yet released/gi,
+			/there is no (?:release|download|installer|build)/gi,
+			/nothing to download/gi,
+			/when it exists/gi,
+			/once (?:there is|we have) a release/gi,
+			/before the first release/gi,
+			/still to come/gi
+		]
+	},
+	{
+		flag: 'checksums',
+		patterns: [/checksums? (?:will|are still to)|no checksums? (?:yet|exist)/gi]
+	}
+];
+
 for (const [slug, html] of built) {
 	const words = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
 	for (const claim of CLAIMS) {
@@ -399,6 +438,23 @@ for (const [slug, html] of built) {
 				fail(
 					slug,
 					`states that ${claim.says}, which SITE.release.${claim.flag} says is not true yet — "${hit[0].slice(0, 60)}"`
+				);
+			}
+		}
+	}
+
+	for (const { flag, patterns } of STALE_ABSENCE) {
+		if (!SITE.release[flag]) {
+			continue;
+		}
+		for (const pattern of patterns) {
+			pattern.lastIndex = 0;
+			const hit = pattern.exec(words);
+			if (hit) {
+				fail(
+					slug,
+					`says "${hit[0]}" while SITE.release.${flag} is true — ` +
+						'the release happened; this sentence did not notice'
 				);
 			}
 		}

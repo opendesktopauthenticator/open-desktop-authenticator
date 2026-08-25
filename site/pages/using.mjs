@@ -459,13 +459,9 @@ export const mobileVsDesktop = {
 
 			<h2>Where ${s.short} stands today</h2>
 			<p>
-				Stated so you can weigh it: this is a young project with no public release
-				yet, no independent audit, and none of the years of scrutiny the mobile app
-				has. Those are real disadvantages and open source does not cancel them.
-				<a href="/download">The current status is here</a>, and
-				<a href="/owners">the company behind it is named</a> — which is the least you
-				should demand of anything asking to hold a Steam secret.
-			</p>
+				Stated so you can weigh it: this is a young project. Version 1.0 is days old,
+				no independent audit has happened, and it has none of the years of scrutiny the
+				mobile app has.</p>
 
 			<h2>Related</h2>
 			<ul class="link-cards">

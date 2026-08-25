@@ -94,7 +94,7 @@ export default {
 				We are not asking you to trust us because we are named. We are pointing out that
 				a name is one of the few things you can check about a piece of software before
 				you run it, alongside
-				<a href="/verify">the checksum and the signature</a> and
+				<a href="/verify">the checksum and the build provenance</a> and
 				<a href="${s.repo}" rel="noopener">the source itself</a>. Use all of them.
 			</p>
 
@@ -153,9 +153,16 @@ ${PROJECTS.map(
 			<h2>Getting in touch</h2>
 			<p>
 				Bugs, documentation errors and suspected clone sites go through
-				<a href="/support">the reporting form</a>. Security reports go to the same place
-				and are handled privately — see <a href="/security">the security page</a> for
-				what we ask and what we commit to.
+				<a href="/support">the reporting form</a>.
+			</p>
+			<p>
+				<strong>Vulnerabilities do not.</strong> The reporting form writes a ticket
+				anyone holding its link can read, which is the wrong place for a working
+				exploit. Use
+				<a href="https://github.com/opendesktopauthenticator/open-desktop-authenticator/security/advisories/new" rel="noopener">GitHub's
+				private vulnerability reporting</a>, or the address in
+				<a href="/.well-known/security.txt">security.txt</a> — the two channels
+				<a href="/security">the security page</a> names, and the only two there are.
 			</p>
 		</article>`
 };

@@ -78,7 +78,7 @@ export default {
 						${
 							s.release.checksums && s.release.signed
 								? 'Checksums and signatures you can check against the source.'
-								: 'Public source and public CI now; checksums and a signature ship with the first release.'
+								: 'Public source, public CI, published checksums and build provenance. A signature over the checksum list is not done yet.'
 						}
 					</span>
 				</li>
@@ -87,14 +87,18 @@ export default {
 
 	body: () => `
 		<article>
-			<div class="callout callout-warn">
-				<h2>Status: in development, not yet released</h2>
+			<div class="callout">
+				<h2>Status: 1.0, in the Microsoft Store and on GitHub</h2>
 				<p>
-					There is no download here yet, and we would rather say so plainly than
-					publish a button that does nothing. The application is written and under
-					test; there is no signed public build. When there is one it will appear on
-					the <a href="/download">download page</a> with checksums and a signature,
-					and not a day earlier.
+					<a href="/download">The download page</a> has both, and they are the only
+					two places a genuine build comes from. This page still hosts no installer
+					and never will — every button here links outward.
+				</p>
+				<p>
+					What is still missing is written down rather than left for you to find: the
+					direct downloads carry no code-signing certificate, nothing signs the
+					checksum list, builds are not yet reproducible, and no independent audit has
+					happened. <a href="/download">The download page tracks each of those.</a>
 				</p>
 			</div>
 

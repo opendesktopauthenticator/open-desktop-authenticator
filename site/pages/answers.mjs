@@ -331,8 +331,9 @@ export const alternatives = {
 				An independent implementation built around one idea: you should not have to
 				trust us. Public source, built in public CI, no self-updating, and
 				<a href="/security">a documented security model that includes what it cannot
-				protect you from</a>. Checksums, release signatures and reproducible builds are
-				required before the first release rather than done —
+				protect you from</a>. Every release publishes checksums and build provenance.
+				Two things are not yet done: signing that checksum list, and reproducible builds
+				you could compare byte for byte —
 				<a href="/download">the download page says where each one stands</a>.
 			</p>
 			<p>
@@ -340,8 +341,8 @@ export const alternatives = {
 				be able to check what it does — or have somebody else check.
 			</p>
 			<p>
-				<strong>Against it, plainly:</strong> it is new. It has no public release yet, no
-				years of community scrutiny behind it, and no track record. Those are real
+				<strong>Against it, plainly:</strong> it is new. Version 1.0 is days old, with no
+				years of community scrutiny behind it and no track record. Those are real
 				disadvantages and no amount of open source substitutes for them. If that matters
 				more to you than auditability, one of the options above is the better choice
 				today.

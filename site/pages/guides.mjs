@@ -472,9 +472,9 @@ const FAQ_ITEMS = [
 	{
 		q: 'How do I know this is not itself a scam?',
 		plain:
-			'Do not take our word for it. The source is public and can be built and run today, the publisher is a registered company, and there is no download yet — so the honest answer includes what is not finished.',
+			'Do not take our word for it. The source is public, the publisher is a registered company, and 1.0 is out — so the honest answer includes what is still not finished.',
 		a: `<p>Do not take our word for it — that is the entire design. Here is what you can check <strong>today</strong>: the source is public and you can build and run it yourself; the publisher is a named, registered company you can look up; and the site tells you <a href="/verify">how to check any download</a>, ours or anyone else's.</p>
-			<p>And here is what is <strong>not</strong> finished, because a page that only lists the reassuring half is doing the thing it warns you about. There is no public release yet. Release signatures and published checksums arrive with it. Reproducible builds — compiling the tag yourself and getting byte-for-byte identical output — are further out still. <a href="/download">The download page tracks each of those</a>, and the site refuses to build if any page here claims one of them before it is true.</p>
+			<p>And here is what is <strong>not</strong> finished, because a page that only lists the reassuring half is doing the thing it warns you about. The direct downloads carry no code-signing certificate, so Windows warns on them. Nothing signs the checksum list, so take it from the release page itself rather than from wherever you got the installer. Reproducible builds — compiling the tag yourself and getting byte-for-byte identical output — are further out still. No independent audit has happened. <a href="/download">The download page tracks each of those</a>, and the site refuses to build if any page here claims one of them before it is true, or goes on saying it is missing after it is not.</p>
 			<p>We would rather you were sceptical of us and safe than trusting and robbed.</p>`
 	},
 	{

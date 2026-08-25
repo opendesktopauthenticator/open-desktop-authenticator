@@ -130,12 +130,16 @@ export const scamClones = {
 
 			<h2>What a genuine release looks like</h2>
 			<p>
-				Ours, when it exists, will look like this — and so does any other project worth
+				Ours looks like this — and so does any other project worth
 				trusting:
 			</p>
 			<ul>
 				<li>Published on the repository that holds the source, at a tagged version.</li>
-				<li>A <code>SHA256SUMS</code> file listing every artifact, and a signature over it.</li>
+				<li>
+					A <code>SHA256SUMS</code> file listing every artifact. Ideally a signature
+					over that list too — ours does not have one yet, which is why the
+					provenance attestation below matters here rather than being a nicety.
+				</li>
 				<li>
 					A build that anyone can reproduce from the tag and compare byte for byte
 					against what was published.
@@ -196,7 +200,8 @@ export const verify = {
 		'@context': 'https://schema.org',
 		'@type': 'HowTo',
 		name: 'Verify an Open Desktop Authenticator download',
-		description: 'Check a release against its published checksum and signature.',
+		description:
+			'Check a release against its published checksum and its build provenance attestation.',
 		publisher: { '@type': 'Organization', name: s.publisher },
 		step: [
 			{ '@type': 'HowToStep', name: 'Get the checksum file from the release page' },
@@ -214,11 +219,12 @@ export const verify = {
 				filenames changed, for anything else you download.
 			</p>
 
-			<div class="callout callout-warn">
+			<div class="callout">
 				<p>
-					<strong>No release exists yet</strong>, so there is nothing to verify today.
-					The commands below are exactly what will apply when there is, and they are
-					published now so the process is familiar before it matters.
+					<strong>These commands apply to 1.0, which is out now.</strong> Run them
+					against what you actually downloaded rather than reading them and moving on
+					— a verification step you have never performed is not a habit, and the
+					moment you need it is the worst moment to learn it.
 				</p>
 			</div>
 

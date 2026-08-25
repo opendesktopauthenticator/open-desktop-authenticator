@@ -41,8 +41,11 @@ src/
     import/    maFile parsing, staging, and the commit into the vault
     codes/     Steam Guard code generation and the clipboard rules
     confirmations/  confirmation keys, the S16 type allowlist, mobileconf
-    net/       the ONLY place a socket opens: per-account Electron sessions,
-               each with its own proxy and its own cookie jar
+    net/       every request this application composes itself, and the only
+               place it opens one: per-account Electron sessions, each with its
+               own proxy and its own cookie jar. Sign-in is the exception —
+               `steam-session` opens its own sockets from Node, routed through
+               the same per-account proxy (see steam/)
     steam/     talking to Valve's own endpoints (session minting)
   preload/     bridge only. see the warning below
   renderer/    React UI
@@ -93,17 +96,25 @@ to any local file on the machine. The check must pin the exact file.
 ## Where Valve churn is absorbed
 
 All Steam protocol contact goes through `src/main/steam/`, `src/main/codes/` and
-`src/main/confirmations/`, and every request leaves through the single transport
-in `src/main/net/`. When Valve changes something — and they will — the fix is in
+`src/main/confirmations/`, and every request this application composes leaves
+through the single transport in `src/main/net/` — sign-in excepted, which
+`steam-session` performs over Node using the same per-account proxy. When Valve changes something — and they will — the fix is in
 one place.
 
-**The shipped application depends on none of DoctorMcKay's libraries.** That was
-not the original plan; D12/D13 and Q19 in
-[PLAN_AMENDMENTS.md](PLAN_AMENDMENTS.md) record why it changed. In short: code
-generation and confirmation signing are twenty lines each and are the most
-security-critical computations here, so they are written where a reader can check
-them — and proven against `steam-totp` in `/spike` on every push. `steamcommunity`
-was declined separately, over eleven unfixable advisories and an
+**The shipped application writes its own cryptography and borrows its sign-in.**
+This paragraph used to say it depended on none of DoctorMcKay's libraries, which
+stopped being true when `steam-session` became a runtime dependency and was never
+corrected — the sort of drift a security review boundary cannot afford, since a
+reader deciding what to audit would have taken the sentence at its word.
+
+What is true: code generation and confirmation signing are twenty lines each and
+are the most security-critical computations here, so they are written where a
+reader can check them — and proven against `steam-totp` in `/spike` on every
+push. Signing in is **not** ours: `steam-session` handles it, because the login
+flow is a moving protocol with no security-critical arithmetic in it, and D12/D13
+and Q19 in [PLAN_AMENDMENTS.md](PLAN_AMENDMENTS.md) record that reasoning.
+
+`steamcommunity` was declined separately, over eleven unfixable advisories and an
 `EConfirmationType` enum that does not contain the account-recovery type this
 application must refuse.
 

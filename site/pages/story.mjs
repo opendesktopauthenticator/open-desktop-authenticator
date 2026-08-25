@@ -148,9 +148,9 @@ export default {
 				<a href="${'https://github.com/opendesktopauthenticator/open-desktop-authenticator'}" rel="noopener">public source</a>,
 				builds produced in public CI, and
 				<a href="/security">a security page that says what it cannot protect you from</a>.
-				Published checksums and reproducible builds are required before the first
-				release rather than done — <a href="/download">the download page says where each
-				one stands</a>. It cannot update itself, because that is the same door left open.
+				Published checksums and build provenance ship with each release. Reproducible
+				builds do not yet, and neither does a signature over the checksum list —
+				<a href="/download">the download page says where each one stands</a>. It cannot update itself, because that is the same door left open.
 			</p>
 			<p>
 				If you use something else, use something else. Just

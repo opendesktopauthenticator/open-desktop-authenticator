@@ -127,12 +127,15 @@ jobs:
   # installer produced under wine differs from one produced by the toolchain
   # users actually run.
   #
-  # The Store package (appx) is deliberately NOT built here. It needs the
-  # Partner Center identity, it is submitted through Partner Center rather than
-  # attached to a GitHub release, and `electron-builder.config.mjs` refuses to
-  # produce one while that identity is a placeholder. Adding it to this workflow
-  # would make every release fail on a step that has nothing to do with the
-  # release.
+  # The Store package (appx) IS built here, and is not released. That is a
+  # change from what this comment used to say — it was written while the Partner
+  # Center identity was still a placeholder, when `electron-builder.config.mjs`
+  # refused to produce an appx at all and adding one would have failed every
+  # release. The identity exists now, so the package is built to prove it still
+  # matches (a mismatch is otherwise discovered at upload, slowly), uploaded as a
+  # workflow artifact for the maintainer, and never downloaded into the staging
+  # directory the release publishes from. See `pattern: package-*` below, which
+  # is what enforces the second half.
   # ---------------------------------------------------------------------------
   package:
     name: package (${{ matrix.os }})

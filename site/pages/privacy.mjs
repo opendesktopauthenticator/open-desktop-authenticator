@@ -101,8 +101,11 @@ export const privacy = {
 
 			<h2>Having something removed sooner</h2>
 			<p>
-				Reply on your own report and ask — the reference is the only thing needed, and
-				<a href="/support">the support page</a> explains how to get back to it. We will
+				Reply on your own report and ask. You need the private link you were given
+				when you filed it — the short reference identifies a report but is not enough
+				to open one, deliberately, because a reference short enough to read out is
+				short enough to guess. <a href="/support">The support page</a> explains how to
+				get back to a report. We will
 				delete the report, its replies and its attachments, and say when it is done.
 				There is no account to close because there was never one to create.
 			</p>

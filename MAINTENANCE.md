@@ -50,9 +50,11 @@ maintainer disappears and the project rots while still looking alive.
 - **Break-glass escrow, from day one.** Sealed documentation covering signing
   material locations, GitHub organisation recovery, the domain registrar, and the
   release procedure — stored offline in two separate places.
-- **Second maintainer.** Recruited from credible early contributors, targeted
-  before 1.0, given release access and escrow knowledge. Until that exists, the
-  escrow document is the bridge.
+- **Second maintainer.** Recruited from credible early contributors, given
+  release access and escrow knowledge. This was targeted before 1.0 and did not
+  happen — 1.0 shipped with one maintainer, and saying so is more use to you than
+  a date that has already passed. Until it exists, the escrow document is the
+  bridge, and this remains the project's largest single point of failure.
 - **Quarterly**: escrow refresh and a restore-from-backup fire drill.
 
 ## If we step away

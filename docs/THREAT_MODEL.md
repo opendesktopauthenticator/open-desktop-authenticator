@@ -74,14 +74,19 @@ Someone compromises a dependency, our build, or our release pipeline.
 - Dependencies are pinned exact, installed with `npm ci` only, and every bump is
   a reviewed PR — Dependabot never auto-merges (§9.4).
 - Builds run in public CI; the workflow is in the repo and its history is public.
-- Releases are signed and attested. A binary that does not verify is not ours.
+- **Distribution is two channels with different guarantees, and conflating them
+  is itself a risk.** The Microsoft Store package is signed, because Microsoft
+  re-signs what it distributes. The GitHub builds are **not** code-signed: they
+  carry published SHA-256 checksums and a sigstore build-provenance attestation
+  naming the workflow, commit and tag that produced them. A binary that fails
+  the check appropriate to its channel is not ours.
 - `npm audit` and `osv-scanner` gate CI on production dependencies.
 
 **Resolved, and worth stating because an earlier version of this document said
 otherwise:** the production tree used to be planned around `steamcommunity`,
 which reaches eleven unfixable advisories through the deprecated `request`. It is
-not shipped. The application depends on **react, react-dom, zod and
-steam-session** and nothing else — 36 transitive packages, and
+not shipped. The application's direct runtime dependencies are **protobufjs,
+react, react-dom, steam-session and zod** — 38 transitive packages, and
 `npm audit --omit=dev` reports zero vulnerabilities. `steam-session` carries none
 of `steamcommunity`'s advisories; every one of those arrives through the
 deprecated `request`, which `steam-session` does not use. Sign-in is the
@@ -116,8 +121,17 @@ becomes an adversary in your model.**
   even without content.
 - Content stays TLS-encrypted **unless you install that proxy's CA certificate**.
   If you do, they see everything. Do not.
-- `socks5://` resolves DNS locally, so your own resolver still sees every Steam
-  hostname. Prefer `socks5h://`.
+- **DNS goes to the proxy, not to your resolver.** This paragraph previously said
+  the opposite — that `socks5://` resolves locally and `socks5h://` should be
+  preferred — which was true of Node's SOCKS client and false of Chromium's, and
+  the two halves of this application used different stacks. They no longer
+  disagree: `src/main/net/egress.ts` normalises the Node side to `socks5h` and
+  translates the spelling Chromium needs, so both resolve at the proxy. Write
+  `socks5://`; `socks5h://` is accepted and means the same thing here.
+- **A SOCKS proxy needing a username and password is refused, deliberately.**
+  Chromium cannot authenticate to one, so accepting it would mean traffic
+  silently taking a different route than the one you configured. Use an
+  http/https proxy if you need credentials.
 
 The users most likely to want this feature are the most likely to buy cheap
 residential proxies of unknown ownership. The warning belongs next to the
