@@ -42,9 +42,16 @@ it came from.
 
 ### Don't trust us. Verify us.
 
-**Never download an authenticator from a website — including ours.** Our download
-button only ever deep-links a signed GitHub release asset. Anything else claiming
-to be this application is not.
+**Never download an authenticator from a website — including ours.** Every button
+on our site links somewhere else: the Microsoft Store listing, or a release asset
+on this repository. The site hosts no binary and never will. Anything else
+claiming to be this application is not.
+
+On Windows the Store is the route we point people at, because Microsoft re-signs
+the package and nobody has to be talked through comparing a hash on the day they
+are already worried about their account. The releases page stays for Linux, for
+Windows images with no Store, for the portable build, and for anyone who would
+rather check the bytes than be told they are fine.
 
 ---
 

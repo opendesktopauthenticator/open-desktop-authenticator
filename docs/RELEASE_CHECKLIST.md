@@ -93,8 +93,11 @@ The trust story is only real if it works for someone who does not trust us.
 - [ ] Follow `docs/verify-windows.md` / `verify-linux.md` exactly as written,
       copy-pasting the commands. Hashes match.
 - [ ] Signature verification succeeds on both platforms.
-- [ ] The website's download button deep-links the signed GitHub asset. **The
-      website hosts no binary.**
+- [ ] The website's Windows button deep-links the Store listing, and its other
+      buttons deep-link GitHub release assets. **The website hosts no binary.**
+- [ ] `/download` on a Windows browser leads with the Store, and on Linux leads
+      with the release page. Both are still reachable with JavaScript off —
+      the page must never offer nothing because a script failed.
 
 ## Publish
 

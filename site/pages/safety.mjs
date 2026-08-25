@@ -224,7 +224,7 @@ export const verify = {
 
 			<h2>First: which copy do you have?</h2>
 			<p>
-				There will be two ways to get this application, and they are verified
+				There are two ways to get this application, and they are verified
 				differently. Checking the wrong thing for your copy produces a scary-looking
 				result that means nothing, so start here.
 			</p>

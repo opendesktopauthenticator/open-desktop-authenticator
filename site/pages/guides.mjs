@@ -5,42 +5,64 @@ import { reviewAsk } from '../markup.mjs';
 export const download = {
 	slug: 'download',
 	navTitle: 'Download',
+	script: 'download.js',
 	title: 'Open Desktop Authenticator download and release status',
 	description:
 		'Download Open Desktop Authenticator for Windows and Linux. Install from the Microsoft Store, or take a build from GitHub and verify it yourself.',
 	body: (s) => `
 		<article>
 			<h1>Download</h1>
-			<div class="callout">
+			<div class="callout" data-download>
 				<h2>Two places, and nowhere else</h2>
 				<p>
 					${s.name} 1.0 is published in the Microsoft Store and on this project's
 					GitHub releases page. <strong>Those are the only two places a genuine build
 					comes from.</strong> Not a mirror, not a lookalike domain, not a sponsored
-					search result, and not this page — the button below is a link to GitHub, not
-					a file we serve.
+					search result, and not this page — every button here is a link somewhere
+					else, never a file we serve.
 				</p>
-				<p>
-					<a class="button" href="${s.store.url}" rel="noopener">Get it from the Microsoft Store</a>
-					<a class="button button-quiet" href="${s.repo}/releases/latest" rel="noopener">Or download from GitHub →</a>
-				</p>
-			</div>
 
-			<h2>Which one should you take?</h2>
-			<p>
-				<strong>The Store, for most people.</strong> Microsoft re-signs every package it
-				distributes, so Windows never warns on it, updates arrive through the Store, and
-				you do not have to verify anything by hand. That is the shortest honest chain
-				between you and a build we made.
-			</p>
-			<p>
-				<strong>GitHub, if you want to check the bytes yourself</strong> — or if you are
-				on Linux, or on a Windows machine without the Store. These builds carry no
-				code-signing certificate yet, so Windows will warn on first run. That warning is
-				about a missing certificate, not about the file being wrong, and
-				<a href="/verify">the verification steps</a> are how you tell the difference
-				rather than taking our word for it.
-			</p>
+				<div class="download-primary download-windows">
+					<p>
+						<a class="button" href="${s.store.url}" rel="noopener">Get it from the Microsoft Store</a>
+					</p>
+					<p class="download-why">
+						Microsoft re-signs every package it distributes, so Windows never warns,
+						updates arrive on their own, and there is nothing for you to check by
+						hand. On Windows this is the right answer for almost everybody.
+					</p>
+				</div>
+
+				<div class="download-primary download-linux">
+					<p>
+						<a class="button" href="${s.repo}/releases/latest" rel="noopener">Download for Linux</a>
+					</p>
+					<p class="download-why">
+						An AppImage and a <code>.deb</code>, published on the releases page.
+						Nothing has checked these for you, so
+						<a href="/verify">verify them</a> — the checksums and the build
+						provenance attestation are both on that release.
+					</p>
+				</div>
+
+				<details class="download-alt">
+					<summary>Can't use the Store, or want to check the bytes yourself?</summary>
+					<p>
+						The same builds are on
+						<a href="${s.repo}/releases/latest" rel="noopener">the GitHub releases page</a>,
+						including the portable build, which has no Store equivalent — it writes
+						nothing outside its own folder and runs from a USB stick. Take this route
+						if the Store is missing from your Windows image, if the machine is locked
+						down, or if you would rather verify a download than be told it is fine.
+					</p>
+					<p>
+						<strong>These carry no code-signing certificate yet, so Windows warns on
+						first run.</strong> That warning is about a missing certificate, not about
+						the file being wrong — <a href="/verify">the verification steps</a> are
+						how you tell those two apart instead of guessing.
+					</p>
+				</details>
+			</div>
 
 			<!--
 				The most useful thing this page can do today.

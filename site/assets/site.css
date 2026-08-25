@@ -2427,3 +2427,46 @@ article > .jump {
 	font-weight: 640;
 	color: var(--text);
 }
+
+/*
+ * Download options, narrowed to the one that fits.
+ *
+ * The base state shows every path, because it is what somebody with no
+ * JavaScript sees and a download page that offers nothing when a script fails
+ * would be the worst possible failure on this particular page. `download.js`
+ * then stamps the platform on the container and the rules below hide what does
+ * not apply — the Store link is meaningless on Linux, and the direct downloads
+ * are a footnote on Windows rather than a second front door.
+ */
+.download-primary {
+	margin-top: 1.25rem;
+}
+
+.download-why {
+	margin-top: 0.5rem;
+	font-size: 0.95rem;
+	color: var(--muted);
+}
+
+.download-alt {
+	margin-top: 1.5rem;
+	border-top: 1px solid var(--line);
+	padding-top: 1rem;
+	font-size: 0.95rem;
+}
+
+.download-alt summary {
+	cursor: pointer;
+	font-weight: 600;
+}
+
+.download-alt p {
+	margin-top: 0.75rem;
+}
+
+[data-download][data-platform='windows'] .download-linux,
+[data-download][data-platform='linux'] .download-windows {
+	display: none;
+}
+
+/* Anything we could not identify keeps both, which is the honest default. */
