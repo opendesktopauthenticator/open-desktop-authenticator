@@ -76,7 +76,8 @@ describe('the release publishes only what it attests', () => {
 		const config = readFileSync(join(__dirname, '..', 'electron-builder.config.mjs'), 'utf8');
 		const win = config.slice(config.indexOf('	win: {'), config.indexOf('	nsis: {'));
 		const declared = [...win.matchAll(/arch: \[([^\]]+)\]/g)]
-			.flatMap((m) => [...m[1].matchAll(/'([^']+)'/g)].map((a) => a[1]))
+			.flatMap((m) => [...(m[1] ?? '').matchAll(/'([^']+)'/g)].map((a) => a[1] ?? ''))
+			.filter((a) => a !== '')
 			.filter((a, i, all) => all.indexOf(a) === i);
 
 		expect(declared).toContain('arm64');

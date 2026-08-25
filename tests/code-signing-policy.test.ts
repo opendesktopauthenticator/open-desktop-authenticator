@@ -74,12 +74,18 @@ describe('the code signing policy SignPath Foundation requires', () => {
 
 	/*
 	 * The claim must not drift ahead of reality. Until a certificate exists the
-	 * page has to say so, and `SITE.release.signed` is the flag that decides when
-	 * that stops being true.
+	 * page has to say so.
+	 *
+	 * The flag carrying that meaning is `codeSigned`, not `signed` — this test
+	 * asserted `signed: false` and started failing the moment the checksum list
+	 * gained a sigstore signature and `signed` flipped true. That is the split
+	 * working: one flag used to mean "the list is signed" and "the binaries are
+	 * signed" at once, and a test written against the old name is exactly what
+	 * should break when the two are separated.
 	 */
 	it('does not claim a certificate it does not have', () => {
 		expect(POLICY).toMatch(/has not been granted yet/);
 		const build = read('site', 'build.mjs');
-		expect(build).toMatch(/signed:\s*false/);
+		expect(build).toMatch(/codeSigned:\s*false/);
 	});
 });
