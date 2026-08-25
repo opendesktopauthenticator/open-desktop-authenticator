@@ -34,7 +34,11 @@ import { planProxy, type ProxyPlan } from '../net/egress';
 
 /** The subset of Electron this module needs, injected so it can be tested. */
 export interface BrowserHost {
-	sessionFromPartition(partition: string, options?: { cache?: boolean }): BrowserSessionHandle;
+	// `cache` is required, not optional — Electron's `FromPartitionOptions`
+	// declares it so, and `ElectronNetworking` in transport.ts already had this
+	// right. Writing it optional here made the port describe something Electron
+	// does not accept, which the adapter refused to compile against.
+	sessionFromPartition(partition: string, options?: { cache: boolean }): BrowserSessionHandle;
 	createWindow(options: BrowserWindowOptions): BrowserWindowHandle;
 }
 
