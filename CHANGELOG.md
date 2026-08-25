@@ -14,10 +14,12 @@ public post-mortem — what broke, when we detected it, and what we changed.
 
 The first version that exists as an installable file rather than as source.
 
-**Not yet code-signed.** Windows SmartScreen will warn on it, and `/download`
-says so. Verify the download against the published `SHA256SUMS.txt` and the
-build provenance attestation, both produced by the public workflow from this
-tag.
+**Published in the Microsoft Store**, which re-signs the package it
+distributes, so SmartScreen never warns on that channel. The direct downloads
+on this release carry no code-signing certificate yet: Windows warns on first
+run, and `/download` says so. Verify those against the published
+`SHA256SUMS.txt` and the build provenance attestation, both produced by the
+public workflow from this tag.
 
 ### Added
 
@@ -215,5 +217,7 @@ the fix for the item above them.
   generation, confirmations, backup, restore and recovery. Defects found that
   way — a removed account returning after a restore, an unreachable error on the
   vault-adoption screen — were fixed and covered by tests.
-- This is maintainer testing rather than independent review, and there is still
-  no signed release. Treat it as tested, not as audited.
+- This is maintainer testing rather than independent review. Store
+  certification is not a substitute: it checks policy compliance and that the
+  application runs, not the vault's cryptography. Treat it as tested, not as
+  audited.

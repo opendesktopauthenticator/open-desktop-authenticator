@@ -175,13 +175,40 @@ export const SITE = {
 	 */
 	release: {
 		/** A signed public build exists and can be downloaded. */
-		published: false,
+		published: true,
 		/** Artifacts are listed with SHA-256 checksums on the release page. */
-		checksums: false,
-		/** The checksum file carries a signature from a published key. */
+		checksums: true,
+		/*
+		 * **Still false, and the distinction matters.**
+		 *
+		 * The Store build is signed — Microsoft re-signs every package it
+		 * distributes — but this flag is not about that. It asks whether
+		 * `SHA256SUMS.txt` carries a detached signature from a published key,
+		 * and it does not: the release workflow produces no `.asc`. What the
+		 * direct downloads carry instead is a sigstore build-provenance
+		 * attestation, which /verify documents by name.
+		 *
+		 * Flipping this to true because "the Store build is signed" would be
+		 * exactly the conflation the tripwire below exists to catch, and would
+		 * re-permit a `gpg --verify` instruction against a file nobody publishes.
+		 */
 		signed: false,
 		/** Anyone can rebuild the tag and get the same bytes. Deferred (§P3). */
 		reproducible: false
+	},
+
+	/*
+	 * Where the Store listing lives.
+	 *
+	 * The product ID is issued by Partner Center and is the only stable handle
+	 * for the listing — the slug in a browser's address bar is generated from
+	 * the display name and is not ours to rely on.
+	 */
+	store: {
+		id: '9NMM2XJ6HZ1D',
+		get url() {
+			return `https://apps.microsoft.com/detail/${this.id}`;
+		}
 	},
 
 	/** The company behind this, and the other things it runs. */

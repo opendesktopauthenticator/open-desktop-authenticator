@@ -7,20 +7,40 @@ export const download = {
 	navTitle: 'Download',
 	title: 'Open Desktop Authenticator download and release status',
 	description:
-		'Release status for Open Desktop Authenticator. No public build yet: what exists, what is left, and how to build from source in the meantime.',
+		'Download Open Desktop Authenticator for Windows and Linux. Install from the Microsoft Store, or take a build from GitHub and verify it yourself.',
 	body: (s) => `
 		<article>
 			<h1>Download</h1>
-			<div class="callout callout-warn">
-				<h2>There is no release yet</h2>
+			<div class="callout">
+				<h2>Two places, and nowhere else</h2>
 				<p>
-					No signed public build of ${s.name} has been published. There is no
-					installer to download from this page, from anywhere else, or from anyone
-					claiming to distribute it. <strong>If you find a file advertised as an
-					${s.short} or Open Desktop Authenticator build today, it is not
-					ours.</strong>
+					${s.name} 1.0 is published in the Microsoft Store and on this project's
+					GitHub releases page. <strong>Those are the only two places a genuine build
+					comes from.</strong> Not a mirror, not a lookalike domain, not a sponsored
+					search result, and not this page — the button below is a link to GitHub, not
+					a file we serve.
+				</p>
+				<p>
+					<a class="button" href="${s.store.url}" rel="noopener">Get it from the Microsoft Store</a>
+					<a class="button button-quiet" href="${s.repo}/releases/latest" rel="noopener">Or download from GitHub →</a>
 				</p>
 			</div>
+
+			<h2>Which one should you take?</h2>
+			<p>
+				<strong>The Store, for most people.</strong> Microsoft re-signs every package it
+				distributes, so Windows never warns on it, updates arrive through the Store, and
+				you do not have to verify anything by hand. That is the shortest honest chain
+				between you and a build we made.
+			</p>
+			<p>
+				<strong>GitHub, if you want to check the bytes yourself</strong> — or if you are
+				on Linux, or on a Windows machine without the Store. These builds carry no
+				code-signing certificate yet, so Windows will warn on first run. That warning is
+				about a missing certificate, not about the file being wrong, and
+				<a href="/verify">the verification steps</a> are how you tell the difference
+				rather than taking our word for it.
+			</p>
 
 			<!--
 				The most useful thing this page can do today.
@@ -56,9 +76,10 @@ export const download = {
 					result.
 				</li>
 				<li>
-					<strong>This project, once there is a release to check.</strong> There is not
-					one yet, and recommending our own unreleased software over a working option
-					would be the same mistake in the other direction.
+					<strong>This project.</strong> There is a release to check now, and the
+					links at the top of this page are it. We still put Valve's own app first,
+					because for most people it is the better answer and saying otherwise to win
+					an install would be the same mistake in the other direction.
 				</li>
 			</ol>
 			<div class="origin-note">
@@ -71,11 +92,13 @@ export const download = {
 				<a class="button button-quiet" href="${s.sda.repo}" rel="noopener">Read SDA's own notice →</a>
 			</div>
 
-			<h2>Why the page exists anyway</h2>
+			<h2>Why this page still lists the alternatives</h2>
 			<p>
-				Because "coming soon" pages get replaced by scam listings the moment a product
-				is talked about and cannot be got. Stating the status plainly, at the URL people
-				will look at, is worth more than an empty page.
+				Because the reason this project exists is that somebody searching for a desktop
+				authenticator lands on a page and installs whatever it offers. A download page
+				that answers only "install ours" trains exactly that habit, which is the habit
+				that costs people their inventories. Naming the alternatives, and the real home
+				of each, is worth more than the installs it loses us.
 			</p>
 
 			<h2>What is finished</h2>
@@ -90,27 +113,47 @@ export const download = {
 				</li>
 			</ul>
 
-			<h2>What is left before a release</h2>
+			<h2>What is still missing</h2>
+			<p>Stated here rather than left for you to discover:</p>
 			<ul>
-				<li>Packaging and installers for Windows and Linux.</li>
-				<li>A code-signing certificate, so Windows can tell you who built it.</li>
-				<li>Published checksums and a signature, and a reproducible build others can compare against.</li>
+				<li>
+					<strong>A code-signing certificate for the direct downloads.</strong> The
+					Store build is signed by Microsoft; the <code>.exe</code> and Linux builds on
+					GitHub are not, so Windows warns on first run. Until that changes, the
+					checksums and the provenance attestation are how you check them.
+				</li>
+				<li>
+					<strong>A signature over the checksum file.</strong> Every release lists
+					SHA-256 checksums, but nothing signs that list yet — so verify it against the
+					copy on the release page itself, not a copy someone sent you.
+				</li>
+				<li>
+					<strong>Reproducible builds.</strong> You cannot yet rebuild the tag and
+					compare bytes with ours. The provenance attestation is what stands in for it.
+				</li>
+				<li>
+					<strong>An independent audit.</strong> This has been tested end to end
+					against live Steam accounts by the maintainer. That is testing, not review by
+					someone with no stake in the answer.
+				</li>
 			</ul>
 
-			<h2>In the meantime</h2>
+			<h2>Building it yourself</h2>
 			<p>
-				The source is public and can be built and run today by anyone comfortable with
-				Node.js. That is not a substitute for a release and we are not pretending
-				otherwise — it is the honest answer to "can I use it now".
+				The source is public and can be built and run by anyone comfortable with
+				Node.js. You no longer have to — there are builds now — but the option is the
+				point: every claim on this site is checkable against the thing that produced the
+				download.
 			</p>
 			<p><a class="button" href="${s.repo}" rel="noopener">View the source repository</a></p>
 
-			<h2>When it does ship</h2>
+			<h2>Checking what you downloaded</h2>
 			<p>
-				Every artifact will be listed with a SHA-256 checksum and a signature over that
-				list, published on the release page beside the source. <a href="/verify">The
-				verification steps are already written</a>, so you can learn them before you need
-				them.
+				Every artifact is listed with a SHA-256 checksum in
+				<code>SHA256SUMS.txt</code> on the release page, alongside a build provenance
+				attestation that ties those exact bytes to the public workflow run that produced
+				them. <a href="/verify">The verification steps walk through both</a> — worth
+				reading once before you need them rather than in a hurry afterwards.
 			</p>
 
 ${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
@@ -439,8 +482,8 @@ const FAQ_ITEMS = [
 	{
 		q: 'Which platforms does it run on?',
 		plain:
-			'The source targets Windows 10 and 11 as the primary platforms, with Linux supported. There is no public build to install yet.',
-		a: `<p>The source targets Windows 10 and 11 as the primary platforms, and Linux is supported. macOS is deferred rather than planned — see <a href="/download">the release status</a>, since there is no public build to install on any of them yet.</p>`
+			'Open Desktop Authenticator runs on Windows 10 and 11, and on Linux. Install it from the Microsoft Store or from the GitHub releases page.',
+		a: `<p>Windows 10 version 1809 or later, Windows 11, and Linux. macOS is deferred rather than planned, because we will not ship a macOS build we cannot sign. See <a href="/download">the download page</a> for the Store listing and the direct builds.</p>`
 	}
 ];
 

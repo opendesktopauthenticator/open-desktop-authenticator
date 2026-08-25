@@ -194,11 +194,11 @@ export const confirmationsOnDesktop = {
 
 			<div class="callout">
 				<p>
-					<strong>Looking for the steps rather than the explanation?</strong> There is
-					no public build of ${s.short} to give you steps for yet —
-					<a href="/download">the release status is here</a>, stated plainly rather
-					than implied. This page explains the mechanism so the eventual instructions
-					make sense, and so you can judge any other tool offering the same thing.
+					<strong>Looking for the steps rather than the explanation?</strong>
+					<a href="/download">Get ${s.short} here</a> and the application walks you
+					through it. This page explains the mechanism underneath, so the steps make
+					sense while you follow them — and so you can judge any other tool offering
+					to do the same thing.
 				</p>
 			</div>
 

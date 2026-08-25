@@ -5,13 +5,21 @@ A maintained successor to SDA.
 
 Built and maintained by **MASTERPANEL LLC** · [opendesktopauthenticator.com](https://opendesktopauthenticator.com)
 
-> **1.0.** Feature-complete and **exercised end to end against
-> live Steam accounts** by the maintainer — import from SDA, enrollment, codes,
-> confirmations, backup and recovery — with the defects that surfaced fixed.
+> **1.0 is out.** Install it from the
+> [Microsoft Store](https://apps.microsoft.com/detail/9NMM2XJ6HZ1D), or take a
+> build from [the releases page](https://github.com/opendesktopauthenticator/open-desktop-authenticator/releases/latest)
+> and check it against the published checksums. **Those two places, and nowhere
+> else** — anything else claiming to be a build of this is not ours.
 >
-> That is maintainer testing, not an independent audit, and there are still no
-> signed releases. Until there are, anything claiming to be a build of this is
-> not ours.
+> The Store package is signed, because Microsoft re-signs what it distributes.
+> The direct downloads are not signed yet, so Windows warns on first run; verify
+> them against `SHA256SUMS.txt` and the build provenance attestation.
+>
+> It has been **exercised end to end against live Steam accounts** by the
+> maintainer — import from SDA, enrollment, codes, confirmations, backup and
+> recovery — with the defects that surfaced fixed. That is maintainer testing,
+> not an independent audit, and passing Store certification does not change
+> that: certification checks policy compliance, not cryptography.
 
 ---
 
@@ -64,13 +72,13 @@ items; they are deliberate non-goals.
 
 ## Status
 
-|                                                    |             |
-| -------------------------------------------------- | ----------- |
-| Phase 0 — protocol validated against live accounts | **done**    |
-| Phase 1 — app shell, security posture, CI, docs    | **done**    |
-| 0.1 — vault, import, codes, confirmations          | **done**    |
-| 0.1 — sign-in, tray, settings, auto-confirm        | **done**    |
-| 1.0 — signed releases, Windows + Linux             | in progress |
+|                                                    |          |
+| -------------------------------------------------- | -------- |
+| Phase 0 — protocol validated against live accounts | **done** |
+| Phase 1 — app shell, security posture, CI, docs    | **done** |
+| 0.1 — vault, import, codes, confirmations          | **done** |
+| 0.1 — sign-in, tray, settings, auto-confirm        | **done** |
+| 1.0 — signed releases, Windows + Linux             | **done** |
 
 **macOS is not supported.** Signing it requires Apple Developer enrollment as an
 organization, which we have not completed. We will not ship an unsigned macOS
