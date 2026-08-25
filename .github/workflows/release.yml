@@ -145,8 +145,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # **Architectures are named here, not left to the config.** Passing
+          # targets on the command line overrides `win.target` in
+          # electron-builder.config.mjs entirely, including its `arch` array —
+          # so the config declared `['x64', 'arm64']` while every release built
+          # x64 only, and no arm64 installer has ever existed. The config was
+          # not wrong and the workflow was not wrong; they simply disagreed, and
+          # nothing compared them. `tests/release-assets.test.ts` now does.
           - os: windows-latest
-            targets: --win nsis portable
+            targets: --win nsis:x64 nsis:arm64 portable:x64
           - os: ubuntu-latest
             targets: --linux AppImage deb
     steps:

@@ -63,6 +63,29 @@ describe('the release publishes only what it attests', () => {
 		expect(PUBLISH).toContain(`\\.(${attested.join('|')})$`);
 	});
 
+	/*
+	 * The config and the workflow have to agree about architecture.
+	 *
+	 * `electron-builder.config.mjs` declares `arch: ['x64', 'arm64']` for nsis.
+	 * Passing targets on the command line overrides that whole block, `arch`
+	 * included, and defaults to the runner's own architecture — so the config
+	 * promised arm64 while every release shipped x64 only, silently, for as long
+	 * as the project has existed. Neither file was wrong on its own.
+	 */
+	it('builds every architecture the config declares', () => {
+		const config = readFileSync(join(__dirname, '..', 'electron-builder.config.mjs'), 'utf8');
+		const win = config.slice(config.indexOf('	win: {'), config.indexOf('	nsis: {'));
+		const declared = [...win.matchAll(/arch: \[([^\]]+)\]/g)]
+			.flatMap((m) => [...m[1].matchAll(/'([^']+)'/g)].map((a) => a[1]))
+			.filter((a, i, all) => all.indexOf(a) === i);
+
+		expect(declared).toContain('arm64');
+		const targets = WORKFLOW.slice(WORKFLOW.indexOf('targets: --win'));
+		for (const arch of declared) {
+			expect(targets, `the workflow never builds ${arch}`).toContain(`:${arch}`);
+		}
+	});
+
 	it('still states that the Store package is not a release asset', () => {
 		expect(WORKFLOW).toContain('not published as a release');
 	});
