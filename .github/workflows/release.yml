@@ -354,10 +354,25 @@ jobs:
         shell: bash
         working-directory: staging
         run: |
+          # **Matched by pattern, not by `$GITHUB_REF`.** An exact identity built
+          # from that variable is correct only for a tag push: this workflow also
+          # runs from `workflow_dispatch` with an `inputs.tag`, and there
+          # `GITHUB_REF` is the branch the dispatch came from while the
+          # certificate names the tag. The check would then look for an identity
+          # that was never issued and fail the release — on the dispatched path
+          # the version job exists specifically to support.
+          #
+          # The pattern is still tight: this repository, this workflow file, and
+          # `refs/tags/` only. That last part is an assertion worth making rather
+          # than a wildcard for convenience — a signature minted by a run from a
+          # branch must not satisfy it.
+          repo_escaped=$(printf '%s' "$GITHUB_REPOSITORY" | sed 's/[.[\*^$()+?{}|]/\\&/g')
+          identity="^https://github\.com/${repo_escaped}/\.github/workflows/release\.yml@refs/tags/"
+          echo "expecting identity matching: $identity"
           cosign verify-blob SHA256SUMS.txt \
             --signature SHA256SUMS.txt.sig \
             --certificate SHA256SUMS.txt.pem \
-            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+            --certificate-identity-regexp "$identity" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 
       # Proof of *where* the bytes came from: which workflow, which commit,
