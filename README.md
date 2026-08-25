@@ -39,8 +39,16 @@ added. What fixes it is a chain a stranger can walk without trusting anyone:
 So: every release is built in public CI from a tag, published with hashes and
 provenance, by a named company that does not hide where it came from. It reaches
 you through the Microsoft Store, which re-signs the package, or from GitHub
-Releases, where you can check the bytes yourself. Two distribution channels, one
-build, and a chain that starts at either end and meets in the same commit.
+Releases, where you can check the bytes yourself.
+
+**The two channels are not equally provable, and it is worth saying which is
+which.** A GitHub download can be traced all the way back: its hash is published,
+and a sigstore attestation names the workflow run, the commit and the tag that
+produced it. The Store package is built by that same workflow run, but it is then
+submitted to Partner Center by hand and re-signed by Microsoft — so what you can
+verify there is that Microsoft distributed it, not which commit it came from.
+That is a real limit, it is Microsoft's design rather than ours, and it is the
+trade you make for a package Windows never warns about.
 
 ### Don't trust us. Verify us.
 

@@ -1,9 +1,35 @@
 # Founder test plan — what has to be checked by a human
 
-**Status: worked through.** This plan was written when the assembled application
-had never spoken to live Steam. It since has, across several rounds against real
-accounts, and the plan is kept here as the record of what was covered and as the
-checklist to repeat before a release.
+**Status: worked through on Windows, with two gaps named below.** This plan was
+written when the assembled application had never spoken to live Steam. It since
+has, across several rounds against real accounts, and is kept as the record of
+what was covered and as the checklist to repeat before a release.
+
+Reconciled against what was actually done on 25 August 2026, after an audit found
+this file still describing the product as it stood before 1.0. Where a statement
+here disagreed with the shipped application, the application won.
+
+**Covered against a live account:** vault creation and the recovery ceremony,
+unlock and auto-lock, importing real maFiles, codes matching Steam's own app,
+sign-in and session handling, listing and approving and denying confirmations,
+enrollment, the authenticator transfer (with the two-day restriction observed),
+backup and restore and recovery-file recovery, revealing a revocation code,
+exporting a maFile, importing an **encrypted** SDA install, removing an account
+including the Steam-side detach, auto-confirm including that it pauses when the
+vault locks, routing an account through a proxy, and a broken proxy failing
+closed.
+
+**The two gaps, stated plainly because they are the useful part:**
+
+1. **No Linux build has ever been launched.** The AppImage and `.deb` are built
+   by CI and published, and nobody has run either. Linux is listed as a supported
+   platform on the strength of the code being cross-platform, not on the strength
+   of anyone starting it. This document has no Linux stage at all, which is its
+   own finding — the gap was never written down to be left undone.
+2. **T19 was not run.** Two accounts routed through _different_ proxies were
+   never checked for session separation end to end. The isolation is unit-tested
+   and the architecture gives each account its own Electron session; it has not
+   been watched happening.
 
 Automated tests prove the code does what it was written to do; they cannot prove
 it was written against Steam's actual behaviour. That is what these are for, and
@@ -307,8 +333,11 @@ Route two accounts through two different proxies. Use both.
 
 ### T27 · Add an authenticator to a new account
 
-**This changes a Steam account and cannot be undone from the app.** Throwaway
-only. The account must not already have an authenticator; a phone number is
+**This changes a Steam account.** It _can_ now be undone from the app — T23
+detaches the authenticator from Steam using the revocation code, and that path
+has been run against a live account — but it costs the trade restriction and
+depends on having the code, so treat it as expensive rather than reversible.
+Throwaway only. The account must not already have an authenticator; a phone number is
 **not** required (F-10, settled by live run — the code arrives by email instead).
 
 1. Account list → **Add authenticator**.
@@ -336,12 +365,16 @@ The file must contain no `refreshToken`. Bonus: SDA reads it.
 
 ### T29 · Import an encrypted SDA install
 
-**This is the one test whose outcome is genuinely unknown.** Everything else in
-this document verifies code written against a format we can see. The SDA
-decryption parameters were read out of `Steam Desktop Authenticator.dll` — the
-KDF, 50000 iterations, AES-256-CBC — but nothing here has ever been run against
-a file SDA itself encrypted. If the format guess is wrong, this is where it
-shows, and no amount of unit testing would have caught it.
+**Run, and it worked.** This was the one test whose outcome was genuinely
+unknown: the SDA decryption parameters were read out of
+`Steam Desktop Authenticator.dll` — the KDF, 50000 iterations, AES-256-CBC — and
+nothing had ever been run against a file SDA itself encrypted. If that reading
+were wrong, no amount of unit testing would have caught it.
+
+It has now been run against a real encrypted SDA install and the format reading
+holds. Repeat it against each release candidate anyway: it is the one place where
+a dependency-free reimplementation of somebody else's undocumented format could
+silently drift.
 
 Set up: in SDA, **Settings → Encrypt maFiles** (or File → Encrypt), and set a
 password. Use a spare account if you have one.
@@ -412,8 +445,9 @@ Enable it, lock the vault, send a trade, wait.
 
 **Read this before doing it.** Removing an account from the vault does not remove
 the authenticator from Steam. Steam will keep demanding codes this app can no
-longer produce. Without the revocation code from T20, recovering that account
-means Steam Support.
+longer produce. The revocation code from T20 is the route back that depends on
+nothing else; without it you are relying on Steam's own account recovery, which
+may go through a linked phone and may end at Steam Support.
 
 1. Remove an account that **has** a revocation code. Read what the screen says.
 2. Then use that revocation code on Steam to actually detach the authenticator.
@@ -453,14 +487,23 @@ These are genuinely covered, and hand-testing them is a poor use of your time:
 
 ## Still blocked on you, outside this document
 
-- **Create the GitHub organisation `opendesktopauthenticator`** and the repository
-  `open-desktop-authenticator` inside it. `branding.repository` now points there
-  and nothing in the build can check that it resolves.
-- A Windows code-signing certificate (Q2).
-- Sign-off on the IPC channel table (§24.3) — roughly 16 channels.
-- Tray and application icons. The current tray icon is a deliberate placeholder.
-- The §8 attribution string in `branding.ts` still says "Built on open-source
-  Steam libraries by DoctorMcKay", which stopped being true when D13 and Q19
-  removed those dependencies. It needs rewording by you, since §8 strings are
-  exact-wording assets.
+Most of this list is now done. It is kept rather than deleted because the items
+that closed are the ones a reader would otherwise assume are still open.
+
+**Done:**
+
+- The GitHub organisation and repository exist, and 1.0 is published from them.
+- Tray and application icons are generated from the vector in `tools/make-icons.mjs`;
+  the placeholders are gone.
+- The §8 attribution string was rewritten. `steam-session` is a shipped
+  dependency again and is credited accurately — the sentence that had to change
+  was the one claiming no DoctorMcKay code ships at all.
+
+**Still open:**
+
+- **Run a Linux build.** Neither the AppImage nor the `.deb` has been launched by
+  a human. This is the largest untested surface in the project.
+- A Windows code-signing certificate (Q2) — the direct downloads stay unsigned
+  until SignPath, and the Store package is signed by Microsoft instead.
+- Sign-off on the IPC channel table (§24.3).
 - The scrypt work factor benchmarked on your slowest target machine (Q6).

@@ -30,10 +30,18 @@ it is stated rather than glossed over. Mitigations are below.
 | Routine maintenance                                    | Monthly window: Electron and dependency updates, canary review, triage                            |
 | Chromium security patches                              | Non-optional. Shipped in the monthly window, or immediately if severity warrants                  |
 
-Detection is not left to chance: canaries run daily against dedicated throwaway
-accounts and exercise login, code generation, and confirmation fetching. The
-intent is to hear about a break from a robot within 24 hours rather than from an
-angry forum thread in 72.
+**Detection is currently manual, and this section used to claim otherwise.** It
+said canaries run daily against dedicated throwaway accounts, exercising login,
+code generation and confirmation fetching. No such workflow exists — the
+repository contains `ci.yml` and `release.yml` and nothing scheduled — so the
+sentence described the intent as though it were the arrangement.
+
+The intent stands: hear about a Valve-side break from a robot within 24 hours
+rather than from an angry forum thread in 72. Until that is built, breaks are
+found by the maintainer using the application and by users reporting them, which
+is slower and depends on somebody being awake. Treat the response times in the
+table above as commitments once a break is _known_, not as a promise about how
+quickly it becomes known.
 
 ## Supported platforms
 
