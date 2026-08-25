@@ -19,7 +19,7 @@
 
 export default {
 	slug: 'steam-inventory-stolen',
-	updated: '2026-08-14',
+	updated: '2026-08-25',
 	navTitle: 'Our story',
 	title: 'A fake SDA download emptied my Steam inventory',
 	description:

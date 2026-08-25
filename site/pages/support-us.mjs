@@ -208,8 +208,9 @@ const SPENDS = [
 		cost: 'a few pounds a month',
 		body: `A small virtual machine and a domain. It serves static files and one small
 		process for the report form. There is no advertising network and no paid third-party
-		service behind it — the site's only third-party script is Google Analytics, which is
-		free and <a href="/privacy">described on the privacy page</a>.`
+		service behind it — the third-party scripts are Google Analytics and Cloudflare's
+		Web Analytics, both free and both
+		<a href="/privacy">described on the privacy page</a>.`
 	},
 	{
 		what: 'Time',

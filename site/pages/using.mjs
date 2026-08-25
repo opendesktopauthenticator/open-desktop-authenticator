@@ -225,7 +225,7 @@ export const mobileVsDesktop = {
 	guide: true,
 	navTitle: 'Mobile or desktop',
 	title: 'Steam mobile app or a desktop authenticator?',
-	updated: '2026-08-14',
+	updated: '2026-08-25',
 	description:
 		'An honest comparison of Steam Guard on the official mobile app versus a desktop authenticator, including who should ignore the desktop option entirely.',
 	structuredData: (s) => ({

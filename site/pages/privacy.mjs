@@ -144,14 +144,22 @@ export const privacy = {
 					GitHub sees an address and that the application is running, the same as any
 					visitor to that page. Nothing about you or your accounts is sent.
 				</dd>
+				<dt>Cloudflare Web Analytics</dt>
+				<dd>
+					Cloudflare sits in front of this site, and its Web Analytics is switched on at
+					the edge — so a small measurement script is added to pages on their way to
+					you, without being part of the files we build. It records page views and
+					performance timings, sets no cookie, and does not follow you between sites.
+					<strong>We listed Google Analytics as the only third-party script until 25
+					August 2026, which was wrong</strong>: this one is added after our build, so
+					it never appeared in the source we were checking.
+				</dd>
 				<dt>Nobody else</dt>
 				<dd>
 					No advertising network, no third-party fonts, and nothing sold or shared.
-					Google Analytics, described above, is the only third-party script on the
-					site. <a href="/donate">Donations are cryptocurrency
-					only</a> partly for this reason — taking cards would mean a payment processor
-					holding donor names against a project whose whole argument is that it holds
-					nothing.
+					<a href="/donate">Donations are cryptocurrency only</a> partly for this reason
+					— taking cards would mean a payment processor holding donor names against a
+					project whose whole argument is that it holds nothing.
 				</dd>
 			</dl>
 

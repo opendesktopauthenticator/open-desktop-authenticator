@@ -401,7 +401,7 @@ export const docs = {
 
 export const faq = {
 	slug: 'faq',
-	updated: '2026-08-14',
+	updated: '2026-08-25',
 	navTitle: 'FAQ',
 	title: 'FAQ: Steam Guard codes, maFiles and security',
 	description:

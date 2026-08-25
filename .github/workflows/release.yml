@@ -343,9 +343,13 @@ jobs:
 
           **The files below are unsigned.** They carry no code-signing certificate yet, so Windows warns on first run — that warning is about a missing certificate, not a bad file. Take these if you are on Linux, if your Windows image has no Store, if you want the portable build, or if you would rather verify a download than be told it is fine. Check them against \`SHA256SUMS.txt\` below and the provenance attestation on this release.
 
-          Verify on Linux or macOS:
+          Verify on Linux:
           \`\`\`
           sha256sum --check --ignore-missing SHA256SUMS.txt
+          \`\`\`
+          Verify on macOS — a stock Mac ships \`shasum\`, not \`sha256sum\`:
+          \`\`\`
+          shasum -a 256 --check --ignore-missing SHA256SUMS.txt
           \`\`\`
           Verify on Windows PowerShell:
           \`\`\`

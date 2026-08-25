@@ -268,7 +268,7 @@ export const lostAuthenticator = {
 
 export const alternatives = {
 	slug: 'alternatives',
-	updated: '2026-08-14',
+	updated: '2026-08-25',
 	navTitle: 'Alternatives',
 	title: 'Steam authenticator alternatives to SDA, compared',
 	description:

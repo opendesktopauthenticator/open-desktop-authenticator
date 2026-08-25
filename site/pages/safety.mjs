@@ -205,7 +205,7 @@ ${reviewAsk(s, { got: 'Did this help you spot a fake before you ran it?' })}
 
 export const verify = {
 	slug: 'verify',
-	updated: '2026-08-14',
+	updated: '2026-08-25',
 	navTitle: 'Verify',
 	title: 'How to verify a download is genuine',
 	description:
@@ -391,7 +391,7 @@ ${reviewAsk(s, { got: 'Did these steps help you check a download?' })}
 
 export const security = {
 	slug: 'security',
-	updated: '2026-08-14',
+	updated: '2026-08-25',
 	navTitle: 'Security',
 	title: 'Security model: how your Steam secrets are stored',
 	description:
