@@ -87,10 +87,13 @@ export function RevocationBackup({
 			{code === undefined ? (
 				<>
 					<div className="ceremony">
-						<h2>This code is the only way back</h2>
+						<h2>This code is what saves you</h2>
 						<p>
-							If you lose this vault and you do not have this code, removing the authenticator means
-							going through Steam Support. There is no other route.
+							It is the one route back that depends on nothing else — not a phone number, not a
+							support queue, not how long ago you set the account up. If you lose this vault without
+							it, you are left with Steam&rsquo;s own account recovery, which may work through a
+							linked phone and may end at Steam Support. Having the code means never finding out
+							which.
 						</p>
 						<p>Write it on paper. Not in this app, not in a note synced to a phone.</p>
 					</div>

@@ -141,10 +141,24 @@ export const scamClones = {
 					provenance attestation below matters here rather than being a nicety.
 				</li>
 				<li>
-					A build that anyone can reproduce from the tag and compare byte for byte
-					against what was published.
+					A build anyone can reproduce from the tag and compare byte for byte against
+					what was published. <strong>Ours cannot be, yet</strong> — it is on the list
+					because it is what the ideal looks like, not because we have it. What stands
+					in for it today is the provenance attestation, which proves which workflow
+					and which commit produced the bytes even though you cannot rebuild them
+					yourself.
 				</li>
-				<li>No installer that reaches outside its own directory, and no self-update.</li>
+				<li>
+					<strong>No self-update.</strong> Nothing here downloads and runs its own
+					replacement — that is the mechanism the clone sites rely on, and the update
+					check only ever tells you a version exists and links you to it.
+				</li>
+				<li>
+					An installer that writes only where it says it will. Our portable build goes
+					further and writes nothing outside its own folder; the ordinary installed
+					build does use the normal application-data directory, because that is where
+					your vault has to live.
+				</li>
 			</ul>
 			<p><a href="/verify">Step-by-step instructions for checking all of that</a>.</p>
 
@@ -252,7 +266,8 @@ export const verify = {
 			<p>
 				Anywhere else is neither of those. No download of this application is genuine
 				unless it came from the Store or from the release page linked on
-				<a href="/download">our download page</a> — see
+				<a href="/download">our download page</a>, both of which appear on
+				<a href="/official">the list of addresses we publish from</a> — see
 				<a href="/scam-clones">what a counterfeit build does</a>.
 			</p>
 
@@ -266,10 +281,20 @@ export const verify = {
 			<h2>2. Compute the hash of what you downloaded</h2>
 			<h3>Windows (PowerShell)</h3>
 			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-1.0.0-x64-setup.exe</code></pre>
-			<h3>Linux or macOS</h3>
+			<h3>Linux</h3>
 			<pre><code>sha256sum open-desktop-authenticator-1.0.0-x86_64.AppImage</code></pre>
-			<p>Or check everything you downloaded at once, from that folder:</p>
+			<h3>macOS</h3>
+			<p>
+				macOS ships <code>shasum</code> rather than <code>sha256sum</code>, so the Linux
+				command above returns &ldquo;command not found&rdquo; on a stock Mac. There is no
+				macOS build of this application — this is here for someone checking a download
+				on a Mac before moving it to the machine that will run it.
+			</p>
+			<pre><code>shasum -a 256 open-desktop-authenticator-1.0.0-x86_64.AppImage</code></pre>
+			<p>Or check everything you downloaded at once, from that folder (Linux):</p>
 			<pre><code>sha256sum --check --ignore-missing SHA256SUMS.txt</code></pre>
+			<p>On macOS, the same thing:</p>
+			<pre><code>shasum -a 256 --check --ignore-missing SHA256SUMS.txt</code></pre>
 			<p>
 				<code>--ignore-missing</code> matters. The list covers every file in the
 				release, and you almost certainly downloaded one of them &mdash; without it,
@@ -370,7 +395,7 @@ export const security = {
 	navTitle: 'Security',
 	title: 'Security model: how your Steam secrets are stored',
 	description:
-		'How Steam secrets are stored: scrypt, AES-256-GCM, an isolated renderer, no network but Steam — and the limits of what any desktop authenticator can do.',
+		'How Steam secrets are stored: scrypt, AES-256-GCM, an isolated renderer, and no network beyond Steam and an optional update check.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
@@ -390,9 +415,33 @@ export const security = {
 
 			<h2>Where secrets live</h2>
 			<p>
-				Every account's shared secret, identity secret and revocation code is held in a
-				single encrypted vault file on your machine. Nothing is stored anywhere else and
-				nothing is transmitted to us; we operate no account system and no sync service.
+				Every account's shared secret, identity secret and revocation code is held in an
+				encrypted vault file on your machine. Nothing is transmitted to us; we operate no
+				account system and no sync service.
+			</p>
+			<p>
+				<strong>That vault is not the only file, and saying so would be tidier than
+				true.</strong> Two others hold the same class of secret, both encrypted the same
+				way, under the same passphrase-derived key:
+			</p>
+			<ul>
+				<li>
+					<strong>A recovery file per account</strong>, written the moment an
+					authenticator is created. It exists for the person who removes an account
+					from the vault and only then discovers they never wrote the revocation code
+					down.
+				</li>
+				<li>
+					<strong>The previous version of the vault</strong>, kept as a backup so an
+					interrupted write cannot leave you with nothing.
+				</li>
+			</ul>
+			<p>
+				And one file it does <em>not</em> protect: the maFile you imported from. Import
+				reads those and leaves them exactly where they were — deleting somebody's only
+				copy of a secret would be the worse mistake — so if it was plaintext before, it
+				still is. Moving it somewhere safe is yours to do, and the app says so after
+				every import.
 			</p>
 			<dl class="defs">
 				<dt>Key derivation</dt>
@@ -438,10 +487,17 @@ export const security = {
 			<h2>How the application is put together</h2>
 			<ul>
 				<li>
-					<strong>Secrets never reach the interface.</strong> The window is a sandboxed
-					renderer with no Node access and no direct filesystem access. It receives
-					generated codes — which expire in thirty seconds and cannot be turned back
-					into the secret that made them — and never the secrets themselves.
+					<strong>Secrets reach the interface twice, and only when you ask.</strong> The
+					window is a sandboxed renderer with no Node access and no direct filesystem
+					access. Ordinarily it receives generated codes — which expire in thirty
+					seconds and cannot be turned back into the secret that made them — and never
+					the secrets themselves. The exceptions are both revocation codes you
+					deliberately asked to see: the backup ceremony, which makes you re-enter your
+					passphrase first, and the end of a transfer, where Steam has just issued a new
+					code and you must write it down. Each is shown once and cleared when you
+					navigate away. Nothing else long-lived crosses that boundary, and the list is
+					kept short on purpose — a screen that could show every recovery code at once
+					is one screenshot away from being the whole vault.
 				</li>
 				<li>
 					<strong>A closed list of permitted messages.</strong> The interface can ask

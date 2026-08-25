@@ -12,14 +12,14 @@ exists, not to imply protection you have today.
 
 ## 1. What we are protecting
 
-| Asset             | Why it matters                                       | Loss means                                                                    |
-| ----------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `shared_secret`   | Generates your Steam Guard codes                     | Attacker generates your codes forever, silently                               |
-| `identity_secret` | Signs mobile confirmations                           | Attacker approves trades and listings as you                                  |
-| `revocation_code` | The only self-service way to remove an authenticator | You cannot recover the account yourself; Steam Support becomes the only route |
-| Refresh token     | A live Steam session                                 | Attacker acts as you until it expires or is revoked                           |
-| Vault passphrase  | Unlocks everything above                             | Total compromise                                                              |
-| Account password  | Only ever in memory, never stored                    | Account takeover                                                              |
+| Asset             | Why it matters                                         | Loss means                                                                                                      |
+| ----------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------- |
+| `shared_secret`   | Generates your Steam Guard codes                       | Attacker generates your codes forever, silently                                                                 |
+| `identity_secret` | Signs mobile confirmations                             | Attacker approves trades and listings as you                                                                    |
+| `revocation_code` | Removes an authenticator without needing anything else | You fall back on Steam's own account recovery, which may go through a linked phone and may end at Steam Support |
+| Refresh token     | A live Steam session                                   | Attacker acts as you until it expires or is revoked                                                             |
+| Vault passphrase  | Unlocks everything above                               | Total compromise                                                                                                |
+| Account password  | Only ever in memory, never stored                      | Account takeover                                                                                                |
 
 The first three come out of a maFile and are **long-lived**. Rotating them means
 removing and re-enrolling the authenticator. Treat any exposure as permanent
@@ -59,9 +59,18 @@ verification a copy-pasteable command, not an exercise.
 Split deliberately, because the two halves have very different answers.
 
 **Passive/opportunistic malware** — infostealers grepping the disk for known
-filenames. Defended: the vault is a single AES-256-GCM file whose key is derived
-from a passphrase we never store. There is no plaintext maFile on disk after
-import.
+filenames. Partly defended: what this application writes is AES-256-GCM,
+under a key derived from a passphrase we never store — the vault, its backup,
+and the per-account recovery files.
+
+**It does not defend the maFile you imported from.** Import reads those files
+and does not move, alter or delete them, which the import screen says plainly
+because deleting a user's only copy of a secret would be a worse failure than
+leaving it. If the maFile was plaintext before, it is plaintext afterwards,
+in the same place, and an infostealer grepping for `.maFile` finds it exactly
+as it would have. Importing into this vault adds a protected copy; it does not
+retract the unprotected one. That is the user's to delete, and the post-import
+screen tells them so.
 
 **An attacker with code execution as your user, while the vault is unlocked** —
 **not defended, and cannot be.** They can read our process memory. This is the
@@ -71,8 +80,10 @@ explicit out-of-scope boundary in §4 below.
 
 Someone compromises a dependency, our build, or our release pipeline.
 
-- Dependencies are pinned exact, installed with `npm ci` only, and every bump is
-  a reviewed PR — Dependabot never auto-merges (§9.4).
+- Dependencies are **lockfile-pinned and installed with `npm ci` only**, so every
+  build resolves the same tree; `package.json` still carries carets, and it is
+  the lockfile plus `npm ci` that makes this deterministic rather than the range.
+  Every bump is a reviewed PR — Dependabot never auto-merges (§9.4).
 - Builds run in public CI; the workflow is in the repo and its history is public.
 - **Distribution is two channels with different guarantees, and conflating them
   is itself a risk.** The Microsoft Store package is signed, because Microsoft
@@ -121,13 +132,20 @@ becomes an adversary in your model.**
   even without content.
 - Content stays TLS-encrypted **unless you install that proxy's CA certificate**.
   If you do, they see everything. Do not.
-- **DNS goes to the proxy, not to your resolver.** This paragraph previously said
-  the opposite — that `socks5://` resolves locally and `socks5h://` should be
-  preferred — which was true of Node's SOCKS client and false of Chromium's, and
-  the two halves of this application used different stacks. They no longer
-  disagree: `src/main/net/egress.ts` normalises the Node side to `socks5h` and
-  translates the spelling Chromium needs, so both resolve at the proxy. Write
-  `socks5://`; `socks5h://` is accepted and means the same thing here.
+- **With `http`, `https`, `socks5` or `socks5h`, DNS goes to the proxy rather
+  than to your resolver.** This paragraph previously said the opposite — that
+  `socks5://` resolves locally and `socks5h://` should be preferred — which was
+  true of Node's SOCKS client and false of Chromium's, and the two halves of this
+  application used different stacks. They no longer disagree:
+  `src/main/net/egress.ts` normalises the Node side to `socks5h` and translates
+  the spelling Chromium needs, so both resolve at the proxy.
+- **`socks4://` is the exception, and resolves on your machine.** The protocol
+  carries an address rather than a hostname, so it cannot do otherwise. It is
+  still accepted, because refusing it would strand people whose only proxy speaks
+  it — but your resolver sees every Steam hostname, which is most of what routing
+  was meant to avoid. Prefer `socks5://`. (`socks4a`, which _can_ carry a
+  hostname, is refused outright: Chromium has no rule for it and would silently
+  fall back to local resolution while Node resolved remotely.)
 - **A SOCKS proxy needing a username and password is refused, deliberately.**
   Chromium cannot authenticate to one, so accepting it would mean traffic
   silently taking a different route than the one you configured. Use an
@@ -171,7 +189,14 @@ button that fails.
 
 ### 2.8 Steam correlating your accounts with each other
 
-Routing gives each account its own exit address. That is necessary and it is not
+Routing lets each account use its own exit address — **lets, not guarantees.**
+Nothing checks that two accounts were given different proxies, because the
+application cannot know whether two URLs resolve to the same egress and a check
+that only caught the easy case would be worse than none. Point two accounts at
+one proxy and they share an address while still having separate sessions and
+cookie jars. What routing does guarantee is the isolation it controls: a session
+per account, and a fail-closed refusal to send an account's traffic down a route
+that is not its own. That is necessary and it is not
 sufficient — several other signals survive it, and this section says which,
 including the ones we cannot fix.
 

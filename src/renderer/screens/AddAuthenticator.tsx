@@ -346,8 +346,8 @@ export function AddAuthenticator({
 						</strong>
 						<p className="hint">
 							Steam has issued its secrets and this app has saved them.{' '}
-							<strong>Write down the revocation code now</strong> — it is the only way back if you
-							ever lose this vault, and Steam will not show it again.
+							<strong>Write down the revocation code now</strong> — it is the one route back that
+							depends on nothing else if you ever lose this vault, and Steam will not show it again.
 						</p>
 						<div className="controls">
 							<button

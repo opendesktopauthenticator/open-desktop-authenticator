@@ -119,8 +119,9 @@ public workflow from this tag.
 - Per-account network routing, **entirely optional**. An account with no proxy
   connects the way everything else on your machine does, and no feature is
   withheld from it. An account with one gets its own connection and its own
-  cookies — HTTP, HTTPS or SOCKS5 — so two accounts can never share an address or
-  a session. Routing can be added, replaced or switched off per account at any
+  cookies — HTTP, HTTPS or SOCKS5 — so two accounts never share a session. They
+  can still share an _address_ if you point both at the same proxy; nothing
+  checks, because nothing can tell whether two URLs reach the same egress. Routing can be added, replaced or switched off per account at any
   time, including a proxy that arrived inside an imported maFile. If a proxy is
   configured and cannot be used, that account makes **no** connection at all
   rather than quietly falling back to yours. Requests carry an ordinary mobile

@@ -44,9 +44,16 @@ surface requires maintainer sign-off.
 
 **Never let a long-term secret reach the renderer.** `sharedSecret`,
 `identitySecret`, `revocationCode`, refresh tokens, and passphrases stay in the
-main process. Two user-invoked exceptions exist — the revocation-code backup
-ceremony and explicit export — and both are deliberate, transient, and cleared on
-navigation.
+main process. Two user-invoked exceptions exist, and both carry a
+`revocationCode`: the backup ceremony (`revealRevocationCode`, which asks for the
+passphrase again) and the end of an authenticator transfer, where Steam returns a
+new code that the user must write down before anything else. Both are deliberate,
+transient, and cleared on navigation.
+
+This used to name "explicit export" as the second. It is not one — `exportResponse`
+returns a file name or a cancellation and never a secret, because the main process
+writes the maFile itself. Naming the wrong exception in the rule that exists to
+keep the list short is how a third one gets added without anyone noticing.
 
 **Never log a secret.** All output goes through the redaction wrapper. Raw
 `console.log` of a Steam-layer object is not acceptable.

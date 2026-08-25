@@ -345,7 +345,7 @@ jobs:
 
           Verify on Linux or macOS:
           \`\`\`
-          sha256sum -c SHA256SUMS.txt
+          sha256sum --check --ignore-missing SHA256SUMS.txt
           \`\`\`
           Verify on Windows PowerShell:
           \`\`\`

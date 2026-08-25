@@ -17,6 +17,7 @@ import owners from './owners.mjs';
 import story from './story.mjs';
 import { credits, donate } from './support-us.mjs';
 import { privacy } from './privacy.mjs';
+import { official } from './official.mjs';
 
 export const PAGES = [
 	home,
@@ -25,6 +26,7 @@ export const PAGES = [
 	story,
 	verify,
 	security,
+	official,
 	mafile,
 	openMafile,
 	encryptedMafile,

@@ -51,7 +51,9 @@ export const privacy = {
 			<h2>If you file a report</h2>
 			<p>
 				<a href="/support">The support form</a> is the only place this site collects
-				anything. It stores:
+				anything <em>you write</em> — the server logs and the analytics above happen
+				whether you type anything or not, which is why they are listed first rather
+				than here. The form stores:
 			</p>
 			<dl class="defs">
 				<dt>What you wrote</dt>
@@ -137,7 +139,7 @@ export const privacy = {
 				</dd>
 				<dt>GitHub</dt>
 				<dd>
-					Hosts the source and the eventual releases. If the application's update check
+					Hosts the source and the releases. If the application's update check
 					is on, it asks GitHub's public releases page whether a newer version exists;
 					GitHub sees an address and that the application is running, the same as any
 					visitor to that page. Nothing about you or your accounts is sent.

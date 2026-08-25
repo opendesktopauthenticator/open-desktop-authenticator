@@ -20,6 +20,8 @@ export const download = {
 					comes from.</strong> Not a mirror, not a lookalike domain, not a sponsored
 					search result, and not this page — every button here is a link somewhere
 					else, never a file we serve.
+					<a href="/official">The full list of addresses we publish from</a> is
+					short, and anything outside it is not ours.
 				</p>
 
 				<div class="download-primary download-windows">

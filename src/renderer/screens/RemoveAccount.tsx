@@ -111,10 +111,18 @@ export function RemoveAccount({
 						Steam yourself, and it is deleted with everything else.
 					</p>
 				) : (
-					<p>
-						<strong>There is no revocation code for this account.</strong> If you remove it here,
-						the only way back into the Steam account is Steam Support.
-					</p>
+					<>
+						<p>
+							<strong>There is no revocation code for this account.</strong> Removing it here
+							destroys this machine&rsquo;s copy of the authenticator, and the revocation code is
+							what would otherwise let you detach it from Steam yourself.
+						</p>
+						<p>
+							Without it you are relying on Steam&rsquo;s own account recovery — which may go
+							through a phone number linked to the account, and may end at Steam Support. Neither is
+							something this app can promise you, and both are slower than having the code.
+						</p>
+					</>
 				)}
 			</div>
 

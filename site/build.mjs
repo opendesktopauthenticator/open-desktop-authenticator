@@ -69,7 +69,7 @@ export const SITE = {
 	 * that did not happen, and a site whose every page updates whenever CSS
 	 * changes is telling search engines something false about its freshness.
 	 */
-	updated: '2026-08-12',
+	updated: '2026-08-25',
 	/** GA4 measurement ID. Referenced by head() and by the CSP host allowlist. */
 	analyticsId: 'G-G0GE9H5VR7',
 

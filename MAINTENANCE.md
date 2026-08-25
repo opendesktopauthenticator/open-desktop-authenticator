@@ -6,11 +6,17 @@ committed to, and what happens when they stop.
 
 ## Maintainer of record
 
-**MASTERPANEL LLC**, and personally its founder, who is named on the product
-website's About page along with the company's other properties. We do not
-maintain this anonymously, and we do not hide where we come from — we come from
-the Steam trading world, we lost money to a fake authenticator download in it,
-and we built this because of that.
+**MASTERPANEL LLC** — a registered company, named on the product website
+alongside its other properties, and looked up in a state registry rather than
+taken on faith.
+
+**The founder is deliberately not named**, and this section used to claim
+otherwise. The accountable entity is the company: it can be looked up, it can be
+served, and it has other work to point at. Attaching an individual's name adds
+nothing a reader can act on and follows one person around permanently — which is
+the reasoning `site/pages/story.mjs` already records for telling that story
+unattributed. What matters for trust is that the publisher is findable, and it
+is.
 
 At launch this is a **single-maintainer project**. That is a real risk to you and
 it is stated rather than glossed over. Mitigations are below.

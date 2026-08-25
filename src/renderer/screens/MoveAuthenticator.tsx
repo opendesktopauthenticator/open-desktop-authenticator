@@ -485,7 +485,7 @@ export function MoveAuthenticator({
 					</p>
 					<p className="hint">
 						You will be given a new recovery code. Write it down before doing anything else — it is
-						the only way back in if this machine is lost.
+						the one route back that depends on nothing else if this machine is lost.
 					</p>
 				</div>
 
