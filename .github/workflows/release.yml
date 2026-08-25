@@ -306,7 +306,9 @@ jobs:
             --title "$TAG" \
             --notes "Draft. Release notes are written by hand before publishing — see docs/RELEASE_CHECKLIST.md.
 
-          **Unsigned.** These builds carry no code-signing certificate yet, so Windows will warn on first run. Verify the download against \`SHA256SUMS.txt\` below, and check the provenance attestation on this release.
+          **On Windows, most people want [the Microsoft Store](https://apps.microsoft.com/detail/9NMM2XJ6HZ1D) instead.** Microsoft re-signs that package, so it never trips SmartScreen and there is nothing to check by hand.
+
+          **The files below are unsigned.** They carry no code-signing certificate yet, so Windows warns on first run — that warning is about a missing certificate, not a bad file. Take these if you are on Linux, if your Windows image has no Store, if you want the portable build, or if you would rather verify a download than be told it is fine. Check them against \`SHA256SUMS.txt\` below and the provenance attestation on this release.
 
           Verify on Linux or macOS:
           \`\`\`

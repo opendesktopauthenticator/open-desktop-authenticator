@@ -70,8 +70,9 @@ sites filled.
 ## Release cadence
 
 No fixed schedule. Releases happen when there is something worth shipping:
-a fix, a security patch, or a feature that is finished. Every release is signed,
-hashed, attested, and published only on GitHub Releases.
+a fix, a security patch, or a feature that is finished. Every release is hashed
+and attested, and reaches users through exactly two channels: the Microsoft
+Store, and GitHub Releases. The website hosts no binary and never will.
 
 We would rather ship nothing than ship something we cannot stand behind.
 

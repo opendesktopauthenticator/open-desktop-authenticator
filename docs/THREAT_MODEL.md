@@ -38,8 +38,15 @@ exfiltrates maFiles.
 Open source alone does not fix this — attackers compile open source with malware
 added. What actually helps:
 
-- Releases exist only as signed artifacts on GitHub Releases (§11 S11). The
-  website hosts no binaries and never will.
+- Releases reach users through two channels and no others: the Microsoft Store,
+  which re-signs the package it distributes, and GitHub Releases (§11 S11). The
+  website hosts no binaries and never will — every button on it is a link
+  outward.
+- **The two channels have different failure modes, and the docs say which is
+  which.** A Store package is verified by Windows before it installs and needs
+  nothing checked by hand; a GitHub asset is verified by the person who
+  downloads it, or not at all. Presenting them as interchangeable would leave
+  the second group believing a check happened that did not.
 - Every release publishes `SHA256SUMS.txt` and build provenance attestations.
 - We teach one habit above all others: **never download an authenticator from a
   website — including ours.**

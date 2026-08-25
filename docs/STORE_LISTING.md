@@ -12,6 +12,15 @@ too.
 **Product**: Open Desktop Authenticator · **Store ID**: 9NMM2XJ6HZ1D
 **Package identity**: `TheMaster.OpenDesktopAuthenticator`
 
+> [!NOTE]
+> **The live listing is one sentence behind this file.** Submission 1 went to
+> certification carrying "our download button only ever links a file published
+> on our GitHub releases page", written when GitHub was the only channel. It
+> stopped being true the moment this listing existed. A submission cannot be
+> edited while it is in certification, so the corrected wording below ships with
+> the next one — there is no user-visible harm in the meantime, since the
+> sentence understates where the app is available rather than overstating it.
+
 ---
 
 ## Description
@@ -58,9 +67,10 @@ too.
 >
 > **Before you install anything else**
 >
-> Never download an authenticator from a website, including ours. Our own
-> download button only ever links a file published on our GitHub releases page.
-> Anything else claiming to be this application is not ours.
+> Never download an authenticator from a website, including ours. This listing
+> and our GitHub releases page are the only two places a genuine build comes
+> from, and our own website hosts no installer — every button on it links to one
+> of those two. Anything else claiming to be this application is not ours.
 >
 > Source, documented threat model and build instructions:
 > https://github.com/opendesktopauthenticator/open-desktop-authenticator

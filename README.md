@@ -36,9 +36,11 @@ added. What fixes it is a chain a stranger can walk without trusting anyone:
 
 **website → company → GitHub org → source → public CI build → signed binary → published hash**
 
-So: every release is built in public CI, signed, published only on GitHub
-Releases with hashes and provenance, by a named company that does not hide where
-it came from.
+So: every release is built in public CI from a tag, published with hashes and
+provenance, by a named company that does not hide where it came from. It reaches
+you through the Microsoft Store, which re-signs the package, or from GitHub
+Releases, where you can check the bytes yourself. Two distribution channels, one
+build, and a chain that starts at either end and meets in the same commit.
 
 ### Don't trust us. Verify us.
 
