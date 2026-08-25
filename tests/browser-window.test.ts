@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+	AccountBrowsers,
 	BROWSER_USER_AGENT,
 	BrowserSessionError,
 	browserPartitionFor,
@@ -199,3 +200,70 @@ describe('the in-app browser', () => {
 		expect(START_URL.startsWith('https://steamcommunity.com/')).toBe(true);
 	});
 });
+
+/**
+ * What the vault lock has to reach.
+ *
+ * `SteamTransportFactory.forgetAll` wipes the `steam-*` sessions it made. The
+ * browser's partition is not one of those, so before `AccountBrowsers` existed
+ * a signed-in Steam session survived the vault locking — and reopening the
+ * browser found it still logged in, with no passphrase asked for.
+ */
+describe('closing every browser when the vault locks', () => {
+	it('clears the session as well as closing the window', async () => {
+		const cleared: string[] = [];
+		const closed: string[] = [];
+		const host = lockHarness(cleared, closed);
+		const browsers = new AccountBrowsers(host);
+
+		await browsers.open(ACCOUNT);
+		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(true);
+
+		await browsers.closeAll();
+
+		// Both, and the first is the one that is easy to forget: `fromPartition`
+		// hands back the same session next time, so a closed window leaves its
+		// cookie behind unless the storage goes too.
+		expect(cleared, 'the session was not wiped').toEqual([browserPartitionFor(ACCOUNT.steamId64)]);
+		expect(closed, 'the window was not closed').toHaveLength(1);
+		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(false);
+	});
+
+	it('does not open a second window for the same account', async () => {
+		const host = lockHarness([], []);
+		const browsers = new AccountBrowsers(host);
+		await browsers.open(ACCOUNT);
+		await browsers.open(ACCOUNT);
+		// One partition lookup per real open. A second window would share the
+		// session anyway, adding nothing but a window to lose track of.
+		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(true);
+	});
+});
+
+/** A host that records what was wiped and what was closed. */
+function lockHarness(cleared: string[], closed: string[]): BrowserHost {
+	return {
+		sessionFromPartition: (partition) => ({
+			setProxy: () => Promise.resolve(),
+			setUserAgent: () => undefined,
+			clearStorageData: () => {
+				cleared.push(partition);
+				return Promise.resolve();
+			},
+			cookies: { set: () => Promise.resolve() }
+		}),
+		createWindow: () => {
+			let destroyed = false;
+			return {
+				loadURL: () => Promise.resolve(),
+				close: () => {
+					destroyed = true;
+					closed.push('closed');
+				},
+				isDestroyed: () => destroyed,
+				on: () => undefined,
+				setWindowOpenHandler: () => undefined
+			};
+		}
+	};
+}

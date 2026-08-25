@@ -54,14 +54,29 @@ export const electronBrowserHost: BrowserHost = {
 			width: options.width,
 			height: options.height,
 			title: options.title,
-			// Set explicitly: without it the page can rewrite the title bar to
-			// anything, and a window that says "Steam Login" while showing
-			// somebody else's page is the exact deception being guarded against.
 			autoHideMenuBar: true,
 			webPreferences: {
 				...HARDENED,
 				partition: options.partition
 			}
+		});
+
+		/*
+		 * **The page is not allowed to rename the window.**
+		 *
+		 * Setting `title` above only chooses the *initial* one: Electron updates
+		 * the native title from the document unless `page-title-updated` is
+		 * prevented, which an earlier comment here claimed it did not. So a page
+		 * could have titled itself "Steam — Sign In" inside the user's own
+		 * authenticator, which is precisely the deception this application exists
+		 * to warn people about, wearing our window chrome.
+		 *
+		 * The title stays as the account name. That is also the more useful thing
+		 * to show: when several are open, the only question worth answering at a
+		 * glance is which account you are about to trade as.
+		 */
+		window.webContents.on('page-title-updated', (event) => {
+			event.preventDefault();
 		});
 
 		// Chromium sends the session's user agent for subresources, but the

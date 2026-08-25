@@ -177,6 +177,79 @@ export async function openAccountBrowser(
 	return window;
 }
 
+/**
+ * Every browser window this process has opened, and the way to end them.
+ *
+ * **Built because the lock did not reach them.** `SteamTransportFactory.forgetAll`
+ * wipes the `steam-*` sessions it created; the `browser-*` partition is not one
+ * of those, so a signed-in Steam session survived the vault locking — and
+ * reopening the browser would have found it still logged in, without a
+ * passphrase. The vault's promise is that everything stops while it is locked,
+ * and a live web session is not nothing.
+ *
+ * Closing the window is not enough on its own. `fromPartition` hands back the
+ * same session object next time it is asked, so the cookie outlives the window
+ * that used it unless the storage is cleared too.
+ */
+export class AccountBrowsers {
+	private readonly windows = new Map<string, BrowserWindowHandle>();
+
+	constructor(private readonly host: BrowserHost) {}
+
+	async open(options: OpenBrowserOptions): Promise<void> {
+		// One window per account. A second would share the partition and the
+		// session, so it adds nothing except a way to lose track of one.
+		const existing = this.windows.get(options.steamId64);
+		if (existing && !existing.isDestroyed()) {
+			return;
+		}
+		const window = await openAccountBrowser(this.host, options);
+		this.windows.set(options.steamId64, window);
+		window.on('closed', () => {
+			this.windows.delete(options.steamId64);
+		});
+	}
+
+	/** True while a window for this account is on screen. */
+	isOpen(steamId64: string): boolean {
+		const window = this.windows.get(steamId64);
+		return window !== undefined && !window.isDestroyed();
+	}
+
+	/**
+	 * Close every window and wipe every browser session.
+	 *
+	 * Called when the vault locks. Failures are swallowed per account rather
+	 * than aborting the sweep: a lock that stopped halfway because one window
+	 * was already gone would leave the others signed in, which is the opposite
+	 * of what was asked for.
+	 */
+	async closeAll(): Promise<void> {
+		const accounts = [...this.windows.keys()];
+		// Snapshot taken before clearing, so a window closing mid-sweep cannot
+		// remove itself from under the iteration.
+		const closing = new Map(this.windows);
+		this.windows.clear();
+		await Promise.all(
+			accounts.map(async (steamId64) => {
+				try {
+					const session = this.host.sessionFromPartition(browserPartitionFor(steamId64), {
+						cache: false
+					});
+					await session.clearStorageData?.();
+				} catch {
+					// Nothing useful to do: the window is going regardless.
+				}
+			})
+		);
+		for (const window of closing.values()) {
+			if (!window.isDestroyed()) {
+				window.close();
+			}
+		}
+	}
+}
+
 /** The partition name, kept in one place so the wipe and the open agree. */
 export function browserPartitionFor(steamId64: string): string {
 	// No `persist:` prefix, matching the account transport: a signed-in Steam

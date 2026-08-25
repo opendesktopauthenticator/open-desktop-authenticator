@@ -79,6 +79,20 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(ADAPTER).toMatch(/window\.webContents\.setWindowOpenHandler/);
 	});
 
+	/*
+	 * A page must not be able to rename the window it is displayed in.
+	 *
+	 * The `title` constructor option only picks the *initial* title; Electron
+	 * updates it from the document unless `page-title-updated` is prevented. A
+	 * comment here once claimed the option was enough, which meant a page could
+	 * have titled itself "Steam — Sign In" inside the user's own authenticator,
+	 * wearing this application's window chrome.
+	 */
+	it('refuses to let the page rewrite the window title', () => {
+		expect(ADAPTER).toMatch(/page-title-updated/);
+		expect(ADAPTER).toMatch(/preventDefault\(\)/);
+	});
+
 	it('sets the user agent on the contents, not only the session', () => {
 		// The session's agent covers subresources; navigation uses the contents'.
 		// Without this the first page load announces Electron.
