@@ -67,8 +67,25 @@ describe('the verification instructions name real files', () => {
 		expect(SAFETY).not.toContain('OpenDesktopAuthenticator.AppImage');
 	});
 
+	/*
+	 * The bulk check must still be offered — and must still carry
+	 * `--ignore-missing`.
+	 *
+	 * Without it, `sha256sum --check` reports `FAILED open or read` for every
+	 * artifact in the list the reader did not download, and exits non-zero. A
+	 * reader who took one file out of six therefore sees five failures and a
+	 * warning around their single `OK`, which is indistinguishable from the
+	 * tampering they were checking for. The names being right is necessary and
+	 * was never sufficient.
+	 */
 	it('still offers the bulk check, which is the one that was broken', () => {
-		expect(SAFETY).toContain('sha256sum --check SHA256SUMS.txt');
+		expect(SAFETY).toContain('sha256sum --check');
+		expect(SAFETY).toContain('SHA256SUMS.txt');
+	});
+
+	it('does not tell people to run the bulk check without --ignore-missing', () => {
+		const bulk = SAFETY.slice(SAFETY.indexOf('sha256sum --check'));
+		expect(bulk.slice(0, 60)).toContain('--ignore-missing');
 	});
 
 	it('warns that PowerShell prints upper case', () => {
@@ -152,6 +169,24 @@ describe('the Microsoft Store identity', () => {
 			workflow.indexOf('Collect the Store package')
 		);
 		expect(collect).not.toContain('appx');
+
+		/*
+		 * **This assertion is why v1.0.0 shipped an appx anyway.**
+		 *
+		 * Everything above was true and stayed true: the packaging job never
+		 * globs appx into `dist-release`. The leak was one job later. `publish`
+		 * called `download-artifact` with no `pattern:`, which fetches every
+		 * artifact the run produced — including `store-package` — straight into
+		 * the staging directory that `gh release create staging/*` publishes.
+		 *
+		 * So a test named "never published as a release asset" passed on every
+		 * run while the file was on the release page, unattested and listed in
+		 * SHA256SUMS.txt under a name GitHub does not serve. Checking the half
+		 * of the pipeline that was already correct is worse than not checking:
+		 * it is a green tick over the thing that was broken.
+		 */
+		const publish = workflow.slice(workflow.indexOf('  publish:'));
+		expect(publish).toContain('pattern: package-*');
 	});
 });
 

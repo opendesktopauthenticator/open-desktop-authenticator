@@ -262,8 +262,15 @@ export const verify = {
 			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-1.0.0-x64-setup.exe</code></pre>
 			<h3>Linux or macOS</h3>
 			<pre><code>sha256sum open-desktop-authenticator-1.0.0-x86_64.AppImage</code></pre>
-			<p>Or check every file at once, from the folder you downloaded into:</p>
-			<pre><code>sha256sum --check SHA256SUMS.txt</code></pre>
+			<p>Or check everything you downloaded at once, from that folder:</p>
+			<pre><code>sha256sum --check --ignore-missing SHA256SUMS.txt</code></pre>
+			<p>
+				<code>--ignore-missing</code> matters. The list covers every file in the
+				release, and you almost certainly downloaded one of them &mdash; without it,
+				<code>sha256sum</code> reports <code>FAILED open or read</code> for each file
+				you do not have and exits non-zero, which looks exactly like the thing you
+				were checking for. With it, you get one line per file you actually have.
+			</p>
 			<p>
 				PowerShell prints its hash in upper case and the list is in lower case. That
 				is the same value written two ways, not a mismatch &mdash; compare the
