@@ -146,14 +146,15 @@ export const download = {
 					GitHub are not, so Windows warns on first run. Until that changes, the
 					checksums and the provenance attestation are how you check them.
 					<br />
-					We have applied to the
+					We are applying to the
 					<a href="https://signpath.org/" rel="noopener">SignPath Foundation</a>, which
 					provides free code-signing certificates to open-source projects, and intend
 					to sign the direct downloads through
 					<a href="https://about.signpath.io/" rel="noopener">SignPath.io</a> once that
 					is granted. <strong>It has not been granted yet</strong>, so nothing you can
 					download today is signed by us — when that changes, this paragraph and the
-					release notes change with it.
+					release notes change with it. See
+					<a href="/code-signing-policy">our code signing policy</a>.
 				</li>
 				<li>
 					<strong>A signature over the checksum file.</strong> Every release lists

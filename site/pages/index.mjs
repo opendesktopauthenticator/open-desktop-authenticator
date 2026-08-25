@@ -18,6 +18,7 @@ import story from './story.mjs';
 import { credits, donate } from './support-us.mjs';
 import { privacy } from './privacy.mjs';
 import { official } from './official.mjs';
+import { codeSigningPolicy } from './code-signing.mjs';
 
 export const PAGES = [
 	home,
@@ -27,6 +28,7 @@ export const PAGES = [
 	verify,
 	security,
 	official,
+	codeSigningPolicy,
 	mafile,
 	openMafile,
 	encryptedMafile,

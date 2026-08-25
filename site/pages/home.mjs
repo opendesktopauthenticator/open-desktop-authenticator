@@ -100,6 +100,10 @@ export default {
 					checksum list, builds are not yet reproducible, and no independent audit has
 					happened. <a href="/download">The download page tracks each of those.</a>
 				</p>
+				<p>
+					<strong>Code signing policy:</strong> who may approve a release for signing,
+					and how to check one — <a href="/code-signing-policy">read it here</a>.
+				</p>
 			</div>
 
 			<h2>Why this exists</h2>
