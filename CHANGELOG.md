@@ -166,7 +166,7 @@ public workflow from this tag.
 
 ### Fixed
 
-Nothing here has shipped, so none of these reached a user. They are recorded
+None of these reached a user: every one was found and fixed before 1.0.0 shipped. They are recorded
 because the reasoning is the useful part, and because several were introduced by
 the fix for the item above them.
 

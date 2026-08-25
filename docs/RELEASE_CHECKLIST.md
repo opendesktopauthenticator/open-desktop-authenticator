@@ -84,9 +84,12 @@ Automation does not catch a broken installer.
 - [ ] AppImage runs on Ubuntu LTS.
 - [ ] AppImage runs on one non-GNOME distro.
 - [ ] `.deb` installs and uninstalls cleanly.
-- [ ] **Keyring-less distro**: convenience unlock is refused with a plain-language
-      warning, and the passphrase still works. `safeStorage` reporting
-      `basic_text` must never be treated as real encryption.
+- [ ] **Keyring-less distro**: the vault still unlocks with the passphrase, and
+      nothing offers a keyring-backed shortcut. Convenience unlock is a vault
+      format capability that is **not implemented** — Settings says so — so there
+      is no switch to test. If it is ever built, `safeStorage` reporting
+      `basic_text` must never be treated as real encryption, and this step
+      becomes a real one again.
 
 ## Manual verification — function
 
@@ -105,16 +108,27 @@ Use throwaway accounts. Never a real trading account.
       Includes a forced crash between `enableTwoFactor` and finalize, then resume.
 - [ ] Auto-confirm, if enabled in this release: runs only while unlocked, pauses
       on lock, logs every action, halts after repeated auth failures.
-- [ ] Updater: upgrade from the previous release. Notify-only, never silent.
-      "Skip this version" honoured, except for `security`-flagged releases.
+- [ ] Updater: on a build newer than the last release, the check reports
+      up-to-date; on an older one it reports the new version and links to it.
+      **Notify-only, never silent** — it must not download or install anything.
+      Turning the check off in Settings stops it contacting GitHub at all.
+- [ ] The updater states are `disabled`, `storeManaged`, `upToDate`,
+      `updateAvailable` and `unknown`. There is no "skip this version" and no
+      `security` flag on a release. This checklist tested both for a while, which
+      is how a checklist stops being run: the first unperformable line teaches
+      the reader that the whole list is decorative.
 
 ## Verify like a stranger
 
 The trust story is only real if it works for someone who does not trust us.
 
 - [ ] Download from the GitHub release page — not from a local build.
-- [ ] Follow `docs/verify-windows.md` / `verify-linux.md` exactly as written,
-      copy-pasting the commands. Hashes match.
+- [ ] Follow [the verification page](https://opendesktopauthenticator.com/verify)
+      exactly as written, copy-pasting the commands rather than adapting them.
+      Hashes match. That page is what users are actually sent to, so testing
+      anything else tests the wrong thing — this step previously named
+      `docs/verify-windows.md` and `docs/verify-linux.md`, which have never
+      existed.
 - [ ] Provenance verification succeeds on both platforms:
       `gh attestation verify <file> --owner opendesktopauthenticator`.
       There is no code signature on these files to check — see _Not yet gates_.

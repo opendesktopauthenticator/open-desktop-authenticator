@@ -26,8 +26,9 @@ import {
  *
  *   portable  No installer, no writes outside its own directory. For locked-down
  *             machines and for people who want to try it without installing.
- *             Labelled manual-update everywhere it appears, because nothing will
- *             tell it a new version exists.
+ *             Labelled manual-update everywhere it appears: the update check
+ *             still runs and still tells it a new version exists, but nothing
+ *             fetches or installs one, so the user does the swap by hand.
  *
  * Only the Store build gets a free ride on SmartScreen. The nsis and portable
  * builds warn until reputation accrues, which is a property of the channel and

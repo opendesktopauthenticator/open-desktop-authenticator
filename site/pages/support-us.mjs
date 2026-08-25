@@ -257,7 +257,7 @@ export const donate = {
 					the parts that handle your secrets, which is the only part that matters.
 				</li>
 				<li>
-					<strong>Nothing is collected.</strong> No telemetry, no accounts, no server
+					<strong>The application collects nothing.</strong> No telemetry, no accounts, no server
 					of ours that your secrets could be sent to, because
 					<a href="/security">there is no server in the design at all</a>.
 				</li>

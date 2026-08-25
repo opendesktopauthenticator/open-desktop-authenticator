@@ -156,10 +156,19 @@ export const lostAuthenticator = {
 		'@type': 'HowTo',
 		name: 'Recover access after losing a Steam authenticator',
 		publisher: { '@type': 'Organization', name: s.publisher },
+		/*
+		 * These steps must match the order the page actually recommends.
+		 * They did not: the prose sends a reader to a linked phone and to backup
+		 * codes before Steam Support, while this list jumped straight from "no
+		 * revocation code" to Support — so an assistant quoting the structured
+		 * data told people to give up two steps early.
+		 */
 		step: [
 			{ '@type': 'HowToStep', name: 'Find any surviving copy of the secret' },
 			{ '@type': 'HowToStep', name: 'Use the revocation code if you have it' },
-			{ '@type': 'HowToStep', name: 'Use Steam Support if you do not' }
+			{ '@type': 'HowToStep', name: 'Try Steam recovery with a linked phone number' },
+			{ '@type': 'HowToStep', name: 'Try a printed Steam backup code' },
+			{ '@type': 'HowToStep', name: 'Contact Steam Support if none of those work' }
 		]
 	}),
 	body: () => `

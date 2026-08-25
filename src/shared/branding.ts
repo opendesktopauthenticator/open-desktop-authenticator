@@ -68,7 +68,7 @@ export const branding = {
 	 *
 	 * This is not decoration. §4's whole answer to the clone problem is a chain a
 	 * stranger can walk — website → company → **this URL** → source → public CI
-	 * build → signed binary — so it is the link a suspicious user follows to check
+	 * build → published hash and provenance — so it is the link a suspicious user follows to check
 	 * that a download is ours. It must resolve to the real repository, and the org
 	 * name must match what is published on `/official`.
 	 */

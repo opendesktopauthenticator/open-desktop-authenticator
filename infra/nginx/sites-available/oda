@@ -1,6 +1,8 @@
 # opendesktopauthenticator.com
 #
-# HTTP only for now: the domain still resolves to Cloudflare, so there is no
+# NOTE: this opening paragraph described the pre-TLS state and was left behind.
+# HTTPS is live below. Kept for the reasoning, not as a description of today:
+# HTTP only at the time, because the domain resolved to Cloudflare and there was no
 # certificate yet. The ACME location is live, so certbot will work the moment
 # DNS points here and will add the TLS server and redirect itself.
 

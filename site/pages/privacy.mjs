@@ -31,7 +31,7 @@ export const privacy = {
 			<h1>What this site stores</h1>
 			<p class="lede">
 				Short version: <strong>the application</strong> holds your secrets on your own
-				machine, sends them nowhere, and contains no analytics or telemetry of any
+				machine, sends them to nobody but Steam, and contains no analytics or telemetry of any
 				kind. <strong>This website</strong> is a separate thing and does collect a
 				little — server logs kept for 14 days, Cloudflare in front of it, and Google
 				Analytics. All of that is listed below, along with what a report holds and how

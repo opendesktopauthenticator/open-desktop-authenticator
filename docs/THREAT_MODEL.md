@@ -22,7 +22,9 @@ exists, not to imply protection you have today.
 | Account password  | Only ever in memory, never stored                      | Account takeover                                                                                                |
 
 The first three come out of a maFile and are **long-lived**. Rotating them means
-removing and re-enrolling the authenticator. Treat any exposure as permanent
+replacing the authenticator — either the transfer this application implements,
+which rotates the whole bundle server-side, or a remove-and-re-enrol. Treat any
+exposure as permanent
 until you have done that.
 
 ---

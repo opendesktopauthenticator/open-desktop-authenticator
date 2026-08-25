@@ -79,8 +79,18 @@ sites filled.
 
 No fixed schedule. Releases happen when there is something worth shipping:
 a fix, a security patch, or a feature that is finished. Every release is hashed
-and attested, and reaches users through exactly two channels: the Microsoft
-Store, and GitHub Releases. The website hosts no binary and never will.
+and reaches users through exactly two channels: the Microsoft Store, and GitHub
+Releases. The website hosts no binary and never will.
+
+**The two are not produced identically, and this used to say they were.** Every
+GitHub artifact is hashed into `SHA256SUMS.txt` and covered by a build
+provenance attestation. The Store package is built by the same workflow run, but
+it is uploaded as a workflow artifact rather than a release asset, submitted to
+Partner Center by hand, and re-signed by Microsoft — so it carries Microsoft's
+signature rather than our attestation, and its build step is `continue-on-error`
+precisely so a Store tooling failure cannot hold up the direct downloads.
+Saying "every release is attested" flattened that into one guarantee it does not
+have.
 
 We would rather ship nothing than ship something we cannot stand behind.
 

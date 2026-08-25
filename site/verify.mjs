@@ -583,6 +583,25 @@ if (origin) {
 		'x-frame-options',
 		'permissions-policy'
 	];
+	/*
+	 * Cloudflare Web Analytics is an intentional edge transformation.
+	 *
+	 * It is not in site/dist: Cloudflare inserts the tag after nginx has served
+	 * the built page, and it skips clients that do not resemble browsers. The
+	 * old verifier used Node's default user agent, therefore sometimes compared
+	 * the unmodified response and reported a clean site while every visitor got
+	 * another script. Ask for the page the way a browser does, validate the one
+	 * transformation we permit, then remove only that tag for the byte comparison.
+	 */
+	const BROWSER_HEADERS = {
+		accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+		'accept-language': 'en-US,en;q=0.9',
+		'user-agent':
+			'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+			'(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36'
+	};
+	const CLOUDFLARE_BEACON_TAG =
+		/<script\b(?=[^>]*\bsrc="https:\/\/static\.cloudflareinsights\.com\/beacon\.min\.js\/[^"\s]+")(?=[^>]*\btype="module")(?=[^>]*\bintegrity="sha512-[^"]+")(?=[^>]*\bdata-cf-beacon='[^']+')(?=[^>]*\bcrossorigin="anonymous")[^>]*><\/script>\r?\n?/g;
 	let checked = 0;
 
 	for (const page of PAGES) {
@@ -590,7 +609,10 @@ if (origin) {
 		const path = page.slug === 'index' ? '/' : `/${page.slug}`;
 		let response;
 		try {
-			response = await fetch(`${origin}${path}`, { redirect: 'manual' });
+			response = await fetch(`${origin}${path}`, {
+				redirect: 'manual',
+				headers: BROWSER_HEADERS
+			});
 		} catch (error) {
 			fail(path, `could not be fetched: ${error.message}`);
 			continue;
@@ -603,18 +625,31 @@ if (origin) {
 		for (const header of REQUIRED_HEADERS) {
 			if (!response.headers.get(header)) fail(path, `is missing the ${header} header`);
 		}
+		const csp = response.headers.get('content-security-policy') ?? '';
+		const scriptSources = /(?:^|;)\s*script-src\s+([^;]+)/.exec(csp)?.[1] ?? '';
+		if (!scriptSources.includes('https://static.cloudflareinsights.com')) {
+			fail(path, 'CSP does not permit the disclosed Cloudflare Web Analytics script');
+		}
 		if (response.headers.get('server')?.match(/\d/)) {
 			fail(path, `leaks a version in the Server header: ${response.headers.get('server')}`);
 		}
 		const body = await response.text();
-		if (body !== built.get(page.slug)) {
+		const beaconTags = body.match(CLOUDFLARE_BEACON_TAG) ?? [];
+		if (beaconTags.length !== 1) {
+			fail(
+				path,
+				`has ${beaconTags.length} valid Cloudflare Web Analytics beacon tags, expected exactly 1`
+			);
+		}
+		const comparableBody = body.replace(CLOUDFLARE_BEACON_TAG, '');
+		if (comparableBody !== built.get(page.slug)) {
 			// Name the cause when we recognise it. Cloudflare's Email Address
 			// Obfuscation rewrites any plain-text address in HTML and injects a
 			// decoder script — on a site that ships none, and leaving the address
 			// unreadable to anyone without JavaScript, which for a security contact
 			// is the wrong audience to exclude. Turn it off under
 			// Scrape Shield → Email Address Obfuscation.
-			if (/__cf_email__|email-decode\.min\.js/.test(body)) {
+			if (/__cf_email__|email-decode\.min\.js/.test(comparableBody)) {
 				fail(path, 'Cloudflare is obfuscating an email address and injecting a script');
 			} else {
 				fail(path, 'served content differs from the build output');

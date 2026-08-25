@@ -134,12 +134,23 @@ Three failure branches, each naming what the user can still do:
 | Read-back mismatch                 | Refuses to call it success, keeps the secrets, invites a retry                                |
 
 **A reply that cannot be decoded is not a failure.** Steam answered, so the
-authenticator has probably rotated already. The raw bytes escape the API layer
-before anything tries to parse them, are held in memory (never on disk
-unsealed), and `retryDecode` can read them again. The message says the
-authenticator has probably been replaced and not to close the window — because
-saying "it failed" there would be false and would invite exactly the wrong
-action.
+authenticator has probably rotated already.
+
+**`retryDecode` was removed, and this paragraph described it for longer than it
+existed.** Retrying meant running the same pure decoder over the same bytes and
+hoping for a different answer, which cannot happen. What the implementation does
+instead is record which of two things went wrong, because the difference is the
+whole point:
+
+- `unanswered` — the request went out and nothing came back. Steam may or may not
+  have acted, so the user has to look at their phone to find out.
+- `unreadable` — Steam answered, which means it rotated, and this build cannot
+  use what it sent. That is terminal, and the account needs Steam Support.
+
+Both are held as a name and an id, never a credential, so the record outlives a
+vault lock — losing it would cost the user the only evidence that either
+happened. The message never says "it failed", because on an irreversible
+operation that would be both false and an invitation to retry.
 
 ## Testing
 

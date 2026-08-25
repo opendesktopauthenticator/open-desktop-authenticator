@@ -409,8 +409,8 @@ export function MoveAuthenticator({
 				<div className="notice">
 					<strong>Write this recovery code down before you close this window.</strong>
 					<p className="hint">
-						It is the only way to detach this authenticator yourself if this machine is lost. Steam
-						issued it once and will not issue it again.
+						It is the one route that depends on nothing else if this machine is lost. Steam issued
+						it once and will not issue it again.
 					</p>
 					<p className="code">{done.revocationCode}</p>
 				</div>

@@ -7,23 +7,31 @@ import { branding } from '../../shared/branding';
  *
  * That is the whole design, and it is not timidity. §4's answer to the clone
  * problem is a chain a stranger can walk — website → company → repository →
- * public CI build → signed binary → published hash — and an application that
+ * public CI build → published hash and provenance — and an application that
  * downloads and executes its own replacement **is the exact mechanism the clone
  * sites use**. A user who has been taught that this app can silently replace
  * itself has been taught to accept the thing we exist to warn them about.
  *
  * So the update path is: we tell you a version exists, and you go to GitHub
- * Releases and get it, where the signature and the published hash are. The
+ * Releases and get it, where the published hash and the provenance attestation
+ * are. The
  * download button on our own site does the same thing (§16). The user walks the
  * last step of the chain themselves, every time, because that step is the
  * product.
  *
- * **Automatic installation is not merely unimplemented — it is blocked on Q2.**
- * Without a Windows code-signing certificate there is no signature to verify, so
- * an auto-installer could only verify a hash it fetched from the same place as
- * the binary, which proves nothing against an attacker who controls that place.
- * The moment signing exists, `verifiedInstallAvailable` below is the one thing
- * that has to change, and the founder has to decide it deliberately.
+ * **Automatic installation is refused as policy, not deferred until signing.**
+ * This comment used to say it was blocked on Q2 and that a code-signing
+ * certificate would unblock it. That reads as "we would do this if we could",
+ * which is the opposite of what the paragraph above argues and what Settings now
+ * tells users: the app will never download or install an update. A certificate
+ * would fix the verification problem and would still leave the design problem —
+ * teaching a user that this application can replace itself is teaching them to
+ * accept the clone sites' mechanism.
+ *
+ * The verification obstacle is real and worth recording: without a signature an
+ * auto-installer could only check a hash fetched from the same place as the
+ * binary, which proves nothing against whoever controls that place. It is a
+ * second reason, not the reason.
  *
  * ## This is the only network request the app makes that is not Steam
  *

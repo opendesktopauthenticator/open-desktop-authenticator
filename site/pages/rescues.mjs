@@ -314,7 +314,7 @@ export const moveAuthenticator = {
 			{ '@type': 'HowToStep', name: 'Use the recovery code or Steam Support as a last resort' }
 		]
 	}),
-	body: () => `
+	body: (s) => `
 		<article class="guide">
 			<h1>Move your Steam authenticator to a new phone</h1>
 			<p class="lede">
@@ -452,12 +452,18 @@ ${tradeHoldDiagram()}
 			</p>
 			<div class="callout callout-warn">
 				<p>
-					<strong>Budget for fifteen days, not two, when a desktop tool is
-					involved.</strong> The two-day restriction is documented for Steam's own
-					<em>Move Authenticator</em> flow between devices running Steam's app.
-					Moving to or from an unofficial desktop authenticator may instead require
-					removing the authenticator and enrolling again, which is the fifteen-day
-					path. Assume the longer one unless you have tested the specific route.
+					<strong>Which restriction you get depends on the route, not on the
+					device.</strong> Steam's two-day figure is documented for its own
+					<em>Move Authenticator</em> flow. A tool that instead removes the
+					authenticator and enrols a new one takes the fifteen-day path, and plenty
+					of desktop tools do exactly that.
+				</p>
+				<p>
+					${s.short} uses the transfer, not remove-and-add, and we have run it against
+					a real account and watched the two-day restriction apply —
+					<a href="/move-steam-authenticator-to-pc">the details are here</a>. For any
+					other desktop tool, assume fifteen days unless you have tested that specific
+					route, and check which of the two operations it performs before you start.
 				</p>
 			</div>
 

@@ -131,7 +131,7 @@ export default {
 				</li>
 				<li>
 					<strong>Check the file, not the website.</strong> A convincing page proves
-					nothing. <a href="/verify">A checksum and a signature take a minute</a> and
+					nothing. <a href="/verify">A checksum and a provenance check take a minute</a> and
 					prove what you actually have.
 				</li>
 			</ul>
