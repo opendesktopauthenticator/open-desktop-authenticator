@@ -41,22 +41,25 @@ function harness(overrides: { setProxy?: () => Promise<void> } = {}) {
 	};
 
 	const session: BrowserSessionHandle = {
-		setProxy: overrides.setProxy
-			? overrides.setProxy
-			: async (config) => {
-					recorded.proxies.push(config);
-				},
+		setProxy:
+			overrides.setProxy ??
+			((config) => {
+				recorded.proxies.push(config);
+				return Promise.resolve();
+			}),
 		setUserAgent: (ua) => recorded.userAgents.push(ua),
 		cookies: {
-			set: async (cookie) => {
+			set: (cookie) => {
 				recorded.cookies.push({ url: cookie.url, name: cookie.name, value: cookie.value });
+				return Promise.resolve();
 			}
 		}
 	};
 
 	const window: BrowserWindowHandle = {
-		loadURL: async (url) => {
+		loadURL: (url) => {
 			recorded.loaded.push(url);
+			return Promise.resolve();
 		},
 		close: vi.fn(),
 		isDestroyed: () => false,
@@ -143,9 +146,7 @@ describe('the in-app browser', () => {
 	 */
 	it('opens no window at all if a configured proxy cannot be applied', async () => {
 		const { host, recorded } = harness({
-			setProxy: async () => {
-				throw new Error('ERR_PROXY_CONNECTION_FAILED');
-			}
+			setProxy: () => Promise.reject(new Error('ERR_PROXY_CONNECTION_FAILED'))
 		});
 
 		await expect(
@@ -158,9 +159,7 @@ describe('the in-app browser', () => {
 
 	it('names the proxy in the failure without leaking its password', async () => {
 		const { host } = harness({
-			setProxy: async () => {
-				throw new Error('nope');
-			}
+			setProxy: () => Promise.reject(new Error('nope'))
 		});
 
 		await expect(
