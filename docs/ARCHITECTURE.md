@@ -43,9 +43,12 @@ src/
     confirmations/  confirmation keys, the S16 type allowlist, mobileconf
     net/       every request this application composes itself, and the only
                place it opens one: per-account Electron sessions, each with its
-               own proxy and its own cookie jar. Sign-in is the exception —
-               `steam-session` opens its own sockets from Node, routed through
-               the same per-account proxy (see steam/)
+               own proxy and its own cookie jar. Two exceptions, both
+               deliberate — sign-in, which `steam-session` performs over Node
+               using the same per-account proxy (see steam/), and browser/
+    browser/   a window that browses the open web as one account, on the
+               account's proxy, in its own session. Not a request this
+               application composes: the user drives it
     steam/     talking to Valve's own endpoints (session minting)
   preload/     bridge only. see the warning below
   renderer/    React UI
@@ -97,8 +100,20 @@ to any local file on the machine. The check must pin the exact file.
 
 All Steam protocol contact goes through `src/main/steam/`, `src/main/codes/` and
 `src/main/confirmations/`, and every request this application composes leaves
-through the single transport in `src/main/net/` — sign-in excepted, which
-`steam-session` performs over Node using the same per-account proxy. When Valve changes something — and they will — the fix is in
+through the single transport in `src/main/net/`. Two things do not, and both are
+named rather than implied: sign-in, which `steam-session` performs over Node
+using the same per-account proxy, and the in-app browser in
+`src/main/browser/`, which is not a request this application composes at all —
+it is a window the user drives, on the account's proxy, in a session of its own.
+
+**The browser is the widest surface in the application and the newest.** It
+loads pages nobody here wrote, so it carries no preload, no bridge, and no way
+to reach the vault or the IPC table; `sandbox` and `contextIsolation` are on and
+`nodeIntegration` is off. It cannot share the account's transport session, which
+is disguised as the Steam Android app — serving Steam's web pages to an `okhttp`
+client breaks them, and removing the disguise to fix that breaks the property the
+disguise exists for. So it holds a second session, honestly presented as a
+browser, sharing only the proxy. When Valve changes something — and they will — the fix is in
 one place.
 
 **The shipped application writes its own cryptography and borrows its sign-in.**

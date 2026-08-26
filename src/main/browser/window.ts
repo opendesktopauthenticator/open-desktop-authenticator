@@ -217,36 +217,52 @@ export class AccountBrowsers {
 	}
 
 	/**
-	 * Close every window and wipe every browser session.
+	 * Close every window, then wipe every browser session.
 	 *
-	 * Called when the vault locks. Failures are swallowed per account rather
-	 * than aborting the sweep: a lock that stopped halfway because one window
-	 * was already gone would leave the others signed in, which is the opposite
-	 * of what was asked for.
+	 * Called when the vault locks.
+	 *
+	 * **Windows first, storage second.** The other order clears a session out
+	 * from under a page that is still on screen and still able to make requests
+	 * with what it already holds — which is a strange half-state to leave a
+	 * signed-in Steam tab in, and slower to reach the thing that matters. Closing
+	 * first stops the page; the wipe then removes what it was using.
+	 *
+	 * **Never rejects.** Every other call in `onLock` is synchronous, so this one
+	 * is fired and not awaited; a rejection would surface as an unhandled one
+	 * with nothing to catch it, at the exact moment the application is supposed
+	 * to be making itself safe. Failures are swallowed per account for the same
+	 * reason a sweep should not abort halfway: one window that was already gone
+	 * must not leave the others signed in.
 	 */
 	async closeAll(): Promise<void> {
-		const accounts = [...this.windows.keys()];
-		// Snapshot taken before clearing, so a window closing mid-sweep cannot
-		// remove itself from under the iteration.
+		// Snapshot before clearing, so a window removing itself on `closed`
+		// cannot mutate what is being iterated.
 		const closing = new Map(this.windows);
 		this.windows.clear();
+
+		for (const window of closing.values()) {
+			try {
+				if (!window.isDestroyed()) {
+					window.close();
+				}
+			} catch {
+				// Already gone, or going. Either way there is nothing left to close.
+			}
+		}
+
 		await Promise.all(
-			accounts.map(async (steamId64) => {
+			[...closing.keys()].map(async (steamId64) => {
 				try {
 					const session = this.host.sessionFromPartition(browserPartitionFor(steamId64), {
 						cache: false
 					});
 					await session.clearStorageData?.();
 				} catch {
-					// Nothing useful to do: the window is going regardless.
+					// The window is already closed; a session that outlives it is
+					// unreachable but still worth having tried to remove.
 				}
 			})
 		);
-		for (const window of closing.values()) {
-			if (!window.isDestroyed()) {
-				window.close();
-			}
-		}
 	}
 }
 

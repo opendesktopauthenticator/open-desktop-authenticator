@@ -164,6 +164,44 @@ The users most likely to want this feature are the most likely to buy cheap
 residential proxies of unknown ownership. The warning belongs next to the
 setting, not only here.
 
+### 2.6b The in-app browser
+
+**New, and the largest attack surface this application has.** A window that
+loads pages nobody here wrote, signed in as one account and routed like that
+account, so a trade can be finished without copying a session into a browser
+that is not routed.
+
+What it is given, and nothing more:
+
+- **Its own session.** Not the account transport's, which is disguised as the
+  Steam Android app. Sharing that one would either serve Steam's web pages to an
+  `okhttp` client or strip the disguise off the application's own requests.
+- **The account's proxy.** If routing is configured and cannot be applied, **no
+  window opens** — the same fail-closed rule the transport follows, where the
+  unit of work happens to be a window rather than a request.
+- **A short-lived access token**, set as Steam's own `steamLoginSecure` cookie.
+  No password is typed into a window this application drew, and the module that
+  opens it never sees a refresh token.
+
+What it deliberately cannot do: reach the vault, the IPC table, or any part of
+this process. No preload, no bridge, `sandbox` and `contextIsolation` on,
+`nodeIntegration` off. The page cannot rename its own window either, because a
+page titled "Steam — Sign In" inside this application would be the exact
+deception the project exists to warn people about, wearing our chrome.
+
+**Accepted:** the user can navigate anywhere. That is the feature — a browser
+that only reached one page would not finish a trade. Ordinary browser
+same-origin rules apply, so a page on another domain cannot read Steam's
+cookies; what it can do is what any site can do to a logged-in browser, which is
+why the address stays visible and why this section exists rather than a claim
+that the window is safe.
+
+**Ends with the lock.** `AccountBrowsers.closeAll` closes the windows and wipes
+their sessions when the vault locks. Closing alone would not be enough:
+`fromPartition` returns the same session next time it is asked, so the cookie
+would outlive the window and a reopened browser would still be signed in without
+a passphrase.
+
 ### 2.7 An attacker with your unlocked vault, stripping 2FA
 
 **New with authenticator removal (F-09, Q15), and accepted with mitigations.**

@@ -276,7 +276,11 @@ function start(): void {
 			// made. Closing the window is not enough either: `fromPartition` hands
 			// back the same session next time, so the cookie would outlive the
 			// window unless the storage goes with it.
-			void browsers.closeAll();
+			// `onLock` is synchronous and every other call here is too, so this is
+			// fired rather than awaited. `closeAll` is written not to reject for
+			// exactly that reason; the catch is the belt to that braces, because an
+			// unhandled rejection while locking is the worst possible moment for one.
+			void browsers.closeAll().catch(() => undefined);
 
 			// The backup ceremony is per sitting: an unlock has to show the code
 			// again before it can be marked as written down.

@@ -229,6 +229,106 @@ describe('closing every browser when the vault locks', () => {
 		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(false);
 	});
 
+	/*
+	 * Windows first, storage second.
+	 *
+	 * The other order clears the session out from under a page that is still on
+	 * screen and still able to use what it holds. Closing first stops the page;
+	 * the wipe then removes what it was using.
+	 */
+	it('closes the window before wiping its session', async () => {
+		const order: string[] = [];
+		const host: BrowserHost = {
+			sessionFromPartition: () => ({
+				setProxy: () => Promise.resolve(),
+				setUserAgent: () => undefined,
+				clearStorageData: () => {
+					order.push('wipe');
+					return Promise.resolve();
+				},
+				cookies: { set: () => Promise.resolve() }
+			}),
+			createWindow: () => {
+				let destroyed = false;
+				return {
+					loadURL: () => Promise.resolve(),
+					close: () => {
+						destroyed = true;
+						order.push('close');
+					},
+					isDestroyed: () => destroyed,
+					on: () => undefined,
+					setWindowOpenHandler: () => undefined
+				};
+			}
+		};
+
+		const browsers = new AccountBrowsers(host);
+		await browsers.open(ACCOUNT);
+		await browsers.closeAll();
+
+		expect(order).toEqual(['close', 'wipe']);
+	});
+
+	/*
+	 * `onLock` is synchronous, so this is fired and not awaited. A rejection
+	 * would surface as an unhandled one at the exact moment the application is
+	 * supposed to be making itself safe — and a lock that gave up partway would
+	 * leave the remaining accounts signed in.
+	 */
+	it('finishes the sweep even when closing throws', async () => {
+		const cleared: string[] = [];
+		const host: BrowserHost = {
+			sessionFromPartition: (partition) => ({
+				setProxy: () => Promise.resolve(),
+				setUserAgent: () => undefined,
+				clearStorageData: () => {
+					cleared.push(partition);
+					return Promise.resolve();
+				},
+				cookies: { set: () => Promise.resolve() }
+			}),
+			createWindow: () => ({
+				loadURL: () => Promise.resolve(),
+				close: () => {
+					throw new Error('window already gone');
+				},
+				isDestroyed: () => false,
+				on: () => undefined,
+				setWindowOpenHandler: () => undefined
+			})
+		};
+
+		const browsers = new AccountBrowsers(host);
+		await browsers.open(ACCOUNT);
+
+		await expect(browsers.closeAll()).resolves.toBeUndefined();
+		// The wipe still happened despite the close failing.
+		expect(cleared).toEqual([browserPartitionFor(ACCOUNT.steamId64)]);
+	});
+
+	it('survives a session that cannot be wiped', async () => {
+		const host: BrowserHost = {
+			sessionFromPartition: () => ({
+				setProxy: () => Promise.resolve(),
+				setUserAgent: () => undefined,
+				clearStorageData: () => Promise.reject(new Error('session gone')),
+				cookies: { set: () => Promise.resolve() }
+			}),
+			createWindow: () => ({
+				loadURL: () => Promise.resolve(),
+				close: () => undefined,
+				isDestroyed: () => false,
+				on: () => undefined,
+				setWindowOpenHandler: () => undefined
+			})
+		};
+
+		const browsers = new AccountBrowsers(host);
+		await browsers.open(ACCOUNT);
+		await expect(browsers.closeAll()).resolves.toBeUndefined();
+	});
+
 	it('does not open a second window for the same account', async () => {
 		const host = lockHarness([], []);
 		const browsers = new AccountBrowsers(host);
