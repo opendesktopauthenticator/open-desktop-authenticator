@@ -331,6 +331,76 @@ Route two accounts through two different proxies. Use both.
 
 ---
 
+### T30 · The in-app browser opens signed in — **the test that decides whether this feature works at all**
+
+Everything else about the browser is verified in this repository: the session it
+gets, the proxy, the cookie it sets, the window it closes. One thing is not, and
+cannot be. **Steam has to accept a `steamLoginSecure` cookie built from an access
+token this application minted for the mobile client.** That is a fact about
+Valve's servers. No type and no test here can establish it, and the whole feature
+rests on it.
+
+1. Account list → **Trade** on an account with a live session.
+2. A window titled `<account name> — browser` opens on your trade offers.
+
+**Pass:** the page shows _your_ trade offers, with your account name in Steam's
+own header. Click through to the market and to your inventory; both should stay
+signed in.
+
+**If the cookie is not accepted**, you should **never see a Steam login form
+inside that window** — the app reads where the page actually landed and, if it is
+a login page, closes the window and wipes the session before you see it, then
+offers its own sign-in form instead. That is the behaviour to check: which of the
+two happened.
+
+If its own form appears, sign in and it will try again by itself. If it comes
+back a second time, the app will say the sign-in cannot be completed here and
+stop asking — **that is the honest failure, and it means the cookie route does
+not work and the design has to change.** Report which of the three you got.
+
+### T31 · The browser is routed like the account
+
+The failure this feature exists to prevent is finishing a trade in an ordinary
+browser, which puts your own address on an account you were careful to route —
+while you are signed in and trading, which is the worst possible moment for it.
+
+1. On a **routed** account, press **Trade**.
+2. In that window, visit any page that reports the address you are coming from.
+
+**Pass:** it is the proxy's address, not your machine's. **Fails if** it is
+yours — the window would then be worse than no feature at all.
+
+Then repeat T17's broken-proxy setup and press **Trade** on that account.
+
+**Pass:** no window opens at all, and the row says the browser could not be
+routed. **Fails if** a window opens anyway, however it looks.
+
+### T32 · The browser ends when the vault locks
+
+1. Open a browser for an account and leave it on a signed-in Steam page.
+2. Lock the vault, or leave it to the idle timeout.
+
+**Pass:** the browser window closes on its own. **Fails if** it stays open — a
+live Steam web session outliving the lock is a smaller lock than the one you
+set.
+
+Then unlock and press **Trade** again. It should open normally. What it must
+never do is open **without** the unlock: while the vault is locked there is no
+way to reach that window at all.
+
+### T33 · Two browsers, two accounts, and pressing Trade twice
+
+1. Open browsers for two accounts routed through different proxies.
+2. In each, check the account name Steam shows in its header.
+3. Go back to the account list and press **Trade** again on one of them.
+
+**Pass:** each window is signed in as its own account and neither picks up the
+other's session — the browser half of T19. And the second press brings the
+window you already have to the front rather than doing nothing, which is what
+you would otherwise see when it is hidden behind the app.
+
+---
+
 ### T27 · Add an authenticator to a new account
 
 **This changes a Steam account.** It _can_ now be undone from the app — T23
@@ -501,6 +571,9 @@ that closed are the ones a reader would otherwise assume are still open.
 
 **Still open:**
 
+- **T30 — the in-app browser's sign-in.** Whether Steam accepts the cookie this
+  application builds is the one load-bearing fact about this feature that nothing
+  in the repository can settle. Worth doing before the feature is announced.
 - **Run a Linux build.** Neither the AppImage nor the `.deb` has been launched by
   a human. This is the largest untested surface in the project.
 - A Windows code-signing certificate (Q2) — the direct downloads stay unsigned
