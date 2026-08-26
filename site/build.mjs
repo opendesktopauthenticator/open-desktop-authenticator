@@ -74,6 +74,25 @@ export const SITE = {
 	analyticsId: 'G-G0GE9H5VR7',
 
 	/*
+	 * Ownership tokens third parties ask us to put on the home page.
+	 *
+	 * Inert by design: an HTML comment, not a script and not a request. Nothing
+	 * here executes, nothing is fetched, and the CSP is untouched — which is why
+	 * this form of verification is the one to agree to when a service offers a
+	 * choice between a comment, a script tag and a DNS record.
+	 *
+	 * Home page only, because that is what is asked for and because a token is
+	 * somebody else's identifier for us: there is no reason to repeat it across
+	 * thirty pages. Kept here rather than typed into the template so it is
+	 * findable by the person who later wonders what it is.
+	 */
+	verifications: [
+		// Requested by Trustpilot support, 2026-08-26, to verify domain ownership
+		// for the review profile.
+		{ service: 'Trustpilot', token: 'r2qnjwvklb' }
+	],
+
+	/*
 	 * How many packages actually ship, counted rather than remembered.
 	 *
 	 * /security advertises this number, and it was written out as a word — "Four
@@ -281,9 +300,21 @@ function head(page) {
 		page.slug === 'index' || namesTheProduct || page.title.length + suffix.length > 62
 			? page.title
 			: page.title + suffix;
+	// After the charset, which has to stay inside the first 1024 bytes, and
+	// before everything else — a verifier that reads only the head still finds it.
+	const verifications =
+		page.slug === 'index'
+			? SITE.verifications
+					.map(
+						(v) => `
+	<!-- ${escape(v.service)} verification: ${escape(v.token)} -->`
+					)
+					.join('')
+			: '';
+
 	return `
 	<meta charset="utf-8">
-	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="viewport" content="width=device-width, initial-scale=1">${verifications}
 	<title>${escape(title)}</title>
 	<meta name="description" content="${escape(page.description)}">
 	<link rel="canonical" href="${escape(url)}">
