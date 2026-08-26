@@ -188,6 +188,16 @@ const api: RendererApi = {
 	signInToSteam: (steamId64: string, password: string) =>
 		ipcRenderer.invoke(CHANNELS.steamSignIn, { steamId64, password }) as Promise<SignInResult>,
 
+	/**
+	 * Open a signed-in, routed browser for this account.
+	 *
+	 * Passes only the account. The destination is the main process's decision —
+	 * a URL crossing this bridge would be a way to aim a live Steam session at
+	 * any page that reached the renderer.
+	 */
+	openAccountBrowser: (steamId64: string) =>
+		ipcRenderer.invoke(CHANNELS.accountOpenBrowser, { steamId64 }) as Promise<void>,
+
 	// §11 S2 exception (a). The passphrase is required again on purpose.
 	revealRevocationCode: (steamId64: string, passphrase: string) =>
 		ipcRenderer.invoke(CHANNELS.revocationReveal, { steamId64, passphrase }) as Promise<{

@@ -831,6 +831,18 @@ export const IPC_CONTRACT = {
 		response: okResponse
 	},
 
+	[CHANNELS.accountOpenBrowser]: {
+		request: z
+			.object({
+				steamId64: z.string()
+				// Deliberately nothing else. See the channel's note: a URL here would
+				// let whatever reaches the renderer choose where a signed-in session
+				// points.
+			})
+			.strict(),
+		response: okResponse
+	},
+
 	[CHANNELS.accountSetProxy]: {
 		request: z
 			.object({
@@ -1070,6 +1082,13 @@ export interface RendererApi {
 
 	/** §11 S2 exception (a). Requires the passphrase again. */
 	revealRevocationCode(steamId64: string, passphrase: string): Promise<{ revocationCode: string }>;
+	/**
+	 * Open a signed-in, routed browser for this account.
+	 *
+	 * Resolves when the window is on screen, not when the user is finished with
+	 * it — there is nothing to wait for and nothing to return.
+	 */
+	openAccountBrowser(steamId64: string): Promise<void>;
 	/** Record that the code has been written down, clearing the account's warning. */
 	confirmRevocationBackup(steamId64: string): Promise<{ ok: true }>;
 }

@@ -25,6 +25,10 @@ import { CodeService } from './codes/service';
 import { ClipboardCourier } from './codes/clipboard';
 import { registerCodeHandlers } from './codes/ipc';
 import { registerUpdateHandlers } from './update/ipc';
+import { registerBrowserHandlers } from './browser/ipc';
+import { mintAccessToken } from './steam/access-token';
+import { AccountBrowsers } from './browser/window';
+import { electronBrowserHost } from './browser/electron-host';
 import { EnrollmentService } from './steam/enrollment';
 import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
 import { TransferService } from './steam/transfer';
@@ -236,6 +240,14 @@ function start(): void {
 	// The lock handler below refers to `imports` and `clipboard`, both constructed
 	// after the vault they need. That is fine and not a cycle: the references live
 	// inside a closure that cannot run until all three exist.
+	/*
+	 * Created before the vault, because the lock closure below has to be able to
+	 * reach it. The browser windows are the newest thing a lock has to sweep and
+	 * the easiest to forget: they are not part of the transport factory, so
+	 * `forgetAll` never touched them.
+	 */
+	const browsers = new AccountBrowsers(electronBrowserHost);
+
 	const vault = new VaultService({
 		file: join(app.getPath('userData'), 'vault.json'),
 		onLock: () => {
@@ -258,6 +270,13 @@ function start(): void {
 			// Chromium keeps them in the per-account session, and a web session that
 			// survived the lock would make the lock a smaller thing than it claims.
 			transports.forgetAll();
+
+			// The in-app browsers hold their own sessions, in their own partitions,
+			// which `forgetAll` above does not reach — it only knows the ones it
+			// made. Closing the window is not enough either: `fromPartition` hands
+			// back the same session next time, so the cookie would outlive the
+			// window unless the storage goes with it.
+			void browsers.closeAll();
 
 			// The backup ceremony is per sitting: an unlock has to show the code
 			// again before it can be marked as written down.
@@ -534,6 +553,42 @@ function start(): void {
 			}
 		);
 		registerCodeHandlers(codes, vault, clipboard, clock);
+
+		registerBrowserHandlers({
+			browsers,
+			// Read at call time. A captured account would go stale the moment the
+			// user changed its routing, and the browser would then open through the
+			// proxy they had just moved off.
+			account: (steamId64) => {
+				const found = vault.read().accounts.find((candidate) => candidate.steamId64 === steamId64);
+				if (!found) {
+					return undefined;
+				}
+				return {
+					accountName: found.accountName,
+					refreshToken: found.refreshToken,
+					proxyUrl: found.proxyUrl
+				};
+			},
+			/*
+			 * Minted through the account's own transport, so the request that
+			 * fetches the token leaves by the same address the browsing will. Doing
+			 * it any other way would mean the token arrived from the user's own
+			 * connection and was then used from a proxy — two addresses for one
+			 * session, which is the pattern routing exists to avoid.
+			 */
+			mintToken: async (steamId64, refreshToken) => {
+				const transport = await transports.forAccount({
+					steamId64,
+					proxyUrl: vault.read().accounts.find((candidate) => candidate.steamId64 === steamId64)
+						?.proxyUrl
+				});
+				return mintAccessToken(transport, steamId64, refreshToken, Date.now());
+			},
+			isUnlocked: () => vault.isUnlocked(),
+			touch: () => vault.touch()
+		});
+
 		registerUpdateHandlers({
 			// Read at call time, not captured: a vault that is locked has no settings
 			// to consult, and "locked" is not consent to make a network request.

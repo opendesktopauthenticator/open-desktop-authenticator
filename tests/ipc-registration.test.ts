@@ -9,6 +9,8 @@ import { registerConfirmationHandlers } from '../src/main/confirmations/ipc';
 import { registerUpdateHandlers } from '../src/main/update/ipc';
 import { registerEnrollmentHandlers } from '../src/main/steam/enrollment-ipc';
 import { registerTransferHandlers } from '../src/main/steam/transfer-ipc';
+import { registerBrowserHandlers } from '../src/main/browser/ipc';
+import type { AccountBrowsers } from '../src/main/browser/window';
 import type { TransferService } from '../src/main/steam/transfer';
 import type { EnrollmentService } from '../src/main/steam/enrollment';
 import type { ConfirmationsService } from '../src/main/confirmations/service';
@@ -79,6 +81,13 @@ function registerEverything(): void {
 		show: () => Promise.resolve(undefined)
 	});
 	registerTransferHandlers(transfer, vault);
+	registerBrowserHandlers({
+		browsers: { open: () => Promise.resolve() } as unknown as AccountBrowsers,
+		account: () => undefined,
+		mintToken: () => Promise.resolve(''),
+		isUnlocked: () => false,
+		touch: () => undefined
+	});
 }
 
 beforeEach(() => {
@@ -121,6 +130,9 @@ describe('IPC registration', () => {
 		const missing = Object.values(CHANNELS).filter((channel) => !registered.has(channel));
 
 		expect(missing).toEqual([
+			// Declared beside `accountSetProxy`, so it sorts ahead of the rest by
+			// declaration order rather than by anything meaningful.
+			CHANNELS.accountOpenBrowser,
 			CHANNELS.activityList,
 			CHANNELS.activityAcknowledge,
 			CHANNELS.confirmationsList,

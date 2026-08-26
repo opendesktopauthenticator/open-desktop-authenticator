@@ -76,6 +76,23 @@ export const CHANNELS = {
 	accountSetProxy: 'account:setProxy',
 
 	/**
+	 * Open a browser window signed in as one account, routed like that account.
+	 *
+	 * For finishing a trade that this application deliberately does not automate.
+	 * §12's answer to "why not just automate trading" is that confirming what you
+	 * started is a different thing from acting for you, and that line does not
+	 * move — so the alternative to a bot is a browser, carrying the routing the
+	 * user configured instead of leaking their own address into an account they
+	 * were careful to separate.
+	 *
+	 * Takes no URL. Where the window starts is this application's decision, not
+	 * the renderer's: a channel that accepted a destination would be a way to
+	 * point a signed-in Steam session at any page somebody could get into the
+	 * renderer.
+	 */
+	accountOpenBrowser: 'account:openBrowser',
+
+	/**
 	 * Turn automatic confirmation on or off for one account (§12 F6).
 	 *
 	 * Per account and per type, never global. What the user enables here is the
