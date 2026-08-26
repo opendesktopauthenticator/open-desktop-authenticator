@@ -298,10 +298,10 @@ export const moveAuthenticator = {
 	slug: 'move-steam-authenticator-new-phone',
 	guide: true,
 	navTitle: 'New phone',
-	title: 'Move your Steam authenticator to a new phone',
+	title: 'Move your Steam authenticator to a new phone: 2 days, not 15',
 	updated: '2026-08-14',
 	description:
-		'Transferring Steam Guard costs a 2-day trade restriction; removing and re-adding costs 15. The difference, and the current steps for each path.',
+		"How to move Steam Guard to a new phone using Steam's own transfer route — a 2-day trade hold, instead of the 15 days that removing and re-adding costs.",
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'HowTo',
@@ -494,14 +494,14 @@ export const revocationCode = {
 	slug: 'steam-revocation-code',
 	guide: true,
 	navTitle: 'Recovery code',
-	title: 'Steam recovery code: what the R-code does',
+	title: 'Steam revocation code: what it is, and how to get it back',
 	updated: '2026-08-14',
 	description:
-		'The R-code Valve calls your recovery code removes a Steam authenticator when the device is gone — and it is still retrievable while the app works.',
+		'The R-code that detaches a Steam authenticator when the device is gone — what it does, and how to retrieve yours while the authenticator still works.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
-		headline: 'Steam recovery code: what the R-code does',
+		headline: 'Steam revocation code: what it is, and how to get it back',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
 		dateModified: '2026-08-14',
@@ -509,7 +509,7 @@ export const revocationCode = {
 	}),
 	body: (s) => `
 		<article class="guide numbered">
-			<h1>Steam recovery code: what the R-code does</h1>
+			<h1>Steam revocation code: what it is, and how to get it back</h1>
 			<p class="lede">
 				It looks like <code>R12345</code>. Valve calls it your <strong>recovery
 				code</strong>; SDA and the maFile format call the same field
