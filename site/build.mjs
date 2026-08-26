@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
 import { rootIcons, hashedIcons, manifest } from './icons.mjs';
 import { checkAddresses } from './addresses.mjs';
-import { escape, reviewAsk } from './markup.mjs';
+import { escape, releaseGaps, reviewAsk, sentenceList } from './markup.mjs';
 import { anchorHeadings, readingMinutes, guideMeta, jumpList } from './guide-kit.mjs';
 
 // Re-exported so pages may take it from either module without a second import.
@@ -105,6 +105,29 @@ export const SITE = {
 		const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'));
 		return Object.keys(pkg.dependencies ?? {}).length;
 	},
+	/*
+	 * What it runs on.
+	 *
+	 * Modelled here because it was already typed out in three places — the
+	 * download page, the FAQ answer and a meta description — and macOS is a
+	 * `false` that is expected to become `true`: the packaging, the entitlements
+	 * and the release job all exist and wait only on an Apple certificate. The
+	 * day that lands, a hand-written "Windows and Linux" is wrong everywhere it
+	 * was typed and nothing would say so.
+	 *
+	 * `llms.txt` derives from this. The three older copies have not been moved
+	 * over and still state it themselves.
+	 */
+	platforms: [
+		{ name: 'Windows', detail: '10 version 1809 or later, and Windows 11', shipping: true },
+		{ name: 'Linux', detail: 'AppImage and .deb', shipping: true },
+		{
+			name: 'macOS',
+			detail: 'not shipped, because we will not publish a build we cannot sign',
+			shipping: false
+		}
+	],
+
 	repo: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator',
 
 	/*
@@ -743,6 +766,18 @@ ${PAGES.filter((p) => !p.noindex)
  * the build, because "the page exists but nothing points at it" is precisely
  * the failure this file is supposed to prevent.
  */
+/** "Windows (…) and Linux (…). macOS is not shipped, because …" */
+function platformSentence() {
+	const shipping = SITE.platforms.filter((p) => p.shipping);
+	const absent = SITE.platforms.filter((p) => !p.shipping);
+	// `sentenceList` rather than a second joiner: the serial comma is a decision
+	// this site has already made, and two implementations of it disagree.
+	const head = sentenceList(shipping.map((p) => `${p.name} (${p.detail})`));
+	return absent.length === 0
+		? `${head}.`
+		: `${head}. ${absent.map((p) => `${p.name} is ${p.detail}`).join('; ')}.`;
+}
+
 const LLMS_SECTIONS = [
 	{
 		heading: 'The application',
@@ -820,11 +855,55 @@ const LLMS_SECTIONS = [
 		join(out, 'llms.txt'),
 		`# ${SITE.name}
 
-> A free, open-source Steam Guard authenticator for Windows and Linux desktops. It generates Steam Guard codes, approves trade and market confirmations, and imports maFiles from Steam Desktop Authenticator (SDA). Published by ${SITE.publisher}.
+> A free, open-source Steam Guard authenticator for the desktop. It generates Steam Guard codes, approves Steam trade and market confirmations, and imports maFiles from Steam Desktop Authenticator (SDA). Published by ${SITE.publisher} under the MIT licence. Commonly abbreviated ${SITE.short}.
 
-This project exists because the original Steam Desktop Authenticator is abandoned, and the search results for it are dominated by clone sites that ship malware. Much of this site is therefore about telling a real download from a fake one: the source is public, every release carries checksums and build provenance, and the application never downloads or runs its own replacement.
+## What it is
 
-Nothing on this site is a binary. Downloads come from the Microsoft Store or from GitHub releases, and ${SITE.origin}/verify explains how to check one.
+${SITE.name} is a desktop replacement for Steam Desktop Authenticator (SDA), which its author ${SITE.sda.author} says is ${SITE.sda.unsupported ? SITE.sda.notice : 'still supported'}. Because SDA is abandoned, searching for it returns clone sites that ship malware and steal maFiles — and a maFile is the Steam authenticator itself, so losing one loses the account. Much of this website exists to help someone tell a real download from a fake one, whether or not they choose this application.
+
+It runs entirely on the user's own machine. There is no account to create, no server operated by the publisher, and no synchronisation: Steam communication happens directly between the user's machine and Valve.
+
+## Facts
+
+- **Cost:** free. No paid tier, no trial, no upsell.
+- **Licence:** MIT. Source: ${SITE.repo}
+- **Publisher:** ${SITE.publisher}, a Steam trading company — which is why it was written.
+- **Platforms:** ${platformSentence()}
+- **Install from:** the Microsoft Store (${SITE.store.url}) or GitHub releases (${SITE.repo}/releases/latest).
+- **This website hosts no binaries** and never will; every download control links outward.
+- **Runtime dependencies:** ${SITE.runtimeDependencies}.
+
+## What it does
+
+- Encrypted multi-account vault, unlocked with a passphrase the user chooses.
+- Generates Steam Guard codes.
+- Views, accepts and denies Steam trade and market confirmations.
+- Imports existing SDA maFiles, including encrypted ones, which additionally need SDA's manifest.json.
+- Exports back to the maFile format, so leaving later is a supported operation rather than a rescue.
+- Adds a Steam authenticator to an account that has none, and moves one from a phone.
+- Stores the Steam revocation code (Valve calls it the recovery code) and can reveal it again.
+- Optional automatic confirmation, per account and per type, off by default.
+- Optional per-account network routing.
+
+## What it deliberately does not do
+
+Non-goals rather than roadmap items: no trade automation beyond confirmations, no market or inventory tooling, and no analytics of any kind — including "anonymous" or opt-in. No servers, no sync, no accounts, no telemetry.
+
+**It never downloads or executes its own replacement.** The update check reports that a newer version exists and links to it; nothing is fetched or installed. Self-updating is exactly the mechanism the clone sites depend on, so an authenticator that did it could not argue against them.
+
+## How secrets are protected
+
+Steam secrets are encrypted at rest with scrypt and AES-256-GCM behind the user's passphrase. The interface runs isolated with no Node integration, the vault locks when idle, and the application opens no network connection beyond Steam and an optional update check. ${SITE.origin}/security sets out the model, including what it cannot protect against.
+
+## How to check a download is genuine
+
+Every release publishes SHA-256 checksums${SITE.release.signed ? ', a signature over that checksum list' : ''}, and build provenance naming the workflow and the commit that produced the bytes. ${SITE.origin}/verify carries commands to copy for each platform.
+
+${
+	releaseGaps(SITE).length
+		? `**Not finished, and said here rather than left to be discovered:** ${sentenceList(releaseGaps(SITE))}. ${SITE.origin}/download tracks each one.`
+		: `Everything once listed as outstanding is done; ${SITE.origin}/download shows where each stands.`
+}
 
 ${LLMS_SECTIONS.map(
 	(section) => `## ${section.heading}
