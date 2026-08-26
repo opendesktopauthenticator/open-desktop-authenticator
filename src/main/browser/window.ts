@@ -69,6 +69,15 @@ export interface BrowserWindowOptions {
 
 export interface BrowserWindowHandle {
 	loadURL(url: string): Promise<void>;
+	/** Bring this window to the user, restoring it if it was minimised. */
+	focus(): void;
+	/**
+	 * Where the main frame actually is, after every redirect Steam performed.
+	 *
+	 * Asking for a URL is not the same as landing on it, and the difference is
+	 * the whole of `looksSignedOut`.
+	 */
+	currentUrl(): string;
 	close(): void;
 	isDestroyed(): boolean;
 	on(event: 'closed', listener: () => void): void;
@@ -100,6 +109,16 @@ export const START_URL = 'https://steamcommunity.com/my/tradeoffers/';
 const COOKIE_HOSTS = ['https://steamcommunity.com', 'https://store.steampowered.com'] as const;
 
 export class BrowserSessionError extends Error {}
+
+/**
+ * Steam would not accept the session, so no window is open.
+ *
+ * Separate from `BrowserSessionError` because it is a **state the user can fix
+ * in one step**, not a failure to report — the same distinction
+ * `confirmationsListResponse.signInRequired` draws, and for the same reason:
+ * thrown as an error, the renderer can only print it.
+ */
+export class BrowserSignInRequired extends Error {}
 
 export interface OpenBrowserOptions {
 	steamId64: string;
@@ -173,8 +192,92 @@ export async function openAccountBrowser(
 	 */
 	window.setWindowOpenHandler(() => ({ action: 'allow' }));
 
-	await window.loadURL(START_URL);
+	/*
+	 * **Nothing below here may leave a window behind.**
+	 *
+	 * From this point there is a window on screen holding a signed-in session,
+	 * and `AccountBrowsers` has not recorded it — it records what this function
+	 * returns. So anything that throws from here leaves a signed-in Steam window
+	 * that the vault lock cannot reach and the user cannot see the origin of.
+	 * Both exits below close it and wipe the session before rethrowing.
+	 */
+	try {
+		await window.loadURL(START_URL);
+	} catch (cause) {
+		await abandon(window, session);
+		throw new BrowserSessionError('the browser could not reach Steam, so it was closed', {
+			cause
+		});
+	}
+
+	if (looksSignedOut(window.currentUrl())) {
+		await abandon(window, session);
+		throw new BrowserSignInRequired(
+			`Steam did not accept the saved session for ${options.accountName}. ` +
+				'Sign in to that account again.'
+		);
+	}
+
 	return window;
+}
+
+/** Steam's own hosts, and the only ones a signed-in landing may be on. */
+const STEAM_HOSTS = ['steamcommunity.com', 'store.steampowered.com', 'help.steampowered.com'];
+
+/**
+ * Did the browser land on a login page rather than on the user's trade offers?
+ *
+ * **The question the rest of this feature only approximated.** `ipc.ts` refuses
+ * to open a window for an account with no saved session, precisely so nobody is
+ * shown a Steam login form inside a window this application drew. But holding a
+ * refresh token is not the same as Steam accepting the cookie minted from it:
+ * that is a fact about Valve's servers, and the only way to learn it is to look
+ * at where the page ended up.
+ *
+ * Answers "signed in" only for a Steam page that is not a login page. Anything
+ * else — an unparseable URL, a blank window, a redirect somewhere unexpected —
+ * counts as signed out, because the one answer that does harm here is a
+ * confident yes.
+ */
+export function looksSignedOut(url: string): boolean {
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		// `about:blank`, an empty string, anything that never loaded.
+		return true;
+	}
+	if (parsed.protocol !== 'https:') {
+		return true;
+	}
+	if (!STEAM_HOSTS.includes(parsed.hostname.replace(/^www\./, ''))) {
+		return true;
+	}
+	return /^\/login(\/|$)/i.test(parsed.pathname);
+}
+
+/**
+ * Close a window that should never have stayed open, and take its session with
+ * it.
+ *
+ * Swallows both failures on purpose: this runs on the way to throwing something
+ * the caller needs to see, and a secondary error here would replace it with a
+ * less useful one.
+ */
+async function abandon(window: BrowserWindowHandle, session: BrowserSessionHandle): Promise<void> {
+	try {
+		if (!window.isDestroyed()) {
+			window.close();
+		}
+	} catch {
+		// Already gone.
+	}
+	try {
+		await session.clearStorageData?.();
+	} catch {
+		// The window is closed either way; an unreachable session is the lesser
+		// problem and still worth having tried to remove.
+	}
 }
 
 /**
@@ -201,6 +304,17 @@ export class AccountBrowsers {
 		// session, so it adds nothing except a way to lose track of one.
 		const existing = this.windows.get(options.steamId64);
 		if (existing && !existing.isDestroyed()) {
+			/*
+			 * **Raised, not ignored.**
+			 *
+			 * The window is almost certainly behind the one the button was pressed
+			 * in, so returning quietly makes the second press do nothing visible —
+			 * and a user who cannot see the window they just asked for concludes the
+			 * feature is broken and presses again. This screen's own copy button
+			 * carries the rule: silently doing nothing is the one response a button
+			 * must never give.
+			 */
+			existing.focus();
 			return;
 		}
 		const window = await openAccountBrowser(this.host, options);

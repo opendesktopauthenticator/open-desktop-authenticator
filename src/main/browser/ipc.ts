@@ -1,11 +1,12 @@
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
-import type { AccountBrowsers } from './window';
+import { AccessTokenError } from '../steam/access-token';
+import { BrowserSignInRequired, type AccountBrowsers } from './window';
 
 /**
  * The handler behind "open a browser for this account".
  *
- * Thin on purpose. It holds three refusals and nothing else — every decision
+ * Thin on purpose. Two refusals, one state, and nothing else — every decision
  * about sessions, routing and windows lives in `window.ts`, and every decision
  * about credentials lives in the vault. What is left here is the order those
  * have to happen in, which is the part with security consequences:
@@ -17,6 +18,15 @@ import type { AccountBrowsers } from './window';
  *     Steam password into a window this application drew.
  *  3. The token is minted **through the account's own routing**, so the request
  *     that fetches it leaves by the same address the browsing will.
+ *
+ * ## "Sign in" is a state, not an error
+ *
+ * Three different things mean the same thing to a user: no saved session, a
+ * refresh token Steam has finished with, and a cookie Steam declined. All three
+ * come back as `signInRequired` rather than as a throw, so the screen can offer
+ * the sign-in instead of printing a sentence about needing one — the same
+ * distinction `confirmationsListResponse` already draws, for the same reason.
+ * Everything else still throws.
  */
 
 export interface BrowserAccount {
@@ -51,25 +61,46 @@ export function registerBrowserHandlers(deps: BrowserHandlerDeps): void {
 		}
 
 		if (account.refreshToken === undefined || account.refreshToken === '') {
-			// Named precisely, because the fix differs from every other failure
-			// here: this one is "sign in", not "try again".
-			throw new BrowserRequestError(
-				`${account.accountName} has no saved Steam session. Sign in to that account first.`
-			);
+			return {
+				signInRequired: true,
+				reason: `There is no saved Steam session for ${account.accountName}.`
+			};
 		}
 
-		const accessToken = await deps.mintToken(steamId64, account.refreshToken);
+		let accessToken: string;
+		try {
+			accessToken = await deps.mintToken(steamId64, account.refreshToken);
+		} catch (err) {
+			// A refresh token Steam has finished with. Common after months away,
+			// and indistinguishable to the user from never having signed in — so it
+			// gets the same answer rather than a raw error about a token.
+			if (err instanceof AccessTokenError && err.needsSignIn) {
+				return { signInRequired: true, reason: err.message };
+			}
+			throw err;
+		}
 
-		await deps.browsers.open({
-			steamId64,
-			accountName: account.accountName,
-			proxyUrl: account.proxyUrl,
-			accessToken
-		});
+		try {
+			await deps.browsers.open({
+				steamId64,
+				accountName: account.accountName,
+				proxyUrl: account.proxyUrl,
+				accessToken
+			});
+		} catch (err) {
+			// Steam declined the cookie. The window has already closed itself and
+			// wiped its session; what is left is to tell the user the one thing that
+			// helps, which is not "it failed".
+			if (err instanceof BrowserSignInRequired) {
+				return { signInRequired: true, reason: err.message };
+			}
+			throw err;
+		}
 
 		// After the window is up, not before. Touching first would extend the
-		// auto-lock on a request that then failed.
+		// auto-lock on a request that then failed — and a sign-in state is one of
+		// those: nothing opened, so nothing here counts as the user being present.
 		deps.touch();
-		return { ok: true as const };
+		return { signInRequired: false };
 	});
 }

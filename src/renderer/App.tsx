@@ -19,6 +19,7 @@ import { RecoverAccount } from './screens/RecoverAccount';
 import { AddAuthenticator } from './screens/AddAuthenticator';
 import { MoveAuthenticator } from './screens/MoveAuthenticator';
 import { RevocationBackup } from './screens/RevocationBackup';
+import { SteamSignIn } from './screens/SteamSignIn';
 import { UnlockVault } from './screens/UnlockVault';
 import { VaultHome } from './screens/VaultHome';
 
@@ -83,6 +84,17 @@ export function App(): React.JSX.Element {
 	const [removingFor, setRemovingFor] = useState<AccountSummary | undefined>();
 	/** The account whose automatic-confirmation settings are open, if any. */
 	const [autoConfirmFor, setAutoConfirmFor] = useState<AccountSummary | undefined>();
+	/**
+	 * The browser could not open because Steam wants a sign-in, and for which
+	 * account.
+	 *
+	 * A whole screen rather than a message on the row, because the answer is a
+	 * password field — and the row has nowhere to put one. `Confirmations` does
+	 * the same thing for the same reason.
+	 */
+	const [browserSignIn, setBrowserSignIn] = useState<
+		{ account: AccountSummary; reason?: string } | undefined
+	>();
 	/**
 	 * Unrecoverable, and only ever one thing: the bridge to the main process does
 	 * not exist, so no screen in this app can function.
@@ -492,6 +504,51 @@ export function App(): React.JSX.Element {
 			);
 		}
 
+		if (browserSignIn) {
+			return (
+				<SteamSignIn
+					accountName={browserSignIn.account.accountName}
+					{...(browserSignIn.reason === undefined ? {} : { reason: browserSignIn.reason })}
+					onSignIn={async (password) => {
+						const result = await api.signInToSteam(browserSignIn.account.steamId64, password);
+						// **Only on success**, for the reason `Confirmations` records: a
+						// failure comes back rather than throwing, so advancing here would
+						// clear the form as though the sign-in had worked.
+						if (!result.ok) {
+							return result;
+						}
+
+						// Straight into the browser the user actually pressed for, rather
+						// than back to a list they would have to press again.
+						const opened = await api.openAccountBrowser(browserSignIn.account.steamId64);
+						if (opened.signInRequired) {
+							/*
+							 * A fresh sign-in that Steam still will not accept for browsing.
+							 *
+							 * `retryable: false` on purpose: another password cannot fix
+							 * this, and a form that keeps asking for one is how a person ends
+							 * up typing their Steam password over and over into a window an
+							 * application drew. The form withdraws and says so.
+							 */
+							return {
+								ok: false as const,
+								retryable: false,
+								reason:
+									opened.reason ??
+									'Steam accepted the sign-in but would not open a browsing session.'
+							};
+						}
+
+						setBrowserSignIn(undefined);
+						// The account now has a session, which the list shows.
+						void refresh();
+						return result;
+					}}
+					onCancel={() => setBrowserSignIn(undefined)}
+				/>
+			);
+		}
+
 		if (routingFor) {
 			// Re-read from the live list so the screen reflects a change made in it,
 			// rather than the snapshot taken when it was opened.
@@ -672,6 +729,19 @@ export function App(): React.JSX.Element {
 				onBackUpRevocationCode={setBackupFor}
 				onChangeRouting={setRoutingFor}
 				onShowConfirmations={setConfirmingFor}
+				onOpenBrowser={async (account) => {
+					const result = await api.openAccountBrowser(account.steamId64);
+					// Taking over the screen here rather than in `VaultHome`: the row has
+					// nowhere to put a password field, and this is the component that owns
+					// which screen is showing.
+					if (result.signInRequired) {
+						setBrowserSignIn({
+							account,
+							...(result.reason === undefined ? {} : { reason: result.reason })
+						});
+					}
+					return result;
+				}}
 				onRemoveAccount={setRemovingFor}
 				onChangeAutoConfirm={setAutoConfirmFor}
 				onImport={() => setView('import')}

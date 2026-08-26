@@ -47,6 +47,7 @@ const render = (accounts: AccountSummary[]) =>
 			onBackUpRevocationCode={noop}
 			onChangeRouting={noop}
 			onShowConfirmations={noop}
+			onOpenBrowser={() => Promise.resolve({ signInRequired: false })}
 			onRemoveAccount={noop}
 			onMove={noop}
 			onChangeAutoConfirm={noop}

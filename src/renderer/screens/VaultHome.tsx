@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { CompanyMark } from '../CompanyMark';
 import { Logo } from '../Logo';
 import { branding } from '../../shared/branding';
-import type { AccountSummary, CodesList, ExportResult } from '../../shared/ipc';
+import type { AccountSummary, CodesList, ExportResult, OpenBrowserResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -21,6 +21,7 @@ export function VaultHome({
 	onBackUpRevocationCode,
 	onChangeRouting,
 	onShowConfirmations,
+	onOpenBrowser,
 	onRemoveAccount,
 	onChangeAutoConfirm,
 	onImport,
@@ -42,6 +43,15 @@ export function VaultHome({
 	onBackUpRevocationCode: (account: AccountSummary) => void;
 	onChangeRouting: (account: AccountSummary) => void;
 	onShowConfirmations: (account: AccountSummary) => void;
+	/**
+	 * Open a signed-in, routed browser for this account.
+	 *
+	 * Resolves with what happened rather than throwing it, because one outcome —
+	 * Steam wanting a sign-in — is a step the caller can offer instead of an
+	 * error this screen would only print. When it comes back `signInRequired` the
+	 * caller has already taken over the screen, so nothing is shown here.
+	 */
+	onOpenBrowser: (account: AccountSummary) => Promise<OpenBrowserResult>;
 	onRemoveAccount: (account: AccountSummary) => void;
 	onChangeAutoConfirm: (account: AccountSummary) => void;
 	onImport: () => void;
@@ -96,6 +106,21 @@ export function VaultHome({
 
 	const [exporting, setExporting] = useState<string | undefined>();
 	const [exported, setExported] = useState<{ steamId64: string; message: string } | undefined>();
+
+	/** The account whose browser is being opened, and why the last one was not. */
+	const [opening, setOpening] = useState<string | undefined>();
+	const [browserError, setBrowserError] = useState<
+		{ steamId64: string; message: string } | undefined
+	>();
+	/**
+	 * Its own counter, not the one copy and export share.
+	 *
+	 * Same problem, same fix: one status slot for the whole list, so a slow
+	 * failure on one row could land under another row's newer attempt. Separate
+	 * from `attempt` because these are separate slots — opening a browser should
+	 * not silence an export's result, which is still on screen and still true.
+	 */
+	const browserAttempt = useRef(0);
 
 	// Retire the message when the clipboard clear it describes has happened.
 	// Left up, it goes from true to false without changing: the clipboard is
@@ -404,6 +429,51 @@ export function VaultHome({
 									>
 										Confirmations
 									</button>
+									{/* A browser, signed in as this account and routed like it.
+
+									    The thing it replaces is the reason it exists: finishing a trade
+									    used to mean signing in to Steam in an ordinary browser, which
+									    puts the machine's own address on an account the user was
+									    careful to route — and does it while they are logged in and
+									    trading, which is the worst moment for it. */}
+									<button
+										type="button"
+										className="secondary"
+										disabled={opening === account.steamId64}
+										title={
+											account.hasProxy
+												? 'Open a signed-in browser for this account, through its proxy. Starts at your trade offers.'
+												: 'Open a signed-in browser for this account. Starts at your trade offers.'
+										}
+										onClick={() => {
+											const mine = (browserAttempt.current += 1);
+											const newest = (): boolean => browserAttempt.current === mine;
+											setBrowserError(undefined);
+											setOpening(account.steamId64);
+											onOpenBrowser(account)
+												.catch((err: unknown) => {
+													// A sign-in is not an error and never arrives here — it
+													// comes back as a state and the caller shows the form.
+													// What reaches this is routing that could not be applied,
+													// or Steam being unreachable.
+													if (!newest()) {
+														return;
+													}
+													setBrowserError({
+														steamId64: account.steamId64,
+														message: messageOf(err)
+													});
+												})
+												.finally(() =>
+													// Only this account's flag, for the reason the copy button
+													// documents: clearing unconditionally re-enables a row whose
+													// own open is still in flight.
+													setOpening((prev) => (prev === account.steamId64 ? undefined : prev))
+												);
+										}}
+									>
+										{opening === account.steamId64 ? 'Opening…' : 'Trade'}
+									</button>
 									{/* Last, and visually quietest of the three. It is the only one
 									    here that destroys something. */}
 									{/* Reports what happened. Fire-and-forget made a cancelled save
@@ -458,6 +528,9 @@ export function VaultHome({
 									</button>
 									{exported?.steamId64 === account.steamId64 && (
 										<p className="hint">{exported.message}</p>
+									)}
+									{browserError?.steamId64 === account.steamId64 && (
+										<p className="hint bad">{browserError.message}</p>
 									)}
 								</div>
 

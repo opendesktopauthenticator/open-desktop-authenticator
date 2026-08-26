@@ -3,7 +3,9 @@ import {
 	AccountBrowsers,
 	BROWSER_USER_AGENT,
 	BrowserSessionError,
+	BrowserSignInRequired,
 	browserPartitionFor,
+	looksSignedOut,
 	openAccountBrowser,
 	START_URL,
 	type BrowserHost,
@@ -29,16 +31,29 @@ interface Recorded {
 	cookies: { url: string; name: string; value: string }[];
 	windows: BrowserWindowOptions[];
 	loaded: string[];
+	/** Windows that were closed, and sessions that were wiped, after a bad landing. */
+	closed: number;
+	wiped: string[];
+	/** Times an already-open window was raised instead of a new one being made. */
+	focused: number;
 }
 
-function harness(overrides: { setProxy?: () => Promise<void> } = {}) {
+function harness(
+	overrides: { setProxy?: () => Promise<void>; landsOn?: string; loadFails?: boolean } = {}
+) {
+	// Per-harness, not module-level: two tests sharing one of these is how a
+	// fake starts reporting the previous test's partition.
+	let partitionName = '';
 	const recorded: Recorded = {
 		partitions: [],
 		proxies: [],
 		userAgents: [],
 		cookies: [],
 		windows: [],
-		loaded: []
+		loaded: [],
+		closed: 0,
+		wiped: [],
+		focused: 0
 	};
 
 	const session: BrowserSessionHandle = {
@@ -49,6 +64,10 @@ function harness(overrides: { setProxy?: () => Promise<void> } = {}) {
 				return Promise.resolve();
 			}),
 		setUserAgent: (ua) => recorded.userAgents.push(ua),
+		clearStorageData: () => {
+			recorded.wiped.push(partitionName);
+			return Promise.resolve();
+		},
 		cookies: {
 			set: (cookie) => {
 				recorded.cookies.push({ url: cookie.url, name: cookie.name, value: cookie.value });
@@ -60,9 +79,20 @@ function harness(overrides: { setProxy?: () => Promise<void> } = {}) {
 	const window: BrowserWindowHandle = {
 		loadURL: (url) => {
 			recorded.loaded.push(url);
-			return Promise.resolve();
+			return overrides.loadFails === true
+				? Promise.reject(new Error('ERR_TUNNEL_CONNECTION_FAILED'))
+				: Promise.resolve();
 		},
-		close: vi.fn(),
+		// Deliberately a separate fact from what `loadURL` was handed. A fake that
+		// always echoes the requested URL back can never land anywhere else, which
+		// is the one thing `looksSignedOut` exists to notice.
+		currentUrl: () => overrides.landsOn ?? START_URL,
+		focus: () => {
+			recorded.focused += 1;
+		},
+		close: () => {
+			recorded.closed += 1;
+		},
 		isDestroyed: () => false,
 		on: vi.fn(),
 		setWindowOpenHandler: vi.fn()
@@ -71,6 +101,7 @@ function harness(overrides: { setProxy?: () => Promise<void> } = {}) {
 	const host: BrowserHost = {
 		sessionFromPartition: (partition) => {
 			recorded.partitions.push(partition);
+			partitionName = partition;
 			return session;
 		},
 		createWindow: (options) => {
@@ -202,6 +233,96 @@ describe('the in-app browser', () => {
 });
 
 /**
+ * Asking for a page is not the same as landing on it.
+ *
+ * Everything above this point is about what the window is *given*: a partition,
+ * a proxy, a user agent, a cookie. None of it establishes the thing the feature
+ * actually promises, which is that Steam accepted the session — that is a fact
+ * about Valve's servers, and the only place it shows up is the URL the main
+ * frame ended on.
+ *
+ * The refusal in `ipc.ts` checks for a stored refresh token, which is a proxy
+ * for this and not the thing itself: a token can exist and be declined. Until
+ * these tests the gap between the two was invisible, and what fell into it was
+ * a Steam login form inside a window this application drew.
+ */
+describe('where the window actually ended up', () => {
+	it.each([
+		['the trade offers page', 'https://steamcommunity.com/my/tradeoffers/', false],
+		['a market listing', 'https://steamcommunity.com/market/listings/730/x', false],
+		['the store, signed in', 'https://store.steampowered.com/account/', false],
+		['a www. host', 'https://www.steamcommunity.com/my/tradeoffers/', false],
+		[
+			'the community login page',
+			'https://steamcommunity.com/login/home/?goto=my%2Ftradeoffers',
+			true
+		],
+		['the store login page', 'https://store.steampowered.com/login/', true],
+		['help, signed out', 'https://help.steampowered.com/login/', true],
+		['a page that never loaded', 'about:blank', true],
+		['nothing at all', '', true],
+		['something that is not a URL', 'not a url', true],
+		['a host that is not Steam', 'https://steamcommunity.com.evil.example/my/', true],
+		['plain http, even on Steam', 'http://steamcommunity.com/my/tradeoffers/', true]
+	])('%s', (_name, url, signedOut) => {
+		expect(looksSignedOut(url)).toBe(signedOut);
+	});
+
+	/*
+	 * The case the whole check exists for.
+	 *
+	 * A user shown a Steam login form inside this application is being taught the
+	 * exact habit every page on the site tells them to refuse. So the window does
+	 * not stay open to be looked at — it closes, and its session goes with it.
+	 */
+	it('closes the window and wipes the session when Steam sent us to a login page', async () => {
+		const { host, recorded } = harness({
+			landsOn: 'https://steamcommunity.com/login/home/?goto=my%2Ftradeoffers'
+		});
+
+		await expect(openAccountBrowser(host, ACCOUNT)).rejects.toBeInstanceOf(BrowserSignInRequired);
+
+		expect(recorded.closed, 'a login page was left on screen').toBe(1);
+		expect(recorded.wiped, 'the declined session was left in place').toEqual([
+			browserPartitionFor(ACCOUNT.steamId64)
+		]);
+	});
+
+	it('says which account to sign in to, and does not call it a failure', async () => {
+		const { host } = harness({ landsOn: 'https://steamcommunity.com/login/home/' });
+		await expect(openAccountBrowser(host, ACCOUNT)).rejects.toThrow(/demo_trader/);
+		await expect(openAccountBrowser(host, ACCOUNT)).rejects.toThrow(/sign in/i);
+	});
+
+	/*
+	 * A window that failed to load is still a window, holding a signed-in
+	 * session, and `AccountBrowsers` has not recorded it yet — it records what
+	 * `openAccountBrowser` returns. So an unhandled throw here left a Steam
+	 * window on screen that the vault lock could not reach.
+	 */
+	it('closes the window when the page could not be reached at all', async () => {
+		const { host, recorded } = harness({ loadFails: true });
+
+		await expect(openAccountBrowser(host, ACCOUNT)).rejects.toBeInstanceOf(BrowserSessionError);
+
+		expect(recorded.closed, 'a window survived a failed load').toBe(1);
+		expect(recorded.wiped).toEqual([browserPartitionFor(ACCOUNT.steamId64)]);
+	});
+
+	it('never records a window it did not open successfully', async () => {
+		const { host } = harness({ landsOn: 'https://steamcommunity.com/login/home/' });
+		const browsers = new AccountBrowsers(host);
+
+		await expect(browsers.open(ACCOUNT)).rejects.toBeInstanceOf(BrowserSignInRequired);
+
+		// If it had been recorded, the next attempt would be treated as "already
+		// open" and quietly do nothing, leaving the user with no window and no
+		// error either.
+		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(false);
+	});
+});
+
+/**
  * What the vault lock has to reach.
  *
  * `SteamTransportFactory.forgetAll` wipes the `steam-*` sessions it made. The
@@ -252,6 +373,8 @@ describe('closing every browser when the vault locks', () => {
 				let destroyed = false;
 				return {
 					loadURL: () => Promise.resolve(),
+					currentUrl: () => START_URL,
+					focus: () => undefined,
 					close: () => {
 						destroyed = true;
 						order.push('close');
@@ -290,6 +413,8 @@ describe('closing every browser when the vault locks', () => {
 			}),
 			createWindow: () => ({
 				loadURL: () => Promise.resolve(),
+				currentUrl: () => START_URL,
+				focus: () => undefined,
 				close: () => {
 					throw new Error('window already gone');
 				},
@@ -317,6 +442,8 @@ describe('closing every browser when the vault locks', () => {
 			}),
 			createWindow: () => ({
 				loadURL: () => Promise.resolve(),
+				currentUrl: () => START_URL,
+				focus: () => undefined,
 				close: () => undefined,
 				isDestroyed: () => false,
 				on: () => undefined,
@@ -329,13 +456,26 @@ describe('closing every browser when the vault locks', () => {
 		await expect(browsers.closeAll()).resolves.toBeUndefined();
 	});
 
-	it('does not open a second window for the same account', async () => {
-		const host = lockHarness([], []);
+	/*
+	 * Pressing the button again, with the window already open behind the one the
+	 * button is in.
+	 *
+	 * Returning quietly here makes the second press do nothing the user can see,
+	 * and somebody who cannot find the window they just asked for presses again.
+	 * The account list's own copy button carries the rule this follows: silently
+	 * doing nothing is the one response a button must never give.
+	 */
+	it('raises the window it already has rather than opening a second', async () => {
+		const { host, recorded } = harness();
 		const browsers = new AccountBrowsers(host);
+
 		await browsers.open(ACCOUNT);
 		await browsers.open(ACCOUNT);
-		// One partition lookup per real open. A second window would share the
-		// session anyway, adding nothing but a window to lose track of.
+
+		// A second window would share the partition and the session anyway, so it
+		// adds nothing but a window to lose track of.
+		expect(recorded.windows, 'a second window was opened').toHaveLength(1);
+		expect(recorded.focused, 'the second press did nothing at all').toBe(1);
 		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(true);
 	});
 });
@@ -356,6 +496,8 @@ function lockHarness(cleared: string[], closed: string[]): BrowserHost {
 			let destroyed = false;
 			return {
 				loadURL: () => Promise.resolve(),
+				currentUrl: () => START_URL,
+				focus: () => undefined,
 				close: () => {
 					destroyed = true;
 					closed.push('closed');

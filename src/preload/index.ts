@@ -12,6 +12,7 @@ import type {
 	ImportOutcome,
 	ImportReport,
 	ImportSelection,
+	OpenBrowserResult,
 	RendererApi,
 	EnrollBegin,
 	ExportResult,
@@ -196,7 +197,9 @@ const api: RendererApi = {
 	 * any page that reached the renderer.
 	 */
 	openAccountBrowser: (steamId64: string) =>
-		ipcRenderer.invoke(CHANNELS.accountOpenBrowser, { steamId64 }) as Promise<void>,
+		ipcRenderer.invoke(CHANNELS.accountOpenBrowser, {
+			steamId64
+		}) as Promise<OpenBrowserResult>,
 
 	// §11 S2 exception (a). The passphrase is required again on purpose.
 	revealRevocationCode: (steamId64: string, passphrase: string) =>

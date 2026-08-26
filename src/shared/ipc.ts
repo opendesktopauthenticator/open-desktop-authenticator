@@ -595,6 +595,28 @@ export const confirmationsListResponse = z.object({
 });
 
 /**
+ * What came of asking for a browser window.
+ *
+ * No payload, because the result is a window rather than data. The one thing
+ * worth reporting is the state that stops it opening and that the user can
+ * clear in a single step — deliberately the same shape as
+ * `confirmationsListResponse.signInRequired`, and for the reason written there:
+ * thrown as an error, the renderer can only print it.
+ *
+ * Three unrelated causes arrive here as one answer, because they are one answer
+ * to the person reading it: no session was ever saved, the saved one has
+ * expired, or Steam declined the cookie minted from it.
+ */
+export const openBrowserResponse = z.object({
+	/** False means a window is open. */
+	signInRequired: z.boolean(),
+	/** Why, in terms the user can act on. Present when `signInRequired`. */
+	reason: z.string().optional()
+});
+
+export type OpenBrowserResult = z.infer<typeof openBrowserResponse>;
+
+/**
  * One thing automatic confirmation did, or refused to do.
  *
  * Same shape the renderer already receives for a confirmation — no nonce, no
@@ -840,7 +862,7 @@ export const IPC_CONTRACT = {
 				// points.
 			})
 			.strict(),
-		response: okResponse
+		response: openBrowserResponse
 	},
 
 	[CHANNELS.accountSetProxy]: {
@@ -1086,9 +1108,10 @@ export interface RendererApi {
 	 * Open a signed-in, routed browser for this account.
 	 *
 	 * Resolves when the window is on screen, not when the user is finished with
-	 * it — there is nothing to wait for and nothing to return.
+	 * it — there is nothing to wait for once it is up. What comes back is the one
+	 * thing that stops it opening and that the caller can offer to fix.
 	 */
-	openAccountBrowser(steamId64: string): Promise<void>;
+	openAccountBrowser(steamId64: string): Promise<OpenBrowserResult>;
 	/** Record that the code has been written down, clearing the account's warning. */
 	confirmRevocationBackup(steamId64: string): Promise<{ ok: true }>;
 }

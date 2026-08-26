@@ -189,6 +189,22 @@ this process. No preload, no bridge, `sandbox` and `contextIsolation` on,
 page titled "Steam — Sign In" inside this application would be the exact
 deception the project exists to warn people about, wearing our chrome.
 
+**No login page is ever shown in it, and this is checked rather than assumed.**
+The claim above — that no password is typed into a window this application drew
+— used to rest on refusing to open a browser for an account with no stored
+refresh token. That is a proxy for the property, not the property: a token can
+exist and Steam can still decline the cookie minted from it, and the window
+would then have landed on a Steam login form wearing this application's chrome,
+which is the precise deception the project exists to warn people about. So the
+URL the main frame actually ended on is inspected after the load. Anything that
+is not a signed-in Steam page — a login path, a redirect elsewhere, a page that
+never loaded — closes the window and wipes its session before anyone sees it,
+and the user is asked to sign in through this application's own form instead.
+
+The same rule covers a load that fails outright. Until it did, a window that
+could not reach Steam stayed on screen holding a signed-in session that
+`AccountBrowsers` had never recorded, and so the vault lock could not reach it.
+
 **Accepted:** the user can navigate anywhere. That is the feature — a browser
 that only reached one page would not finish a trade. Ordinary browser
 same-origin rules apply, so a page on another domain cannot read Steam's

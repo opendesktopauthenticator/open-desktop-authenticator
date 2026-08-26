@@ -245,7 +245,7 @@ describe('the update-check toggle', () => {
 	});
 });
 
-describe('copy and export status on the account list', () => {
+describe('per-account status on the account list', () => {
 	it('is only written by the newest attempt', () => {
 		const source = readFileSync(join(__dirname, '../src/renderer/screens/VaultHome.tsx'), 'utf8');
 		// One status slot for the whole list: the first copy after an unlock waits
@@ -253,7 +253,23 @@ describe('copy and export status on the account list', () => {
 		// so an older failure could overwrite a newer success.
 		expect(source).toMatch(/const attempt = useRef\(0\);/);
 		expect(source.match(/const mine = \(attempt\.current \+= 1\);/g) ?? []).toHaveLength(2);
-		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(4);
+
+		/*
+		 * The browser counts separately, and that is deliberate rather than an
+		 * oversight this test should have caught.
+		 *
+		 * `attempt` is shared by copy and export because they share one status
+		 * slot. The browser has its own slot, so sharing the counter would make
+		 * opening a browser silence an export result that is still on screen and
+		 * still true.
+		 */
+		expect(source).toMatch(/const browserAttempt = useRef\(0\);/);
+		expect(source.match(/const mine = \(browserAttempt\.current \+= 1\);/g) ?? []).toHaveLength(1);
+
+		// Every asynchronous writer to a shared slot, guarded: two for copy, two
+		// for export, one for the browser — which has no success message to write,
+		// only a failure.
+		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(5);
 	});
 });
 

@@ -86,6 +86,19 @@ export const electronBrowserHost: BrowserHost = {
 
 		return {
 			loadURL: (url) => window.loadURL(url),
+			// The contents' URL, not the one that was requested: after Steam's
+			// redirects these are different, and the difference is the only way to
+			// tell a signed-in landing from a login page.
+			currentUrl: () => window.webContents.getURL(),
+			focus: () => {
+				// `focus()` alone does nothing to a minimised window — it is restored
+				// first, or the second press on an account whose browser is minimised
+				// is still a press that does nothing.
+				if (window.isMinimized()) {
+					window.restore();
+				}
+				window.focus();
+			},
 			close: () => window.close(),
 			isDestroyed: () => window.isDestroyed(),
 			on: (event, listener) => {
