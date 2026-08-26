@@ -1,3 +1,5 @@
+import { releaseGaps, sentenceList, countPhrase } from '../markup.mjs';
+
 /**
  * Pages that answer a question somebody is actually typing.
  *
@@ -291,7 +293,7 @@ export const alternatives = {
 		dateModified: s.updated,
 		mainEntityOfPage: `${s.origin}/alternatives`
 	}),
-	body: () => `
+	body: (s) => `
 		<article>
 			<h1>Steam authenticator alternatives to SDA, compared</h1>
 			<p class="lede">
@@ -341,9 +343,14 @@ export const alternatives = {
 				trust us. Public source, built in public CI, no self-updating, and
 				<a href="/security">a documented security model that includes what it cannot
 				protect you from</a>. Every release publishes checksums and build provenance.
-				Two things are not yet done: signing that checksum list, and reproducible builds
-				you could compare byte for byte —
-				<a href="/download">the download page says where each one stands</a>.
+				${
+					releaseGaps(s).length
+						? `${countPhrase(releaseGaps(s).length)} not yet done:
+							${sentenceList(releaseGaps(s, 'noun'))} —
+							<a href="/download">the download page says where each one stands</a>.`
+						: `Nothing on that list is still outstanding —
+							<a href="/download">the download page shows where each one stands</a>.`
+				}
 			</p>
 			<p>
 				<strong>Choose it if:</strong> you want a desktop authenticator and you want to

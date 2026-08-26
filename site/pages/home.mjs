@@ -1,3 +1,5 @@
+import { releaseGaps, sentenceList } from '../markup.mjs';
+
 export default {
 	slug: 'index',
 	title: 'Open Desktop Authenticator — Steam Guard on your PC',
@@ -85,7 +87,7 @@ export default {
 			</ul>
 		</section>`,
 
-	body: () => `
+	body: (s) => `
 		<article>
 			<div class="callout">
 				<h2>Status: 1.0, in the Microsoft Store and on GitHub</h2>
@@ -95,10 +97,14 @@ export default {
 					and never will — every button here links outward.
 				</p>
 				<p>
-					What is still missing is written down rather than left for you to find: the
-					direct downloads carry no code-signing certificate, nothing signs the
-					checksum list, builds are not yet reproducible, and no independent audit has
-					happened. <a href="/download">The download page tracks each of those.</a>
+					${
+						releaseGaps(s).length
+							? `What is still missing is written down rather than left for you to find:
+								${sentenceList(releaseGaps(s))}.
+								<a href="/download">The download page tracks each of those.</a>`
+							: `Everything this page once listed as outstanding is done.
+								<a href="/download">The download page shows where each one stands.</a>`
+					}
 				</p>
 				<p>
 					<strong>Code signing policy:</strong> who may approve a release for signing,

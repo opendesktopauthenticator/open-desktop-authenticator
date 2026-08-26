@@ -1,4 +1,4 @@
-import { reviewAsk } from '../markup.mjs';
+import { releaseGaps, reviewAsk } from '../markup.mjs';
 
 /** Download status, migration, documentation hub, FAQ, support and 404. */
 
@@ -427,14 +427,14 @@ export const faq = {
 			acceptedAnswer: { '@type': 'Answer', text: item.plain }
 		}))
 	}),
-	body: () => `
+	body: (s) => `
 		<article>
 			<h1>Frequently asked questions</h1>
 			${FAQ_ITEMS.map(
 				(item) => `
 			<section class="faq-item">
 				<h2>${item.q}</h2>
-				${item.a}
+				${typeof item.a === 'function' ? item.a(s) : item.a}
 			</section>`
 			).join('')}
 
@@ -487,9 +487,27 @@ const FAQ_ITEMS = [
 		q: 'How do I know this is not itself a scam?',
 		plain:
 			'Do not take our word for it. The source is public, the publisher is a registered company, and 1.0 is out — so the honest answer includes what is still not finished.',
-		a: `<p>Do not take our word for it — that is the entire design. Here is what you can check <strong>today</strong>: the source is public and you can build and run it yourself; the publisher is a named, registered company you can look up; and the site tells you <a href="/verify">how to check any download</a>, ours or anyone else's.</p>
-			<p>And here is what is <strong>not</strong> finished, because a page that only lists the reassuring half is doing the thing it warns you about. The direct downloads carry no code-signing certificate, so Windows warns on them. Nothing signs the checksum list, so take it from the release page itself rather than from wherever you got the installer. Reproducible builds — compiling the tag yourself and getting byte-for-byte identical output — are further out still. No independent audit has happened. <a href="/download">The download page tracks each of those</a>, and the site refuses to build if any page here claims one of them before it is true, or goes on saying it is missing after it is not.</p>
-			<p>We would rather you were sceptical of us and safe than trusting and robbed.</p>`
+		/*
+		 * **Derived, because this paragraph made a promise it was breaking.**
+		 *
+		 * Its last sentence says the site refuses to build if any page goes on
+		 * saying something is missing after it is not — and this paragraph was
+		 * saying "Nothing signs the checksum list" long after cosign started
+		 * signing it. The claim was true of the machinery and false of the page
+		 * making it. Now the list comes from the flags, so the sentence is
+		 * describing something that actually holds.
+		 */
+		a: (s) => {
+			const open = releaseGaps(s, 'sentence');
+			const enforcement = `<a href="/download">The download page tracks each of those</a>, and the site refuses to build if any page here claims one of them before it is true, or goes on saying it is missing after it is not.`;
+			return `<p>Do not take our word for it — that is the entire design. Here is what you can check <strong>today</strong>: the source is public and you can build and run it yourself; the publisher is a named, registered company you can look up; and the site tells you <a href="/verify">how to check any download</a>, ours or anyone else's.</p>
+			<p>${
+				open.length
+					? `And here is what is <strong>not</strong> finished, because a page that only lists the reassuring half is doing the thing it warns you about. ${open.join(' ')} ${enforcement}`
+					: `Everything this answer used to list as unfinished is now done. ${enforcement}`
+			}</p>
+			<p>We would rather you were sceptical of us and safe than trusting and robbed.</p>`;
+		}
 	},
 	{
 		q: 'What happens if I lose my vault passphrase?',

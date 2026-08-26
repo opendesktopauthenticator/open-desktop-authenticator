@@ -210,7 +210,16 @@ export const SITE = {
 		 */
 		gpgSignature: false,
 		/** Anyone can rebuild the tag and get the same bytes. Deferred (§P3). */
-		reproducible: false
+		reproducible: false,
+		/*
+		 * **An independent third party has audited this and published the
+		 * result.** Maintainer testing is not that, and neither is passing Store
+		 * certification — certification checks policy compliance, not
+		 * cryptography. The flag exists because two pages asserted the absence
+		 * of an audit in prose, which is a claim that would have gone stale
+		 * silently the day one happened.
+		 */
+		audited: false
 	},
 
 	/*

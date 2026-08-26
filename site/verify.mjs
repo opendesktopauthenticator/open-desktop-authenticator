@@ -435,6 +435,50 @@ const STALE_ABSENCE = [
 	{
 		flag: 'checksums',
 		patterns: [/checksums? (?:will|are still to)|no checksums? (?:yet|exist)/gi]
+	},
+	/*
+	 * **The four below exist because the two above were not enough.**
+	 *
+	 * `signed` went true when the release workflow began signing SHA256SUMS.txt
+	 * with cosign, and the homepage went on saying "nothing signs the checksum
+	 * list" — two paragraphs under a hero that read the same flag correctly and
+	 * said the opposite. A page contradicting itself about its own signatures,
+	 * on a site whose entire argument is "verify us rather than trust us", and
+	 * the verifier watched it happen: `STALE_ABSENCE` covered `published` and
+	 * `checksums` and nothing else, so the one flag that actually flipped was
+	 * the one flag nobody was watching.
+	 *
+	 * Every remaining flag is listed now, whether or not it looks likely to
+	 * flip. The cost of an entry that never fires is nothing; the cost of the
+	 * missing entry was a live page understating its own security.
+	 */
+	{
+		flag: 'signed',
+		patterns: [
+			/nothing signs (?:the|that) checksum list/gi,
+			/checksum list is (?:un|not )signed/gi,
+			/no signature over (?:the|that)/gi,
+			/(?:not yet done|still missing)[^.]{0,200}signing (?:the|that) checksum list/gi
+		]
+	},
+	{
+		flag: 'codeSigned',
+		patterns: [
+			/carry no code[- ]signing certificate/gi,
+			/(?:are|is) not (?:yet )?code[- ]signed/gi,
+			/(?:not yet done|still missing)[^.]{0,200}code[- ]signing certificate for the direct/gi
+		]
+	},
+	{
+		flag: 'reproducible',
+		patterns: [/builds are not (?:yet )?reproducible/gi, /reproducible builds you could compare/gi]
+	},
+	{
+		flag: 'audited',
+		patterns: [
+			/no independent audit has happened/gi,
+			/(?:not yet done|still missing)[^.]{0,200}an independent audit/gi
+		]
 	}
 ];
 

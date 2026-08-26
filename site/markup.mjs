@@ -49,3 +49,71 @@ export function reviewAsk(s, { got }) {
 				</div>
 			</aside>`;
 }
+
+/**
+ * The distance between what the release pipeline does today and what it should
+ * eventually do, derived from the flags rather than written out by hand.
+ *
+ * `build.mjs` states the rule this exists to enforce: every status claim on the
+ * site renders from the release object. Two pages had drifted from it anyway —
+ * both still said the checksum list was unsigned long after it was signed —
+ * because they described the gaps in prose instead of deriving them. Prose does
+ * not follow a flag; this does.
+ *
+ * Each gap carries three phrasings because the call sites need different
+ * grammar: `clause` completes "what is missing is …", `noun` completes "not yet
+ * done: …", and `sentence` stands on its own — the FAQ gives each gap its
+ * consequence rather than just its name, which is the most useful form and the
+ * one worth keeping when the list became derived.
+ */
+const RELEASE_GAPS = [
+	{
+		open: (r) => !(r.checksums && r.signed),
+		clause: 'nothing signs the checksum list',
+		noun: 'signing that checksum list',
+		sentence:
+			'Nothing signs the checksum list, so take it from the release page itself ' +
+			'rather than from wherever you got the installer.'
+	},
+	{
+		open: (r) => !r.codeSigned,
+		clause: 'the direct downloads carry no code-signing certificate',
+		noun: 'a code-signing certificate for the direct downloads',
+		sentence: 'The direct downloads carry no code-signing certificate, so Windows warns on them.'
+	},
+	{
+		open: (r) => !r.reproducible,
+		clause: 'builds are not yet reproducible',
+		noun: 'reproducible builds you could compare byte for byte',
+		// Standalone on purpose. This used to read "are further out still", which
+		// only parses while something precedes it — and once the list is derived,
+		// nothing is guaranteed to.
+		sentence:
+			'Builds are not yet reproducible: you cannot compile the tag yourself and ' +
+			'get byte-for-byte identical output.'
+	},
+	{
+		open: (r) => !r.audited,
+		clause: 'no independent audit has happened',
+		noun: 'an independent audit',
+		sentence: 'No independent audit has happened.'
+	}
+];
+
+/** The gaps still open, in whichever phrasing the call site needs. */
+export const releaseGaps = (s, form = 'clause') =>
+	RELEASE_GAPS.filter((g) => g.open(s.release)).map((g) => g[form]);
+
+/** "a", "a and b", "a, b, and c". The serial comma is deliberate. */
+export function sentenceList(items) {
+	if (items.length <= 1) return items[0] ?? '';
+	if (items.length === 2) return `${items[0]} and ${items[1]}`;
+	return `${items.slice(0, -1).join(', ')}, and ${items.at(-1)}`;
+}
+
+/** "One thing is", "Two things are" — the verb agreement changes with the count. */
+export function countPhrase(n) {
+	if (n === 0) return 'Nothing is';
+	if (n === 1) return 'One thing is';
+	return `${['', '', 'Two', 'Three', 'Four', 'Five'][n] ?? n} things are`;
+}
