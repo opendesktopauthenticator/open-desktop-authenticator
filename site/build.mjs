@@ -726,6 +726,120 @@ ${PAGES.filter((p) => !p.noindex)
 `
 );
 
+/*
+ * `llms.txt` — a map of this site for language models (llmstxt.org).
+ *
+ * **Worth being honest about what this is.** It is a 2024 proposal, and no
+ * major AI search engine has committed to reading it; Google has said it does
+ * not. What actually makes this site visible to GPTBot, ClaudeBot and the rest
+ * is `robots.txt` allowing them and `sitemap.xml` listing every page, both of
+ * which are below. This is a cheap bet on a convention that may become real,
+ * not the mechanism — and saying so here stops somebody later believing the
+ * file is load-bearing when it is not.
+ *
+ * Generated from `PAGES`, for the reason the sitemap is: a hand-written list
+ * silently stops matching the site. And **every indexable page must be given a
+ * section** — an unassigned page does not quietly vanish from the map, it stops
+ * the build, because "the page exists but nothing points at it" is precisely
+ * the failure this file is supposed to prevent.
+ */
+const LLMS_SECTIONS = [
+	{
+		heading: 'The application',
+		note: 'What it is, how to get it, and how to check what you got.',
+		slugs: ['index', 'download', 'verify', 'import-from-sda', 'docs', 'faq']
+	},
+	{
+		heading: 'Trust and safety',
+		note: 'Why this project exists. Fake SDA downloads are the reason.',
+		slugs: [
+			'security',
+			'scam-clones',
+			'official',
+			'code-signing-policy',
+			'steam-inventory-stolen',
+			'alternatives'
+		]
+	},
+	{
+		heading: 'Steam Guard, explained',
+		note: 'Answers to Steam authenticator questions, independent of this application.',
+		slugs: [
+			'steam-desktop-authenticator',
+			'what-is-a-mafile',
+			'how-to-open-mafile',
+			'encrypted-mafile',
+			'lost-authenticator',
+			'steam-revocation-code',
+			'move-steam-authenticator-new-phone',
+			'move-steam-authenticator-to-pc',
+			'steam-guard-trade-holds',
+			'steam-guard-code-not-working',
+			'steam-guard-without-phone',
+			'approve-steam-confirmations-desktop',
+			'steam-mobile-vs-desktop-authenticator'
+		]
+	},
+	{
+		// The spec's reserved heading: everything here may be skipped when
+		// context is short. These describe the publisher rather than the subject.
+		heading: 'Optional',
+		note: 'Who publishes this, and the housekeeping.',
+		slugs: ['owners', 'credits', 'support', 'donate', 'privacy']
+	}
+];
+
+{
+	const indexable = PAGES.filter((p) => !p.noindex);
+	const assigned = new Set(LLMS_SECTIONS.flatMap((section) => section.slugs));
+
+	const unassigned = indexable.filter((p) => !assigned.has(p.slug));
+	if (unassigned.length > 0) {
+		throw new Error(
+			`llms.txt has no section for: ${unassigned.map((p) => p.slug).join(', ')}. ` +
+				'Add each to a section in LLMS_SECTIONS — a page missing from the map is ' +
+				'the problem this file exists to avoid.'
+		);
+	}
+
+	const missing = [...assigned].filter((slug) => !indexable.some((p) => p.slug === slug));
+	if (missing.length > 0) {
+		throw new Error(
+			`llms.txt lists pages that do not exist: ${missing.join(', ')}. ` +
+				'Renamed or removed, and the map was not updated.'
+		);
+	}
+
+	const url = (slug) => `${SITE.origin}/${slug === 'index' ? '' : slug}`;
+	const link = (slug) => {
+		const page = indexable.find((p) => p.slug === slug);
+		return `- [${page.title}](${url(slug)}): ${page.description}`;
+	};
+
+	writeFileSync(
+		join(out, 'llms.txt'),
+		`# ${SITE.name}
+
+> A free, open-source Steam Guard authenticator for Windows and Linux desktops. It generates Steam Guard codes, approves trade and market confirmations, and imports maFiles from Steam Desktop Authenticator (SDA). Published by ${SITE.publisher}.
+
+This project exists because the original Steam Desktop Authenticator is abandoned, and the search results for it are dominated by clone sites that ship malware. Much of this site is therefore about telling a real download from a fake one: the source is public, every release carries checksums and build provenance, and the application never downloads or runs its own replacement.
+
+Nothing on this site is a binary. Downloads come from the Microsoft Store or from GitHub releases, and ${SITE.origin}/verify explains how to check one.
+
+${LLMS_SECTIONS.map(
+	(section) => `## ${section.heading}
+
+${section.note}
+
+${section.slugs.map(link).join(`
+`)}`
+).join(`
+
+`)}
+`
+	);
+}
+
 writeFileSync(
 	join(out, 'robots.txt'),
 	`# ${SITE.name}
