@@ -55,7 +55,7 @@ describe('the release publishes only what it attests', () => {
 	 */
 	it('guards exactly the extensions the attestation signs', () => {
 		const attestation = PUBLISH.slice(PUBLISH.indexOf('subject-path:'));
-		const attested = ['exe', 'AppImage', 'deb'];
+		const attested = ['exe', 'AppImage', 'deb', 'dmg'];
 		for (const ext of attested) {
 			expect(attestation).toContain(`staging/*.${ext}`);
 		}
@@ -72,16 +72,19 @@ describe('the release publishes only what it attests', () => {
 	 * promised arm64 while every release shipped x64 only, silently, for as long
 	 * as the project has existed. Neither file was wrong on its own.
 	 */
-	it('builds every architecture the config declares', () => {
+	it.each([
+		['win', '	win: {', '	nsis: {', 'targets: --win'],
+		['mac', '	mac: {', '	dmg: {', 'targets: --mac']
+	])('builds every %s architecture the config declares', (_platform, from, to, workflowTargets) => {
 		const config = readFileSync(join(__dirname, '..', 'electron-builder.config.mjs'), 'utf8');
-		const win = config.slice(config.indexOf('	win: {'), config.indexOf('	nsis: {'));
-		const declared = [...win.matchAll(/arch: \[([^\]]+)\]/g)]
+		const block = config.slice(config.indexOf(from), config.indexOf(to));
+		const declared = [...block.matchAll(/arch: \[([^\]]+)\]/g)]
 			.flatMap((m) => [...(m[1] ?? '').matchAll(/'([^']+)'/g)].map((a) => a[1] ?? ''))
 			.filter((a) => a !== '')
 			.filter((a, i, all) => all.indexOf(a) === i);
 
 		expect(declared).toContain('arm64');
-		const targets = WORKFLOW.slice(WORKFLOW.indexOf('targets: --win'));
+		const targets = WORKFLOW.slice(WORKFLOW.indexOf(workflowTargets));
 		for (const arch of declared) {
 			expect(targets, `the workflow never builds ${arch}`).toContain(`:${arch}`);
 		}
@@ -89,5 +92,114 @@ describe('the release publishes only what it attests', () => {
 
 	it('still states that the Store package is not a release asset', () => {
 		expect(WORKFLOW).toContain('not published as a release');
+	});
+});
+
+/**
+ * macOS, which is built long before it can be shipped.
+ *
+ * The README promises that this project will not ship an unsigned macOS build,
+ * and until the Apple Developer enrolment completes every macOS build CI
+ * produces is unsigned. A promise in a README is not a mechanism; `pattern:
+ * package-*` is. These check that the mechanism and the promise still agree.
+ *
+ * The cost of getting it wrong is not theoretical — it is exactly how v1.0.0
+ * shipped an appx that nobody could install.
+ */
+describe('the macOS build, before it is signed', () => {
+	const PACKAGE = WORKFLOW.slice(WORKFLOW.indexOf('  package:'), WORKFLOW.indexOf('  publish:'));
+
+	it('is built on every release, so the target is exercised', () => {
+		expect(PACKAGE).toContain('os: macos-latest');
+		expect(PACKAGE).toContain('--mac dmg');
+	});
+
+	/*
+	 * The gate. An unsigned `.dmg` uploaded under `package-*` reaches the
+	 * release page, and Gatekeeper refuses it on every machine except the one
+	 * that built it — an unusable file, published in the one place this project
+	 * asks strangers to trust.
+	 */
+	it('cannot reach the release page until a repository variable says so', () => {
+		const upload = PACKAGE.slice(PACKAGE.lastIndexOf('upload-artifact'));
+		expect(upload).toContain('MACOS_SIGNING_READY');
+		// The name it falls back to must not match the publish job's pattern.
+		expect(upload).toContain('macos-unsigned-check');
+		expect('macos-unsigned-check'.startsWith('package-')).toBe(false);
+	});
+
+	/*
+	 * `CSC_LINK` is not a macOS variable. electron-builder reads it on Windows
+	 * too, so a Developer ID certificate exported into the whole matrix makes
+	 * the Windows job try to sign the `.exe` with it — a build failure on the
+	 * platform that was working, caused by adding a secret for another one.
+	 */
+	it('hands the signing certificate to the macOS runner only', () => {
+		const packageStep = PACKAGE.slice(PACKAGE.indexOf('- name: Package'));
+		for (const variable of ['CSC_LINK', 'CSC_KEY_PASSWORD', 'APPLE_API_KEY']) {
+			const at = packageStep.indexOf(`${variable}:`);
+			expect(at, `${variable} is not set at all`).toBeGreaterThan(-1);
+			// The value is one `${{ ... }}` expression, so it ends at the first `}}`.
+			const value = packageStep.slice(at, packageStep.indexOf('}}', at));
+			expect(value, `${variable} is not gated on the runner`).toContain("runner.os == 'macOS'");
+		}
+	});
+
+	/*
+	 * **`APPLE_API_KEY` is a path.**
+	 *
+	 * electron-builder hands it to `@electron/notarize`, which puts it after
+	 * `xcrun notarytool --key` — a file. electron-builder's own published
+	 * documentation says to set the variable to the base64 contents of the
+	 * `.p8`, and following it makes notarisation fail looking for a file named
+	 * after a wall of base64.
+	 *
+	 * This is here because the wrong version is the one a reader will find if
+	 * they go looking, so "simplifying" the decode step away is a natural thing
+	 * to do and breaks a release that cannot be tested from this machine.
+	 */
+	it('hands notarisation a path to the key, not the key', () => {
+		expect(PACKAGE, 'the .p8 is never written to disk').toContain('apple-api-key.p8');
+
+		const at = PACKAGE.indexOf('APPLE_API_KEY:');
+		const value = PACKAGE.slice(at, PACKAGE.indexOf('}}', at));
+		expect(value, 'APPLE_API_KEY is the secret itself, which notarytool cannot open').not.toContain(
+			'secrets.APPLE_API_KEY_P8'
+		);
+		expect(value).toContain('apple-api-key.p8');
+	});
+
+	it('does not leave the signing key on the runner', () => {
+		expect(PACKAGE).toContain('Remove the notarisation key');
+		// `always()`, or a failed build keeps the key for the rest of the job.
+		const removal = PACKAGE.slice(PACKAGE.indexOf('Remove the notarisation key'));
+		expect(removal.slice(0, 200)).toContain('always()');
+	});
+
+	/*
+	 * Notarisation needs the Hardened Runtime, and the Hardened Runtime stops
+	 * V8 dead without these two. A `.dmg` that is signed, notarised, and
+	 * crashes on launch is the worst of the available outcomes: it passes every
+	 * check this pipeline can make.
+	 */
+	it('grants the two entitlements Electron cannot run without', () => {
+		const plist = readFileSync(join(__dirname, '..', 'signing', 'entitlements.mac.plist'), 'utf8');
+		expect(plist).toContain('com.apple.security.cs.allow-jit');
+		expect(plist).toContain('com.apple.security.cs.allow-unsigned-executable-memory');
+	});
+
+	/*
+	 * And nothing else. Every entitlement below weakens the process, and this
+	 * process holds an unlocked vault. `disable-library-validation` is the one
+	 * to watch: Electron apps carry it as a matter of habit, for native modules
+	 * this project does not have.
+	 */
+	it('grants nothing that would let a stranger into the process', () => {
+		const plist = readFileSync(join(__dirname, '..', 'signing', 'entitlements.mac.plist'), 'utf8');
+		const granted = [...plist.matchAll(/<key>([^<]+)<\/key>/g)].map((m) => m[1]);
+		expect(granted).toEqual([
+			'com.apple.security.cs.allow-jit',
+			'com.apple.security.cs.allow-unsigned-executable-memory'
+		]);
 	});
 });

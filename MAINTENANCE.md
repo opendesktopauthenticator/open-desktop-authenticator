@@ -56,6 +56,15 @@ undermine the one habit that actually protects them.
 If that changes it will be announced here and on the product site. Anything
 claiming to be a macOS build of this application today is not ours.
 
+**The pipeline is ready and waiting on the certificate.** CI builds a macOS
+`.dmg` on every release already — signed if credentials are present, unsigned
+otherwise — and an unsigned one is uploaded under a name the publish job cannot
+collect, so it never reaches the release page. That is deliberate: the packaging
+is exercised continuously rather than attempted for the first time on the day
+the certificate arrives, and the promise above is enforced by the workflow
+rather than remembered by a person. The remaining steps are in
+[docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md).
+
 ## Bus factor
 
 The honest failure mode of a single-maintainer security tool is that the

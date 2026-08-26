@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	What the Hardened Runtime is asked to allow, and nothing else.
+
+	Notarization requires the Hardened Runtime, which switches off several
+	things a normal process may do. Two of them are things Chromium cannot
+	work without: V8 compiles JavaScript to machine code at runtime, and it
+	needs pages that are both writable and executable to do it. Without these
+	the application launches and immediately dies.
+
+	**What is deliberately absent matters more than what is here.**
+
+	  com.apple.security.cs.disable-library-validation
+	      Would let this process load code signed by somebody other than us.
+	      Electron apps routinely carry it because they load native modules
+	      from npm; this one has none — every dependency is JavaScript — so
+	      the check stays on. An authenticator that will load a stranger's
+	      dylib is not one worth having.
+
+	  com.apple.security.cs.allow-dyld-environment-variables
+	      Would let the environment inject libraries at launch. Nothing here
+	      needs it, and it is the oldest trick there is for getting code into
+	      somebody else's process.
+
+	  com.apple.security.cs.debugger / get-task-allow
+	      Would let another process attach to this one and read its memory —
+	      which, in this application, is the vault while it is unlocked.
+
+	If a future dependency needs one of these, the honest thing is to change
+	the dependency.
+
+	This same file is used for `entitlements` and `entitlementsInherit`, so the
+	helper processes get exactly what the main one gets. Two files with the
+	same purpose drift, and the one that drifts is always the one nobody reads.
+-->
+<plist version="1.0">
+	<dict>
+		<key>com.apple.security.cs.allow-jit</key>
+		<true/>
+		<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+		<true/>
+	</dict>
+</plist>

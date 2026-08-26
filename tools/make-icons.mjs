@@ -18,8 +18,11 @@
  *    same four scale factors.
  *  - `installerSidebar.bmp` / `installerHeader.bmp` — NSIS will not take a PNG
  *    for these two and 24-bit BMP has no alpha, so they are composited here.
- *  - `icon.png` at 1024 and the PNG set — Linux packaging, and the source
- *    electron-builder resamples from for macOS.
+ *  - `icon.png` at 1024 and the PNG set — Linux packaging.
+ *  - `icon.icns` — macOS. Ten entries at seven native sizes, for the same
+ *    reason the `.ico` carries ten: the Finder list view draws this at 16
+ *    pixels, and electron-builder would otherwise have resampled the 1024px
+ *    PNG down to reach it.
  *  - `icon.svg` — the canonical vector, for the readme, the site, and anywhere
  *    a raster would be the wrong answer.
  */
@@ -30,7 +33,7 @@ import { fileURLToPath } from 'node:url';
 // Imported straight from the application's own source. Node strips the types;
 // there is no build step here, and no second copy of the artwork.
 import { COLOURS, DESIGN, EXTENT, rgbaOf, shieldSvgPath } from '../src/shared/logo.ts';
-import { encodeBmp24, encodeIco, encodePng } from './raster.mjs';
+import { encodeBmp24, encodeIcns, encodeIco, encodePng } from './raster.mjs';
 
 /**
  * Where the files land. `build/` normally; `ICON_OUTPUT_DIR` lets
@@ -113,6 +116,10 @@ for (const size of PNG_SIZES) {
 	emit(`icons/${size}x${size}.png`, encodePng(size, render(size)));
 }
 emit('icon.png', encodePng(1024, render(1024)));
+
+// macOS. `render` rather than a list of buffers, so the encoder renders each
+// size once and shares the bytes between the 1x and 2x codes that duplicate it.
+emit('icon.icns', encodeIcns(render));
 
 /*
  * Microsoft Store tiles.

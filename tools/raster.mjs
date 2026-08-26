@@ -1,17 +1,20 @@
 /**
- * The three container formats Windows wants.
+ * The container formats the desktop platforms want.
  *
  * Written out longhand rather than pulled from npm. Icon toolchains are heavy,
  * and this project keeps its production dependencies at four on purpose — adding
  * a build-time image library with its own transitive tree to draw one shield is
  * a poor trade. Everything here uses `node:zlib` and nothing else.
  *
+ * Three of these are Windows': `.ico` for the executable and `.bmp` twice for
+ * the installer. The fourth is `.icns`, which is macOS'.
+ *
  * PNG is not here: it moved to `src/main/png.ts`, because the application needs
  * to write one at runtime as well and two encoders would be one too many.
  *
  * The drawing itself is not here — it lives in `src/shared/logo.ts`, because the
  * running application needs it too for the tray icon. This file is only the
- * three containers Windows wants around it.
+ * containers that go around it.
  */
 
 // The same encoder the running application uses to write its notification icon.
@@ -82,6 +85,73 @@ export function encodeIco(images) {
 	header.writeUInt16LE(1, 2); // type: icon
 	header.writeUInt16LE(images.length, 4);
 	return Buffer.concat([header, ...entries, ...blobs]);
+}
+
+/* ----------------------------------------------------------------- icns -- */
+
+/**
+ * What goes in a macOS icon, and at which size.
+ *
+ * Ten entries for seven distinct sizes, because macOS asks for the Retina
+ * variants under their own type codes: `ic11` is "16pt at 2x" and `icp5` is
+ * "32pt at 1x", and although both are a 32-pixel square the system will not
+ * substitute one for the other. This is the same list `iconutil` produces from
+ * an `.iconset`, which is the only reference implementation there is.
+ *
+ * The 1x/2x duplicates share their bytes: the same PNG is written under both
+ * codes rather than rendered twice.
+ */
+const ICNS_ENTRIES = [
+	['icp4', 16],
+	['ic11', 32], // 16pt @2x
+	['icp5', 32],
+	['ic12', 64], // 32pt @2x
+	['ic07', 128],
+	['ic13', 256], // 128pt @2x
+	['ic08', 256],
+	['ic14', 512], // 256pt @2x
+	['ic09', 512],
+	['ic10', 1024] // 512pt @2x
+];
+
+/**
+ * A macOS `.icns`.
+ *
+ * Every entry is a complete PNG rendered at its own native size, for the reason
+ * the `.ico` carries ten: the Finder list view draws this at 16 pixels, and a
+ * 1024-pixel shield resampled down to reach it is how an icon goes soft. macOS
+ * would happily have taken a single large PNG and done that resampling itself,
+ * which is why this is worth writing down rather than leaving to the packager.
+ *
+ * The format is a header and a flat run of chunks; both lengths are big-endian
+ * and both count their own headers, which is the detail every hand-written
+ * encoder gets wrong once.
+ *
+ * @param render {(size: number) => Buffer} straight RGBA for a square of `size`
+ */
+export function encodeIcns(render) {
+	/** One PNG per distinct size, so a shared 1x/2x pair is encoded once. */
+	const pngs = new Map();
+	for (const [, size] of ICNS_ENTRIES) {
+		if (!pngs.has(size)) {
+			pngs.set(size, encodePng(size, render(size)));
+		}
+	}
+
+	const chunks = ICNS_ENTRIES.map(([type, size]) => {
+		const png = pngs.get(size);
+		const header = Buffer.alloc(8);
+		header.write(type, 0, 'ascii');
+		// Including these eight bytes.
+		header.writeUInt32BE(8 + png.length, 4);
+		return Buffer.concat([header, png]);
+	});
+
+	const body = Buffer.concat(chunks);
+	const header = Buffer.alloc(8);
+	header.write('icns', 0, 'ascii');
+	header.writeUInt32BE(8 + body.length, 4);
+	return Buffer.concat([header, body]);
 }
 
 /* ------------------------------------------------------------------ bmp -- */

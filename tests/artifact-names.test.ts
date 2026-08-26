@@ -32,8 +32,10 @@ const templates = [...BUILDER.matchAll(/artifactName: '([^']+)'/g)].map((m) => m
 
 describe('published artifact names', () => {
 	it('declares one for every target', () => {
-		// NSIS, portable, and the shared Linux template.
-		expect(templates).toHaveLength(3);
+		// NSIS, portable, the shared Linux template, and dmg. Every published
+		// target needs one: the default carries `${productName}`, which is the
+		// whole reason this file exists.
+		expect(templates).toHaveLength(4);
 	});
 
 	it('never interpolates the product name, which contains spaces', () => {

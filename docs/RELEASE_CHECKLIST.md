@@ -7,7 +7,8 @@ without being replaced by something that fails loudly.
 publishes it. Publishing an authenticator binary is the moment users' trust is
 actually spent.
 
-Platforms: **Windows and Linux** (D11 — macOS deferred).
+Platforms: **Windows and Linux** (D11 — macOS built but not published; see
+[Turning macOS on](#turning-macos-on)).
 
 ---
 
@@ -152,6 +153,96 @@ The trust story is only real if it works for someone who does not trust us.
 - [ ] Website `/download` updated. Official domains registry still accurate.
 - [ ] If this fixes a Valve breakage: pinned status issue updated and closed, with
       a short public post-mortem in the CHANGELOG.
+
+## Turning macOS on
+
+Everything below the certificate is already built: the `mac` block in
+`electron-builder.config.mjs`, the Hardened Runtime entitlements in
+`signing/entitlements.mac.plist`, the `icon.icns` at ten native sizes, and the
+macOS leg of the release matrix. CI produces an unsigned `.dmg` on every release
+and uploads it under `macos-unsigned-check`, which the publish job's
+`pattern: package-*` cannot collect. Nothing published, nothing promised.
+
+What is missing is one certificate, one API key, and one switch.
+
+**1 · Enrol.** Apple Developer Program, **Company/Organization** — not
+Individual, which would put a person's name on every install instead of the
+company's. Requires the D-U-N-S number, the legal entity name exactly as
+registered, and a phone number on the D&B record that reaches a human, because
+Apple verifies by calling it. $99/year.
+
+**2 · Create a Developer ID Application certificate.** This is the one for
+direct downloads; Mac App Store distribution uses a different certificate and
+would additionally require App Sandbox, which is not worth doing for a first
+macOS release. **A Mac is not needed** — the portal takes a CSR from anywhere:
+
+```
+openssl req -new -newkey rsa:2048 -nodes -keyout mac-signing.key -out mac-signing.csr
+```
+
+Upload the CSR, download the `.cer`, then combine. **Include the Apple
+Worldwide Developer Relations intermediate** — without it the chain is
+incomplete and `codesign` produces a signature that verifies on the machine
+that made it and nowhere else, which is the most expensive way to discover a
+missing file:
+
+```
+openssl x509 -inform DER -in developerID.cer -out mac-signing.pem
+openssl pkcs12 -export -inkey mac-signing.key -in mac-signing.pem   -certfile AppleWWDRCAG3.pem -out mac-signing.p12
+base64 -w0 mac-signing.p12 > mac-signing.p12.base64
+```
+
+**3 · Create an App Store Connect API key.** App Store Connect → Users and
+Access → Integrations → App Store Connect API. **Developer** role or higher.
+The `.p8` downloads exactly once. This is what notarisation authenticates with;
+it is preferred over an Apple ID and app-specific password because it does not
+expire and never prompts for two-factor in CI.
+
+**4 · Put them in the repository.** Settings → Secrets and variables → Actions.
+Six secrets:
+
+| Secret                       | What goes in it                                         |
+| ---------------------------- | ------------------------------------------------------- |
+| `MACOS_CERTIFICATE_P12`      | base64 of `mac-signing.p12`                             |
+| `MACOS_CERTIFICATE_PASSWORD` | the password used on the `-export` above                |
+| `APPLE_API_KEY_P8`           | base64 of the `.p8` — the workflow decodes it to a file |
+| `APPLE_API_KEY_ID`           | the key's 10-character ID                               |
+| `APPLE_API_ISSUER`           | the issuer UUID, on the same App Store Connect page     |
+| `APPLE_TEAM_ID`              | the 10-character Team ID from the membership page       |
+
+The certificate and the key are checked against each other, not each on their
+own: `electron-builder.config.mjs` refuses to build when one is present and the
+other is not, because that combination produces a signed but un-notarised
+`.dmg` — which Gatekeeper blocks everywhere except the machine that built it,
+and which looks like a successful build all the way to the release page.
+
+**5 · Flip the switch.** Same settings page, Variables tab:
+`MACOS_SIGNING_READY` = `true`. The artifact then uploads as `package-macos-latest`
+and the publish job collects, hashes, attests and cosigns it like every other
+asset.
+
+The `.p8` is stored base64-encoded because it is multi-line PEM, and the
+workflow decodes it into `RUNNER_TEMP` before building. That indirection is not
+tidiness: `APPLE_API_KEY` is a **file system path**, because electron-builder
+hands it to `@electron/notarize`, which puts it after `xcrun notarytool --key`.
+The published electron-builder documentation says to set the variable to the
+base64 contents directly — following it makes notarisation fail looking for a
+file named after a wall of base64. Settled by reading `@electron/notarize`'s own
+type definitions in `node_modules`, not the docs.
+
+**6 · On the first signed release, check two things by hand.** Neither can be
+checked from here, and both need a Mac:
+
+- [ ] The `.dmg` opens on a Mac that has **never seen this application**, from a
+      download rather than a copy, with no Gatekeeper warning. A stapled
+      notarisation is only observable on a machine that did not build it.
+- [ ] `spctl -a -vvv -t install <app>` reports `accepted` and
+      `source=Notarized Developer ID`.
+
+Then update `README.md`, `MAINTENANCE.md` and the product site, all three of
+which currently say macOS is not supported — and are correct until this is done.
+
+---
 
 ## After publishing
 

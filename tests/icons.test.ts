@@ -89,6 +89,59 @@ describe('the committed icons', () => {
 		}
 	});
 
+	/*
+	 * The macOS container, walked chunk by chunk.
+	 *
+	 * `.icns` states its own total length and then each chunk states its own,
+	 * every one of them counting its header and all of them big-endian — which
+	 * is three chances to be off by eight in a file the Finder will simply
+	 * refuse to draw rather than complain about. Walking it is the only way to
+	 * know, and there is no macOS in this suite to ask.
+	 */
+	it('is a well-formed icns covering every size macOS asks for', () => {
+		const bytes = read('icon.icns');
+		expect(bytes.toString('ascii', 0, 4)).toBe('icns');
+		expect(bytes.readUInt32BE(4), 'the declared length is not the file length').toBe(bytes.length);
+
+		const found: [string, number][] = [];
+		let offset = 8;
+		while (offset < bytes.length) {
+			const type = bytes.toString('ascii', offset, offset + 4);
+			const length = bytes.readUInt32BE(offset + 4);
+			expect(length, `${type} declares nothing`).toBeGreaterThan(8);
+
+			const png = bytes.subarray(offset + 8, offset + length);
+			expect(png.subarray(0, 4), `${type} is not a PNG`).toEqual(
+				Buffer.from([0x89, 0x50, 0x4e, 0x47])
+			);
+			// Width and height out of the IHDR, which is always the first chunk.
+			expect(png.readUInt32BE(16), `${type} is not square`).toBe(png.readUInt32BE(20));
+			found.push([type, png.readUInt32BE(16)]);
+			offset += length;
+		}
+
+		expect(offset, 'the chunks do not fill the file exactly').toBe(bytes.length);
+
+		/*
+		 * Ten entries, seven sizes. The Retina duplicates are the part that is
+		 * easy to drop: `ic11` is 16pt at 2x and `icp5` is 32pt at 1x, both
+		 * 32 pixels square, and macOS will not substitute one for the other — it
+		 * draws nothing at that size instead.
+		 */
+		expect(found).toEqual([
+			['icp4', 16],
+			['ic11', 32],
+			['icp5', 32],
+			['ic12', 64],
+			['ic07', 128],
+			['ic13', 256],
+			['ic08', 256],
+			['ic14', 512],
+			['ic09', 512],
+			['ic10', 1024]
+		]);
+	});
+
 	it('describes the same shape in the SVG as in the bitmaps', () => {
 		// The vector and the rasters are generated from one geometry, so the only
 		// way they can disagree is if the SVG writer stops following it.

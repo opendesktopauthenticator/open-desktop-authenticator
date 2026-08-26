@@ -156,6 +156,12 @@ jobs:
             targets: --win nsis:x64 nsis:arm64 portable:x64
           - os: ubuntu-latest
             targets: --linux AppImage deb
+          # macOS builds on every release, signed or not. Unsigned it is not
+          # published — see the artifact name below — but it is built, so the
+          # target is exercised continuously rather than first attempted on the
+          # day the Apple certificate arrives. Same reasoning as the appx step.
+          - os: macos-latest
+            targets: --mac dmg:x64 dmg:arm64
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -173,8 +179,62 @@ jobs:
       # after hashing — rather than letting the packager push assets as it
       # finishes each one, which would produce a release whose contents depend
       # on how far the build got.
+      # **`APPLE_API_KEY` is a path, not a key.**
+      #
+      # electron-builder hands it straight to `@electron/notarize`, which puts it
+      # after `xcrun notarytool --key` — and that wants a file. The published
+      # electron-builder documentation says to set this variable to the
+      # base64-encoded contents of the `.p8`, which would make notarisation fail
+      # looking for a file named after a wall of base64. Settled by reading
+      # `@electron/notarize`'s own types in `node_modules`, whose wording is
+      # unambiguous: "File system path to the `.p8` private key".
+      #
+      # So the secret holds base64 (a `.p8` is multi-line PEM and survives a
+      # secret box badly) and this step turns it back into a file. `RUNNER_TEMP`
+      # dies with the runner, and the step below removes it anyway.
+      - name: Materialise the notarisation key
+        if: runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true'
+        shell: bash
+        env:
+          KEY_BASE64: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -z "$KEY_BASE64" ]; then
+            echo "::error::MACOS_SIGNING_READY is true but APPLE_API_KEY_P8 is empty."
+            exit 1
+          fi
+          printf '%s' "$KEY_BASE64" | base64 --decode > "$RUNNER_TEMP/apple-api-key.p8"
+          # Never the contents. A malformed secret shows up as a length of zero.
+          echo "wrote $(wc -c < "$RUNNER_TEMP/apple-api-key.p8") bytes"
+
+      # **The signing variables are gated on the runner, not left to resolve
+      # empty.** `CSC_LINK` is not a macOS variable — electron-builder reads it
+      # on Windows too, and a Developer ID certificate handed to a Windows build
+      # makes it try to sign the `.exe` with it and fail. So each one is either
+      # the secret or nothing, decided by which runner this is.
+      #
+      # Both credentials or neither: the config refuses a half-configured
+      # environment rather than producing a signed-but-un-notarised `.dmg`,
+      # which Gatekeeper blocks everywhere except the machine that built it.
       - name: Package
+        env:
+          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_P12 || '' }}
+          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
+          # The path written above, not the key itself. See that step.
+          APPLE_API_KEY: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            format('{0}/apple-api-key.p8', runner.temp) || '' }}
+          APPLE_API_KEY_ID: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ runner.os == 'macOS' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
         run: npm run build && npx electron-builder --config electron-builder.config.mjs ${{ matrix.targets }} --publish never
+
+      # The private key does not outlive the step that needed it. `RUNNER_TEMP`
+      # is discarded with the runner, so this is belt and braces — but a signing
+      # key sitting in a workspace for the rest of a job is the kind of thing
+      # that becomes a habit and then becomes a cached artifact.
+      - name: Remove the notarisation key
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/apple-api-key.p8"
 
       # The Store package, built separately and **not published as a release
       # asset**.
@@ -219,7 +279,7 @@ jobs:
         run: |
           mkdir -p dist-release
           find release -maxdepth 1 -type f \
-            \( -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
+            \( -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' -o -name '*.dmg' \) \
             -exec cp {} dist-release/ \;
           ls -l dist-release
           if [ -z "$(ls -A dist-release)" ]; then
@@ -227,9 +287,26 @@ jobs:
             exit 1
           fi
 
+      # **An unsigned macOS build is uploaded under a name the publish job
+      # cannot collect.**
+      #
+      # `pattern: package-*` is what decides which artifacts reach the release
+      # page. README states that this project will not ship an unsigned macOS
+      # build, and that has to be enforced somewhere rather than remembered: an
+      # unsigned `.dmg` is refused by Gatekeeper on every machine except the one
+      # that built it, so publishing it would put an unusable file in the one
+      # place this project asks strangers to trust. That is precisely how v1.0.0
+      # shipped an appx nobody could install.
+      #
+      # Flip the `MACOS_SIGNING_READY` repository variable to `true` once the
+      # Developer ID certificate and the notarisation key are in place. One
+      # deliberate switch, visible in the repository settings — rather than the
+      # release quietly changing shape the moment a secret is added.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: package-${{ matrix.os }}
+          name:
+            ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY != 'true') && 'macos-unsigned-check'
+            || format('package-{0}', matrix.os) }}
           path: dist-release/
           if-no-files-found: error
           retention-days: 7
@@ -287,7 +364,7 @@ jobs:
         shell: bash
         run: |
           cd staging
-          unexpected=$(ls -1 | grep -v -E '\.(exe|AppImage|deb)$' || true)
+          unexpected=$(ls -1 | grep -v -E '\.(exe|AppImage|deb|dmg)$' || true)
           if [ -n "$unexpected" ]; then
             echo "::error::staging holds files the provenance step does not attest:"
             echo "$unexpected"
@@ -394,6 +471,7 @@ jobs:
             staging/*.exe
             staging/*.AppImage
             staging/*.deb
+            staging/*.dmg
 
       # A draft, always. The checklist requires a human to read the notes and
       # the asset list before anything is public, and "published automatically
