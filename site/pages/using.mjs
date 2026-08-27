@@ -24,6 +24,7 @@ const VALVE = {
 
 export const confirmationsOnDesktop = {
 	slug: 'approve-steam-confirmations-desktop',
+	parent: 'docs',
 	guide: true,
 	// Valve documents the feature; the wire protocol is from open implementations.
 	sourced: 'Checked against Valve documentation and current Steam protocol implementations',
@@ -222,6 +223,7 @@ export const confirmationsOnDesktop = {
 
 export const mobileVsDesktop = {
 	slug: 'steam-mobile-vs-desktop-authenticator',
+	parent: 'docs',
 	guide: true,
 	navTitle: 'Mobile or desktop',
 	title: 'Steam mobile app or a desktop authenticator?',
@@ -487,6 +489,7 @@ export const mobileVsDesktop = {
 
 export const withoutPhone = {
 	slug: 'steam-guard-without-phone',
+	parent: 'docs',
 	guide: true,
 	navTitle: 'Without a phone',
 	title: 'Steam Guard without a smartphone',
@@ -680,6 +683,7 @@ export const withoutPhone = {
 
 export const openMafile = {
 	slug: 'how-to-open-mafile',
+	parent: 'docs',
 	guide: true,
 	sourced: (s) =>
 		`Checked against <a href="${s.sda.repo}" rel="noopener">SDA's source code</a> and on-disk file format`,

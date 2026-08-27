@@ -23,6 +23,7 @@ const VALVE = {
 
 export const tradeHolds = {
 	slug: 'steam-guard-trade-holds',
+	parent: 'docs',
 	guide: true,
 	navTitle: 'Trade holds',
 	title: 'Steam trade holds: every restriction, and how long each lasts',
@@ -234,6 +235,7 @@ export const tradeHolds = {
 
 export const moveToPc = {
 	slug: 'move-steam-authenticator-to-pc',
+	parent: 'docs',
 	guide: true,
 	navTitle: 'Move to a PC',
 	title: 'Move your Steam authenticator from your phone to a PC',

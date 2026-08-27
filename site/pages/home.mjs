@@ -11,31 +11,39 @@ export default {
 		'@graph': [
 			{
 				'@type': 'Organization',
-				'@id': `${s.origin}/#org`,
+				'@id': s.organizationId,
 				name: s.publisher,
+				legalName: s.brand.legal,
+				url: s.brand.url,
+				logo: `${s.origin}${s.brand.logo}`
+			},
+			{
+				'@type': 'WebSite',
+				'@id': s.websiteId,
 				url: s.origin,
-				// The publisher's other authoritative presences: its own company site
-				// and the source repository. `sameAs` is how a search engine ties the
-				// three references to one entity — the same website → company → source
-				// chain a suspicious human walks, expressed for a machine. The company
-				// site is deliberately included even though this schema lives on the
-				// product domain: it corroborates that MASTERPANEL LLC is a real
-				// organisation with a footprint beyond this one site.
-				sameAs: [s.brand.url, s.repo]
+				name: s.name,
+				publisher: { '@id': s.organizationId },
+				about: { '@id': s.softwareId }
 			},
 			{
 				'@type': 'SoftwareApplication',
-				'@id': `${s.origin}/#app`,
+				'@id': s.softwareId,
 				name: s.name,
 				alternateName: 'ODA',
+				url: s.origin,
+				description: s.tagline,
+				sameAs: [s.repo, s.store.url],
 				applicationCategory: 'SecurityApplication',
 				operatingSystem: 'Windows 10, Windows 11, Linux',
+				softwareVersion: s.version,
+				datePublished: s.released,
 				isAccessibleForFree: true,
 				// The repository's LICENSE is MIT. This said GPL-3.0, which is a false
 				// claim in machine-readable form — see tests in site/verify.mjs.
 				license: 'https://opensource.org/license/mit',
-				publisher: { '@id': `${s.origin}/#org` },
+				publisher: { '@id': s.organizationId },
 				softwareHelp: `${s.origin}/docs`,
+				downloadUrl: s.store.url,
 				offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' }
 			}
 		]
@@ -50,9 +58,10 @@ export default {
 		<section class="hero">
 			<img class="hero-mark" src="/assets/mark.svg" width="88" height="88"
 			     alt="" aria-hidden="true">
-			<h1>An open-source Steam authenticator for the desktop</h1>
+			<h1>Open Desktop Authenticator</h1>
 			<p class="lede">
-				${s.name} generates Steam Guard codes on your computer, approves trades and
+				<strong>An open-source Steam authenticator for the desktop.</strong>
+				It generates Steam Guard codes on your computer, approves trades and
 				market listings, and imports the <code>.maFile</code> accounts you already
 				have — without ever asking you to take our word for anything.
 			</p>

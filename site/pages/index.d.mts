@@ -10,6 +10,10 @@
 export interface SitePage {
 	/** The URL segment. `index` is the homepage. */
 	slug: string;
+	/** Optional reader-facing hub used by navigation and breadcrumbs. */
+	parent?: string;
+	/** Long-form guides receive review metadata and an on-page contents list. */
+	guide?: boolean;
 	title: string;
 	description: string;
 	/**

@@ -30,7 +30,7 @@ export const codeSigningPolicy = {
 		'@type': 'WebPage',
 		name: 'Code signing policy',
 		description: 'Signing roles, approval, and verification for Open Desktop Authenticator.',
-		publisher: { '@id': `${s.origin}/#org` }
+		publisher: { '@id': s.organizationId }
 	}),
 	body: (s) => `
 		<article>

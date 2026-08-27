@@ -483,6 +483,21 @@ function breadcrumbs(page) {
 	const trail = [{ name: 'Home', url: `${SITE.origin}/` }];
 	if (page.parent) {
 		const parent = PAGES.find((p) => p.slug === page.parent);
+		/*
+		 * Named here rather than left to crash.
+		 *
+		 * `site/verify.mjs` has a rule for a page declaring a parent that does not
+		 * exist, and that rule could never run: this line reached `.navTitle` on
+		 * `undefined` first and took the build down with a TypeError three frames
+		 * deep. The build failed either way — but "Cannot read properties of
+		 * undefined" is not the same help as being told which page points where.
+		 */
+		if (!parent) {
+			throw new Error(
+				`${page.slug} declares parent "${page.parent}", which is not a page. ` +
+					'Fix the slug, or add the parent to site/pages/index.mjs.'
+			);
+		}
 		trail.push({ name: parent.navTitle ?? parent.title, url: `${SITE.origin}/${parent.slug}` });
 	}
 	if (page.slug !== 'index') {

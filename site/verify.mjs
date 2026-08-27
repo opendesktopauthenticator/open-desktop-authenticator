@@ -170,6 +170,181 @@ for (const [slug, html] of built) {
 	}
 }
 
+/*
+ * Distinct pages need distinct promises.
+ *
+ * A technically valid site can still become a collection of near-duplicate
+ * landing pages aimed at adjacent queries. Exact duplicates are the clearest
+ * regression signal: two indexable pages with the same title, description or
+ * H1 no longer explain why both should exist. Keep this deliberately exact;
+ * semantic similarity still needs editorial judgement during review.
+ */
+const uniqueFields = [
+	['title', (html) => /<title>([^<]*)<\/title>/.exec(html)?.[1] ?? ''],
+	['description', (html) => /<meta name="description" content="([^"]*)"/.exec(html)?.[1] ?? ''],
+	[
+		'H1',
+		(html) =>
+			(/<h1[^>]*>([\s\S]*?)<\/h1>/.exec(html)?.[1] ?? '')
+				.replace(/<[^>]+>/g, ' ')
+				.replace(/\s+/g, ' ')
+				.trim()
+	]
+];
+
+for (const [field, read] of uniqueFields) {
+	const seen = new Map();
+	for (const page of PAGES) {
+		if (page.noindex) continue;
+		const value = read(built.get(page.slug) ?? '').toLocaleLowerCase('en');
+		if (!value) continue;
+		const first = seen.get(value);
+		if (first) {
+			fail(page.slug, `${field} duplicates ${first}: "${value}"`);
+		} else {
+			seen.set(value, page.slug);
+		}
+	}
+}
+
+/*
+ * A declared hierarchy must be real for readers as well as for breadcrumbs.
+ *
+ * A child page whose parent never links to it is structured-data theatre. It
+ * also recreates the flat, search-result-first shape associated with doorway
+ * collections. Guide pages are required to live under a deliberate hub.
+ */
+/*
+ * **Two pages that say the same thing in different words.**
+ *
+ * The duplicate title, description and H1 checks above are exact-match: they
+ * catch a copied field, not a copied page. Google's scaled content abuse policy
+ * is about pages "generated for the primary purpose of manipulating search
+ * rankings and not helping users", and the shape that produces is a family of
+ * pages whose bodies are substantially the same with the query swapped.
+ *
+ * Measured as the overlap of six-word runs, over `<main>` only — the shared
+ * header, nav and footer are identical on all 32 pages by design and would
+ * drown the signal. When this was written the highest overlap between any two
+ * pages was 5.1%, and the median page ran to 817 words, so 30% is far above
+ * anything the site does today and far below two pages worth merging.
+ *
+ * This is deliberately a floor rather than a style guide: it cannot tell a
+ * useful sibling page from a spun one, only that two pages have stopped being
+ * distinguishable. Editorial judgement still belongs in review.
+ */
+const SIMILARITY_LIMIT = 0.3;
+
+function shingles(text) {
+	const words = text.toLowerCase().match(/[a-z']+/g) ?? [];
+	const out = new Set();
+	for (let i = 0; i + 6 <= words.length; i++) out.add(words.slice(i, i + 6).join(' '));
+	return out;
+}
+
+{
+	const bodies = new Map();
+	for (const page of PAGES) {
+		if (page.noindex) continue;
+		const text = mainOf(built.get(page.slug) ?? '')
+			.replace(/<script[\s\S]*?<\/script>/g, ' ')
+			.replace(/<style[\s\S]*?<\/style>/g, ' ')
+			.replace(/<[^>]+>/g, ' ')
+			.replace(/\s+/g, ' ');
+		const set = shingles(text);
+		if (set.size > 0) bodies.set(page.slug, set);
+	}
+
+	const slugs = [...bodies.keys()];
+	for (let i = 0; i < slugs.length; i++) {
+		for (let j = i + 1; j < slugs.length; j++) {
+			const a = bodies.get(slugs[i]);
+			const b = bodies.get(slugs[j]);
+			let shared = 0;
+			for (const run of a) if (b.has(run)) shared++;
+			const overlap = shared / (a.size + b.size - shared);
+			if (overlap >= SIMILARITY_LIMIT) {
+				fail(
+					slugs[i],
+					`shares ${Math.round(overlap * 100)}% of its wording with ${slugs[j]} — ` +
+						'two pages this alike need merging, or one needs a reason to exist'
+				);
+			}
+		}
+	}
+}
+
+/** A page's own content, with the shared header, nav and footer removed. */
+function mainOf(html) {
+	const start = html.indexOf('<main');
+	const end = html.indexOf('</main>');
+	return start === -1 || end === -1 ? html : html.slice(start, end);
+}
+
+for (const page of PAGES) {
+	if (page.guide && !page.parent) {
+		fail(page.slug, 'is a guide but has no declared reader-facing parent');
+	}
+	if (!page.parent) continue;
+	const parent = PAGES.find((candidate) => candidate.slug === page.parent);
+	if (!parent) {
+		fail(page.slug, `declares missing parent ${page.parent}`);
+		continue;
+	}
+	if (parent === page) fail(page.slug, 'declares itself as its parent');
+	if (parent.noindex) fail(page.slug, `declares noindex page ${parent.slug} as its parent`);
+	/*
+	 * **The parent's own words, not the furniture around them.**
+	 *
+	 * This read the whole document, and the site footer links five of these
+	 * children from every page — so for those five the rule passed on the
+	 * footer's say-so and would have gone on passing if the hub stopped
+	 * mentioning them at all. A hierarchy that only exists in navigation
+	 * present on all 32 pages is the flat shape this rule was added to prevent,
+	 * asserted rather than fixed.
+	 *
+	 * `<main>` is the parent actually saying it.
+	 */
+	const parentHtml = mainOf(built.get(parent.slug) ?? '');
+	if (!parentHtml.includes(`href="/${page.slug}"`)) {
+		fail(
+			page.slug,
+			`declares ${parent.slug} as its parent, but that page's own content does not link to it`
+		);
+	}
+}
+
+/*
+ * The company, website and application are related, but not interchangeable.
+ * Misidentifying a repository or sibling business as the company in JSON-LD is
+ * misleading structured data even if every visible sentence is accurate.
+ */
+{
+	const homePage = PAGES.find((page) => page.slug === 'index');
+	const graph = homePage?.structuredData?.(SITE)?.['@graph'] ?? [];
+	const organization = graph.find((entry) => entry['@type'] === 'Organization');
+	const website = graph.find((entry) => entry['@type'] === 'WebSite');
+	const software = graph.find((entry) => entry['@type'] === 'SoftwareApplication');
+	if (organization?.['@id'] !== SITE.organizationId || organization?.url !== SITE.brand.url) {
+		fail('index', 'structured data does not identify the publisher at its company URL');
+	}
+	if (website?.['@id'] !== SITE.websiteId || website?.url !== SITE.origin) {
+		fail('index', 'structured data does not identify this domain as the product website');
+	}
+	if (
+		software?.['@id'] !== SITE.softwareId ||
+		software?.url !== SITE.origin ||
+		software?.publisher?.['@id'] !== SITE.organizationId ||
+		!software?.sameAs?.includes(SITE.repo) ||
+		!software?.sameAs?.includes(SITE.store.url)
+	) {
+		fail(
+			'index',
+			'structured data does not keep the software, publisher and release homes distinct'
+		);
+	}
+}
+
 // The sitemap must agree with the pages, in both directions.
 const sitemap = existsSync(join(dist, 'sitemap.xml'))
 	? readFileSync(join(dist, 'sitemap.xml'), 'utf8')

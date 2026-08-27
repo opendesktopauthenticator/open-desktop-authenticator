@@ -63,7 +63,7 @@ export const official = {
 		'@type': 'WebPage',
 		name: `Official domains for ${s.name}`,
 		description: 'The complete list of addresses this project publishes from.',
-		publisher: { '@id': `${s.origin}/#org` }
+		publisher: { '@id': s.organizationId }
 	}),
 	body: (s) => `
 		<article>

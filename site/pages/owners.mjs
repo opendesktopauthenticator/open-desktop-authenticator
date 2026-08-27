@@ -61,16 +61,24 @@ export default {
 		'Open Desktop Authenticator is published by MASTERPANEL LLC. Who we are, and why a Steam trading company wrote an open-source authenticator.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
-		'@type': 'Organization',
-		name: s.publisher,
-		url: `${s.origin}/owners`,
-		sameAs: PROJECTS.filter((p) => p.domain !== 'opendesktopauthenticator.com').map(
-			(p) => `https://${p.domain}`
-		),
-		makesOffer: PROJECTS.map((p) => ({
-			'@type': 'Offer',
-			itemOffered: { '@type': 'SoftwareApplication', name: p.name, url: `https://${p.domain}` }
-		}))
+		'@graph': [
+			{
+				'@type': 'Organization',
+				'@id': s.organizationId,
+				name: s.publisher,
+				legalName: s.brand.legal,
+				url: s.brand.url,
+				logo: `${s.origin}${s.brand.logo}`
+			},
+			{
+				'@type': 'AboutPage',
+				'@id': `${s.origin}/owners#page`,
+				url: `${s.origin}/owners`,
+				name: `Who builds ${s.name}`,
+				isPartOf: { '@id': s.websiteId },
+				about: { '@id': s.organizationId }
+			}
+		]
 	}),
 	body: (s) => `
 		<article>
@@ -132,6 +140,21 @@ ${PROJECTS.map(
 				visible, the source is public, and the site tells you how to check what you
 				downloaded. Whether they use ours or somebody else's matters less than whether
 				they verify it.
+			</p>
+
+			<h2>How these guides are written</h2>
+			<p>
+				The documentation on this site starts with the product we maintain and the
+				failure cases we have handled, then checks changeable Steam behaviour against
+				Valve's current support pages and SDA-specific claims against its published
+				source. Where a statement comes from one live test rather than documentation,
+				the page says that plainly instead of turning one observation into a rule.
+			</p>
+			<p>
+				Pages are split only when they answer a different task: moving an authenticator,
+				recovering one, understanding a maFile, or choosing between tools. They are not
+				generated variants of the same answer. Every page carries its review date, and
+				<a href="/support">documentation corrections</a> are accepted as product bugs.
 			</p>
 
 			<h2>The obvious question</h2>

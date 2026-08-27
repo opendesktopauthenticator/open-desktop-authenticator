@@ -1,5 +1,11 @@
 import { releaseGaps, sentenceList, countPhrase } from '../markup.mjs';
 
+// Tests render comparison copy with a deliberately minimal site object. Keep
+// the canonical source usable there without weakening the production source of
+// truth, which still comes from SITE.sda.repo.
+const originalSdaRepo = (site) =>
+	site.sda?.repo ?? 'https://github.com/Jessecar96/SteamDesktopAuthenticator';
+
 /**
  * Pages that answer a question somebody is actually typing.
  *
@@ -21,6 +27,7 @@ import { releaseGaps, sentenceList, countPhrase } from '../markup.mjs';
 
 export const mafile = {
 	slug: 'what-is-a-mafile',
+	parent: 'docs',
 	updated: '2026-08-14',
 	navTitle: 'maFiles',
 	title: 'What is a .maFile?',
@@ -149,6 +156,7 @@ export const mafile = {
 
 export const lostAuthenticator = {
 	slug: 'lost-authenticator',
+	parent: 'docs',
 	// Edited 14 Aug (UTC) to drop the unsupported Support durations. Without
 	// this the page inherits SITE.updated and advertises a stale lastmod.
 	updated: '2026-08-14',
@@ -290,7 +298,11 @@ export const lostAuthenticator = {
 
 export const alternatives = {
 	slug: 'alternatives',
-	updated: '2026-08-25',
+	parent: 'docs',
+	guide: true,
+	sourced: (s) =>
+		`Compared against <a href="https://help.steampowered.com/en/faqs/view/6891-E071-C9D9-0134" rel="noopener">Valve's Steam Guard guidance</a> and <a href="${originalSdaRepo(s)}" rel="noopener">SDA's official repository</a>`,
+	updated: '2026-08-27',
 	navTitle: 'Alternatives',
 	title: 'Steam authenticator alternatives to SDA, compared',
 	description:
@@ -314,7 +326,8 @@ export const alternatives = {
 
 			<h2>Steam Mobile — the default, and the right answer for most people</h2>
 			<p>
-				Valve's own app. It is maintained by the people who run the service, it comes
+				<a href="https://help.steampowered.com/en/faqs/view/6891-E071-C9D9-0134" rel="noopener">Valve's own app</a>.
+				It is maintained by the people who run the service, it comes
 				from Apple's or Google's store rather than a search result — so it is far
 				harder to substitute a fake, though phishing pages still imitate Steam's
 				branding — and losing your phone is a recoverable problem rather than a
@@ -339,7 +352,7 @@ export const alternatives = {
 			</p>
 			<p>
 				<strong>Choose it if:</strong> you already use it, it works for you, and you got
-				it from its own repository.
+				it from <a href="${originalSdaRepo(s)}" rel="noopener">its own repository</a>.
 			</p>
 			<p>
 				<strong>Against it:</strong> its name is what the counterfeit sites rank for, so

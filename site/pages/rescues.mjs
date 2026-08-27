@@ -31,6 +31,7 @@ const SDA_ENCRYPTOR =
 
 export const codeNotWorking = {
 	slug: 'steam-guard-code-not-working',
+	parent: 'docs',
 	guide: true,
 	navTitle: 'Codes not working',
 	title: 'Steam Guard code not working? Check the clock',
@@ -296,6 +297,7 @@ ${timeWindowDiagram()}
 
 export const moveAuthenticator = {
 	slug: 'move-steam-authenticator-new-phone',
+	parent: 'docs',
 	guide: true,
 	navTitle: 'New phone',
 	title: 'Move your Steam authenticator to a new phone: 2 days, not 15',
@@ -492,6 +494,7 @@ ${tradeHoldDiagram()}
 
 export const revocationCode = {
 	slug: 'steam-revocation-code',
+	parent: 'docs',
 	guide: true,
 	navTitle: 'Recovery code',
 	title: 'Steam revocation code: what it is, and how to get it back',
@@ -700,6 +703,7 @@ export const revocationCode = {
 
 export const encryptedMafile = {
 	slug: 'encrypted-mafile',
+	parent: 'docs',
 	guide: true,
 	// Valve documents none of this. The format and the crypto are SDA's.
 	sourced: `Checked against <a href="${SDA_ENCRYPTOR}" rel="noopener">SDA's published source code</a>`,
