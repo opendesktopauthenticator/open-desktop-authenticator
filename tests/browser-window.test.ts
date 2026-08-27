@@ -39,6 +39,8 @@ interface Recorded {
 	focused: number;
 	/** Every title the window was given, in order. */
 	titles: string[];
+	/** Times this session was told to refuse permission requests. */
+	permissionsDenied: number;
 }
 
 function harness(
@@ -59,10 +61,14 @@ function harness(
 		closed: 0,
 		wiped: [],
 		focused: 0,
-		titles: []
+		titles: [],
+		permissionsDenied: 0
 	};
 
 	const session: BrowserSessionHandle = {
+		denyPermissions: () => {
+			recorded.permissionsDenied += 1;
+		},
 		setProxy:
 			overrides.setProxy ??
 			((config) => {
@@ -160,6 +166,52 @@ describe('the in-app browser', () => {
 		expect(recorded.userAgents).toContain(BROWSER_USER_AGENT);
 		expect(recorded.userAgents).not.toContain(STEAM_USER_AGENT);
 		expect(BROWSER_USER_AGENT).not.toContain('okhttp');
+	});
+
+	/*
+	 * **A partition inherits none of the application's hardening.**
+	 *
+	 * §P8 refuses every permission request, and `src/main/index.ts` applies that
+	 * to `session.defaultSession`. This window runs in a partition of its own, so
+	 * it got none of it — and Electron with no handler installed *approves*. A
+	 * page nobody here wrote could ask for a camera, a microphone or a location
+	 * and be granted it, in a window signed in to somebody's Steam account.
+	 *
+	 * Steam needs none of them, so the answer is the same as everywhere else.
+	 */
+	it('refuses every permission request on its own session', async () => {
+		const { host, recorded } = harness();
+		await openAccountBrowser(host, ACCOUNT);
+		expect(recorded.permissionsDenied, 'the partition kept Electron’s defaults').toBe(1);
+	});
+
+	it('refuses them before the first page loads', async () => {
+		// A page cannot be asked to wait while we decide whether it may use a
+		// camera; the handler has to be installed before anything runs.
+		const order: string[] = [];
+		const { host } = harness();
+		const wrapped: BrowserHost = {
+			sessionFromPartition: (partition, options) => {
+				const real = host.sessionFromPartition(partition, options);
+				return {
+					...real,
+					denyPermissions: () => order.push('deny'),
+					cookies: {
+						set: (cookie) => {
+							order.push('cookie');
+							return real.cookies.set(cookie);
+						}
+					}
+				};
+			},
+			createWindow: (options) => {
+				order.push('window');
+				return host.createWindow(options);
+			}
+		};
+
+		await openAccountBrowser(wrapped, ACCOUNT);
+		expect(order[0]).toBe('deny');
 	});
 
 	it('routes through the account’s proxy when it has one', async () => {
@@ -438,6 +490,7 @@ describe('closing every browser when the vault locks', () => {
 		const order: string[] = [];
 		const host: BrowserHost = {
 			sessionFromPartition: () => ({
+				denyPermissions: () => undefined,
 				setProxy: () => Promise.resolve(),
 				setUserAgent: () => undefined,
 				clearStorageData: () => {
@@ -481,6 +534,7 @@ describe('closing every browser when the vault locks', () => {
 		const cleared: string[] = [];
 		const host: BrowserHost = {
 			sessionFromPartition: (partition) => ({
+				denyPermissions: () => undefined,
 				setProxy: () => Promise.resolve(),
 				setUserAgent: () => undefined,
 				clearStorageData: () => {
@@ -514,6 +568,7 @@ describe('closing every browser when the vault locks', () => {
 	it('survives a session that cannot be wiped', async () => {
 		const host: BrowserHost = {
 			sessionFromPartition: () => ({
+				denyPermissions: () => undefined,
 				setProxy: () => Promise.resolve(),
 				setUserAgent: () => undefined,
 				clearStorageData: () => Promise.reject(new Error('session gone')),
@@ -564,6 +619,7 @@ describe('closing every browser when the vault locks', () => {
 function lockHarness(cleared: string[], closed: string[]): BrowserHost {
 	return {
 		sessionFromPartition: (partition) => ({
+			denyPermissions: () => undefined,
 			setProxy: () => Promise.resolve(),
 			setUserAgent: () => undefined,
 			clearStorageData: () => {

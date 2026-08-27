@@ -183,6 +183,14 @@ What it is given, and nothing more:
   No password is typed into a window this application drew, and the module that
   opens it never sees a refresh token.
 
+**Every permission request is refused**, on this session specifically. §P8
+denies them application-wide, but that call is made against
+`session.defaultSession` and this window runs in a partition of its own, so it
+inherited none of it — and Electron with no handler installed _approves_. A page
+nobody here wrote could have been granted a camera, a microphone or a location
+while signed in to somebody's Steam account. The refusal is installed before the
+first page loads, because a page cannot be asked to wait while we decide.
+
 What it deliberately cannot do: reach the vault, the IPC table, or any part of
 this process. No preload, no bridge, `sandbox` and `contextIsolation` on,
 `nodeIntegration` off. The page cannot rename its own window either, because a

@@ -1,5 +1,7 @@
 import { BrowserWindow, session } from 'electron';
 
+import { denyAllPermissions } from '../security';
+
 import type {
 	BrowserHost,
 	BrowserSessionHandle,
@@ -46,7 +48,19 @@ const HARDENED = {
 
 export const electronBrowserHost: BrowserHost = {
 	sessionFromPartition(partition, options): BrowserSessionHandle {
-		return session.fromPartition(partition, options);
+		const partitioned = session.fromPartition(partition, options);
+		/*
+		 * `Object.assign` rather than a spread and a cast: an Electron `Session`
+		 * already satisfies the rest of the port structurally, and widening it
+		 * keeps that true instead of asserting it.
+		 *
+		 * §P8 denies every permission, but it does so against the default session
+		 * and this partition inherits none of it — and Electron with no handler
+		 * approves. So the same refusal is applied here, explicitly.
+		 */
+		return Object.assign(partitioned, {
+			denyPermissions: () => denyAllPermissions(partitioned)
+		});
 	},
 
 	createWindow(options: BrowserWindowOptions): BrowserWindowHandle {

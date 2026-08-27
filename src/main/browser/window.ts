@@ -44,6 +44,17 @@ export interface BrowserHost {
 
 export interface BrowserSessionHandle {
 	setProxy(config: { mode?: string; proxyRules?: string }): Promise<void>;
+	/**
+	 * Refuse every permission request on this session.
+	 *
+	 * Required, not optional. §P8 denies these app-wide, but that call is made
+	 * against `session.defaultSession` and this window deliberately runs in a
+	 * partition of its own — so it inherited nothing, and Electron's default with
+	 * no handler is to **approve**. A page here is not ours, and it was able to
+	 * ask for a camera, a microphone or a location while signed in to somebody's
+	 * Steam account.
+	 */
+	denyPermissions(): void;
 	setUserAgent?(userAgent: string): void;
 	clearStorageData?(): Promise<void>;
 	cookies: {
@@ -158,6 +169,12 @@ export async function openAccountBrowser(
 	const partition = browserPartitionFor(options.steamId64);
 	const session = host.sessionFromPartition(partition, { cache: false });
 	session.setUserAgent?.(BROWSER_USER_AGENT);
+
+	/*
+	 * Before anything loads. A page cannot be asked to wait while we decide
+	 * whether it may use the camera, and Steam needs none of these to work.
+	 */
+	session.denyPermissions();
 
 	let plan: ProxyPlan | undefined;
 	if (options.proxyUrl !== undefined && options.proxyUrl !== '') {
