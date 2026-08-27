@@ -157,11 +157,11 @@ export const download = {
 					<a href="/code-signing-policy">our code signing policy</a>.
 				</li>
 				<li>
-					<strong>Reproducible builds are still missing</strong>, and so is an
-					independent audit — both below. The checksum list <em>is</em> now signed:
-					every release carries <code>SHA256SUMS.txt.sig</code> and a certificate, so
-					you can check the list came from our workflow rather than only that your
-					file matches it. <a href="/verify">Step 5 walks through it.</a>
+					<strong>The checksum list <em>is</em> signed.</strong> Every release carries
+					<code>SHA256SUMS.txt.sig</code> and a certificate, so you can check the list
+					came from our workflow rather than only that your file matches it.
+					<a href="/verify">Step 5 walks through it.</a> The two things still missing
+					are below.
 				</li>
 				<li>
 					<strong>Reproducible builds.</strong> You cannot yet rebuild the tag and
@@ -512,9 +512,10 @@ const FAQ_ITEMS = [
 	{
 		q: 'What happens if I lose my vault passphrase?',
 		plain:
-			'The vault cannot be opened. There is no reset and no recovery, because either would be a back door. Recovery files written at enrollment use the passphrase in force at the time.',
+			'The vault cannot be opened. There is no reset and no recovery, because either would be a back door. The recovery files this application writes are encrypted under the same passphrase, so they do not help. What helps is the revocation code you wrote down outside the vault; without it, Steam Support is the remaining route.',
 		a: `<p>The vault cannot be opened. There is no reset, no master key and no support process that gets around it, because every one of those would be a back door into everyone else's vault too.</p>
-			<p>What you do have is the recovery file written when each account was enrolled, and your recovery codes — the <code>R</code> codes Valve now calls by that name, stored as <code>revocation_code</code> in a maFile. This is why the application insists you write them down.</p>`
+			<p><strong>The recovery files this application writes will not help either.</strong> They are encrypted under the same passphrase-derived key as the vault, so losing the passphrase locks them in exactly the same way. Anything still inside this application is gone with it.</p>
+			<p>What can still work is whatever you kept <em>outside</em> it: the revocation code for each account — the <code>R</code> code Valve now calls your recovery code, stored as <code>revocation_code</code> in a maFile — written down somewhere that is not the vault. With it you can detach the authenticator from Steam yourself. Without it, Steam Support is the remaining route, and they will want to verify the account. This is why the application insists you write that code down before it will call an account active.</p>`
 	},
 	{
 		q: 'Does it work without an internet connection?',

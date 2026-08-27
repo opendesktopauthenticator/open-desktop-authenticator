@@ -28,7 +28,7 @@ let pages: typeof import('../site/pages/index.mjs', { with: { 'resolution-mode':
  * rather than by importing each module. A page that stopped being in the list
  * would still pass a test that imported it directly.
  */
-const page = (slug: string) => {
+const pageBySlug = (slug: string) => {
 	const found = pages.PAGES.find((candidate) => candidate.slug === slug);
 	if (!found) {
 		throw new Error(`no page with slug ${slug}`);
@@ -54,7 +54,14 @@ const NOTHING: Release = {
 	audited: false
 };
 
-const site = (release: Release) => ({ release });
+// `origin` because some pages print absolute URLs; the rest of SITE is not
+// reached by any body this file renders.
+const site = (release: Release) => ({
+	release,
+	origin: 'https://example.test',
+	// `reviewAsk` reads these; the rest of SITE is not reached by any body here.
+	reviews: { profile: 'https://example.test/p', write: 'https://example.test/w' }
+});
 const gaps = (release: Release, form?: 'clause' | 'noun') =>
 	markup.releaseGaps(site(release), form);
 
@@ -139,9 +146,9 @@ describe('the grammar around the list', () => {
  */
 describe('the pages that carry the sentence', () => {
 	it.each([
-		['the homepage', (s: unknown) => page('index').body(s)],
-		['the alternatives page', (s: unknown) => page('alternatives').body(s)],
-		['the FAQ', (s: unknown) => page('faq').body(s)]
+		['the homepage', (s: unknown) => pageBySlug('index').body(s)],
+		['the alternatives page', (s: unknown) => pageBySlug('alternatives').body(s)],
+		['the FAQ', (s: unknown) => pageBySlug('faq').body(s)]
 	])('%s never claims the checksum list is unsigned once it is', (_name, render) => {
 		const signed = words(render(site({ ...NOTHING, signed: true })));
 		expect(signed).not.toMatch(/signs the checksum list/i);
@@ -152,9 +159,9 @@ describe('the pages that carry the sentence', () => {
 	});
 
 	it.each([
-		['the homepage', (s: unknown) => page('index').body(s)],
-		['the alternatives page', (s: unknown) => page('alternatives').body(s)],
-		['the FAQ', (s: unknown) => page('faq').body(s)]
+		['the homepage', (s: unknown) => pageBySlug('index').body(s)],
+		['the alternatives page', (s: unknown) => pageBySlug('alternatives').body(s)],
+		['the FAQ', (s: unknown) => pageBySlug('faq').body(s)]
 	])('%s says something sensible when there is nothing left to admit', (_name, render) => {
 		const done = {
 			published: true,
@@ -173,13 +180,40 @@ describe('the pages that carry the sentence', () => {
 	});
 
 	/*
+	 * **The fourth page, found by an outside audit after this file existed.**
+	 *
+	 * `/scam-clones` said "ours does not have one yet" about the checksum
+	 * signature — the same stale claim as the other three, in wording no
+	 * pattern in `site/verify.mjs` matched. That is the lesson: the tripwire
+	 * catches the phrasings somebody thought of, and prose has more phrasings
+	 * than anyone thinks of. Deriving the sentence is what actually works, and
+	 * this is what holds it derived.
+	 */
+	it('scam-clones follows the signature flag in both directions', () => {
+		const page = (release: Release) => words(pageBySlug('scam-clones').body(site(release)));
+
+		const signed = page({ ...NOTHING, signed: true });
+		expect(signed, 'still claims we have no signature').not.toMatch(/does not have one yet/i);
+		expect(signed).toMatch(/ours carries one/i);
+
+		const unsigned = page(NOTHING);
+		expect(unsigned, 'claims a signature that does not exist').toMatch(/does not have one yet/i);
+	});
+
+	it('scam-clones follows the reproducible flag too', () => {
+		const page = (release: Release) => words(pageBySlug('scam-clones').body(site(release)));
+		expect(page(NOTHING)).toMatch(/cannot be, yet/i);
+		expect(page({ ...NOTHING, reproducible: true })).not.toMatch(/cannot be, yet/i);
+	});
+
+	/*
 	 * The FAQ is the one that promised the guarantee it was breaking: its last
 	 * sentence says the site refuses to build if a page goes on saying something
 	 * is missing after it is not, while the paragraph above it said exactly that
 	 * about the checksum signature. The promise has to survive the rewrite.
 	 */
 	it('keeps the FAQ’s enforcement promise, which is now true', () => {
-		const text = words(page('faq').body(site({ ...NOTHING, signed: true })));
+		const text = words(pageBySlug('faq').body(site({ ...NOTHING, signed: true })));
 		expect(text).toMatch(/refuses to build/);
 		expect(text).toMatch(/goes on saying it is missing after it is not/);
 	});
@@ -191,7 +225,7 @@ describe('the pages that carry the sentence', () => {
 	 */
 	it('gives the FAQ a sentence that stands on its own', () => {
 		const only = words(
-			page('faq').body(site({ ...NOTHING, signed: true, codeSigned: true, audited: true }))
+			pageBySlug('faq').body(site({ ...NOTHING, signed: true, codeSigned: true, audited: true }))
 		);
 		expect(only).toMatch(/Builds are not yet reproducible/);
 		expect(only, 'a dangling comparative with nothing before it').not.toMatch(/further out still/);
@@ -203,7 +237,7 @@ describe('the pages that carry the sentence', () => {
 	 * for: prose that stopped tracking the thing it describes.
 	 */
 	it('counts the alternatives page list correctly as gaps close', () => {
-		const at = (release: Release) => words(page('alternatives').body(site(release)));
+		const at = (release: Release) => words(pageBySlug('alternatives').body(site(release)));
 		expect(at(NOTHING)).toMatch(/Four things are not yet done/);
 		expect(at({ ...NOTHING, signed: true })).toMatch(/Three things are not yet done/);
 		expect(at({ ...NOTHING, signed: true, audited: true })).toMatch(/Two things are not yet done/);

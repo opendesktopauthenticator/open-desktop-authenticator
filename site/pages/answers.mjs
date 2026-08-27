@@ -55,12 +55,15 @@ export const mafile = {
 				<dd>
 					The seed the login codes are generated from. Base64, twenty bytes decoded.
 					Combined with the current thirty-second time window it produces the five
-					characters you type into Steam. It never expires and never changes.
+					characters you type into Steam. It does not expire with time: it stays valid
+					until the authenticator is removed or replaced, which is the only thing that
+					stops a copy of it working.
 				</dd>
 				<dt><code>identity_secret</code></dt>
 				<dd>
 					The seed used to sign trade and market confirmations. This is the dangerous
-					one: it is what lets software approve a trade on your behalf.
+					one: together with a valid Steam session it is what lets software approve a
+					trade on your behalf. It cannot raise or approve one on its own.
 				</dd>
 				<dt><code>revocation_code</code></dt>
 				<dd>
@@ -202,11 +205,19 @@ export const lostAuthenticator = {
 					<a href="/what-is-a-mafile">Encrypted ones also need
 					<code>manifest.json</code></a>.
 				</li>
-				<li>Steam still signed in on another device, which can often re-add Steam Guard.</li>
 			</ul>
 			<p>
 				If you find one, import it somewhere you control and confirm it produces codes
 				Steam accepts before you rely on it.
+			</p>
+
+			<p>
+				<strong>A phone still signed in to Steam is not one of these.</strong> A session
+				is not an authenticator: there is no secret in it to export or import, and
+				nothing to bring into this application or any other. What it is good for is
+				better than that — while that device is still signed in you can usually add a
+				new authenticator from the Steam mobile app directly, which is the fastest route
+				back and needs nothing from us. Do that before the session expires.
 			</p>
 
 			<h2>2. Is a phone number still linked to the account?</h2>
@@ -357,8 +368,9 @@ export const alternatives = {
 				be able to check what it does — or have somebody else check.
 			</p>
 			<p>
-				<strong>Against it, plainly:</strong> it is new. Version 1.0 is days old, with no
-				years of community scrutiny behind it and no track record. Those are real
+				<strong>Against it, plainly:</strong> it is new. Version 1.0 was published on
+				${s.releasedOn}, with no years of community scrutiny behind it and no track
+				record. Those are real
 				disadvantages and no amount of open source substitutes for them. If that matters
 				more to you than auditability, one of the options above is the better choice
 				today.

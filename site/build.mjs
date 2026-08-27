@@ -70,6 +70,20 @@ export const SITE = {
 	 * changes is telling search engines something false about its freshness.
 	 */
 	updated: '2026-08-25',
+
+	/*
+	 * When 1.0 was published, from the GitHub release.
+	 *
+	 * Here because two pages said "Version 1.0 is days old" — true when typed,
+	 * wronger every day after, and nothing to notice. It is the same failure as
+	 * the checksum-signature sentences: a fact about the release, written by
+	 * hand, with no path from the fact to the page. A date does not rot.
+	 */
+	released: '2026-08-25',
+	/** The same date, as a person would read it. */
+	get releasedOn() {
+		return formatDate(this.released);
+	},
 	/** GA4 measurement ID. Referenced by head() and by the CSP host allowlist. */
 	analyticsId: 'G-G0GE9H5VR7',
 
@@ -407,8 +421,39 @@ function head(page) {
 	-->
 	<script async src="https://www.googletagmanager.com/gtag/js?id=${SITE.analyticsId}"></script>
 	<script src="${asset('analytics.js')}" defer></script>
-	${page.structuredData ? `<script type="application/ld+json">${JSON.stringify(page.structuredData(SITE))}</script>` : ''}
+	${page.structuredData ? `<script type="application/ld+json">${JSON.stringify(datedFor(page))}</script>` : ''}
 	<script type="application/ld+json">${JSON.stringify(breadcrumbs(page))}</script>`.trim();
+}
+
+/**
+ * A page's structured data, with its dates forced to agree with the page.
+ *
+ * **Two ways of writing the same date had drifted apart.** Some pages hardcoded
+ * `dateModified` and some set it to `s.updated`, which is the *site's* review
+ * date rather than the page's — so a page revised on one date could announce
+ * another, in a field only a machine reads and only an audit would catch. Two
+ * pages had it exactly backwards: each was publishing the other's date.
+ *
+ * The page's own `updated` is the truth here, and the visible "Last reviewed"
+ * line already uses it. Overwriting rather than defaulting is deliberate: a
+ * default still lets a page state a date, and a page stating its own date is
+ * the thing that went wrong.
+ */
+function datedFor(page) {
+	const data = page.structuredData(SITE);
+	const on = page.updated ?? SITE.updated;
+	for (const key of ['datePublished', 'dateModified']) {
+		if (key in data) data[key] = on;
+	}
+	// `mainEntity` carries its own dates on the FAQ page.
+	if (Array.isArray(data.mainEntity)) {
+		for (const entry of data.mainEntity) {
+			for (const key of ['datePublished', 'dateModified']) {
+				if (key in entry) entry[key] = on;
+			}
+		}
+	}
+	return data;
 }
 
 /** Breadcrumbs, so a result can show its place rather than a bare URL. */

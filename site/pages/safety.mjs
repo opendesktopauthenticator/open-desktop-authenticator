@@ -137,16 +137,27 @@ export const scamClones = {
 				<li>Published on the repository that holds the source, at a tagged version.</li>
 				<li>
 					A <code>SHA256SUMS</code> file listing every artifact. Ideally a signature
-					over that list too — ours does not have one yet, which is why the
-					provenance attestation below matters here rather than being a nicety.
+					over that list too —
+					${
+						s.release.checksums && s.release.signed
+							? `ours carries one, and <a href="/verify">the verification page</a>
+								shows how to check it.`
+							: `ours does not have one yet, which is why the provenance attestation
+								below matters here rather than being a nicety.`
+					}
 				</li>
 				<li>
 					A build anyone can reproduce from the tag and compare byte for byte against
-					what was published. <strong>Ours cannot be, yet</strong> — it is on the list
-					because it is what the ideal looks like, not because we have it. What stands
-					in for it today is the provenance attestation, which proves which workflow
-					and which commit produced the bytes even though you cannot rebuild them
-					yourself.
+					what was published.
+					${
+						s.release.reproducible
+							? `<strong>Ours can be</strong> — rebuild the tag and the bytes match.`
+							: `<strong>Ours cannot be, yet</strong> — it is on the list because it is
+								what the ideal looks like, not because we have it. What stands in for it
+								today is the provenance attestation, which proves which workflow and
+								which commit produced the bytes even though you cannot rebuild them
+								yourself.`
+					}
 				</li>
 				<li>
 					<strong>No self-update.</strong> Nothing here downloads and runs its own

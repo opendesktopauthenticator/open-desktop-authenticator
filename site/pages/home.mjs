@@ -205,9 +205,12 @@ export default {
 					executable is the exact mechanism the clone sites rely on.
 				</li>
 				<li>
-					<strong>It does not auto-confirm anything dangerous.</strong> Automatic
-					confirmation works from a fixed allowlist of two types. Account recovery is
-					not on it and cannot be added by a setting.
+					<strong>It never auto-confirms an account-recovery request.</strong> Automatic
+					confirmation works from a fixed allowlist of two types — trades and market
+					listings — and account recovery is not on it and cannot be added by a
+					setting. Those two types can still move items and money, which is why the
+					feature is off until you turn it on, per account, and why
+					<a href="/security">the security model describes what it costs you</a>.
 				</li>
 			</ul>
 

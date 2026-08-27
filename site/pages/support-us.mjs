@@ -307,11 +307,17 @@ ${SPENDS.map(
 			<div class="callout callout-warn">
 				<h2>Check the address you paste</h2>
 				<p>
-					After pasting, compare the <strong>first four and last four characters</strong>
-					against this page. Clipboard-replacing malware is real, it targets exactly
-					this moment, and those eight characters are the whole defence. This is the
-					same advice we give about downloads, and it applies to us too — a payment
-					address is unrecoverable in a way almost nothing else is.
+					After pasting, compare the address against this page — <strong>all of it, not
+					just the ends</strong>. Checking the first and last four characters is a quick
+					first look, and it is the check the attack is built to survive: address
+					generators produce lookalikes that match at both ends and differ in the
+					middle. Confirm the network as well as the address.
+				</p>
+				<p>
+					Better still, send a small amount first, or paste from an entry you saved
+					after checking it once. This is the same advice we give about downloads, and
+					it applies to us too — a payment address is unrecoverable in a way almost
+					nothing else is.
 				</p>
 			</div>
 

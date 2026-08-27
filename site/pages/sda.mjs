@@ -244,7 +244,8 @@ export default {
 					<p>
 						An independent, open-source alternative, written to be checkable: public
 						source, builds produced in public CI, and no self-updating. Published
-						published checksums and a signature over them shipped with 1.0, though the binaries are not code-signed yet;
+						checksums and a signature over them shipped with 1.0, though the binaries
+						are not code-signed yet;
 						reproducible builds are a later goal and are not claimed yet —
 						<a href="/download">the download page tracks where each one stands</a>.
 					</p>

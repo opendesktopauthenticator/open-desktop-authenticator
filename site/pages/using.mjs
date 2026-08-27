@@ -459,9 +459,9 @@ export const mobileVsDesktop = {
 
 			<h2>Where ${s.short} stands today</h2>
 			<p>
-				Stated so you can weigh it: this is a young project. Version 1.0 is days old,
-				no independent audit has happened, and it has none of the years of scrutiny the
-				mobile app has.</p>
+				Stated so you can weigh it: this is a young project. Version 1.0 was published
+				on ${s.releasedOn}, no independent audit has happened, and it has none of the
+				years of scrutiny the mobile app has.</p>
 
 			<h2>Related</h2>
 			<ul class="link-cards">
