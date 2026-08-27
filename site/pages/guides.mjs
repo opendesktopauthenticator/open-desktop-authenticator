@@ -174,6 +174,13 @@ export const download = {
 				</li>
 			</ul>
 
+			<p>
+				Free software under the MIT licence — no account, no agreement to accept, and
+				nothing to cancel. <a href="${s.repo}/blob/main/LICENSE" rel="noopener">Read the
+				licence</a>, or <a href="/uninstall">read how to remove it and its data</a>
+				before you install rather than after.
+			</p>
+
 			<h2>Building it yourself</h2>
 			<p>
 				The source is public and can be built and run by anyone comfortable with
@@ -198,6 +205,7 @@ ${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
 
 export const importFromSda = {
 	slug: 'import-from-sda',
+	parent: 'docs',
 	updated: '2026-08-14',
 	navTitle: 'Import',
 	title: 'Import maFiles from SDA',
@@ -300,9 +308,184 @@ export const importFromSda = {
 		</article>`
 };
 
+export const uninstall = {
+	slug: 'uninstall',
+	updated: '2026-08-27',
+	navTitle: 'Uninstall',
+	parent: 'download',
+	title: 'Uninstall Open Desktop Authenticator, and remove its data',
+	description:
+		'How to remove the application on Windows and Linux, what it leaves behind and where, and the one thing to do before you delete any of it.',
+	structuredData: (s) => ({
+		'@context': 'https://schema.org',
+		'@type': 'HowTo',
+		name: 'Uninstall Open Desktop Authenticator',
+		publisher: { '@type': 'Organization', name: s.publisher },
+		step: [
+			{
+				'@type': 'HowToStep',
+				name: 'Detach the authenticator first',
+				text: 'Remove the authenticator from each Steam account, or make sure the revocation code for each is written down somewhere outside the vault.'
+			},
+			{
+				'@type': 'HowToStep',
+				name: 'Remove the application',
+				text: 'Uninstall from the Microsoft Store, Windows Settings, or your package manager, or delete the portable folder or AppImage.'
+			},
+			{
+				'@type': 'HowToStep',
+				name: 'Remove the data',
+				text: 'Delete the application data directory, which holds the encrypted vault, its backup and any recovery files.'
+			}
+		]
+	}),
+	body: (s) => `
+		<article>
+			<h1>Uninstall ${s.name}, and remove its data</h1>
+			<p class="lede">
+				Removing the application is the easy half. The half worth reading first is what
+				happens to the Steam accounts it was holding, because uninstalling does not
+				touch them.
+			</p>
+
+			<div class="callout callout-warn">
+				<h2>Do this before you delete anything</h2>
+				<p>
+					<strong>Uninstalling does not remove the authenticator from your Steam
+					account.</strong> Steam still expects codes from an authenticator this
+					application was generating. Delete the vault without dealing with that and
+					you are locked out of every account it held.
+				</p>
+				<p>Either, for each account:</p>
+				<ul>
+					<li>
+						<strong>Detach it in the application first</strong> — Remove account, which
+						can also deactivate the authenticator on Steam's side. Do this while the
+						vault still opens.
+					</li>
+					<li>
+						<strong>Or make sure you have the revocation code</strong> — the
+						<code>R</code> code Valve calls your recovery code, written down somewhere
+						that is not the vault.
+						<a href="/steam-revocation-code">What it is and how to get it back.</a>
+						With it you can detach the authenticator from Steam later, without this
+						application.
+					</li>
+				</ul>
+				<p>
+					If neither is true and the vault is already gone,
+					<a href="/lost-authenticator">the recovery routes are here</a>.
+				</p>
+			</div>
+
+			<h2>1. Remove the application</h2>
+			<dl class="facts">
+				<dt>Microsoft Store</dt>
+				<dd>
+					Start menu, right-click ${s.name}, Uninstall. Or Settings, Apps, Installed
+					apps. Windows removes the package completely.
+				</dd>
+				<dt>Windows installer (the <code>.exe</code> from GitHub)</dt>
+				<dd>
+					Settings, Apps, Installed apps, ${s.name}, Uninstall. The uninstaller
+					deliberately leaves your data behind — see below — because an uninstall that
+					destroys a vault is an uninstall that destroys accounts.
+				</dd>
+				<dt>Windows portable</dt>
+				<dd>
+					A portable build has no installer and touches no registry key. Delete the
+					<code>.exe</code> and the <code>open-desktop-authenticator</code> folder
+					beside it, which is where a portable build keeps everything.
+				</dd>
+				<dt>Linux AppImage</dt>
+				<dd>Delete the <code>.AppImage</code> file. Nothing else was installed.</dd>
+				<dt>Linux <code>.deb</code></dt>
+				<dd>
+					<code>sudo apt remove open-desktop-authenticator</code>, or
+					<code>sudo dpkg -r open-desktop-authenticator</code>. As with the Windows
+					installer, your data is left alone.
+				</dd>
+			</dl>
+
+			<h2>2. What is left, and where</h2>
+			<p>
+				Everything the application stored lives in one directory. Nothing is written
+				anywhere else, and nothing was ever sent anywhere.
+			</p>
+			<dl class="facts">
+				<dt>Windows, installed</dt>
+				<dd><code>%APPDATA%\\open-desktop-authenticator</code></dd>
+				<dt>Windows, portable</dt>
+				<dd>
+					<code>open-desktop-authenticator</code>, in the same folder as the
+					<code>.exe</code>
+				</dd>
+				<dt>Linux</dt>
+				<dd><code>~/.config/open-desktop-authenticator</code></dd>
+			</dl>
+			<p>Inside it:</p>
+			<dl class="facts">
+				<dt><code>vault.json</code></dt>
+				<dd>
+					Your accounts and their Steam secrets, encrypted with your passphrase. This
+					is the file that matters.
+				</dd>
+				<dt><code>vault.json.bak</code></dt>
+				<dd>
+					The previous version, kept so an interrupted write cannot leave you with
+					nothing. Encrypted the same way, and <strong>just as usable to somebody who
+					has your passphrase</strong> — deleting only <code>vault.json</code> leaves
+					this behind.
+				</dd>
+				<dt><code>recovery/</code></dt>
+				<dd>
+					One <code>.oda-recovery</code> file per account enrolled here, holding the
+					revocation code for it. Encrypted under the same passphrase-derived key as
+					the vault, so they are not a way around a forgotten passphrase — but they
+					are secrets, and they are not covered by deleting the vault alone.
+				</dd>
+			</dl>
+
+			<h2>3. Remove the data</h2>
+			<p>
+				Delete that directory. There is no uninstaller step that does it for you and no
+				hidden second copy: when the directory is gone, everything this application
+				stored is gone.
+			</p>
+			<p>
+				It is encrypted at rest either way, so leaving it costs you nothing immediately —
+				but it is a file whose whole purpose is to be worth stealing, and there is no
+				reason to keep one for software you no longer run.
+			</p>
+			<p>
+				<strong>Exports you made are not in there.</strong> A <code>.maFile</code> you
+				exported went wherever you saved it, and those are unencrypted unless you
+				encrypted them yourself. If you were leaving for another authenticator, that
+				file is the one you are keeping; if you were not, it is the one to delete first.
+			</p>
+
+			<h2>Licence</h2>
+			<p>
+				${s.name} is free software under the MIT licence — you may use, copy, modify and
+				redistribute it, and it comes with no warranty.
+				<a href="${s.repo}/blob/main/LICENSE" rel="noopener">Read the licence</a>. There
+				is no separate end-user agreement, no account, and nothing to cancel.
+			</p>
+
+			<h2>Related</h2>
+			<ul>
+				<li><a href="/download">Download and release status</a></li>
+				<li><a href="/steam-revocation-code">Steam revocation code</a></li>
+				<li><a href="/lost-authenticator">Lost access to an authenticator</a></li>
+			</ul>
+
+${reviewAsk(s, { got: 'Did this cover what you needed to remove?' })}
+		</article>`
+};
+
 export const docs = {
 	slug: 'docs',
-	updated: '2026-08-14',
+	updated: '2026-08-27',
 	navTitle: 'Docs',
 	title: 'Documentation: setup, codes, confirmations and backups',
 	description:
@@ -311,7 +494,8 @@ export const docs = {
 		<article>
 			<h1>Documentation</h1>
 			<p class="lede">
-				How the application works, page by page. If something here is wrong or missing,
+				The product manual and the Steam Guard reference library, grouped by the task
+				you are trying to complete. If something here is wrong or missing,
 				<a href="/support">tell us</a> — documentation faults are treated as faults.
 			</p>
 
@@ -408,11 +592,54 @@ export const docs = {
 					authenticator. If that device is gone, the revocation code is the way through.
 				</dd>
 			</dl>
+
+			<h2>maFile reference</h2>
+			<dl class="defs">
+				<dt><a href="/what-is-a-mafile">What a maFile contains</a></dt>
+				<dd>The secrets, recovery code and session material inside the file, and why each matters.</dd>
+				<dt><a href="/how-to-open-mafile">Opening a maFile safely</a></dt>
+				<dd>How to inspect a copy locally without uploading live authenticator material.</dd>
+				<dt><a href="/encrypted-mafile">Encrypted maFiles and manifest.json</a></dt>
+				<dd>Why an SDA passphrase and the matching manifest are both required.</dd>
+				<dt><a href="/import-from-sda">Importing from SDA</a></dt>
+				<dd>The product workflow for selecting, checking, importing and later exporting accounts.</dd>
+			</dl>
+
+			<h2>Move or recover an authenticator</h2>
+			<dl class="defs">
+				<dt><a href="/lost-authenticator">Lost access completely</a></dt>
+				<dd>The recovery routes in the order worth trying, all on Steam's own systems.</dd>
+				<dt><a href="/steam-revocation-code">Find or use the recovery code</a></dt>
+				<dd>What the R-code does and where to record it before a device is lost.</dd>
+				<dt><a href="/move-steam-authenticator-new-phone">Move to a new phone</a></dt>
+				<dd>Valve's phone-to-phone transfer and the restriction that follows it.</dd>
+				<dt><a href="/move-steam-authenticator-to-pc">Move from a phone to a PC</a></dt>
+				<dd>What a Steam transfer changes and why the old copy must be treated as replaced.</dd>
+				<dt><a href="/steam-guard-trade-holds">Trade holds and restrictions</a></dt>
+				<dd>Each trigger and duration, separated so different restrictions are not confused.</dd>
+				<dt><a href="/steam-guard-code-not-working">Codes that Steam refuses</a></dt>
+				<dd>Start with time synchronisation, then work through the less common causes.</dd>
+			</dl>
+
+			<h2>Choose and use an authenticator</h2>
+			<dl class="defs">
+				<dt><a href="/steam-guard-without-phone">Steam Guard without a smartphone</a></dt>
+				<dd>The difference between needing a mobile device and keeping a phone number for recovery.</dd>
+				<dt><a href="/approve-steam-confirmations-desktop">Trade confirmations on desktop</a></dt>
+				<dd>How confirmation signing works and which secret and session it requires.</dd>
+				<dt><a href="/steam-mobile-vs-desktop-authenticator">Mobile app or desktop</a></dt>
+				<dd>The security, recovery and convenience trade-offs between device types.</dd>
+				<dt><a href="/alternatives">Authenticator options compared</a></dt>
+				<dd>Valve's app, SDA and this project, including the case against choosing ours.</dd>
+				<dt><a href="/faq">Product FAQ</a></dt>
+				<dd>Short answers about cost, platform support, privacy, imports and losing a passphrase.</dd>
+			</dl>
 		</article>`
 };
 
 export const faq = {
 	slug: 'faq',
+	parent: 'docs',
 	updated: '2026-08-25',
 	navTitle: 'FAQ',
 	title: 'FAQ: Steam Guard codes, maFiles and security',

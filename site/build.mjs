@@ -69,7 +69,7 @@ export const SITE = {
 	 * that did not happen, and a site whose every page updates whenever CSS
 	 * changes is telling search engines something false about its freshness.
 	 */
-	updated: '2026-08-25',
+	updated: '2026-08-27',
 
 	/*
 	 * When 1.0 was published, from the GitHub release.
@@ -292,12 +292,34 @@ export const SITE = {
 		}
 	},
 
+	/** The release version, read from the package that is actually built. */
+	get version() {
+		return JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8')).version;
+	},
+
 	/** The company behind this, and the other things it runs. */
 	brand: {
 		name: 'MASTERPANEL',
 		legal: 'MASTERPANEL LLC',
 		url: 'https://masterspanel.com',
 		logo: '/assets/projects/masterspanel.svg'
+	},
+
+	/*
+	 * Stable entity identifiers for structured data.
+	 *
+	 * The company is not the product website, and the repository is not another
+	 * identity for the company. Keeping the three IDs separate prevents schema
+	 * on individual pages from silently merging those different entities.
+	 */
+	get organizationId() {
+		return `${this.brand.url}/#organization`;
+	},
+	get websiteId() {
+		return `${this.origin}/#website`;
+	},
+	get softwareId() {
+		return `${this.origin}/#software`;
 	}
 };
 
@@ -827,7 +849,7 @@ const LLMS_SECTIONS = [
 	{
 		heading: 'The application',
 		note: 'What it is, how to get it, and how to check what you got.',
-		slugs: ['index', 'download', 'verify', 'import-from-sda', 'docs', 'faq']
+		slugs: ['index', 'download', 'verify', 'import-from-sda', 'uninstall', 'docs', 'faq']
 	},
 	{
 		heading: 'Trust and safety',

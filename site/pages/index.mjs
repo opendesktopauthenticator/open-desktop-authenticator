@@ -8,7 +8,7 @@
 import home from './home.mjs';
 import sda from './sda.mjs';
 import { scamClones, verify, security } from './safety.mjs';
-import { download, importFromSda, docs, faq, support, notFound } from './guides.mjs';
+import { download, importFromSda, uninstall, docs, faq, support, notFound } from './guides.mjs';
 import { mafile, lostAuthenticator, alternatives } from './answers.mjs';
 import { codeNotWorking, moveAuthenticator, revocationCode, encryptedMafile } from './rescues.mjs';
 import { confirmationsOnDesktop, mobileVsDesktop, withoutPhone, openMafile } from './using.mjs';
@@ -44,6 +44,7 @@ export const PAGES = [
 	alternatives,
 	download,
 	importFromSda,
+	uninstall,
 	docs,
 	faq,
 	support,

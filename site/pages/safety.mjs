@@ -63,7 +63,9 @@ export const scamClones = {
 			</div>
 			<p>
 				When an attacker finds half an inventory under a trade hold, they do not wait it
-				out. They use the Community Market instead, and the sequence is always the same:
+				out. They use the Community Market instead. This is the sequence in the case
+				this project came out of, and the one described most often when people compare
+				notes afterwards:
 			</p>
 			<ol class="signs">
 				<li>
