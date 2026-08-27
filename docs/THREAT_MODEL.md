@@ -209,8 +209,26 @@ could not reach Steam stayed on screen holding a signed-in session that
 that only reached one page would not finish a trade. Ordinary browser
 same-origin rules apply, so a page on another domain cannot read Steam's
 cookies; what it can do is what any site can do to a logged-in browser, which is
-why the address stays visible and why this section exists rather than a claim
-that the window is safe.
+why this section exists rather than a claim that the window is safe.
+
+**The window says where it is, in its title.** This paragraph used to claim the
+address stayed visible, and it did not: an Electron window has no address bar,
+and the title was pinned to the account name. So somebody who followed a link
+off Steam saw this application's chrome and their own account name above a page
+that was not Steam — which makes a fake page look _better_ than one in an
+ordinary browser, and is the exact deception §2.6 exists to warn people about.
+
+The title now reads `account — host`, and any host that is not Valve's is
+labelled `NOT STEAM: host` rather than merely named, because "not Steam" is the
+fact worth reading and a hostname alone asks the reader to know Valve's domains
+by heart. The host is Electron's, read off the contents after navigation, so
+nothing a page supplies reaches it; `page-title-updated` stays prevented. It
+follows `history.pushState` as well as real loads, because a title that names
+where the window used to be is worse than no title at all.
+
+This is a smaller thing than a real address bar, and it is not claimed to be
+more: it tells a reader who looks whether they are still on Steam. It does not
+stop them going somewhere else, and it is not meant to.
 
 **Ends with the lock.** `AccountBrowsers.closeAll` closes the windows and wipes
 their sessions when the vault locks. Closing alone would not be enough:

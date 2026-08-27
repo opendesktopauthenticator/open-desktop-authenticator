@@ -99,10 +99,32 @@ export const electronBrowserHost: BrowserHost = {
 				}
 				window.focus();
 			},
+			setTitle: (title) => window.setTitle(title),
 			close: () => window.close(),
 			isDestroyed: () => window.isDestroyed(),
 			on: (event, listener) => {
-				window.on(event, listener);
+				if (event === 'closed') {
+					window.on('closed', listener as () => void);
+					return;
+				}
+				/*
+				 * Two events, because one is not enough.
+				 *
+				 * `did-navigate` covers a real page load. `did-navigate-in-page`
+				 * covers history.pushState — which changes the address without a
+				 * load, and which is how a single-page application moves. Listening
+				 * only to the first leaves the title describing where the window
+				 * used to be, and a stale address in a security control is worse
+				 * than none: it is confidently wrong.
+				 *
+				 * The URL is Electron's, read back off the contents rather than
+				 * taken from the event, so nothing the page says reaches the title.
+				 */
+				const report = (): void => {
+					listener(window.webContents.getURL());
+				};
+				window.webContents.on('did-navigate', report);
+				window.webContents.on('did-navigate-in-page', report);
 			},
 			setWindowOpenHandler: (handler) => {
 				// On `webContents`, not on the window. The port names it at the

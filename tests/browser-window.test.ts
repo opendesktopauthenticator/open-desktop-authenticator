@@ -4,6 +4,7 @@ import {
 	BROWSER_USER_AGENT,
 	BrowserSessionError,
 	BrowserSignInRequired,
+	titleFor,
 	browserPartitionFor,
 	looksSignedOut,
 	openAccountBrowser,
@@ -36,6 +37,8 @@ interface Recorded {
 	wiped: string[];
 	/** Times an already-open window was raised instead of a new one being made. */
 	focused: number;
+	/** Every title the window was given, in order. */
+	titles: string[];
 }
 
 function harness(
@@ -44,6 +47,8 @@ function harness(
 	// Per-harness, not module-level: two tests sharing one of these is how a
 	// fake starts reporting the previous test's partition.
 	let partitionName = '';
+	/** Set once the window subscribes; a test calls it to move the window. */
+	let navigate: (url: string) => void = () => undefined;
 	const recorded: Recorded = {
 		partitions: [],
 		proxies: [],
@@ -53,7 +58,8 @@ function harness(
 		loaded: [],
 		closed: 0,
 		wiped: [],
-		focused: 0
+		focused: 0,
+		titles: []
 	};
 
 	const session: BrowserSessionHandle = {
@@ -87,6 +93,7 @@ function harness(
 		// always echoes the requested URL back can never land anywhere else, which
 		// is the one thing `looksSignedOut` exists to notice.
 		currentUrl: () => overrides.landsOn ?? START_URL,
+		setTitle: (title) => recorded.titles.push(title),
 		focus: () => {
 			recorded.focused += 1;
 		},
@@ -94,7 +101,11 @@ function harness(
 			recorded.closed += 1;
 		},
 		isDestroyed: () => false,
-		on: vi.fn(),
+		on: (event: string, listener: unknown) => {
+			if (event === 'navigated') {
+				navigate = listener as (url: string) => void;
+			}
+		},
 		setWindowOpenHandler: vi.fn()
 	};
 
@@ -110,7 +121,7 @@ function harness(
 		}
 	};
 
-	return { host, recorded };
+	return { host, recorded, go: (url: string) => navigate(url) };
 }
 
 const ACCOUNT = {
@@ -323,6 +334,72 @@ describe('where the window actually ended up', () => {
 });
 
 /**
+ * The only place this window shows its address.
+ *
+ * The threat model accepts the biggest risk here — the user may navigate
+ * anywhere, because a browser that reached one page could not finish a trade —
+ * and the mitigation it named was that the address stays visible. It was not:
+ * a plain window has no address bar, and the title was pinned to the account
+ * name. Somebody who followed a link off Steam saw this application's chrome
+ * and their own account name above a page that was not Steam, which makes a
+ * fake page look better rather than worse.
+ */
+describe('the window says where it is', () => {
+	it.each([
+		['steam', 'https://steamcommunity.com/my/tradeoffers/', 'demo_trader — steamcommunity.com'],
+		[
+			'the store',
+			'https://store.steampowered.com/account/',
+			'demo_trader — store.steampowered.com'
+		],
+		['a www host', 'https://www.steamcommunity.com/market/', 'demo_trader — steamcommunity.com'],
+		[
+			'a lookalike',
+			'https://steamcommunity.com.evil.example/login',
+			'demo_trader — NOT STEAM: steamcommunity.com.evil.example'
+		],
+		['anywhere else', 'https://example.org/x', 'demo_trader — NOT STEAM: example.org'],
+		// Nothing loaded yet: the account name alone, never "NOT STEAM: ".
+		['a blank window', 'about:blank', 'demo_trader'],
+		['nothing at all', '', 'demo_trader']
+	])('%s', (_name, url, expected) => {
+		expect(titleFor('demo_trader', url)).toBe(expected);
+	});
+
+	/*
+	 * The lookalike case is the one that matters. `steamcommunity.com.evil.example`
+	 * ends in a domain nobody owns but reads as Steam at a glance, which is
+	 * exactly the trick /scam-clones documents for download pages.
+	 */
+	it('never calls a lookalike host Steam', () => {
+		const title = titleFor('demo_trader', 'https://steamcommunity.com.evil.example/login');
+		expect(title).toContain('NOT STEAM');
+	});
+
+	it('renames the window as it moves, from the first page onward', async () => {
+		const { host, recorded, go } = harness();
+		await openAccountBrowser(host, ACCOUNT);
+
+		go('https://steamcommunity.com/my/tradeoffers/');
+		go('https://evil.example/steam-login');
+
+		expect(recorded.titles).toEqual([
+			'demo_trader — steamcommunity.com',
+			'demo_trader — NOT STEAM: evil.example'
+		]);
+	});
+
+	it('keeps the account name, which is what the window is for', async () => {
+		const { host, recorded, go } = harness();
+		await openAccountBrowser(host, ACCOUNT);
+		go(START_URL);
+		// Several of these are open at once; which account you are about to trade
+		// as is the other question a title has to answer.
+		expect(recorded.titles.at(-1)).toContain(ACCOUNT.accountName);
+	});
+});
+
+/**
  * What the vault lock has to reach.
  *
  * `SteamTransportFactory.forgetAll` wipes the `steam-*` sessions it made. The
@@ -374,6 +451,7 @@ describe('closing every browser when the vault locks', () => {
 				return {
 					loadURL: () => Promise.resolve(),
 					currentUrl: () => START_URL,
+					setTitle: () => undefined,
 					focus: () => undefined,
 					close: () => {
 						destroyed = true;
@@ -414,6 +492,7 @@ describe('closing every browser when the vault locks', () => {
 			createWindow: () => ({
 				loadURL: () => Promise.resolve(),
 				currentUrl: () => START_URL,
+				setTitle: () => undefined,
 				focus: () => undefined,
 				close: () => {
 					throw new Error('window already gone');
@@ -443,6 +522,7 @@ describe('closing every browser when the vault locks', () => {
 			createWindow: () => ({
 				loadURL: () => Promise.resolve(),
 				currentUrl: () => START_URL,
+				setTitle: () => undefined,
 				focus: () => undefined,
 				close: () => undefined,
 				isDestroyed: () => false,
@@ -497,6 +577,7 @@ function lockHarness(cleared: string[], closed: string[]): BrowserHost {
 			return {
 				loadURL: () => Promise.resolve(),
 				currentUrl: () => START_URL,
+				setTitle: () => undefined,
 				focus: () => undefined,
 				close: () => {
 					destroyed = true;

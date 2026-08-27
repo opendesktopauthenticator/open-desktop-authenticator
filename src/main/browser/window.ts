@@ -69,6 +69,8 @@ export interface BrowserWindowOptions {
 
 export interface BrowserWindowHandle {
 	loadURL(url: string): Promise<void>;
+	/** Replace the window's own title. Never called with anything a page supplied. */
+	setTitle(title: string): void;
 	/** Bring this window to the user, restoring it if it was minimised. */
 	focus(): void;
 	/**
@@ -81,6 +83,11 @@ export interface BrowserWindowHandle {
 	close(): void;
 	isDestroyed(): boolean;
 	on(event: 'closed', listener: () => void): void;
+	/**
+	 * The main frame went somewhere. The URL comes from Electron, not from the
+	 * page — a page that could name its own location could lie about it.
+	 */
+	on(event: 'navigated', listener: (url: string) => void): void;
 	setWindowOpenHandler(handler: (details: { url: string }) => { action: 'allow' | 'deny' }): void;
 }
 
@@ -191,6 +198,15 @@ export async function openAccountBrowser(
 	 * the two things this window exists to provide.
 	 */
 	window.setWindowOpenHandler(() => ({ action: 'allow' }));
+
+	/*
+	 * The title follows the address, so the window always says where it is.
+	 * `page-title-updated` is prevented in the adapter, so this is the only
+	 * thing that writes a title and a page cannot overwrite it.
+	 */
+	window.on('navigated', (url) => {
+		window.setTitle(titleFor(options.accountName, url));
+	});
 
 	/*
 	 * **Nothing below here may leave a window behind.**
@@ -378,6 +394,43 @@ export class AccountBrowsers {
 			})
 		);
 	}
+}
+
+/**
+ * What the window is called, which is the only place its address is shown.
+ *
+ * **The threat model promised this and the window did not have it.** That
+ * section accepts the largest risk here — the user can navigate anywhere,
+ * because a browser that reached one page could not finish a trade — and the
+ * mitigation it named was that the address stays visible. It was not visible
+ * anywhere: a plain `BrowserWindow` has no address bar, and the title was
+ * frozen to the account name.
+ *
+ * So somebody who followed a link out of Steam saw this application's chrome
+ * and their own account name above a page that was not Steam, which makes a
+ * phishing page look *more* trustworthy rather than less. That is the precise
+ * deception `/scam-clones` exists to warn people about, reproduced in our own
+ * window.
+ *
+ * The host, not the full URL: phishing is a question about who you are talking
+ * to, and a long path pushes the answer off the end of a title bar. Anything
+ * that is not Steam is labelled rather than merely shown, because "not Steam"
+ * is the fact worth reading, and a hostname alone asks the reader to know
+ * Valve's domains by heart.
+ */
+export function titleFor(accountName: string, url: string): string {
+	let host: string;
+	try {
+		host = new URL(url).hostname.replace(/^www\./, '');
+	} catch {
+		return accountName;
+	}
+	if (host === '') {
+		return accountName;
+	}
+	return STEAM_HOSTS.includes(host)
+		? `${accountName} — ${host}`
+		: `${accountName} — NOT STEAM: ${host}`;
 }
 
 /** The partition name, kept in one place so the wipe and the open agree. */

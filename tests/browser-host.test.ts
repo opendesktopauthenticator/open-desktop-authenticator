@@ -93,6 +93,31 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(ADAPTER).toMatch(/preventDefault\(\)/);
 	});
 
+	/*
+	 * **Two navigation events, because one leaves the title lying.**
+	 *
+	 * `did-navigate` fires for a real page load. `did-navigate-in-page` fires for
+	 * `history.pushState`, which changes the address without a load and is how a
+	 * single-page application moves. With only the first, the title goes on
+	 * naming where the window used to be — and a stale address in the one
+	 * control that says whether you are still on Steam is worse than no address
+	 * at all, because it is confidently wrong.
+	 *
+	 * Asserted here because removing the second listener breaks nothing that any
+	 * other test can see: the window still opens, still loads, still renames
+	 * itself on the first navigation.
+	 */
+	it('follows in-page navigation as well as real page loads', () => {
+		expect(ADAPTER).toMatch(/'did-navigate'/);
+		expect(ADAPTER).toMatch(/'did-navigate-in-page'/);
+	});
+
+	it('reads the address from the contents rather than from the event', () => {
+		// A page that could name its own location could lie about it, and this
+		// address is what tells somebody they have left Steam.
+		expect(ADAPTER).toMatch(/webContents\.getURL\(\)/);
+	});
+
 	it('sets the user agent on the contents, not only the session', () => {
 		// The session's agent covers subresources; navigation uses the contents'.
 		// Without this the first page load announces Electron.
