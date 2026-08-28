@@ -1,4 +1,4 @@
-import { BrowserWindow, session, type Session, type WebContents } from 'electron';
+import { BrowserWindow, screen, session, type Session, type WebContents } from 'electron';
 
 import { denyAllPermissions } from '../security';
 import { windowImage } from '../logo-image';
@@ -87,9 +87,25 @@ export const electronBrowserHost: BrowserHost = {
 	},
 
 	createWindow(options: BrowserWindowOptions): BrowserWindowHandle {
+		/*
+		 * Sized against the screen it opens on, not against a number typed once.
+		 *
+		 * 1280x860 is a reasonable window on a 1080p laptop and a postage stamp on
+		 * a 4K monitor — and a browser that opens too small to read is a browser
+		 * people immediately resize. The requested size is treated as a maximum
+		 * and a preference: it shrinks to fit a small display, and grows to a
+		 * sensible share of a large one.
+		 */
+		const area = screen.getPrimaryDisplay().workAreaSize;
+		const width = Math.min(area.width - 80, Math.max(options.width, Math.round(area.width * 0.8)));
+		const height = Math.min(
+			area.height - 80,
+			Math.max(options.height, Math.round(area.height * 0.85))
+		);
+
 		const window = new BrowserWindow({
-			width: options.width,
-			height: options.height,
+			width,
+			height,
 			title: options.title,
 			/*
 			 * The same mark the main window carries.
