@@ -11,7 +11,7 @@ import {
 import { join } from 'node:path';
 
 import { CHROME_HEIGHT, CHROME_HTML } from './chrome-html';
-import { addressToUrl, isSteamHost } from './window';
+import { addressToUrl, isSteamHost, START_URL } from './window';
 
 import { denyAllPermissions } from '../security';
 import { windowImage } from '../logo-image';
@@ -138,20 +138,13 @@ export const electronBrowserHost: BrowserHost = {
 			autoHideMenuBar: true
 		});
 
-		const page = new WebContentsView({
-			webPreferences: {
-				...HARDENED,
-				partition: options.partition
-			}
-		});
-
 		/*
-		 * The toolbar runs in its own partition, deliberately not the browser's.
+		 * The chrome runs in its own partition, deliberately not the account's.
 		 *
-		 * It shares no cookies with Steam, and because it is not one of the
-		 * sessions `isAccountBrowserContents` knows about, it keeps the
-		 * application-wide navigation lock the page view is exempt from. The
-		 * toolbar never navigates; if it ever tried, it would be stopped.
+		 * It shares no cookies with Steam, and because its partition is not one
+		 * `isAccountBrowserContents` knows about, it keeps the application-wide
+		 * navigation lock the tabs are exempt from. The chrome never navigates; if
+		 * it ever tried, it would be stopped.
 		 */
 		const chrome = new WebContentsView({
 			webPreferences: {
@@ -160,19 +153,150 @@ export const electronBrowserHost: BrowserHost = {
 				preload: join(__dirname, '../preload/browser-chrome.js')
 			}
 		});
-
 		window.contentView.addChildView(chrome);
-		window.contentView.addChildView(page);
 
-		const layout = (): void => {
+		/** Set once `openAccountBrowser` subscribes; called as the active tab moves. */
+		let navigated: () => void = () => undefined;
+
+		/*
+		 * **Every tab is built the same way, or it is not built.**
+		 *
+		 * A tab opened by the user and a tab opened by a page are the same object
+		 * here on purpose. The dangerous version of this feature is one where the
+		 * first tab is hardened and the ones a website opens are not — so there is
+		 * one function, and nothing else creates a view.
+		 */
+		const tabs = new Map<number, WebContentsView>();
+		let nextId = 1;
+		let activeId = 0;
+
+		const bodyBounds = (): Electron.Rectangle => {
 			const bounds = window.getContentBounds();
-			chrome.setBounds({ x: 0, y: 0, width: bounds.width, height: CHROME_HEIGHT });
-			page.setBounds({
+			return {
 				x: 0,
 				y: CHROME_HEIGHT,
 				width: bounds.width,
 				height: Math.max(0, bounds.height - CHROME_HEIGHT)
+			};
+		};
+
+		const publish = (): void => {
+			if (chrome.webContents.isDestroyed()) {
+				return;
+			}
+			const active = tabs.get(activeId);
+			const url = active && !active.webContents.isDestroyed() ? active.webContents.getURL() : '';
+			navigated();
+			chrome.webContents.send('browser-chrome:state', {
+				url,
+				canGoBack: active ? active.webContents.navigationHistory.canGoBack() : false,
+				canGoForward: active ? active.webContents.navigationHistory.canGoForward() : false,
+				loading: active ? active.webContents.isLoading() : false,
+				offSteam: url !== '' && !isSteamHost(url),
+				tabs: [...tabs.entries()].map(([id, view]) => {
+					const at = view.webContents.isDestroyed() ? '' : view.webContents.getURL();
+					return {
+						id,
+						title: view.webContents.isDestroyed() ? '' : view.webContents.getTitle(),
+						url: at,
+						active: id === activeId,
+						offSteam: at !== '' && !isSteamHost(at)
+					};
+				})
 			});
+		};
+
+		const show = (id: number): void => {
+			const chosen = tabs.get(id);
+			if (!chosen) {
+				return;
+			}
+			activeId = id;
+			for (const [at, view] of tabs) {
+				view.setVisible(at === id);
+			}
+			chosen.setBounds(bodyBounds());
+			chosen.webContents.focus();
+			publish();
+		};
+
+		const openTab = (url?: string): number => {
+			const view = new WebContentsView({
+				webPreferences: {
+					...HARDENED,
+					partition: options.partition
+				}
+			});
+			const id = nextId++;
+			tabs.set(id, view);
+
+			// The same three things every tab gets, in the same order, because a
+			// tab that missed one would be a hole shaped exactly like a new tab.
+			view.webContents.setUserAgent(options.userAgent);
+			view.webContents.setWebRTCIPHandlingPolicy(webRtcPolicy);
+			view.webContents.setWindowOpenHandler((details) => {
+				// A page asking for a window gets a tab in this window instead —
+				// hardened the same way, and visible in the same strip.
+				openTab(details.url);
+				return { action: 'deny' };
+			});
+
+			// Listed rather than looped: TypeScript types each of these separately,
+			// and a loop over the names loses the overload that checks the listener.
+			view.webContents.on('did-navigate', publish);
+			view.webContents.on('did-navigate-in-page', publish);
+			view.webContents.on('did-start-loading', publish);
+			view.webContents.on('did-stop-loading', publish);
+			view.webContents.on('page-title-updated', publish);
+
+			window.contentView.addChildView(view);
+			view.setBounds(bodyBounds());
+			if (url !== undefined) {
+				void view.webContents.loadURL(url).catch(publish);
+			}
+			show(id);
+			return id;
+		};
+
+		const closeTab = (id: number): void => {
+			const view = tabs.get(id);
+			if (!view) {
+				return;
+			}
+			const order = [...tabs.keys()];
+			tabs.delete(id);
+			window.contentView.removeChildView(view);
+			if (!view.webContents.isDestroyed()) {
+				view.webContents.close();
+			}
+			if (tabs.size === 0) {
+				// Closing the last tab closes the window, as it does everywhere else.
+				window.close();
+				return;
+			}
+			if (activeId === id) {
+				const at = order.indexOf(id);
+				show([...tabs.keys()][Math.max(0, at - 1)] ?? [...tabs.keys()][0] ?? 0);
+			} else {
+				publish();
+			}
+		};
+
+		/*
+		 * WebRTC is decided before the first tab exists, so every tab is opened
+		 * with it rather than having it applied afterwards. A tab that ran even
+		 * briefly with the default policy could have answered a peer connection
+		 * and given away the address the proxy exists to hide.
+		 */
+		let webRtcPolicy: 'disable_non_proxied_udp' | 'default' = 'default';
+
+		const layout = (): void => {
+			const bounds = window.getContentBounds();
+			chrome.setBounds({ x: 0, y: 0, width: bounds.width, height: CHROME_HEIGHT });
+			const active = tabs.get(activeId);
+			if (active) {
+				active.setBounds(bodyBounds());
+			}
 		};
 		layout();
 		// Explicit, because `BaseWindow` does not resize its children. This is also
@@ -182,71 +306,61 @@ export const electronBrowserHost: BrowserHost = {
 		window.on('enter-full-screen', layout);
 		window.on('leave-full-screen', layout);
 
-		// Chromium sends the session's user agent for subresources, but the
-		// contents keep their own for navigation — so it is set here as well as on
-		// the session, or the first page load announces Electron.
-		page.webContents.setUserAgent(options.userAgent);
-
 		void chrome.webContents.loadURL(
 			'data:text/html;charset=utf-8,' + encodeURIComponent(CHROME_HTML)
 		);
 
-		/** Push the page's state to the toolbar so it can draw itself. */
-		const publish = (): void => {
-			if (chrome.webContents.isDestroyed() || page.webContents.isDestroyed()) {
-				return;
-			}
-			const url = page.webContents.getURL();
-			chrome.webContents.send('browser-chrome:state', {
-				url,
-				canGoBack: page.webContents.navigationHistory.canGoBack(),
-				canGoForward: page.webContents.navigationHistory.canGoForward(),
-				loading: page.webContents.isLoading(),
-				offSteam: !isSteamHost(url)
-			});
-		};
-		// Listed rather than looped: TypeScript types each of these events
-		// separately, and a loop over the names loses the overload that makes the
-		// listener check.
-		page.webContents.on('did-navigate', publish);
-		page.webContents.on('did-navigate-in-page', publish);
-		page.webContents.on('did-start-loading', publish);
-		page.webContents.on('did-stop-loading', publish);
-		page.webContents.on('did-finish-load', publish);
-
 		/*
-		 * The toolbar's four verbs, and nothing else.
+		 * The chrome's verbs, and nothing else.
 		 *
 		 * Scoped by comparing the sender: `ipcMain.on` is process-wide and every
-		 * browser window has a toolbar, so without the check one window's toolbar
-		 * would steer all of them.
+		 * browser window has chrome, so without the check one window's toolbar
+		 * would steer all of them — including one signed in as another account.
 		 */
 		const mine = (event: IpcMainEvent): boolean => event.sender === chrome.webContents;
+		const active = (): WebContentsView | undefined => tabs.get(activeId);
+
 		const onBack = (event: IpcMainEvent): void => {
-			if (mine(event)) page.webContents.navigationHistory.goBack();
+			if (mine(event)) active()?.webContents.navigationHistory.goBack();
 		};
 		const onForward = (event: IpcMainEvent): void => {
-			if (mine(event)) page.webContents.navigationHistory.goForward();
+			if (mine(event)) active()?.webContents.navigationHistory.goForward();
 		};
 		const onReload = (event: IpcMainEvent): void => {
 			if (!mine(event)) return;
-			if (page.webContents.isLoading()) {
-				page.webContents.stop();
+			const view = active();
+			if (!view) return;
+			if (view.webContents.isLoading()) {
+				view.webContents.stop();
 			} else {
-				page.webContents.reload();
+				view.webContents.reload();
 			}
 		};
 		const onGo = (event: IpcMainEvent, typed: unknown): void => {
 			if (!mine(event) || typeof typed !== 'string') return;
 			const target = addressToUrl(typed);
 			if (target !== undefined) {
-				void page.webContents.loadURL(target).catch(() => publish());
+				void active()?.webContents.loadURL(target).catch(publish);
 			}
 		};
+		const onNewTab = (event: IpcMainEvent): void => {
+			// A new tab lands where the window did: the account's trade offers.
+			if (mine(event)) openTab(START_URL);
+		};
+		const onSelectTab = (event: IpcMainEvent, id: unknown): void => {
+			if (mine(event) && typeof id === 'number') show(id);
+		};
+		const onCloseTab = (event: IpcMainEvent, id: unknown): void => {
+			if (mine(event) && typeof id === 'number') closeTab(id);
+		};
+
 		ipcMain.on('browser-chrome:back', onBack);
 		ipcMain.on('browser-chrome:forward', onForward);
 		ipcMain.on('browser-chrome:reload', onReload);
 		ipcMain.on('browser-chrome:go', onGo);
+		ipcMain.on('browser-chrome:new-tab', onNewTab);
+		ipcMain.on('browser-chrome:select-tab', onSelectTab);
+		ipcMain.on('browser-chrome:close-tab', onCloseTab);
 
 		window.on('closed', () => {
 			// Removed by reference, so closing one window does not deafen the rest.
@@ -254,14 +368,25 @@ export const electronBrowserHost: BrowserHost = {
 			ipcMain.removeListener('browser-chrome:forward', onForward);
 			ipcMain.removeListener('browser-chrome:reload', onReload);
 			ipcMain.removeListener('browser-chrome:go', onGo);
+			ipcMain.removeListener('browser-chrome:new-tab', onNewTab);
+			ipcMain.removeListener('browser-chrome:select-tab', onSelectTab);
+			ipcMain.removeListener('browser-chrome:close-tab', onCloseTab);
 		});
 
 		return {
-			loadURL: (url) => page.webContents.loadURL(url),
+			// The first tab. Everything after it is opened by the strip or by a page.
+			loadURL: (url) => {
+				const id = tabs.size === 0 ? openTab() : activeId;
+				const view = tabs.get(id);
+				if (!view) {
+					return Promise.reject(new Error('the browser window has no tab to load into'));
+				}
+				return view.webContents.loadURL(url);
+			},
 			// The contents' URL, not the one requested: after Steam's redirects
 			// these differ, and the difference is the only way to tell a signed-in
 			// landing from a login page.
-			currentUrl: () => page.webContents.getURL(),
+			currentUrl: () => active()?.webContents.getURL() ?? '',
 			focus: () => {
 				// `focus()` alone does nothing to a minimised window.
 				if (window.isMinimized()) {
@@ -271,9 +396,12 @@ export const electronBrowserHost: BrowserHost = {
 			},
 			setTitle: (title) => window.setTitle(title),
 			setWebRtcPolicy: (policy) => {
-				// Chromium's own name for "open no UDP that would skip the proxy",
-				// which is exactly the leak a proxied browser still has.
-				page.webContents.setWebRTCIPHandlingPolicy(policy);
+				// Kept, so tabs opened later start with it rather than having it
+				// applied after their first request.
+				webRtcPolicy = policy;
+				for (const view of tabs.values()) {
+					view.webContents.setWebRTCIPHandlingPolicy(policy);
+				}
 			},
 			close: () => window.close(),
 			isDestroyed: () => window.isDestroyed(),
@@ -290,18 +418,24 @@ export const electronBrowserHost: BrowserHost = {
 				 * security control is worse than none, because it is confidently
 				 * wrong.
 				 *
-				 * The URL is Electron's, read off the contents rather than taken from
-				 * the event, so nothing the page says reaches the title.
+				 * Bound to the window rather than to one tab: the address the title
+				 * shows is the active tab's, and that changes when tabs do.
 				 */
 				const report = (): void => {
-					listener(page.webContents.getURL());
+					listener(active()?.webContents.getURL() ?? '');
 				};
-				page.webContents.on('did-navigate', report);
-				page.webContents.on('did-navigate-in-page', report);
+				navigated = report;
 			},
-			setWindowOpenHandler: (handler) => {
-				// The page's contents, not the toolbar's: popups belong to the site.
-				page.webContents.setWindowOpenHandler((details) => handler({ url: details.url }));
+			setWindowOpenHandler: () => {
+				/*
+				 * Accepted and ignored, deliberately.
+				 *
+				 * Every tab already has a handler that turns a page's `window.open`
+				 * into another tab in this window — hardened identically and listed in
+				 * the same strip. Letting a caller replace that would let a page's
+				 * request escape into a window with no address bar and no tab strip,
+				 * which is the shape this feature exists to avoid.
+				 */
 			}
 		};
 	}

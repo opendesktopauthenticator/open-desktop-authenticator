@@ -6,7 +6,8 @@ import { contextBridge, ipcRenderer } from 'electron';
  * **Deliberately not `preload/index.ts`.** That one exposes the vault, the
  * accounts, the codes and the confirmations to the application's own renderer.
  * This one faces a strip of buttons above a page nobody here wrote, and it can
- * do four things to one window: go back, go forward, reload, and navigate.
+ * do a handful of things to one window: move through history, reload, navigate,
+ * and open, select or close a tab.
  *
  * It cannot read the page. The toolbar and the page are separate `WebContents`
  * with separate origins — the toolbar has this bridge and no access to the
@@ -19,14 +20,26 @@ import { contextBridge, ipcRenderer } from 'electron';
  * of its own, so nothing that reaches it can reach the rest of the IPC table.
  */
 
-/** What the toolbar needs to draw itself. Pushed by the main process. */
+/** One tab, as the strip needs to draw it. */
+export interface ChromeTab {
+	id: number;
+	/** The page's own title. A page chooses this, so it is a label, not evidence. */
+	title: string;
+	url: string;
+	active: boolean;
+	/** True when this tab's host is not one of Valve's. */
+	offSteam: boolean;
+}
+
+/** What the chrome needs to draw itself. Pushed by the main process. */
 export interface ChromeState {
 	url: string;
 	canGoBack: boolean;
 	canGoForward: boolean;
 	loading: boolean;
-	/** True when the host is not one of Valve's. */
+	/** True when the active tab's host is not one of Valve's. */
 	offSteam: boolean;
+	tabs: ChromeTab[];
 }
 
 contextBridge.exposeInMainWorld('chrome', {
@@ -35,6 +48,10 @@ contextBridge.exposeInMainWorld('chrome', {
 	reload: () => ipcRenderer.send('browser-chrome:reload'),
 	/** The address the user typed. The main process decides what it means. */
 	go: (address: string) => ipcRenderer.send('browser-chrome:go', address),
+	newTab: () => ipcRenderer.send('browser-chrome:new-tab'),
+	/** Ids come from the state the main process pushed; the chrome invents none. */
+	selectTab: (id: number) => ipcRenderer.send('browser-chrome:select-tab', id),
+	closeTab: (id: number) => ipcRenderer.send('browser-chrome:close-tab', id),
 	onState: (listener: (state: ChromeState) => void) => {
 		ipcRenderer.on('browser-chrome:state', (_event, state: ChromeState) => listener(state));
 	}

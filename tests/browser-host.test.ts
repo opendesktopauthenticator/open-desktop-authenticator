@@ -101,8 +101,26 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(webPreferences).toMatch(/partition:\s*options\.partition/);
 	});
 
-	it('sets the window-open handler on the page’s contents, where popups belong', () => {
-		expect(ADAPTER).toMatch(/page\.webContents\.setWindowOpenHandler/);
+	/*
+	 * **A page asking for a window gets a tab, not a window.**
+	 *
+	 * Allowing it would open a real popup: same session, same signed-in account,
+	 * but no address bar and no tab strip — a window with none of the things
+	 * added so somebody can tell where they are. The request is denied and a tab
+	 * is opened in its place, hardened by the same function as every other.
+	 */
+	it('turns a page’s window.open into a tab in this window', () => {
+		const handler = ADAPTER.slice(ADAPTER.indexOf('setWindowOpenHandler((details)'));
+		const body = handler.slice(0, handler.indexOf('});'));
+		expect(body).toMatch(/openTab\(details\.url\)/);
+		expect(body).toMatch(/action: 'deny'/);
+	});
+
+	it('refuses to let a caller replace that handler', () => {
+		// The port still has `setWindowOpenHandler`, and honouring it would let a
+		// page's request escape into a chromeless window.
+		const exposed = ADAPTER.slice(ADAPTER.indexOf('setWindowOpenHandler: ()'));
+		expect(exposed.slice(0, 400)).not.toMatch(/webContents\.setWindowOpenHandler/);
 	});
 
 	/*
@@ -160,10 +178,41 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(ADAPTER).toMatch(/webContents\.getURL\(\)/);
 	});
 
-	it('sets the user agent on the page’s contents, not only the session', () => {
-		// The session's agent covers subresources; navigation uses the contents'.
-		// Without this the first page load announces Electron.
-		expect(ADAPTER).toMatch(/page\.webContents\.setUserAgent/);
+	/*
+	 * **One function builds every tab, and it is the only thing that may.**
+	 *
+	 * The dangerous version of tabs is one where the first is hardened and the
+	 * ones a website opens are not. So the user agent, the WebRTC policy and the
+	 * window-open handler are all applied in `openTab`, and nothing else
+	 * constructs a tab view.
+	 */
+	it('hardens every tab in one place', () => {
+		const open = ADAPTER.slice(ADAPTER.indexOf('const openTab ='));
+		const body = open.slice(0, open.indexOf('const closeTab'));
+		expect(body).toMatch(/\.\.\.HARDENED/);
+		expect(body).toMatch(/partition: options\.partition/);
+		expect(body).toMatch(/setUserAgent\(options\.userAgent\)/);
+		expect(body).toMatch(/setWebRTCIPHandlingPolicy\(webRtcPolicy\)/);
+		expect(body).toMatch(/setWindowOpenHandler/);
+	});
+
+	it('builds tab views nowhere else', () => {
+		// Two constructions in the file: the chrome, and the one inside openTab.
+		const constructions = ADAPTER.match(/new WebContentsView\(/g) ?? [];
+		expect(constructions).toHaveLength(2);
+	});
+
+	/*
+	 * A tab opened after the proxy was settled must not start on the default
+	 * policy — a tab that ran even briefly with it could have answered a peer
+	 * connection and given away the address the proxy exists to hide.
+	 */
+	it('gives a later tab the WebRTC policy the window already had', () => {
+		expect(ADAPTER).toMatch(/webRtcPolicy = policy/);
+		const open = ADAPTER.slice(ADAPTER.indexOf('const openTab ='));
+		expect(open.slice(0, open.indexOf('const closeTab'))).toMatch(
+			/setWebRTCIPHandlingPolicy\(webRtcPolicy\)/
+		);
 	});
 
 	/*
