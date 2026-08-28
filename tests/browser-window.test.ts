@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
 	AccountBrowsers,
 	BROWSER_USER_AGENT,
+	addressToUrl,
 	BrowserSessionError,
 	BrowserSignInRequired,
+	isSteamHost,
 	titleFor,
 	browserPartitionFor,
 	looksSignedOut,
@@ -582,6 +584,72 @@ describe('the window says where it is', () => {
 		// Several of these are open at once; which account you are about to trade
 		// as is the other question a title has to answer.
 		expect(recorded.titles.at(-1)).toContain(ACCOUNT.accountName);
+	});
+});
+
+/**
+ * The address bar, and the schemes it refuses.
+ *
+ * A real browser's address bar accepts more than http. Here it must not: this
+ * window holds a signed-in Steam session, so `javascript:` would run in that
+ * origin, and `file:` would read the user's disk from a window that a moment
+ * ago was showing somebody else's website. Both are refused rather than
+ * guessed at — a bar that quietly does nothing is better than one that quietly
+ * does that.
+ */
+describe('what the user may type into the address bar', () => {
+	it.each([
+		['a full URL', 'https://steamcommunity.com/market/', 'https://steamcommunity.com/market/'],
+		['plain http', 'http://example.org/x', 'http://example.org/x'],
+		['a bare host', 'steamcommunity.com', 'https://steamcommunity.com/'],
+		['a host and path', 'steamcommunity.com/market', 'https://steamcommunity.com/market'],
+		['surrounding space', '  steamcommunity.com  ', 'https://steamcommunity.com/']
+	])('accepts %s', (_name, typed, expected) => {
+		expect(addressToUrl(typed)).toBe(expected);
+	});
+
+	it.each([
+		['javascript', 'javascript:alert(document.cookie)'],
+		['javascript with spacing', '  JavaScript:fetch("/x")  '],
+		['a local file', 'file:///C:/Users/someone/vault.json'],
+		['a data url', 'data:text/html,<h1>hi'],
+		['an app scheme', 'steam://run/730'],
+		['nothing at all', '   '],
+		['a bare word', 'tradeoffers']
+	])('refuses %s', (_name, typed) => {
+		expect(addressToUrl(typed)).toBeUndefined();
+	});
+
+	/*
+	 * The two that matter most, stated separately so a future edit that
+	 * broadened the scheme check fails on the reason rather than on a list.
+	 */
+	it('never returns a javascript: URL, whatever the casing', () => {
+		for (const typed of ['javascript:1', 'JAVASCRIPT:1', 'JaVaScRiPt:1', ' javascript:1']) {
+			expect(addressToUrl(typed), typed).toBeUndefined();
+		}
+	});
+
+	it('never returns a file: URL', () => {
+		for (const typed of ['file:///etc/passwd', 'FILE:///C:/', ' file://x']) {
+			expect(addressToUrl(typed), typed).toBeUndefined();
+		}
+	});
+});
+
+describe('whether an address belongs to Valve', () => {
+	it.each([
+		['https://steamcommunity.com/my/', true],
+		['https://store.steampowered.com/', true],
+		['https://www.steamcommunity.com/', true],
+		['https://help.steampowered.com/', true],
+		['https://steamcommunity.com.evil.example/', false],
+		['https://example.org/', false],
+		['http://steamcommunity.com/', false],
+		['about:blank', false],
+		['', false]
+	])('%s -> %s', (url, expected) => {
+		expect(isSteamHost(url)).toBe(expected);
 	});
 });
 

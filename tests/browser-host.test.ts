@@ -47,8 +47,34 @@ describe('the Electron adapter for the in-app browser', () => {
 	 * pointer at the vault. There is no legitimate reason for this window to have
 	 * one, and adding it would be a one-line change nothing else would notice.
 	 */
-	it('gives the window no preload script', () => {
-		expect(ADAPTER).not.toMatch(/preload/i);
+	/*
+	 * **The page has no preload. The toolbar does, and that is the point.**
+	 *
+	 * This used to assert the word "preload" appeared nowhere in the file, which
+	 * was true while the window was a single `BrowserWindow`. The address bar
+	 * made it two views: a toolbar that needs a bridge to drive navigation, and
+	 * a page that must never have one.
+	 *
+	 * Drawing the toolbar inside the page instead would have kept the old
+	 * assertion passing and been far worse — a bar the page could read, restyle
+	 * and forge, drawn by the application that exists to warn people about
+	 * exactly that.
+	 */
+	it('gives the page no preload, and the toolbar only its own', () => {
+		const pageView = ADAPTER.slice(ADAPTER.indexOf('const page = new WebContentsView'));
+		const pageOptions = pageView.slice(0, pageView.indexOf('});'));
+		expect(pageOptions, 'the page view was given a bridge').not.toMatch(/preload/i);
+
+		const chromeView = ADAPTER.slice(ADAPTER.indexOf('const chrome = new WebContentsView'));
+		expect(chromeView.slice(0, chromeView.indexOf('});'))).toMatch(/preload:.*browser-chrome\.js/);
+	});
+
+	it('keeps the toolbar out of the account’s session', () => {
+		// The toolbar shares no cookies with Steam, and because its partition is
+		// not one the browser registers, it keeps the application-wide navigation
+		// lock the page view is exempt from.
+		const chromeView = ADAPTER.slice(ADAPTER.indexOf('const chrome = new WebContentsView'));
+		expect(chromeView.slice(0, chromeView.indexOf('});'))).toMatch(/partition: 'browser-chrome'/);
 	});
 
 	/*
@@ -75,8 +101,8 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(webPreferences).toMatch(/partition:\s*options\.partition/);
 	});
 
-	it('sets the window-open handler on webContents, where it lives', () => {
-		expect(ADAPTER).toMatch(/window\.webContents\.setWindowOpenHandler/);
+	it('sets the window-open handler on the page’s contents, where popups belong', () => {
+		expect(ADAPTER).toMatch(/page\.webContents\.setWindowOpenHandler/);
 	});
 
 	/*
@@ -88,17 +114,25 @@ describe('the Electron adapter for the in-app browser', () => {
 	 * have titled itself "Steam — Sign In" inside the user's own authenticator,
 	 * wearing this application's window chrome.
 	 */
-	it('refuses to let the page rewrite the window title', () => {
-		/*
-		 * **On the window, not on the contents.** This assertion used to be a
-		 * search for "page-title-updated" anywhere in the file. It was there — on
-		 * `webContents`, where preventing it stops nothing, because only
-		 * `BrowserWindow`'s own handler sets the native title. The window wore the
-		 * page's title for as long as the check said it did not.
-		 */
-		expect(ADAPTER).toMatch(/window\.on\('page-title-updated'/);
-		expect(ADAPTER).not.toMatch(/webContents\.on\('page-title-updated'/);
-		expect(ADAPTER).toMatch(/preventDefault\(\)/);
+	/*
+	 * **A page must not be able to rename the window it is shown in.**
+	 *
+	 * This was a `page-title-updated` listener, and it spent a while registered
+	 * on `webContents` where preventing it stops nothing — only `BrowserWindow`
+	 * sets the native title from the document. The window wore "Steam Community
+	 * :: Trade Offers" while a test that searched the file for the event name
+	 * passed.
+	 *
+	 * `BaseWindow` has no such behaviour at all: its title is only ever what
+	 * `setTitle` is given. The protection is now structural rather than a
+	 * listener somebody has to remember, which is why this asserts the base
+	 * class instead of the handler.
+	 */
+	it('uses a window whose title a page cannot touch', () => {
+		expect(ADAPTER).toMatch(/new BaseWindow\(/);
+		expect(ADAPTER, 'a BrowserWindow takes its title from the document').not.toMatch(
+			/new BrowserWindow\(/
+		);
 	});
 
 	/*
@@ -126,9 +160,33 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(ADAPTER).toMatch(/webContents\.getURL\(\)/);
 	});
 
-	it('sets the user agent on the contents, not only the session', () => {
+	it('sets the user agent on the page’s contents, not only the session', () => {
 		// The session's agent covers subresources; navigation uses the contents'.
 		// Without this the first page load announces Electron.
-		expect(ADAPTER).toMatch(/window\.webContents\.setUserAgent/);
+		expect(ADAPTER).toMatch(/page\.webContents\.setUserAgent/);
+	});
+
+	/*
+	 * Every browser window has a toolbar and `ipcMain.on` is process-wide, so
+	 * without a sender check one window's toolbar would steer all of them —
+	 * including one signed in as a different account.
+	 */
+	it('answers only its own toolbar', () => {
+		expect(ADAPTER).toMatch(/event\.sender === chrome\.webContents/);
+	});
+
+	it('stops listening when the window closes', () => {
+		// `ipcMain` listeners outlive the window that added them; four windows
+		// opened and closed would otherwise leave four dead handlers behind.
+		expect(ADAPTER).toMatch(/removeListener\('browser-chrome:back'/);
+		expect(ADAPTER).toMatch(/removeListener\('browser-chrome:go'/);
+	});
+
+	it('lays the views out again when the window changes size', () => {
+		// `BaseWindow` does not resize its children, so without this the page
+		// keeps the size it had when it opened — which is what "the proportions
+		// are bad in fullscreen" looked like.
+		expect(ADAPTER).toMatch(/window\.on\('resize', layout\)/);
+		expect(ADAPTER).toMatch(/enter-full-screen/);
 	});
 });

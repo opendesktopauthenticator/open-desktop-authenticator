@@ -503,6 +503,62 @@ export class AccountBrowsers {
 	}
 }
 
+/** Is this address one of Valve's, over https? */
+export function isSteamHost(url: string): boolean {
+	try {
+		const parsed = new URL(url);
+		return (
+			parsed.protocol === 'https:' && STEAM_HOSTS.includes(parsed.hostname.replace(/^www\./, ''))
+		);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * What the user typed in the address bar, as something safe to load — or
+ * nothing.
+ *
+ * **The schemes matter more than the convenience.** A browser address bar
+ * accepts `javascript:` in some browsers and `file:` in most, and either would
+ * be a mistake here: `javascript:` runs in whatever origin the page currently
+ * holds, which is a signed-in Steam session, and `file:` reads the user's disk
+ * from a window that a moment ago was showing somebody else's website. Only
+ * `http` and `https` are honoured; anything else is refused rather than
+ * guessed at.
+ *
+ * Text with no scheme is treated as a host, the way every browser does it, so
+ * `steamcommunity.com/market` works without typing the protocol.
+ */
+export function addressToUrl(typed: string): string | undefined {
+	const text = typed.trim();
+	if (text === '') {
+		return undefined;
+	}
+
+	const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(text);
+	if (scheme) {
+		const named = (scheme[1] ?? '').toLowerCase();
+		if (named !== 'http' && named !== 'https') {
+			return undefined;
+		}
+		try {
+			return new URL(text).toString();
+		} catch {
+			return undefined;
+		}
+	}
+
+	try {
+		const guessed = new URL(`https://${text}`);
+		// A bare word with no dot is more likely a mistake than a hostname, and
+		// silently loading `https://trade/` helps nobody.
+		return guessed.hostname.includes('.') ? guessed.toString() : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * What the window is called, which is the only place its address is shown.
  *
@@ -535,9 +591,7 @@ export function titleFor(accountName: string, url: string): string {
 	if (host === '') {
 		return accountName;
 	}
-	return STEAM_HOSTS.includes(host)
-		? `${accountName} — ${host}`
-		: `${accountName} — NOT STEAM: ${host}`;
+	return isSteamHost(url) ? `${accountName} — ${host}` : `${accountName} — NOT STEAM: ${host}`;
 }
 
 /** The partition name, kept in one place so the wipe and the open agree. */

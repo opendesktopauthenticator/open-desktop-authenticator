@@ -1,4 +1,17 @@
-import { BrowserWindow, screen, session, type Session, type WebContents } from 'electron';
+import {
+	BaseWindow,
+	ipcMain,
+	screen,
+	session,
+	WebContentsView,
+	type IpcMainEvent,
+	type Session,
+	type WebContents
+} from 'electron';
+import { join } from 'node:path';
+
+import { CHROME_HEIGHT, CHROME_HTML } from './chrome-html';
+import { addressToUrl, isSteamHost } from './window';
 
 import { denyAllPermissions } from '../security';
 import { windowImage } from '../logo-image';
@@ -91,10 +104,8 @@ export const electronBrowserHost: BrowserHost = {
 		 * Sized against the screen it opens on, not against a number typed once.
 		 *
 		 * 1280x860 is a reasonable window on a 1080p laptop and a postage stamp on
-		 * a 4K monitor — and a browser that opens too small to read is a browser
-		 * people immediately resize. The requested size is treated as a maximum
-		 * and a preference: it shrinks to fit a small display, and grows to a
-		 * sensible share of a large one.
+		 * a 4K monitor. The requested size is a preference and a cap: it shrinks to
+		 * fit a small display, and grows to a sensible share of a large one.
 		 */
 		const area = screen.getPrimaryDisplay().workAreaSize;
 		const width = Math.min(area.width - 80, Math.max(options.width, Math.round(area.width * 0.8)));
@@ -103,22 +114,31 @@ export const electronBrowserHost: BrowserHost = {
 			Math.max(options.height, Math.round(area.height * 0.85))
 		);
 
-		const window = new BrowserWindow({
+		/*
+		 * **Two views, not one window with a bar drawn inside it.**
+		 *
+		 * The toolbar and the site are separate `WebContents`. The toolbar has a
+		 * preload and no access to Steam; the site has Steam and no preload at all.
+		 * A chrome bar rendered inside the page would be a bar the page could read,
+		 * restyle, move and forge — the exact trick /scam-clones documents, and it
+		 * would be this application drawing it.
+		 *
+		 * `BaseWindow` has no `page-title-updated` handling of its own, so the page
+		 * cannot rename the window even by accident: the title is only ever what
+		 * `setTitle` is given.
+		 */
+		const window = new BaseWindow({
 			width,
 			height,
 			title: options.title,
-			/*
-			 * The same mark the main window carries.
-			 *
-			 * Without it this window took Electron's default icon, so the second
-			 * window an account opened announced itself as a generic Electron app —
-			 * in the taskbar, in Alt-Tab, and in its own title bar. For an
-			 * application whose argument is that a stranger can tell ours from
-			 * somebody else's, an unbranded window holding a live Steam session is
-			 * the wrong thing to put on screen.
-			 */
+			// The same mark the main window carries. Without it this window took
+			// Electron's default and announced itself as a generic Electron app in
+			// the taskbar, while holding a live Steam session.
 			icon: windowImage(),
-			autoHideMenuBar: true,
+			autoHideMenuBar: true
+		});
+
+		const page = new WebContentsView({
 			webPreferences: {
 				...HARDENED,
 				partition: options.partition
@@ -126,50 +146,124 @@ export const electronBrowserHost: BrowserHost = {
 		});
 
 		/*
-		 * **The page is not allowed to rename the window.**
+		 * The toolbar runs in its own partition, deliberately not the browser's.
 		 *
-		 * Setting `title` above only chooses the *initial* one: Electron updates
-		 * the native title from the document unless `page-title-updated` is
-		 * prevented, which an earlier comment here claimed it did not. So a page
-		 * could have titled itself "Steam — Sign In" inside the user's own
-		 * authenticator, which is precisely the deception this application exists
-		 * to warn people about, wearing our window chrome.
-		 *
-		 * The title stays as the account name. That is also the more useful thing
-		 * to show: when several are open, the only question worth answering at a
-		 * glance is which account you are about to trade as.
+		 * It shares no cookies with Steam, and because it is not one of the
+		 * sessions `isAccountBrowserContents` knows about, it keeps the
+		 * application-wide navigation lock the page view is exempt from. The
+		 * toolbar never navigates; if it ever tried, it would be stopped.
 		 */
-		/*
-		 * **On the window, not on the contents.**
-		 *
-		 * Both emit `page-title-updated`, and only `BrowserWindow`'s own handler
-		 * sets the native title — so preventing it on `webContents` stopped
-		 * nothing. The window went on wearing whatever the page called itself, and
-		 * the address this window shows in place of an address bar was never
-		 * displayed at all.
-		 *
-		 * The test that was supposed to cover this searched the file for
-		 * "page-title-updated" and found it. It was there, on the wrong object.
-		 */
-		window.on('page-title-updated', (event) => {
-			event.preventDefault();
+		const chrome = new WebContentsView({
+			webPreferences: {
+				...HARDENED,
+				partition: 'browser-chrome',
+				preload: join(__dirname, '../preload/browser-chrome.js')
+			}
 		});
 
+		window.contentView.addChildView(chrome);
+		window.contentView.addChildView(page);
+
+		const layout = (): void => {
+			const bounds = window.getContentBounds();
+			chrome.setBounds({ x: 0, y: 0, width: bounds.width, height: CHROME_HEIGHT });
+			page.setBounds({
+				x: 0,
+				y: CHROME_HEIGHT,
+				width: bounds.width,
+				height: Math.max(0, bounds.height - CHROME_HEIGHT)
+			});
+		};
+		layout();
+		// Explicit, because `BaseWindow` does not resize its children. This is also
+		// what keeps the proportions right when the window is maximised rather than
+		// merely correct at the size it opened.
+		window.on('resize', layout);
+		window.on('enter-full-screen', layout);
+		window.on('leave-full-screen', layout);
+
 		// Chromium sends the session's user agent for subresources, but the
-		// contents keep their own for navigation — so it is set here as well as
-		// on the session, or the first page load announces Electron.
-		window.webContents.setUserAgent(options.userAgent);
+		// contents keep their own for navigation — so it is set here as well as on
+		// the session, or the first page load announces Electron.
+		page.webContents.setUserAgent(options.userAgent);
+
+		void chrome.webContents.loadURL(
+			'data:text/html;charset=utf-8,' + encodeURIComponent(CHROME_HTML)
+		);
+
+		/** Push the page's state to the toolbar so it can draw itself. */
+		const publish = (): void => {
+			if (chrome.webContents.isDestroyed() || page.webContents.isDestroyed()) {
+				return;
+			}
+			const url = page.webContents.getURL();
+			chrome.webContents.send('browser-chrome:state', {
+				url,
+				canGoBack: page.webContents.navigationHistory.canGoBack(),
+				canGoForward: page.webContents.navigationHistory.canGoForward(),
+				loading: page.webContents.isLoading(),
+				offSteam: !isSteamHost(url)
+			});
+		};
+		// Listed rather than looped: TypeScript types each of these events
+		// separately, and a loop over the names loses the overload that makes the
+		// listener check.
+		page.webContents.on('did-navigate', publish);
+		page.webContents.on('did-navigate-in-page', publish);
+		page.webContents.on('did-start-loading', publish);
+		page.webContents.on('did-stop-loading', publish);
+		page.webContents.on('did-finish-load', publish);
+
+		/*
+		 * The toolbar's four verbs, and nothing else.
+		 *
+		 * Scoped by comparing the sender: `ipcMain.on` is process-wide and every
+		 * browser window has a toolbar, so without the check one window's toolbar
+		 * would steer all of them.
+		 */
+		const mine = (event: IpcMainEvent): boolean => event.sender === chrome.webContents;
+		const onBack = (event: IpcMainEvent): void => {
+			if (mine(event)) page.webContents.navigationHistory.goBack();
+		};
+		const onForward = (event: IpcMainEvent): void => {
+			if (mine(event)) page.webContents.navigationHistory.goForward();
+		};
+		const onReload = (event: IpcMainEvent): void => {
+			if (!mine(event)) return;
+			if (page.webContents.isLoading()) {
+				page.webContents.stop();
+			} else {
+				page.webContents.reload();
+			}
+		};
+		const onGo = (event: IpcMainEvent, typed: unknown): void => {
+			if (!mine(event) || typeof typed !== 'string') return;
+			const target = addressToUrl(typed);
+			if (target !== undefined) {
+				void page.webContents.loadURL(target).catch(() => publish());
+			}
+		};
+		ipcMain.on('browser-chrome:back', onBack);
+		ipcMain.on('browser-chrome:forward', onForward);
+		ipcMain.on('browser-chrome:reload', onReload);
+		ipcMain.on('browser-chrome:go', onGo);
+
+		window.on('closed', () => {
+			// Removed by reference, so closing one window does not deafen the rest.
+			ipcMain.removeListener('browser-chrome:back', onBack);
+			ipcMain.removeListener('browser-chrome:forward', onForward);
+			ipcMain.removeListener('browser-chrome:reload', onReload);
+			ipcMain.removeListener('browser-chrome:go', onGo);
+		});
 
 		return {
-			loadURL: (url) => window.loadURL(url),
-			// The contents' URL, not the one that was requested: after Steam's
-			// redirects these are different, and the difference is the only way to
-			// tell a signed-in landing from a login page.
-			currentUrl: () => window.webContents.getURL(),
+			loadURL: (url) => page.webContents.loadURL(url),
+			// The contents' URL, not the one requested: after Steam's redirects
+			// these differ, and the difference is the only way to tell a signed-in
+			// landing from a login page.
+			currentUrl: () => page.webContents.getURL(),
 			focus: () => {
-				// `focus()` alone does nothing to a minimised window — it is restored
-				// first, or the second press on an account whose browser is minimised
-				// is still a press that does nothing.
+				// `focus()` alone does nothing to a minimised window.
 				if (window.isMinimized()) {
 					window.restore();
 				}
@@ -179,7 +273,7 @@ export const electronBrowserHost: BrowserHost = {
 			setWebRtcPolicy: (policy) => {
 				// Chromium's own name for "open no UDP that would skip the proxy",
 				// which is exactly the leak a proxied browser still has.
-				window.webContents.setWebRTCIPHandlingPolicy(policy);
+				page.webContents.setWebRTCIPHandlingPolicy(policy);
 			},
 			close: () => window.close(),
 			isDestroyed: () => window.isDestroyed(),
@@ -189,28 +283,25 @@ export const electronBrowserHost: BrowserHost = {
 					return;
 				}
 				/*
-				 * Two events, because one is not enough.
+				 * Two events, because one is not enough. `did-navigate` covers a real
+				 * page load; `did-navigate-in-page` covers history.pushState, which
+				 * changes the address without one. Listening only to the first leaves
+				 * the title naming where the window used to be — a stale address in a
+				 * security control is worse than none, because it is confidently
+				 * wrong.
 				 *
-				 * `did-navigate` covers a real page load. `did-navigate-in-page`
-				 * covers history.pushState — which changes the address without a
-				 * load, and which is how a single-page application moves. Listening
-				 * only to the first leaves the title describing where the window
-				 * used to be, and a stale address in a security control is worse
-				 * than none: it is confidently wrong.
-				 *
-				 * The URL is Electron's, read back off the contents rather than
-				 * taken from the event, so nothing the page says reaches the title.
+				 * The URL is Electron's, read off the contents rather than taken from
+				 * the event, so nothing the page says reaches the title.
 				 */
 				const report = (): void => {
-					listener(window.webContents.getURL());
+					listener(page.webContents.getURL());
 				};
-				window.webContents.on('did-navigate', report);
-				window.webContents.on('did-navigate-in-page', report);
+				page.webContents.on('did-navigate', report);
+				page.webContents.on('did-navigate-in-page', report);
 			},
 			setWindowOpenHandler: (handler) => {
-				// On `webContents`, not on the window. The port names it at the
-				// window because that is the thing a caller has.
-				window.webContents.setWindowOpenHandler((details) => handler({ url: details.url }));
+				// The page's contents, not the toolbar's: popups belong to the site.
+				page.webContents.setWindowOpenHandler((details) => handler({ url: details.url }));
 			}
 		};
 	}
