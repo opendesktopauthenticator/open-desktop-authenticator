@@ -2,7 +2,7 @@
   "name": "open-desktop-authenticator",
   "version": "1.0.0",
   "private": true,
-  "description": "Open Desktop Authenticator — an open-source desktop authenticator for Steam, by MASTERPANEL LLC. A maintained successor to SDA.",
+  "description": "Open Desktop Authenticator \u2014 an open-source desktop authenticator for Steam, by MASTERPANEL LLC. A maintained successor to SDA.",
   "license": "MIT",
   "author": {
     "name": "MASTERPANEL LLC",
@@ -25,7 +25,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "benchmark:kdf": "node scripts/benchmark-kdf.mjs",
-    "icons": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/make-icons.mjs"
+    "icons": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/make-icons.mjs",
+    "smoke:browser": "electron-vite build && electron tools/smoke-browser-chrome.mjs"
   },
   "dependencies": {
     "protobufjs": "7.6.5",

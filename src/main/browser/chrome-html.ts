@@ -96,14 +96,14 @@ export const CHROME_HTML = `<!doctype html>
 	var newtab = document.getElementById('newtab');
 	var typing = false;
 
-	back.onclick = function () { window.chrome.back(); };
-	forward.onclick = function () { window.chrome.forward(); };
-	reload.onclick = function () { window.chrome.reload(); };
+	back.onclick = function () { window.odaBrowser.back(); };
+	forward.onclick = function () { window.odaBrowser.forward(); };
+	reload.onclick = function () { window.odaBrowser.reload(); };
 
 	address.onfocus = function () { typing = true; address.select(); };
 	address.onblur = function () { typing = false; };
 	address.onkeydown = function (event) {
-		if (event.key === 'Enter') { typing = false; window.chrome.go(address.value); address.blur(); }
+		if (event.key === 'Enter') { typing = false; window.odaBrowser.go(address.value); address.blur(); }
 		if (event.key === 'Escape') { address.blur(); }
 	};
 
@@ -116,8 +116,8 @@ export const CHROME_HTML = `<!doctype html>
 				el.title = tab.url || tab.title;
 				el.onmousedown = function (event) {
 					// Middle click closes, as it does everywhere else.
-					if (event.button === 1) { event.preventDefault(); window.chrome.closeTab(tab.id); }
-					else if (event.button === 0) { window.chrome.selectTab(tab.id); }
+					if (event.button === 1) { event.preventDefault(); window.odaBrowser.closeTab(tab.id); }
+					else if (event.button === 0) { window.odaBrowser.selectTab(tab.id); }
 				};
 
 				if (tab.offSteam) {
@@ -140,7 +140,7 @@ export const CHROME_HTML = `<!doctype html>
 				close.title = 'Close tab';
 				close.onmousedown = function (event) {
 					event.stopPropagation();
-					if (event.button === 0) { event.preventDefault(); window.chrome.closeTab(tab.id); }
+					if (event.button === 0) { event.preventDefault(); window.odaBrowser.closeTab(tab.id); }
 				};
 				el.appendChild(close);
 
@@ -152,11 +152,11 @@ export const CHROME_HTML = `<!doctype html>
 		plus.id = 'newtab';
 		plus.textContent = '+';
 		plus.title = 'New tab';
-		plus.onclick = function () { window.chrome.newTab(); };
+		plus.onclick = function () { window.odaBrowser.newTab(); };
 		strip.appendChild(plus);
 	}
 
-	window.chrome.onState(function (state) {
+	window.odaBrowser.onState(function (state) {
 		// Never overwrite what somebody is halfway through typing.
 		if (!typing) { address.value = state.url; }
 		back.disabled = !state.canGoBack;

@@ -42,7 +42,23 @@ export interface ChromeState {
 	tabs: ChromeTab[];
 }
 
-contextBridge.exposeInMainWorld('chrome', {
+/**
+ * The global this bridge is exposed as.
+ *
+ * **Not `chrome`.** Chromium already defines `window.chrome` in every renderer,
+ * and `exposeInMainWorld` refuses to bind over an existing property — it throws
+ * "Cannot bind an API on top of an existing property on the window object". A
+ * preload that throws fails silently as far as the page is concerned: the
+ * toolbar rendered, and every button on it did nothing, because the object it
+ * was calling into was Chromium's and had none of these methods.
+ *
+ * Named here rather than written inline so the name is a thing that can be
+ * checked, and `tests/browser-bridge.test.ts` checks it against the globals a
+ * renderer already has.
+ */
+export const BRIDGE = 'odaBrowser';
+
+contextBridge.exposeInMainWorld(BRIDGE, {
 	back: () => ipcRenderer.send('browser-chrome:back'),
 	forward: () => ipcRenderer.send('browser-chrome:forward'),
 	reload: () => ipcRenderer.send('browser-chrome:reload'),
