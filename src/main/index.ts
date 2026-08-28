@@ -28,7 +28,7 @@ import { registerUpdateHandlers } from './update/ipc';
 import { registerBrowserHandlers } from './browser/ipc';
 import { mintAccessToken } from './steam/access-token';
 import { AccountBrowsers } from './browser/window';
-import { electronBrowserHost } from './browser/electron-host';
+import { electronBrowserHost, isAccountBrowserContents } from './browser/electron-host';
 import { EnrollmentService } from './steam/enrollment';
 import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
 import { TransferService } from './steam/transfer';
@@ -220,7 +220,10 @@ function start(): void {
 	nativeTheme.themeSource = 'dark';
 
 	// Every WebContents, not just the windows we build ourselves.
-	hardenAllWebContents(rendererTarget);
+	// The in-app browser is exempt, by name. See the comment in
+	// `hardenAllWebContents`: without this it cannot load a single Steam page,
+	// because every one of them redirects and a redirect is a navigation.
+	hardenAllWebContents(rendererTarget, isAccountBrowserContents);
 
 	// Electron's default menu carries a Toggle Developer Tools accelerator that
 	// works even with the bar hidden. Removing the menu entirely — together with

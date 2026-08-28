@@ -401,3 +401,60 @@ describe('the renderer bundle stays free of the schema library', () => {
 		expect(offenders).toEqual([]);
 	});
 });
+
+/**
+ * The one window that is deliberately not navigation-locked, and the wiring
+ * that makes the exemption real rather than assumed.
+ *
+ * **This is the bug the ported unit tests could not see.** `browser/window.ts`
+ * is tested against an injected fake host, which is what makes its decisions
+ * checkable without Electron — and it means the real environment those
+ * decisions run inside is invisible to it. `hardenAllWebContents` attaches
+ * `will-redirect` to every `WebContents` the process creates, that fires for a
+ * programmatic `loadURL` as well as for a click, and every interesting Steam
+ * URL answers with a redirect. So the in-app browser could not load a single
+ * page, while forty-three unit tests passed.
+ *
+ * Read out of the source because the alternative is booting Electron. That is a
+ * weaker test than driving the app, and it is the strongest one available here.
+ */
+describe('§9.3 — the in-app browser is exempt, and only it', () => {
+	const security = read('src/main/security.ts');
+	const host = read('src/main/browser/electron-host.ts');
+	const index = read('src/main/index.ts');
+
+	it('lets the process-wide lock take an exemption at all', () => {
+		expect(security).toMatch(/hardenAllWebContents\([\s\S]{0,200}isExempt/);
+		expect(security).toMatch(/if \(isExempt\(contents\)\) \{\s*return;/);
+	});
+
+	it('defaults to locking everything when no exemption is given', () => {
+		// A missing argument must not silently unlock the application.
+		expect(security).toMatch(/isExempt: \(contents: WebContents\) => boolean = \(\) => false/);
+	});
+
+	it('identifies the browser by the sessions it created, not by a guess', () => {
+		expect(host).toMatch(/new WeakSet<Session>\(\)/);
+		expect(host).toMatch(/browserSessions\.add\(partitioned\)/);
+		expect(host).toMatch(/export function isAccountBrowserContents/);
+		expect(host).toMatch(/browserSessions\.has\(contents\.session\)/);
+	});
+
+	/*
+	 * Registration has to happen before the window exists, because
+	 * `web-contents-created` fires during construction. `openAccountBrowser`
+	 * takes the session first and creates the window last, which is what makes
+	 * this hold — asserted here so reordering that function fails loudly.
+	 */
+	it('registers the session before any window is created', () => {
+		const browser = read('src/main/browser/window.ts');
+		expect(browser.indexOf('host.sessionFromPartition')).toBeLessThan(
+			browser.indexOf('host.createWindow')
+		);
+	});
+
+	it('is wired up in the main process', () => {
+		expect(index).toMatch(/hardenAllWebContents\(rendererTarget, isAccountBrowserContents\)/);
+		expect(index).toMatch(/isAccountBrowserContents/);
+	});
+});

@@ -115,8 +115,33 @@ export function lockNavigation(contents: WebContents, target: NavigationTarget):
  * created by a dependency, or by future code that forgets to harden it. Per
  * window hardening is easy to forget once, and once is enough.
  */
-export function hardenAllWebContents(target: NavigationTarget): void {
+export function hardenAllWebContents(
+	target: NavigationTarget,
+	isExempt: (contents: WebContents) => boolean = () => false
+): void {
 	app.on('web-contents-created', (_event, contents) => {
+		/*
+		 * **One window is deliberately not locked down, and it has to say so.**
+		 *
+		 * The in-app browser exists to load Valve's pages, which are not bundled
+		 * content by any definition — so every rule above refuses them. It refused
+		 * silently and completely: `will-redirect` fires for a programmatic
+		 * `loadURL` as well as for a click, `steamcommunity.com/my/tradeoffers/`
+		 * answers with a 302, and the redirect was cancelled before the first page
+		 * ever rendered. The window could not load anything at all.
+		 *
+		 * An exemption is the honest shape for that. The alternative — loosening
+		 * `isAllowedNavigation` until Steam fits through — would weaken the rule
+		 * for the main window too, which is the one that must never leave bundled
+		 * content.
+		 *
+		 * What the exempt window gives up is written down in
+		 * `docs/THREAT_MODEL.md` §2.6b: it may navigate anywhere, it says where it
+		 * is in its title, and it holds nothing but a short-lived Steam session.
+		 */
+		if (isExempt(contents)) {
+			return;
+		}
 		lockNavigation(contents, target);
 	});
 }

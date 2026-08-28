@@ -1,4 +1,4 @@
-import { BrowserWindow, session } from 'electron';
+import { BrowserWindow, session, type Session, type WebContents } from 'electron';
 
 import { denyAllPermissions } from '../security';
 
@@ -46,9 +46,31 @@ const HARDENED = {
 	webviewTag: false
 } as const;
 
+/**
+ * Sessions this module created, so the process-wide navigation lock can tell
+ * this window from every other one.
+ *
+ * A `WeakSet` rather than a list of partition names: identity is the question
+ * being asked, and `session.fromPartition` returns the same object for the same
+ * partition, so this answers it exactly. Nothing is kept alive by being in here.
+ */
+const browserSessions = new WeakSet<Session>();
+
+/**
+ * Is this `WebContents` part of the in-app browser?
+ *
+ * Passed to `hardenAllWebContents`. Registration happens in
+ * `sessionFromPartition`, which `openAccountBrowser` calls before it creates the
+ * window — so the session is known by the time `web-contents-created` fires.
+ */
+export function isAccountBrowserContents(contents: WebContents): boolean {
+	return browserSessions.has(contents.session);
+}
+
 export const electronBrowserHost: BrowserHost = {
 	sessionFromPartition(partition, options): BrowserSessionHandle {
 		const partitioned = session.fromPartition(partition, options);
+		browserSessions.add(partitioned);
 		/*
 		 * `Object.assign` rather than a spread and a cast: an Electron `Session`
 		 * already satisfies the rest of the port structurally, and widening it
