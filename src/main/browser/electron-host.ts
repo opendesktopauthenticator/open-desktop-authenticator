@@ -123,7 +123,19 @@ export const electronBrowserHost: BrowserHost = {
 		 * to show: when several are open, the only question worth answering at a
 		 * glance is which account you are about to trade as.
 		 */
-		window.webContents.on('page-title-updated', (event) => {
+		/*
+		 * **On the window, not on the contents.**
+		 *
+		 * Both emit `page-title-updated`, and only `BrowserWindow`'s own handler
+		 * sets the native title — so preventing it on `webContents` stopped
+		 * nothing. The window went on wearing whatever the page called itself, and
+		 * the address this window shows in place of an address bar was never
+		 * displayed at all.
+		 *
+		 * The test that was supposed to cover this searched the file for
+		 * "page-title-updated" and found it. It was there, on the wrong object.
+		 */
+		window.on('page-title-updated', (event) => {
 			event.preventDefault();
 		});
 

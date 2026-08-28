@@ -89,7 +89,15 @@ describe('the Electron adapter for the in-app browser', () => {
 	 * wearing this application's window chrome.
 	 */
 	it('refuses to let the page rewrite the window title', () => {
-		expect(ADAPTER).toMatch(/page-title-updated/);
+		/*
+		 * **On the window, not on the contents.** This assertion used to be a
+		 * search for "page-title-updated" anywhere in the file. It was there — on
+		 * `webContents`, where preventing it stops nothing, because only
+		 * `BrowserWindow`'s own handler sets the native title. The window wore the
+		 * page's title for as long as the check said it did not.
+		 */
+		expect(ADAPTER).toMatch(/window\.on\('page-title-updated'/);
+		expect(ADAPTER).not.toMatch(/webContents\.on\('page-title-updated'/);
 		expect(ADAPTER).toMatch(/preventDefault\(\)/);
 	});
 
