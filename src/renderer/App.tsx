@@ -93,7 +93,7 @@ export function App(): React.JSX.Element {
 	 * the same thing for the same reason.
 	 */
 	const [browserSignIn, setBrowserSignIn] = useState<
-		{ account: AccountSummary; reason?: string } | undefined
+		{ account: AccountSummary; useProxy: boolean; reason?: string } | undefined
 	>();
 	/**
 	 * Unrecoverable, and only ever one thing: the bridge to the main process does
@@ -520,7 +520,11 @@ export function App(): React.JSX.Element {
 
 						// Straight into the browser the user actually pressed for, rather
 						// than back to a list they would have to press again.
-						const opened = await api.openAccountBrowser(browserSignIn.account.steamId64);
+						const opened = await api.openAccountBrowser(
+							browserSignIn.account.steamId64,
+							// The retry keeps the choice the user made when they pressed.
+							browserSignIn.useProxy
+						);
 						if (opened.signInRequired) {
 							/*
 							 * A fresh sign-in that Steam still will not accept for browsing.
@@ -729,14 +733,15 @@ export function App(): React.JSX.Element {
 				onBackUpRevocationCode={setBackupFor}
 				onChangeRouting={setRoutingFor}
 				onShowConfirmations={setConfirmingFor}
-				onOpenBrowser={async (account) => {
-					const result = await api.openAccountBrowser(account.steamId64);
+				onOpenBrowser={async (account, useProxy) => {
+					const result = await api.openAccountBrowser(account.steamId64, useProxy);
 					// Taking over the screen here rather than in `VaultHome`: the row has
 					// nowhere to put a password field, and this is the component that owns
 					// which screen is showing.
 					if (result.signInRequired) {
 						setBrowserSignIn({
 							account,
+							useProxy,
 							...(result.reason === undefined ? {} : { reason: result.reason })
 						});
 					}

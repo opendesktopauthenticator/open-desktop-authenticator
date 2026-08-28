@@ -264,12 +264,12 @@ describe('per-account status on the account list', () => {
 		 * still true.
 		 */
 		expect(source).toMatch(/const browserAttempt = useRef\(0\);/);
-		expect(source.match(/const mine = \(browserAttempt\.current \+= 1\);/g) ?? []).toHaveLength(1);
+		expect(source.match(/const mine = \(browserAttempt\.current \+= 1\);/g) ?? []).toHaveLength(2);
 
 		// Every asynchronous writer to a shared slot, guarded: two for copy, two
-		// for export, one for the browser — which has no success message to write,
-		// only a failure.
-		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(5);
+		// for export, and one each for the proxied and the direct browser button —
+		// neither has a success message to write, only a failure.
+		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(6);
 	});
 });
 

@@ -65,8 +65,13 @@ function buttons(html: string): string[] {
 	return [...html.matchAll(/<button[^>]*>[\s\S]*?<\/button>/g)].map((match) => match[0]);
 }
 
+/** The button that opens the browser — labelled differently when routed. */
 const tradeButton = (html: string): string | undefined =>
-	buttons(html).find((button) => button.includes('>Trade<'));
+	buttons(html).find((button) => />Trade(\s*\(proxied\))?</.test(button));
+
+/** The second button a routed account gets, for going around its proxy. */
+const directButton = (html: string): string | undefined =>
+	buttons(html).find((button) => button.includes('>Direct<'));
 
 describe('the trade button', () => {
 	it('is on the row, and reachable without opening anything first', () => {
@@ -76,7 +81,38 @@ describe('the trade button', () => {
 
 	it('appears once per account, not once per screen', () => {
 		const two = render([account(), account({ steamId64: '76561198000000002' })]);
-		expect(buttons(two).filter((button) => button.includes('>Trade<'))).toHaveLength(2);
+		expect(buttons(two).filter((button) => />Trade</.test(button))).toHaveLength(2);
+	});
+
+	/*
+	 * **A routed account gets both answers, because both are reasonable.**
+	 *
+	 * A shared proxy address collects rate limits and Cloudflare challenges that
+	 * a home connection never sees, so the routed window is sometimes the one
+	 * that will not load. Somebody who wants to accept a single trade is better
+	 * served by a choice than by a window that fails — and the choice has to be
+	 * visible, or they will conclude the feature is broken.
+	 */
+	it('offers a direct alternative only to an account that is routed', () => {
+		const routed = render([account({ hasProxy: true, routing: 'verified' })]);
+		expect(tradeButton(routed)).toMatch(/proxied/i);
+		expect(directButton(routed), 'a routed account has no way around its proxy').toBeDefined();
+
+		const plain = render([account({ hasProxy: false })]);
+		expect(
+			directButton(plain),
+			'an unrouted account was offered a pointless choice'
+		).toBeUndefined();
+		expect(tradeButton(plain)).not.toMatch(/proxied/i);
+	});
+
+	/*
+	 * The direct button is the one that costs something, so it has to say so:
+	 * it puts this machine's address on an account the user chose to route.
+	 */
+	it('warns that the direct window shows the real address', () => {
+		const routed = render([account({ hasProxy: true, routing: 'verified' })]);
+		expect(directButton(routed)).toMatch(/real address/i);
 	});
 
 	it('is not disabled when nothing is being opened', () => {
@@ -93,9 +129,19 @@ describe('the trade button', () => {
 	 */
 	it('promises a proxy only to an account that has one', () => {
 		expect(tradeButton(render([account({ hasProxy: true, routing: 'verified' })]))).toMatch(
-			/through its proxy/i
+			/through this account’s proxy/i
 		);
 		expect(tradeButton(render([account({ hasProxy: false })]))).not.toMatch(/proxy/i);
+	});
+
+	/*
+	 * The claim the user asked to be sure of. "Routed" must not quietly mean
+	 * "routed except for a list nobody was shown".
+	 */
+	it('says the routed window routes everything', () => {
+		expect(tradeButton(render([account({ hasProxy: true, routing: 'verified' })]))).toMatch(
+			/everything in the window goes through it/i
+		);
 	});
 
 	it('says where the window starts, so pressing it is not a guess', () => {

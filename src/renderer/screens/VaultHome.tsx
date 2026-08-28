@@ -51,7 +51,7 @@ export function VaultHome({
 	 * error this screen would only print. When it comes back `signInRequired` the
 	 * caller has already taken over the screen, so nothing is shown here.
 	 */
-	onOpenBrowser: (account: AccountSummary) => Promise<OpenBrowserResult>;
+	onOpenBrowser: (account: AccountSummary, useProxy: boolean) => Promise<OpenBrowserResult>;
 	onRemoveAccount: (account: AccountSummary) => void;
 	onChangeAutoConfirm: (account: AccountSummary) => void;
 	onImport: () => void;
@@ -436,13 +436,19 @@ export function VaultHome({
 									    puts the machine's own address on an account the user was
 									    careful to route — and does it while they are logged in and
 									    trading, which is the worst moment for it. */}
+									{/* Two buttons when the account is routed, because both answers are
+					    reasonable and only the user knows which they want. A shared proxy
+					    address collects rate limits and Cloudflare challenges that a home
+					    connection never sees, so the routed window is sometimes the one
+					    that will not load — and somebody who only wants to accept a single
+					    trade is better served by a choice than by a window that fails. */}
 									<button
 										type="button"
 										className="secondary"
 										disabled={opening === account.steamId64}
 										title={
 											account.hasProxy
-												? 'Open a signed-in browser for this account, through its proxy. Starts at your trade offers.'
+												? 'Open a signed-in browser routed through this account’s proxy. Everything in the window goes through it. Starts at your trade offers.'
 												: 'Open a signed-in browser for this account. Starts at your trade offers.'
 										}
 										onClick={() => {
@@ -450,7 +456,7 @@ export function VaultHome({
 											const newest = (): boolean => browserAttempt.current === mine;
 											setBrowserError(undefined);
 											setOpening(account.steamId64);
-											onOpenBrowser(account)
+											onOpenBrowser(account, account.hasProxy)
 												.catch((err: unknown) => {
 													// A sign-in is not an error and never arrives here — it
 													// comes back as a state and the caller shows the form.
@@ -472,8 +478,41 @@ export function VaultHome({
 												);
 										}}
 									>
-										{opening === account.steamId64 ? 'Opening…' : 'Trade'}
+										{opening === account.steamId64
+											? 'Opening…'
+											: account.hasProxy
+												? 'Trade (proxied)'
+												: 'Trade'}
 									</button>
+									{account.hasProxy && (
+										<button
+											type="button"
+											className="secondary"
+											disabled={opening === account.steamId64}
+											title="Open the same browser without the proxy, from this machine’s own address. Use it when a proxied page is rate-limited or stuck on a Cloudflare check — but Steam will see your real address on this account."
+											onClick={() => {
+												const mine = (browserAttempt.current += 1);
+												const newest = (): boolean => browserAttempt.current === mine;
+												setBrowserError(undefined);
+												setOpening(account.steamId64);
+												onOpenBrowser(account, false)
+													.catch((err: unknown) => {
+														if (!newest()) {
+															return;
+														}
+														setBrowserError({
+															steamId64: account.steamId64,
+															message: messageOf(err)
+														});
+													})
+													.finally(() =>
+														setOpening((prev) => (prev === account.steamId64 ? undefined : prev))
+													);
+											}}
+										>
+											Direct
+										</button>
+									)}
 									{/* Last, and visually quietest of the three. It is the only one
 									    here that destroys something. */}
 									{/* Reports what happened. Fire-and-forget made a cancelled save

@@ -1,6 +1,7 @@
 import { BrowserWindow, session, type Session, type WebContents } from 'electron';
 
 import { denyAllPermissions } from '../security';
+import { windowImage } from '../logo-image';
 
 import type {
 	BrowserHost,
@@ -90,6 +91,17 @@ export const electronBrowserHost: BrowserHost = {
 			width: options.width,
 			height: options.height,
 			title: options.title,
+			/*
+			 * The same mark the main window carries.
+			 *
+			 * Without it this window took Electron's default icon, so the second
+			 * window an account opened announced itself as a generic Electron app —
+			 * in the taskbar, in Alt-Tab, and in its own title bar. For an
+			 * application whose argument is that a stranger can tell ours from
+			 * somebody else's, an unbranded window holding a live Steam session is
+			 * the wrong thing to put on screen.
+			 */
+			icon: windowImage(),
 			autoHideMenuBar: true,
 			webPreferences: {
 				...HARDENED,
@@ -136,6 +148,11 @@ export const electronBrowserHost: BrowserHost = {
 				window.focus();
 			},
 			setTitle: (title) => window.setTitle(title),
+			setWebRtcPolicy: (policy) => {
+				// Chromium's own name for "open no UDP that would skip the proxy",
+				// which is exactly the leak a proxied browser still has.
+				window.webContents.setWebRTCIPHandlingPolicy(policy);
+			},
 			close: () => window.close(),
 			isDestroyed: () => window.isDestroyed(),
 			on: (event, listener) => {

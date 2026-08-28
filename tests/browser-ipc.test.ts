@@ -89,13 +89,16 @@ describe('opening a browser for an account', () => {
 		const { deps: d, opened } = deps();
 		registerBrowserHandlers(d);
 
-		await invoke({ steamId64: '76561198000000001' });
+		await invoke({ steamId64: '76561198000000001', useProxy: true });
 
 		expect(opened).toEqual([
 			{
 				steamId64: '76561198000000001',
 				accountName: 'demo_trader',
 				proxyUrl: 'http://10.0.0.9:8080',
+				// The renderer's choice reaches the window layer intact. It says
+				// whether to use the stored address, never which address to use.
+				useProxy: true,
 				accessToken: 'minted-access-token'
 			}
 		]);
@@ -105,7 +108,9 @@ describe('opening a browser for an account', () => {
 		const { deps: d, opened } = deps({ isUnlocked: () => false });
 		registerBrowserHandlers(d);
 
-		await expect(invoke({ steamId64: '76561198000000001' })).rejects.toThrow(/unlock/i);
+		await expect(invoke({ steamId64: '76561198000000001', useProxy: true })).rejects.toThrow(
+			/unlock/i
+		);
 		expect(opened, 'a window was opened for a locked vault').toHaveLength(0);
 	});
 
@@ -113,7 +118,9 @@ describe('opening a browser for an account', () => {
 		const { deps: d, opened } = deps({ account: () => undefined });
 		registerBrowserHandlers(d);
 
-		await expect(invoke({ steamId64: '76561198000000009' })).rejects.toThrow(/not in this vault/i);
+		await expect(invoke({ steamId64: '76561198000000009', useProxy: true })).rejects.toThrow(
+			/not in this vault/i
+		);
 		expect(opened).toHaveLength(0);
 	});
 
@@ -131,7 +138,7 @@ describe('opening a browser for an account', () => {
 		const { deps: d, opened } = deps({ account: () => ({ accountName: 'demo_trader' }) });
 		registerBrowserHandlers(d);
 
-		const result = await invoke({ steamId64: '76561198000000001' });
+		const result = await invoke({ steamId64: '76561198000000001', useProxy: true });
 
 		expect(result).toMatchObject({ signInRequired: true });
 		expect((result as { reason: string }).reason).toMatch(/demo_trader/);
@@ -150,7 +157,7 @@ describe('opening a browser for an account', () => {
 		});
 		registerBrowserHandlers(d);
 
-		expect(await invoke({ steamId64: '76561198000000001' })).toMatchObject({
+		expect(await invoke({ steamId64: '76561198000000001', useProxy: true })).toMatchObject({
 			signInRequired: true,
 			reason: 'that session has expired'
 		});
@@ -169,7 +176,9 @@ describe('opening a browser for an account', () => {
 		});
 		registerBrowserHandlers(d);
 
-		await expect(invoke({ steamId64: '76561198000000001' })).rejects.toThrow(/PROXY/);
+		await expect(invoke({ steamId64: '76561198000000001', useProxy: true })).rejects.toThrow(
+			/PROXY/
+		);
 	});
 
 	/*
@@ -184,7 +193,7 @@ describe('opening a browser for an account', () => {
 		);
 		registerBrowserHandlers(d);
 
-		expect(await invoke({ steamId64: '76561198000000001' })).toMatchObject({
+		expect(await invoke({ steamId64: '76561198000000001', useProxy: true })).toMatchObject({
 			signInRequired: true
 		});
 		// Nothing opened, so nothing here was the user being present.
@@ -198,14 +207,14 @@ describe('opening a browser for an account', () => {
 		const { deps: d, touch } = deps({ isUnlocked: () => false });
 		registerBrowserHandlers(d);
 
-		await expect(invoke({ steamId64: '76561198000000001' })).rejects.toThrow();
+		await expect(invoke({ steamId64: '76561198000000001', useProxy: true })).rejects.toThrow();
 		expect(touch).not.toHaveBeenCalled();
 	});
 
 	it('treats a successful open as activity', async () => {
 		const { deps: d, touch } = deps();
 		registerBrowserHandlers(d);
-		expect(await invoke({ steamId64: '76561198000000001' })).toMatchObject({
+		expect(await invoke({ steamId64: '76561198000000001', useProxy: true })).toMatchObject({
 			signInRequired: false
 		});
 		expect(touch).toHaveBeenCalledOnce();
@@ -222,7 +231,11 @@ describe('opening a browser for an account', () => {
 		registerBrowserHandlers(d);
 
 		await expect(
-			invoke({ steamId64: '76561198000000001', url: 'https://not-steam.example/login' })
+			invoke({
+				steamId64: '76561198000000001',
+				useProxy: true,
+				url: 'https://not-steam.example/login'
+			})
 		).rejects.toThrow();
 		expect(opened).toHaveLength(0);
 	});

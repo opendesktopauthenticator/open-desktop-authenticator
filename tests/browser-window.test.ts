@@ -39,12 +39,20 @@ interface Recorded {
 	focused: number;
 	/** Every title the window was given, in order. */
 	titles: string[];
+	/** Every WebRTC policy the window was given. */
+	webRtcPolicies: string[];
 	/** Times this session was told to refuse permission requests. */
 	permissionsDenied: number;
 }
 
 function harness(
-	overrides: { setProxy?: () => Promise<void>; landsOn?: string; loadFails?: boolean } = {}
+	overrides: {
+		setProxy?: () => Promise<void>;
+		landsOn?: string;
+		loadFails?: boolean;
+		/** What Chromium claims it would actually do. Defaults to obeying setProxy. */
+		resolvesTo?: string;
+	} = {}
 ) {
 	// Per-harness, not module-level: two tests sharing one of these is how a
 	// fake starts reporting the previous test's partition.
@@ -62,12 +70,29 @@ function harness(
 		wiped: [],
 		focused: 0,
 		titles: [],
+		webRtcPolicies: [],
 		permissionsDenied: 0
 	};
 
 	const session: BrowserSessionHandle = {
 		denyPermissions: () => {
 			recorded.permissionsDenied += 1;
+		},
+		/*
+		 * Answers with whatever the last `setProxy` asked for, which is the honest
+		 * default: a fake that always reported the intended proxy would make the
+		 * verification untestable, and one that always disagreed would make every
+		 * proxy test fail. `resolvesTo` is how a test says Chromium disagreed.
+		 */
+		resolveProxy: () => {
+			if (overrides.resolvesTo !== undefined) {
+				return Promise.resolve(overrides.resolvesTo);
+			}
+			const last = recorded.proxies.at(-1) as { mode?: string; proxyRules?: string } | undefined;
+			if (!last || last.mode !== 'fixed_servers' || last.proxyRules === undefined) {
+				return Promise.resolve('DIRECT');
+			}
+			return Promise.resolve(`PROXY ${last.proxyRules.replace(/^[a-z0-9]+:\/\//, '')}`);
 		},
 		setProxy:
 			overrides.setProxy ??
@@ -100,6 +125,7 @@ function harness(
 		// is the one thing `looksSignedOut` exists to notice.
 		currentUrl: () => overrides.landsOn ?? START_URL,
 		setTitle: (title) => recorded.titles.push(title),
+		setWebRtcPolicy: (policy) => recorded.webRtcPolicies.push(policy),
 		focus: () => {
 			recorded.focused += 1;
 		},
@@ -133,7 +159,9 @@ function harness(
 const ACCOUNT = {
 	steamId64: '76561198000000001',
 	accountName: 'demo_trader',
-	accessToken: 'eyJhbGciOiJFZERTQSJ9.token.signature'
+	accessToken: 'eyJhbGciOiJFZERTQSJ9.token.signature',
+	// Opted in, so every existing routing test still asks for routing.
+	useProxy: true
 };
 
 describe('the in-app browser', () => {
@@ -216,13 +244,119 @@ describe('the in-app browser', () => {
 
 	it('routes through the account’s proxy when it has one', async () => {
 		const { host, recorded } = harness();
-		await openAccountBrowser(host, { ...ACCOUNT, proxyUrl: 'http://user:pass@10.0.0.9:8080' });
+		await openAccountBrowser(host, { ...ACCOUNT, proxyUrl: 'http://user:hunter2@10.0.0.9:8080' });
 
 		expect(recorded.proxies).toHaveLength(1);
 		expect(recorded.proxies[0]).toMatchObject({ mode: 'fixed_servers' });
 		expect(JSON.stringify(recorded.proxies[0])).toContain('10.0.0.9:8080');
-		// Credentials belong to the proxy, never to a rule string.
-		expect(JSON.stringify(recorded.proxies[0])).not.toContain('pass');
+		/*
+		 * Credentials belong to the proxy, never to a rule string.
+		 *
+		 * The password here was `pass`, and this assertion started failing the day
+		 * `proxyBypassRules` was added — because "Bypass" contains "pass". It was
+		 * passing on a coincidence, and would have gone on passing if the real
+		 * password had ever been a substring of a key name. A distinctive secret
+		 * is the point of the check.
+		 */
+		expect(JSON.stringify(recorded.proxies[0])).not.toContain('hunter2');
+	});
+
+	/**
+	 * **When the proxy is chosen, nothing skips it.**
+	 *
+	 * Chromium bypasses loopback and link-local addresses by default, so
+	 * "routed" quietly meant "routed except for a list nobody was shown".
+	 * `<-loopback>` removes that default rather than adding to it.
+	 */
+	it('leaves nothing outside the proxy', async () => {
+		const { host, recorded } = harness();
+		await openAccountBrowser(host, { ...ACCOUNT, proxyUrl: 'http://10.0.0.9:8080' });
+		expect(recorded.proxies[0]).toMatchObject({ proxyBypassRules: '<-loopback>' });
+	});
+
+	/*
+	 * A proxy carries HTTP. WebRTC opens its own UDP and hands a page the
+	 * machine's real local and public addresses — the one leak that survives a
+	 * correctly applied proxy, in the window where the user has been told their
+	 * traffic is routed.
+	 */
+	it('stops WebRTC going around the proxy', async () => {
+		const { host, recorded } = harness();
+		await openAccountBrowser(host, { ...ACCOUNT, proxyUrl: 'http://10.0.0.9:8080' });
+		expect(recorded.webRtcPolicies).toEqual(['disable_non_proxied_udp']);
+	});
+
+	it('leaves WebRTC alone when the window is not routed', async () => {
+		// Nothing to leak around: this window is already on the machine's address,
+		// and breaking peer connections for no reason is not hardening.
+		const { host, recorded } = harness();
+		await openAccountBrowser(host, ACCOUNT);
+		expect(recorded.webRtcPolicies).toEqual(['default']);
+	});
+
+	/**
+	 * **Configured is not applied.**
+	 *
+	 * `setProxy` resolving means the settings were accepted. `transport.ts` has
+	 * refused to send a request without asking `resolveProxy` what would actually
+	 * happen, because a proxy that is configured and not applied is the one
+	 * failure that looks exactly like success. This window was opening on the
+	 * strength of the configuration alone.
+	 */
+	it('opens no window when Chromium would route it somewhere else', async () => {
+		const { host, recorded } = harness({ resolvesTo: 'PROXY 10.9.9.9:3128' });
+
+		await expect(
+			openAccountBrowser(host, { ...ACCOUNT, proxyUrl: 'http://10.0.0.9:8080' })
+		).rejects.toBeInstanceOf(BrowserSessionError);
+
+		expect(recorded.windows, 'a window was opened on an unverified route').toHaveLength(0);
+	});
+
+	it('opens no window when Chromium would go direct', async () => {
+		const { host, recorded } = harness({ resolvesTo: 'DIRECT' });
+
+		await expect(
+			openAccountBrowser(host, { ...ACCOUNT, proxyUrl: 'http://10.0.0.9:8080' })
+		).rejects.toThrow(/would not/i);
+
+		expect(recorded.windows).toHaveLength(0);
+	});
+
+	it('names the proxy in that refusal without leaking its password', async () => {
+		const { host } = harness({ resolvesTo: 'DIRECT' });
+		const open = () =>
+			openAccountBrowser(host, { ...ACCOUNT, proxyUrl: 'http://user:hunter2@10.0.0.9:8080' });
+		await expect(open()).rejects.toThrow(/10\.0\.0\.9:8080/);
+		await expect(open()).rejects.not.toThrow(/hunter2/);
+	});
+
+	/**
+	 * The user's choice, and the reason it exists: a shared proxy address
+	 * collects rate limits and Cloudflare challenges a home connection never
+	 * sees, so the routed window is sometimes the one that will not load.
+	 */
+	it('goes direct when the user asked it to, even with a proxy stored', async () => {
+		const { host, recorded } = harness();
+		await openAccountBrowser(host, {
+			...ACCOUNT,
+			proxyUrl: 'http://10.0.0.9:8080',
+			useProxy: false
+		});
+
+		expect(recorded.proxies[0]).toMatchObject({ mode: 'direct' });
+		expect(recorded.windows, 'the window should still open').toHaveLength(1);
+	});
+
+	it('does not verify a route it was not asked to take', async () => {
+		// `resolvesTo` says Chromium would go direct — which is what was asked for.
+		const { host, recorded } = harness({ resolvesTo: 'DIRECT' });
+		await openAccountBrowser(host, {
+			...ACCOUNT,
+			proxyUrl: 'http://10.0.0.9:8080',
+			useProxy: false
+		});
+		expect(recorded.windows).toHaveLength(1);
 	});
 
 	it('connects directly when the account has no proxy', async () => {
@@ -491,6 +625,7 @@ describe('closing every browser when the vault locks', () => {
 		const host: BrowserHost = {
 			sessionFromPartition: () => ({
 				denyPermissions: () => undefined,
+				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
 				setUserAgent: () => undefined,
 				clearStorageData: () => {
@@ -505,6 +640,7 @@ describe('closing every browser when the vault locks', () => {
 					loadURL: () => Promise.resolve(),
 					currentUrl: () => START_URL,
 					setTitle: () => undefined,
+					setWebRtcPolicy: () => undefined,
 					focus: () => undefined,
 					close: () => {
 						destroyed = true;
@@ -535,6 +671,7 @@ describe('closing every browser when the vault locks', () => {
 		const host: BrowserHost = {
 			sessionFromPartition: (partition) => ({
 				denyPermissions: () => undefined,
+				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
 				setUserAgent: () => undefined,
 				clearStorageData: () => {
@@ -547,6 +684,7 @@ describe('closing every browser when the vault locks', () => {
 				loadURL: () => Promise.resolve(),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
+				setWebRtcPolicy: () => undefined,
 				focus: () => undefined,
 				close: () => {
 					throw new Error('window already gone');
@@ -569,6 +707,7 @@ describe('closing every browser when the vault locks', () => {
 		const host: BrowserHost = {
 			sessionFromPartition: () => ({
 				denyPermissions: () => undefined,
+				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
 				setUserAgent: () => undefined,
 				clearStorageData: () => Promise.reject(new Error('session gone')),
@@ -578,6 +717,7 @@ describe('closing every browser when the vault locks', () => {
 				loadURL: () => Promise.resolve(),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
+				setWebRtcPolicy: () => undefined,
 				focus: () => undefined,
 				close: () => undefined,
 				isDestroyed: () => false,
@@ -620,6 +760,7 @@ function lockHarness(cleared: string[], closed: string[]): BrowserHost {
 	return {
 		sessionFromPartition: (partition) => ({
 			denyPermissions: () => undefined,
+			resolveProxy: () => Promise.resolve('DIRECT'),
 			setProxy: () => Promise.resolve(),
 			setUserAgent: () => undefined,
 			clearStorageData: () => {
@@ -634,6 +775,7 @@ function lockHarness(cleared: string[], closed: string[]): BrowserHost {
 				loadURL: () => Promise.resolve(),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
+				setWebRtcPolicy: () => undefined,
 				focus: () => undefined,
 				close: () => {
 					destroyed = true;

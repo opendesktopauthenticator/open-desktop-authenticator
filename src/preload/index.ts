@@ -196,9 +196,10 @@ const api: RendererApi = {
 	 * a URL crossing this bridge would be a way to aim a live Steam session at
 	 * any page that reached the renderer.
 	 */
-	openAccountBrowser: (steamId64: string) =>
+	openAccountBrowser: (steamId64: string, useProxy: boolean) =>
 		ipcRenderer.invoke(CHANNELS.accountOpenBrowser, {
-			steamId64
+			steamId64,
+			useProxy
 		}) as Promise<OpenBrowserResult>,
 
 	// §11 S2 exception (a). The passphrase is required again on purpose.

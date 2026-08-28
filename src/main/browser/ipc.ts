@@ -50,7 +50,7 @@ export interface BrowserHandlerDeps {
 export class BrowserRequestError extends Error {}
 
 export function registerBrowserHandlers(deps: BrowserHandlerDeps): void {
-	registerHandler(CHANNELS.accountOpenBrowser, async ({ steamId64 }) => {
+	registerHandler(CHANNELS.accountOpenBrowser, async ({ steamId64, useProxy }) => {
 		if (!deps.isUnlocked()) {
 			throw new BrowserRequestError('unlock the vault first');
 		}
@@ -85,6 +85,9 @@ export function registerBrowserHandlers(deps: BrowserHandlerDeps): void {
 				steamId64,
 				accountName: account.accountName,
 				proxyUrl: account.proxyUrl,
+				// The renderer's choice, passed straight through. It cannot supply an
+				// address — only say whether to use the one already stored here.
+				useProxy,
 				accessToken
 			});
 		} catch (err) {

@@ -1,4 +1,4 @@
-import { planProxy, type ProxyPlan } from '../net/egress';
+import { describesDirectRoute, planProxy, routedEndpoint, type ProxyPlan } from '../net/egress';
 
 /**
  * An in-app browser, signed in as one account and routed like that account.
@@ -43,7 +43,24 @@ export interface BrowserHost {
 }
 
 export interface BrowserSessionHandle {
-	setProxy(config: { mode?: string; proxyRules?: string }): Promise<void>;
+	setProxy(config: {
+		mode?: string;
+		proxyRules?: string;
+		/**
+		 * What is allowed to skip the proxy. Always `<-loopback>` here — see
+		 * `openAccountBrowser`.
+		 */
+		proxyBypassRules?: string;
+	}): Promise<void>;
+	/**
+	 * Ask Chromium what it would actually do with a URL.
+	 *
+	 * `setProxy` resolving means the configuration was accepted, not that it is
+	 * in force. `transport.ts` has refused to send a request without this answer
+	 * since the routing feature existed; the browser was opening windows on the
+	 * strength of the configuration alone.
+	 */
+	resolveProxy(url: string): Promise<string>;
 	/**
 	 * Refuse every permission request on this session.
 	 *
@@ -80,6 +97,15 @@ export interface BrowserWindowOptions {
 
 export interface BrowserWindowHandle {
 	loadURL(url: string): Promise<void>;
+	/**
+	 * Stop WebRTC offering the real address around the proxy.
+	 *
+	 * A proxy carries HTTP. WebRTC opens UDP itself, and a page that asks for a
+	 * peer connection is handed the machine's own local and public addresses —
+	 * which is the leak this window would otherwise have, in the one place a user
+	 * has been told their traffic is routed.
+	 */
+	setWebRtcPolicy(policy: 'disable_non_proxied_udp' | 'default'): void;
 	/** Replace the window's own title. Never called with anything a page supplied. */
 	setTitle(title: string): void;
 	/** Bring this window to the user, restoring it if it was minimised. */
@@ -144,6 +170,19 @@ export interface OpenBrowserOptions {
 	/** The account's proxy, exactly as the rest of the app routes it. */
 	proxyUrl?: string | undefined;
 	/**
+	 * Whether to use it for this window.
+	 *
+	 * The user's choice, made per window rather than assumed. A proxy is often
+	 * the reason a page will not load at all: shared addresses collect rate
+	 * limits and Cloudflare challenges that a residential connection never sees,
+	 * and somebody who only wants to accept one trade is better served by an
+	 * honest choice than by a window that will not open.
+	 *
+	 * Ignored when the account has no proxy. When it is true and routing cannot
+	 * be proved, no window opens.
+	 */
+	useProxy: boolean;
+	/**
 	 * A freshly minted access token.
 	 *
 	 * Passed in rather than minted here, so this module never touches the vault
@@ -177,7 +216,7 @@ export async function openAccountBrowser(
 	session.denyPermissions();
 
 	let plan: ProxyPlan | undefined;
-	if (options.proxyUrl !== undefined && options.proxyUrl !== '') {
+	if (options.useProxy && options.proxyUrl !== undefined && options.proxyUrl !== '') {
 		// Validated before use, for the same reason the transport does it: a
 		// scheme Chromium does not know is accepted by `setProxy` without
 		// complaint and fails much later, per request, as an error the user
@@ -187,7 +226,22 @@ export async function openAccountBrowser(
 
 	try {
 		await session.setProxy(
-			plan ? { mode: 'fixed_servers', proxyRules: plan.proxyRules } : { mode: 'direct' }
+			plan
+				? {
+						mode: 'fixed_servers',
+						proxyRules: plan.proxyRules,
+						/*
+						 * **Nothing skips the proxy.**
+						 *
+						 * Chromium bypasses loopback and link-local addresses by default,
+						 * so "routed" quietly meant "routed except for a list nobody was
+						 * shown". `<-loopback>` removes that default rather than adding to
+						 * it: with a proxy chosen, every request this window makes goes
+						 * through it or does not happen.
+						 */
+						proxyBypassRules: '<-loopback>'
+					}
+				: { mode: 'direct' }
 		);
 	} catch (cause) {
 		throw new BrowserSessionError(
@@ -196,6 +250,34 @@ export async function openAccountBrowser(
 				: 'the browser session could not be prepared',
 			{ cause }
 		);
+	}
+
+	/*
+	 * **Configured is not applied, and only Chromium can settle which.**
+	 *
+	 * `setProxy` resolving means the settings were accepted. `transport.ts` has
+	 * refused to send a single request without asking `resolveProxy` what would
+	 * actually happen — because a proxy that is configured and not applied is the
+	 * one failure that looks exactly like success — and this window was opening on
+	 * the strength of the configuration alone.
+	 */
+	if (plan) {
+		let resolved: string;
+		try {
+			resolved = await session.resolveProxy(START_URL);
+		} catch (cause) {
+			throw new BrowserSessionError(
+				`the routing through ${plan.redacted} could not be checked, so no window was opened`,
+				{ cause }
+			);
+		}
+		if (describesDirectRoute(resolved) || routedEndpoint(resolved) !== plan.endpoint) {
+			throw new BrowserSessionError(
+				`this account is set to route through ${plan.redacted}, but this window would not. ` +
+					'Refusing to open it: browsing anyway would put your own address on the account ' +
+					'the proxy exists to hide.'
+			);
+		}
 	}
 
 	await signIn(session, options.steamId64, options.accessToken);
@@ -207,6 +289,14 @@ export async function openAccountBrowser(
 		partition,
 		userAgent: BROWSER_USER_AGENT
 	});
+
+	/*
+	 * A proxy carries HTTP; WebRTC opens its own UDP and hands a page the
+	 * machine's real local and public addresses. Turned off whenever this window
+	 * is routed — it is the one leak that survives a correctly applied proxy, and
+	 * Steam needs no peer connections.
+	 */
+	window.setWebRtcPolicy(plan ? 'disable_non_proxied_udp' : 'default');
 
 	/*
 	 * Popups stay inside this window's partition rather than opening in the

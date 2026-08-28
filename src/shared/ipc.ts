@@ -856,10 +856,16 @@ export const IPC_CONTRACT = {
 	[CHANNELS.accountOpenBrowser]: {
 		request: z
 			.object({
-				steamId64: z.string()
-				// Deliberately nothing else. See the channel's note: a URL here would
-				// let whatever reaches the renderer choose where a signed-in session
-				// points.
+				steamId64: z.string(),
+				/*
+				 * Whether to route this window through the account's proxy.
+				 *
+				 * A choice and not a URL. The renderer still cannot say *where* the
+				 * traffic goes — only whether to use the address already stored for
+				 * this account — so nothing that reaches the renderer can aim a
+				 * signed-in session at a proxy of its own choosing.
+				 */
+				useProxy: z.boolean()
 			})
 			.strict(),
 		response: openBrowserResponse
@@ -1111,7 +1117,7 @@ export interface RendererApi {
 	 * it — there is nothing to wait for once it is up. What comes back is the one
 	 * thing that stops it opening and that the caller can offer to fix.
 	 */
-	openAccountBrowser(steamId64: string): Promise<OpenBrowserResult>;
+	openAccountBrowser(steamId64: string, useProxy: boolean): Promise<OpenBrowserResult>;
 	/** Record that the code has been written down, clearing the account's warning. */
 	confirmRevocationBackup(steamId64: string): Promise<{ ok: true }>;
 }
