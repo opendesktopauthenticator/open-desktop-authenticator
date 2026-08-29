@@ -11,7 +11,7 @@ import {
 import { join } from 'node:path';
 
 import { CHROME_HEIGHT, CHROME_HTML } from './chrome-html';
-import { addressToUrl, isSteamHost, START_URL } from './window';
+import { addressToUrl, isSteamHost } from './window';
 
 import { denyAllPermissions } from '../security';
 import { windowImage } from '../logo-image';
@@ -180,12 +180,27 @@ export const electronBrowserHost: BrowserHost = {
 			};
 		};
 
+		/**
+		 * The address to show for a view, which is nothing for a blank one.
+		 *
+		 * `about:blank` is a real URL and Chromium reports it, but putting it in
+		 * an address bar tells the user nothing and cannot be typed over without
+		 * clearing it first. An empty tab shows an empty field.
+		 */
+		const shown = (view: WebContentsView | undefined): string => {
+			if (!view || view.webContents.isDestroyed()) {
+				return '';
+			}
+			const at = view.webContents.getURL();
+			return at === 'about:blank' ? '' : at;
+		};
+
 		const publish = (): void => {
 			if (chrome.webContents.isDestroyed()) {
 				return;
 			}
 			const active = tabs.get(activeId);
-			const url = active && !active.webContents.isDestroyed() ? active.webContents.getURL() : '';
+			const url = shown(active);
 			navigated();
 			chrome.webContents.send('browser-chrome:state', {
 				url,
@@ -194,7 +209,7 @@ export const electronBrowserHost: BrowserHost = {
 				loading: active ? active.webContents.isLoading() : false,
 				offSteam: url !== '' && !isSteamHost(url),
 				tabs: [...tabs.entries()].map(([id, view]) => {
-					const at = view.webContents.isDestroyed() ? '' : view.webContents.getURL();
+					const at = shown(view);
 					return {
 						id,
 						title: view.webContents.isDestroyed() ? '' : view.webContents.getTitle(),
@@ -249,11 +264,15 @@ export const electronBrowserHost: BrowserHost = {
 			view.webContents.on('did-stop-loading', publish);
 			view.webContents.on('page-title-updated', publish);
 
+			// Matches the chrome, so a blank tab does not flash white in a dark
+			// window before anything loads.
+			view.setBackgroundColor('#101216');
 			window.contentView.addChildView(view);
 			view.setBounds(bodyBounds());
-			if (url !== undefined) {
-				void view.webContents.loadURL(url).catch(publish);
-			}
+			// `about:blank` rather than nothing at all: a view with no document
+			// reports no title and no URL, which the strip and the address bar both
+			// read as an empty tab — which is exactly what it is.
+			void view.webContents.loadURL(url ?? 'about:blank').catch(publish);
 			show(id);
 			return id;
 		};
@@ -344,8 +363,21 @@ export const electronBrowserHost: BrowserHost = {
 			}
 		};
 		const onNewTab = (event: IpcMainEvent): void => {
-			// A new tab lands where the window did: the account's trade offers.
-			if (mine(event)) openTab(START_URL);
+			/*
+			 * A new tab is empty, the way every browser's is.
+			 *
+			 * It used to land on the account's trade offers, which is right for the
+			 * *first* tab — that is what the window is for — and wrong for every one
+			 * after it: somebody who opens a tab has somewhere else in mind, and
+			 * being taken back to the page they are already on is a step to undo.
+			 */
+			if (mine(event)) {
+				openTab();
+				if (!chrome.webContents.isDestroyed()) {
+					chrome.webContents.send('browser-chrome:focus-address');
+					chrome.webContents.focus();
+				}
+			}
 		};
 		const onSelectTab = (event: IpcMainEvent, id: unknown): void => {
 			if (mine(event) && typeof id === 'number') show(id);

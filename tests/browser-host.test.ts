@@ -196,6 +196,29 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(body).toMatch(/setWindowOpenHandler/);
 	});
 
+	/*
+	 * **A new tab is empty; the first tab is not.**
+	 *
+	 * The window opens on the account's trade offers, which is what it is for.
+	 * Every tab after that used to land there too — so somebody who opened a tab
+	 * to go somewhere else was taken back to the page they were already on, and
+	 * had to clear the address bar before they could type.
+	 */
+	it('opens a new tab blank, and puts the cursor in the address bar', () => {
+		expect(ADAPTER).toMatch(/loadURL\(url \?\? 'about:blank'\)/);
+
+		const handler = ADAPTER.slice(ADAPTER.indexOf('const onNewTab ='));
+		const body = handler.slice(0, handler.indexOf('const onSelectTab'));
+		expect(body, 'a new tab was given a destination').toMatch(/openTab\(\)/);
+		expect(body).toMatch(/browser-chrome:focus-address/);
+	});
+
+	it('shows nothing in the address bar for a blank tab', () => {
+		// `about:blank` is a real URL Chromium reports, and putting it in the
+		// field tells the user nothing while getting in the way of typing.
+		expect(ADAPTER).toMatch(/at === 'about:blank' \? '' : at/);
+	});
+
 	it('builds tab views nowhere else', () => {
 		// Two constructions in the file: the chrome, and the one inside openTab.
 		const constructions = ADAPTER.match(/new WebContentsView\(/g) ?? [];

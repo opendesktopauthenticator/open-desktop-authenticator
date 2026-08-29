@@ -198,6 +198,37 @@ app.whenReady().then(async () => {
 		(await run('document.getElementById("warn").className')) === 'on'
 	);
 
+	// 7. A blank tab reads as blank: empty field, "New tab" label, no warning.
+	window.webContents.send('browser-chrome:state', {
+		url: '',
+		canGoBack: false,
+		canGoForward: false,
+		loading: false,
+		offSteam: false,
+		tabs: [{ id: 3, title: '', url: '', active: true, offSteam: false }]
+	});
+	await new Promise((resolve) => setTimeout(resolve, 150));
+	check(
+		'a blank tab shows an empty address field',
+		(await run('document.getElementById("address").value')) === ''
+	);
+	check(
+		'a blank tab is labelled rather than left nameless',
+		(await run('document.querySelector(".tab .label").textContent')) === 'New tab'
+	);
+	check(
+		'a blank tab raises no off-Steam warning',
+		(await run('document.getElementById("warn").className')) !== 'on'
+	);
+
+	// 8. Opening one puts the cursor where the user is about to type.
+	window.webContents.send('browser-chrome:focus-address');
+	await new Promise((resolve) => setTimeout(resolve, 150));
+	check(
+		'a new tab puts the cursor in the address field',
+		(await run('document.activeElement === document.getElementById("address")')) === true
+	);
+
 	check('nothing errored in the renderer', errors.length === 0, errors.join(' | '));
 
 	clearTimeout(deadline);

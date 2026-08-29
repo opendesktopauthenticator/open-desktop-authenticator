@@ -70,5 +70,9 @@ contextBridge.exposeInMainWorld(BRIDGE, {
 	closeTab: (id: number) => ipcRenderer.send('browser-chrome:close-tab', id),
 	onState: (listener: (state: ChromeState) => void) => {
 		ipcRenderer.on('browser-chrome:state', (_event, state: ChromeState) => listener(state));
+	},
+	/** A new empty tab was opened; the cursor belongs in the address field. */
+	onFocusAddress: (listener: () => void) => {
+		ipcRenderer.on('browser-chrome:focus-address', () => listener());
 	}
 });

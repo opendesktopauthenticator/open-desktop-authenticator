@@ -156,6 +156,11 @@ export const CHROME_HTML = `<!doctype html>
 		strip.appendChild(plus);
 	}
 
+	window.odaBrowser.onFocusAddress(function () {
+		address.focus();
+		address.select();
+	});
+
 	window.odaBrowser.onState(function (state) {
 		// Never overwrite what somebody is halfway through typing.
 		if (!typing) { address.value = state.url; }
