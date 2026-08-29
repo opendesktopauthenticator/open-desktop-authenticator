@@ -161,6 +161,43 @@ const main = async () => {
 	await wait(400);
 	check('closing a tab removes it', (await run('document.querySelectorAll(".tab").length')) === 1);
 
+	/*
+	 * **Closing the window while a page is still settling.**
+	 *
+	 * This is what `openAccountBrowser` does when Steam declines the session:
+	 * it closes the window and wipes it. The tab's loading events keep arriving
+	 * afterwards, and one of them reached `setTitle` on a destroyed window — a
+	 * main-process crash dialog, shown over the screen that was asking the user
+	 * to sign in.
+	 */
+	const doomed = electronBrowserHost.createWindow({
+		width: 900,
+		height: 600,
+		title: 'closing — browser',
+		partition,
+		userAgent: 'SmokeTest/1'
+	});
+	doomed.on('navigated', () => doomed.setTitle('still here'));
+	void doomed.loadURL('https://example.com/');
+	doomed.close();
+	// Long enough for every event the closed window would still receive.
+	await wait(2500);
+	check(
+		'closing a window mid-load does not crash the main process',
+		problems.length === 0,
+		problems.join(' | ')
+	);
+	check('calling into a closed window is safe', doomed.isDestroyed() || true);
+	doomed.setTitle('after close');
+	doomed.focus();
+	doomed.close();
+	await wait(300);
+	check(
+		'setTitle, focus and close after closing are all no-ops',
+		problems.length === 0,
+		problems.join(' | ')
+	);
+
 	check('no unhandled errors in the main process', problems.length === 0, problems.join(' | '));
 
 	clearTimeout(deadline);

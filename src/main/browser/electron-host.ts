@@ -155,6 +155,25 @@ export const electronBrowserHost: BrowserHost = {
 		});
 		window.contentView.addChildView(chrome);
 
+		/*
+		 * **Closed windows still receive events.**
+		 *
+		 * When the landing check refuses a page, `openAccountBrowser` closes this
+		 * window — and the tab's own loading events keep arriving afterwards.
+		 * `publish` guarded the contents but not the window, so the next one
+		 * reached `setTitle` on a destroyed `BaseWindow` and took the main process
+		 * down with "Object has been destroyed", in front of the user, on the
+		 * screen that was telling them to sign in.
+		 *
+		 * `isDestroyed()` alone is not enough: there is a window between `close()`
+		 * and destruction where it still answers false. The flag closes that.
+		 */
+		let gone = false;
+		window.on('closed', () => {
+			gone = true;
+		});
+		const alive = (): boolean => !gone && !window.isDestroyed();
+
 		/** Set once `openAccountBrowser` subscribes; called as the active tab moves. */
 		let navigated: () => void = () => undefined;
 		/** The address last announced, so the same one is not announced twice. */
@@ -198,7 +217,7 @@ export const electronBrowserHost: BrowserHost = {
 		};
 
 		const publish = (): void => {
-			if (chrome.webContents.isDestroyed()) {
+			if (!alive() || chrome.webContents.isDestroyed()) {
 				return;
 			}
 			const active = tabs.get(activeId);
@@ -244,7 +263,7 @@ export const electronBrowserHost: BrowserHost = {
 
 		const show = (id: number): void => {
 			const chosen = tabs.get(id);
-			if (!chosen) {
+			if (!chosen || !alive()) {
 				return;
 			}
 			activeId = id;
@@ -300,7 +319,7 @@ export const electronBrowserHost: BrowserHost = {
 
 		const closeTab = (id: number): void => {
 			const view = tabs.get(id);
-			if (!view) {
+			if (!view || !alive()) {
 				return;
 			}
 			const order = [...tabs.keys()];
@@ -331,6 +350,9 @@ export const electronBrowserHost: BrowserHost = {
 		let webRtcPolicy: 'disable_non_proxied_udp' | 'default' = 'default';
 
 		const layout = (): void => {
+			if (!alive()) {
+				return;
+			}
 			const bounds = window.getContentBounds();
 			chrome.setBounds({ x: 0, y: 0, width: bounds.width, height: CHROME_HEIGHT });
 			const active = tabs.get(activeId);
@@ -429,6 +451,9 @@ export const electronBrowserHost: BrowserHost = {
 		return {
 			// The first tab. Everything after it is opened by the strip or by a page.
 			loadURL: (url) => {
+				if (!alive()) {
+					return Promise.reject(new Error('the browser window has already closed'));
+				}
 				const id = tabs.size === 0 ? openTab() : activeId;
 				const view = tabs.get(id);
 				if (!view) {
@@ -441,22 +466,40 @@ export const electronBrowserHost: BrowserHost = {
 			// landing from a login page.
 			currentUrl: () => active()?.webContents.getURL() ?? '',
 			focus: () => {
+				if (!alive()) {
+					return;
+				}
 				// `focus()` alone does nothing to a minimised window.
 				if (window.isMinimized()) {
 					window.restore();
 				}
 				window.focus();
 			},
-			setTitle: (title) => window.setTitle(title),
+			// Guarded like the rest: the lock sweep and the landing check both close
+			// this window while pages are still settling, and a title set afterwards
+			// is not worth a crash.
+			setTitle: (title) => {
+				if (alive()) {
+					window.setTitle(title);
+				}
+			},
 			setWebRtcPolicy: (policy) => {
 				// Kept, so tabs opened later start with it rather than having it
 				// applied after their first request.
 				webRtcPolicy = policy;
 				for (const view of tabs.values()) {
-					view.webContents.setWebRTCIPHandlingPolicy(policy);
+					if (!view.webContents.isDestroyed()) {
+						view.webContents.setWebRTCIPHandlingPolicy(policy);
+					}
 				}
 			},
-			close: () => window.close(),
+			// `close()` on a destroyed window throws, and the lock sweep calls this
+			// on every window it knows about — including one the user just closed.
+			close: () => {
+				if (alive()) {
+					window.close();
+				}
+			},
 			isDestroyed: () => window.isDestroyed(),
 			on: (event, listener) => {
 				if (event === 'closed') {
