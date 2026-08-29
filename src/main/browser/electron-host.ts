@@ -157,6 +157,8 @@ export const electronBrowserHost: BrowserHost = {
 
 		/** Set once `openAccountBrowser` subscribes; called as the active tab moves. */
 		let navigated: () => void = () => undefined;
+		/** The address last announced, so the same one is not announced twice. */
+		let lastAnnounced: string | undefined;
 
 		/*
 		 * **Every tab is built the same way, or it is not built.**
@@ -201,7 +203,18 @@ export const electronBrowserHost: BrowserHost = {
 			}
 			const active = tabs.get(activeId);
 			const url = shown(active);
-			navigated();
+			/*
+			 * Only when the address actually changed.
+			 *
+			 * `publish` runs on loading and title changes too, so this fired seven
+			 * times for one page load — seven `setTitle` calls describing the same
+			 * address. Harmless, and wrong about what the event means: a caller
+			 * subscribing to "navigated" is told the window moved.
+			 */
+			if (url !== lastAnnounced) {
+				lastAnnounced = url;
+				navigated();
+			}
 			chrome.webContents.send('browser-chrome:state', {
 				url,
 				canGoBack: active ? active.webContents.navigationHistory.canGoBack() : false,
@@ -212,7 +225,15 @@ export const electronBrowserHost: BrowserHost = {
 					const at = shown(view);
 					return {
 						id,
-						title: view.webContents.isDestroyed() ? '' : view.webContents.getTitle(),
+						/*
+						 * A blank tab has no title, whatever Chromium says.
+						 *
+						 * `getTitle()` on `about:blank` returns "about:blank", so a new
+						 * tab was labelled with the URL it was deliberately not showing
+						 * in the address bar. Empty here lets the strip fall back to
+						 * "New tab", which is what it is.
+						 */
+						title: at === '' || view.webContents.isDestroyed() ? '' : view.webContents.getTitle(),
 						url: at,
 						active: id === activeId,
 						offSteam: at !== '' && !isSteamHost(at)
