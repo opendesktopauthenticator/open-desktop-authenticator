@@ -356,8 +356,12 @@ describe('the settings contract', () => {
 
 	it('accepts values inside the schema bounds', () => {
 		expect(
-			request.safeParse({ autoLockMinutes: 30, clipboardClearSeconds: 45, updateCheck: true })
-				.success
+			request.safeParse({
+				requireProxies: false,
+				autoLockMinutes: 30,
+				clipboardClearSeconds: 45,
+				updateCheck: true
+			}).success
 		).toBe(true);
 	});
 
@@ -367,8 +371,12 @@ describe('the settings contract', () => {
 		// the outcome the setting exists to make unnecessary.
 		for (const autoLockMinutes of [0, -5, 241, 1.5, Number.NaN]) {
 			expect(
-				request.safeParse({ autoLockMinutes, clipboardClearSeconds: 30, updateCheck: true })
-					.success,
+				request.safeParse({
+					requireProxies: false,
+					autoLockMinutes,
+					clipboardClearSeconds: 30,
+					updateCheck: true
+				}).success,
 				`${autoLockMinutes}`
 			).toBe(false);
 		}
@@ -377,8 +385,12 @@ describe('the settings contract', () => {
 	it('refuses a clipboard delay outside 5–300', () => {
 		for (const clipboardClearSeconds of [0, 4, 301, -1]) {
 			expect(
-				request.safeParse({ autoLockMinutes: 10, clipboardClearSeconds, updateCheck: true })
-					.success,
+				request.safeParse({
+					requireProxies: false,
+					autoLockMinutes: 10,
+					clipboardClearSeconds,
+					updateCheck: true
+				}).success,
 				`${clipboardClearSeconds}`
 			).toBe(false);
 		}
@@ -389,6 +401,7 @@ describe('the settings contract', () => {
 		// writable here. Strict mode is what stops it arriving anyway.
 		expect(
 			request.safeParse({
+				requireProxies: false,
 				autoLockMinutes: 10,
 				clipboardClearSeconds: 30,
 				updateCheck: true,
@@ -402,6 +415,7 @@ describe('the settings contract', () => {
 		// schema must not reach the renderer just because someone added it there —
 		// `convenienceUnlock` is the standing example, and it stays out.
 		const parsed = response.parse({
+			requireProxies: true,
 			autoLockMinutes: 10,
 			clipboardClearSeconds: 30,
 			updateCheck: true,
@@ -410,6 +424,7 @@ describe('the settings contract', () => {
 		});
 
 		expect(Object.keys(parsed)).toEqual([
+			'requireProxies',
 			'autoLockMinutes',
 			'clipboardClearSeconds',
 			'updateCheck'

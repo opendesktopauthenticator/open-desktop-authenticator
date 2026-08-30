@@ -135,6 +135,17 @@ export function BackupRestore({
 						onClick={() => {
 							setOpen(false);
 							setError(undefined);
+							/*
+							 * **And the passphrase, which Cancel did not clear.**
+							 *
+							 * This component stays mounted on the Create and Unlock screens
+							 * — closing the form only hides it — so the controlled value
+							 * survived, and reopening the form presented the previous
+							 * secret already typed in. Both success and failure clear it
+							 * above; abandoning is the third way out and was the one that
+							 * kept it.
+							 */
+							setPassphrase('');
 						}}
 						disabled={busy || siblingBusy}
 					>

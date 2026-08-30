@@ -269,10 +269,20 @@ export class AutoConfirmEngine {
 		const now = this.now();
 		const due: { steamId64: string; pollIntervalSeconds: number }[] = [];
 
-		for (const account of this.vault.read().accounts) {
+		/*
+		 * The projection, not the whole vault.
+		 *
+		 * `read()` deep-clones every secret the vault holds, and this runs on
+		 * every beat that the `earliestDueAt` early-out does not cover — which,
+		 * for a vault where nobody has switched auto-confirm on, is all of them,
+		 * forever. Nothing scheduled means nothing cached means the early-out
+		 * never fires. What is actually needed is an id, two switches and an
+		 * interval.
+		 */
+		for (const account of this.vault.autoConfirmSchedule()) {
 			// The switch the user set is what decides whether this account is polled
 			// at all. Nothing enabled means no request is ever made for it.
-			if (!account.autoConfirm.marketListings && !account.autoConfirm.trades) {
+			if (!account.marketListings && !account.trades) {
 				this.state.delete(account.steamId64);
 				continue;
 			}
@@ -288,7 +298,7 @@ export class AutoConfirmEngine {
 			}
 			due.push({
 				steamId64: account.steamId64,
-				pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds
+				pollIntervalSeconds: account.pollIntervalSeconds
 			});
 		}
 

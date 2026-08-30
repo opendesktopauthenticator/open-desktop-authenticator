@@ -124,6 +124,25 @@ export const accountSchema = z
 	.passthrough();
 
 export const VAULT_SETTINGS_DEFAULTS = {
+	/**
+	 * Refuse to let anything leave by an address other than the one configured.
+	 *
+	 * **Off, because it settles an ambiguity rather than fixing a defect.** The
+	 * browser offers *Direct* beside the routed button: a shared proxy collects
+	 * rate limits and Cloudflare challenges a home connection never sees, so the
+	 * routed window is sometimes the one that will not load, and somebody who
+	 * only wants to accept one trade is better served by an honest choice than by
+	 * a window that refuses to open. The control states its cost.
+	 *
+	 * Some people want the stronger rule anyway: a configured proxy is the only
+	 * way out, and the option to go around it should not exist. Turning this on
+	 * removes the Direct button and refuses the update check — the one request
+	 * this application makes that no account's proxy applies to.
+	 *
+	 * Enforced in the main process, not by hiding a button. "Only the renderer
+	 * offers it" has never counted as a control here.
+	 */
+	requireProxies: false,
 	autoLockMinutes: 10,
 	clipboardClearSeconds: 30,
 	convenienceUnlock: false,
@@ -144,6 +163,7 @@ export const VAULT_SETTINGS_DEFAULTS = {
 
 export const vaultSettingsSchema = z
 	.object({
+		requireProxies: z.boolean().default(VAULT_SETTINGS_DEFAULTS.requireProxies),
 		autoLockMinutes: z
 			.number()
 			.int()

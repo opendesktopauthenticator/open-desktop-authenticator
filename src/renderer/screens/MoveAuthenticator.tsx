@@ -41,8 +41,18 @@ export function MoveAuthenticator({
 	onComplete,
 	onRetryPersist,
 	onStatus,
-	onClose
+	onAcknowledgeBackup,
+	onClose,
+	requireProxies
 }: {
+	/**
+	 * Whether the vault refuses to talk to Steam without a proxy.
+	 *
+	 * The main process already refuses a proxyless transfer under this setting,
+	 * so without this the form said "optional" and offered a submit that could
+	 * only fail.
+	 */
+	requireProxies: boolean;
 	onAuthenticate: (
 		accountName: string,
 		password: string,
@@ -66,6 +76,19 @@ export function MoveAuthenticator({
 	 * supposed to come back for them.
 	 */
 	onStatus: () => Promise<TransferStatus>;
+	/**
+	 * Record that the recovery code below was written down.
+	 *
+	 * **The checkbox used to lead nowhere.** A transfer deliberately stores the
+	 * account as `pendingRevocationBackup`, this screen shows the code Steam will
+	 * never issue again, and the user ticks a box saying they have written it
+	 * down — and Done only closed the screen. The account stayed pending and the
+	 * home screen went on warning that the code had never been backed up, about
+	 * the code the user had just been shown and had just confirmed keeping. The
+	 * only way out was a second ceremony that re-reveals the same code behind the
+	 * passphrase, which teaches people that the warning means nothing.
+	 */
+	onAcknowledgeBackup: (steamId64: string) => Promise<unknown>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [accountName, setAccountName] = useState('');
@@ -79,6 +102,10 @@ export function MoveAuthenticator({
 	const [smsCode, setSmsCode] = useState('');
 	const [done, setDone] = useState<TransferComplete | undefined>(undefined);
 	const [savedCode, setSavedCode] = useState(false);
+	/** Guards Done against a second press while the acknowledgement is in flight. */
+	const [acknowledging, setAcknowledging] = useState(false);
+	/** Why the acknowledgement did not stick, if it did not. */
+	const [acknowledgeError, setAcknowledgeError] = useState<string | undefined>(undefined);
 	/**
 	 * True once Steam has been asked to rotate.
 	 *
@@ -144,7 +171,14 @@ export function MoveAuthenticator({
 		setBusy(true);
 		setError(undefined);
 		try {
-			setAuthenticated(await onAuthenticate(accountName, password, code, proxyUrl));
+			setAuthenticated(
+				// **Trimmed, matching enrollment.** The raw value went straight to
+				// `new URL()` in the main process, so a field holding only spaces was
+				// not "no proxy" — it was an invalid one, and the transfer failed with
+				// `Invalid URL` for something the user had left blank. The screen
+				// already treats the trimmed value as the real one everywhere else.
+				await onAuthenticate(accountName, password, code, proxyUrl.trim() || undefined)
+			);
 			// Held only as long as the request. Nothing about this screen needs the
 			// password again, and the code is single-use.
 		} catch (err) {
@@ -436,10 +470,50 @@ export function MoveAuthenticator({
 					I have written the recovery code down somewhere other than this computer
 				</label>
 
+				{/* **Not swallowed.** An earlier version of this button closed the
+				    screen whatever happened, on the reasoning that the account is
+				    already stored and the standalone ceremony could clear the warning
+				    later. That is the "you asked for something and it did not happen"
+				    shape this whole application is written against: the user ticks a
+				    box, presses Done, and the home screen goes on saying the code was
+				    never backed up, with nothing anywhere explaining why. The code is
+				    still on screen at this point, which is the one moment retrying
+				    costs nothing. */}
+				{acknowledgeError !== undefined && (
+					<p className="error" role="alert">
+						{acknowledgeError} The recovery code above is still the one to keep — press Done to try
+						again, or close this and use “Back up recovery code” on the account.
+					</p>
+				)}
+
 				<div className="controls">
-					<button type="button" disabled={!savedCode} onClick={onClose}>
-						Done
+					<button
+						type="button"
+						disabled={!savedCode || acknowledging}
+						onClick={() => {
+							setAcknowledging(true);
+							setAcknowledgeError(undefined);
+							void onAcknowledgeBackup(done.steamId64).then(
+								() => onClose(),
+								(err: unknown) => {
+									// Stays open, and says so. Closing from a `finally` was the
+									// bug: it treated failure exactly like success.
+									setAcknowledging(false);
+									setAcknowledgeError(messageOf(err));
+								}
+							);
+						}}
+					>
+						{acknowledging ? 'Saving…' : 'Done'}
 					</button>
+					{/* A way out that does not pretend. Somebody whose vault locked
+					    mid-press cannot record anything from here, and holding them on
+					    this screen would be its own trap. */}
+					{acknowledgeError !== undefined && (
+						<button type="button" className="secondary" onClick={onClose}>
+							Close without recording it
+						</button>
+					)}
 				</div>
 			</main>
 		);
@@ -659,7 +733,11 @@ export function MoveAuthenticator({
 					authenticator being moved.
 				</p>
 
-				<label htmlFor="move-proxy">Route this account through a proxy (optional)</label>
+				<label htmlFor="move-proxy">
+					{requireProxies
+						? 'Route this account through a proxy (required)'
+						: 'Route this account through a proxy (optional)'}
+				</label>
 				<input
 					id="move-proxy"
 					type="text"
@@ -670,14 +748,21 @@ export function MoveAuthenticator({
 					placeholder="socks5://host:1080"
 				/>
 				<p className="hint">
-					HTTP, HTTPS, SOCKS4 and SOCKS5 are all accepted — the example is only an example. Leave it
-					empty to connect directly.
+					HTTP, HTTPS, SOCKS4 and SOCKS5 are all accepted — the example is only an example.{' '}
+					{requireProxies
+						? 'This vault requires a proxy, so it cannot be left empty.'
+						: 'Leave it empty to connect directly.'}
 				</p>
 
 				{error ? <p className="error">{error}</p> : undefined}
 
 				<div className="controls">
-					<button type="submit" disabled={busy}>
+					<button
+						type="submit"
+						// Under `Require proxies` an empty field is a submission the main
+						// process will refuse, so it is not offered.
+						disabled={busy || (requireProxies && proxyUrl.trim() === '')}
+					>
 						{busy ? 'Signing in…' : 'Sign in'}
 					</button>
 					<button type="button" className="secondary" onClick={onClose} disabled={busy}>

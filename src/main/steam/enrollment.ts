@@ -1,4 +1,10 @@
-import { createLoginSession, type LoginSessionFactory, type LoginSessionLike } from './login';
+import {
+	createLoginSession,
+	PROXY_POLICY_STOPPED,
+	VAULT_LOCKED_DURING_SIGN_IN,
+	type LoginSessionFactory,
+	type LoginSessionLike
+} from './login';
 import {
 	EnrollmentError,
 	finalizeEnrollment,
@@ -160,6 +166,34 @@ export class EnrollmentService {
 	private readonly liveSessions = new Set<LoginSessionLike>();
 
 	/**
+	 * Live sign-in sessions that are **not** going through a proxy.
+	 *
+	 * A subset of `liveSessions`, kept beside it rather than derived, because the
+	 * route is known only at `begin` and the session carries no record of it.
+	 *
+	 * **`pendingLogin` is not a substitute.** It is assigned after
+	 * `startWithCredentials` has been awaited — which is exactly the window in
+	 * which the password is on the wire — so a policy change landing there found
+	 * nothing pending and cancelled nothing. `liveSessions` is registered the
+	 * moment the session exists, for that same reason, and this narrows it to
+	 * the ones a proxy rule would forbid.
+	 */
+	private readonly unroutedSessions = new Set<LoginSessionLike>();
+
+	/**
+	 * Sessions **this application** stopped, and why.
+	 *
+	 * A cancelled `startWithCredentials` rejects, and the catch around it reports
+	 * "Steam refused the sign-in" — which is true of a rejected password and
+	 * false of every cancellation. A user who had just switched `Require
+	 * proxies` on was told Steam had refused them, and a lock produced the same
+	 * sentence. `login.ts` carries a reason through its own cancel callback for
+	 * exactly this; enrolment does not use that callback, so it records the
+	 * reason here instead.
+	 */
+	private readonly stoppedBy = new WeakMap<LoginSessionLike, string>();
+
+	/**
 	 * Whether Steam said it had a phone to text, per account mid-enrollment.
 	 *
 	 * Remembered from `AddAuthenticator` rather than inferred later, because it
@@ -234,6 +268,9 @@ export class EnrollmentService {
 		// Registered the moment it exists, so a lock can reach it wherever the flow
 		// has got to. `cancel` removes it again.
 		this.liveSessions.add(session);
+		if (route === undefined) {
+			this.unroutedSessions.add(session);
+		}
 
 		/**
 		 * Stops the sign-in timeout below.
@@ -289,7 +326,18 @@ export class EnrollmentService {
 		try {
 			started = await session.startWithCredentials({ accountName, password, persistence: 1 });
 		} catch (err) {
+			/*
+			 * **Ours or Steam's?** A cancellation lands here as a rejection, and
+			 * reporting it as "Steam refused the sign-in" blames Steam for
+			 * something this application did — after the user pressed a setting, or
+			 * after their vault locked. Only a rejection nobody here asked for is
+			 * Steam's answer.
+			 */
+			const stopped = this.stoppedBy.get(session);
 			this.cancel(session);
+			if (stopped !== undefined) {
+				throw new EnrollmentError(stopped, false);
+			}
 			throw new EnrollmentError(
 				`Steam refused the sign-in: ${redactCredentials(err instanceof Error ? err.message : String(err))}`,
 				false
@@ -656,11 +704,35 @@ export class EnrollmentService {
 		this.textedTheCode.delete(steamId64);
 	}
 
+	/**
+	 * Drop a half-finished sign-in that `Require proxies` has just forbidden.
+	 *
+	 * The IPC guard refuses a new enrolment with no proxy. One already running
+	 * was untouched, so a password kept travelling unrouted after the user had
+	 * turned the rule on — and enrolling is precisely when an account's address
+	 * is first shown to Steam.
+	 *
+	 * Only the unrouted one. An enrolment started *with* a proxy still satisfies
+	 * the rule, and enrolling is an attended act with a code arriving on a
+	 * phone: cancelling it because an unrelated switch moved would be a poor
+	 * trade for a leak that is not happening.
+	 */
+	forgetUnrouted(): void {
+		for (const session of [...this.unroutedSessions]) {
+			this.stoppedBy.set(session, PROXY_POLICY_STOPPED);
+			this.cancel(session);
+			if (this.pendingLogin?.session === session) {
+				this.pendingLogin = undefined;
+			}
+		}
+	}
+
 	/** Drop any half-finished sign-in. Called when the vault locks. */
 	forget(): void {
 		this.discardPending();
 		// Every session, not just a pending one. See `liveSessions`.
 		for (const session of [...this.liveSessions]) {
+			this.stoppedBy.set(session, VAULT_LOCKED_DURING_SIGN_IN);
 			this.cancel(session);
 		}
 		this.tokens.clear();
@@ -895,6 +967,7 @@ export class EnrollmentService {
 		// Deregistered whether or not the cancel throws: a session we can no longer
 		// stop is not one worth holding a reference to.
 		this.liveSessions.delete(session);
+		this.unroutedSessions.delete(session);
 		try {
 			session.cancelLoginAttempt();
 		} catch {
@@ -905,6 +978,7 @@ export class EnrollmentService {
 	/** Done with this session, successfully. Stops tracking it without cancelling. */
 	private release(session: LoginSessionLike): void {
 		this.liveSessions.delete(session);
+		this.unroutedSessions.delete(session);
 	}
 
 	private discardPending(): void {

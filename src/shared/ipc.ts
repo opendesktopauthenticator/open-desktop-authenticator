@@ -98,6 +98,24 @@ export const vaultStatusResponse = z.object({
 	unlocked: z.boolean(),
 	/** Null while locked. */
 	msUntilAutoLock: z.number().nullable(),
+	/**
+	 * Whether the vault refuses unrouted browsing.
+	 *
+	 * On the status rather than fetched with the settings because the account
+	 * list needs it and the status is what that screen already polls. False
+	 * while locked, which is also what the list shows then: nothing.
+	 */
+	requireProxies: z.boolean(),
+	/**
+	 * Whether update checks are permitted.
+	 *
+	 * On the status beside `requireProxies` because the renderer's update effect
+	 * has to re-run when either of them changes. It asked only when the unlocked
+	 * state changed, so turning the check back on — or turning `Require proxies`
+	 * off, which is the other thing that stops it — left the app waiting until
+	 * the next unlock to find out there was a release.
+	 */
+	updateCheck: z.boolean(),
 	/** Whether a recovery backup is on disk (§12 F1). */
 	backupAvailable: z.boolean()
 });
@@ -160,6 +178,16 @@ export const accountsListResponse = z.object({
  * the user is still looking at the field rather than after a failed save.
  */
 export const vaultSettingsView = z.object({
+	/**
+	 * Whether every request must go through a proxy.
+	 *
+	 * On the view because the Settings screen shows it and because `VaultHome`
+	 * stops offering Direct when it is on. **Neither of those is the control.**
+	 * The main process refuses a `direct` route and refuses the update check on
+	 * its own; a renderer that kept drawing the button would be pressing it into
+	 * a refusal, which is the behaviour this setting is for.
+	 */
+	requireProxies: z.boolean(),
 	/** 1–240. How long the vault stays unlocked with no interaction. */
 	autoLockMinutes: z.number().int().min(1).max(240),
 	/** 5–300. How long a copied Steam Guard code stays on the clipboard. */
@@ -188,6 +216,30 @@ export const settingsUpdateRequest = vaultSettingsView.strict();
  * "We could not ask" and "you are current" are different facts, and conflating
  * them hides a version with a known break behind a reassuring tick.
  */
+/**
+ * How the in-app browser leaves the machine.
+ *
+ * Three, not two, because the middle one is what people actually want. A proxy
+ * shared between accounts collects rate limits and Cloudflare challenges a home
+ * connection never sees, so a fully routed window is sometimes the one that
+ * will not load — and going fully direct puts the machine's own address on the
+ * account, which is the thing the proxy was bought to prevent.
+ *
+ * `steam-only` routes every Steam request **and everything it does not
+ * recognise**, and lets out only a short, named list of third-party trade
+ * sites. Not "everything else goes direct", which is what the first version of
+ * this route did and what this comment used to say: under that rule a Steam
+ * domain nobody had listed became a silent direct request, from the window
+ * whose whole promise is that Steam does not see this machine's address.
+ * Defaulting the other way costs a slow load on an unknown host and cannot
+ * leak. `egress.ts` holds the list and the reasoning.
+ *
+ * The choice is per window, and the account keeps its stored proxy either way —
+ * this says which of them to use, never what the address is.
+ */
+export const browserRoute = z.enum(['proxy', 'steam-only', 'direct']);
+export type BrowserRoute = z.infer<typeof browserRoute>;
+
 export const updateCheckResponse = z.discriminatedUnion('state', [
 	z.object({ state: z.literal('disabled') }),
 	/**
@@ -356,7 +408,23 @@ export const recoverResponse = z.discriminatedUnion('state', [
  * reasoning that keeps import from ever handing one over.
  */
 export const exportResponse = z.discriminatedUnion('state', [
-	z.object({ state: z.literal('saved'), fileName: z.string() }),
+	z.object({
+		state: z.literal('saved'),
+		fileName: z.string(),
+		/**
+		 * The previous export at that name could not be removed, and is still
+		 * there.
+		 *
+		 * **Reported rather than swallowed.** The export sets the old file aside so
+		 * a lock can be undone; on success it deletes that copy. When the delete
+		 * failed — a scanner holding the file, a removable drive going away — the
+		 * failure was ignored and the answer was still `saved`, leaving a second
+		 * plaintext file full of the previous authenticator secrets that nobody
+		 * was told about. The export did succeed, so this is not a failure; it is
+		 * a thing the user has to know.
+		 */
+		staleCopy: z.boolean().optional()
+	}),
 	z.object({ state: z.literal('cancelled') })
 ]);
 
@@ -865,7 +933,7 @@ export const IPC_CONTRACT = {
 				 * this account — so nothing that reaches the renderer can aim a
 				 * signed-in session at a proxy of its own choosing.
 				 */
-				useProxy: z.boolean()
+				route: browserRoute
 			})
 			.strict(),
 		response: openBrowserResponse
@@ -935,7 +1003,26 @@ export const IPC_CONTRACT = {
 	[CHANNELS.steamSignIn]: {
 		// The password travels inbound, exactly as a vault passphrase does, and is
 		// dropped as soon as Steam has answered.
-		request: z.object({ steamId64: z.string(), password: z.string().min(1).max(1024) }).strict(),
+		request: z
+			.object({
+				steamId64: z.string(),
+				password: z.string().min(1).max(1024),
+				/**
+				 * Whether to route this sign-in through the account's stored proxy.
+				 *
+				 * **Optional, and defaulting to the account's own routing**, because
+				 * that is what every caller but one wants: a confirmation screen
+				 * signing in has no reason to leave by any other address.
+				 *
+				 * The one exception is the browser, whose *Direct* option exists
+				 * precisely because that proxy is rate-limited, blocked or dead. When
+				 * Steam declines the saved session the user is asked to sign in again
+				 * — and that sign-in went through the proxy regardless, so the
+				 * fallback failed at the one step it was chosen to get past.
+				 */
+				route: browserRoute.optional()
+			})
+			.strict(),
 		response: signInResponse
 	},
 
@@ -1106,7 +1193,7 @@ export interface RendererApi {
 		ids: string[]
 	): Promise<{ ok: true }>;
 	/** Sign in once. The password is used and dropped; the session is what is kept. */
-	signInToSteam(steamId64: string, password: string): Promise<SignInResult>;
+	signInToSteam(steamId64: string, password: string, route?: BrowserRoute): Promise<SignInResult>;
 
 	/** §11 S2 exception (a). Requires the passphrase again. */
 	revealRevocationCode(steamId64: string, passphrase: string): Promise<{ revocationCode: string }>;
@@ -1117,7 +1204,7 @@ export interface RendererApi {
 	 * it — there is nothing to wait for once it is up. What comes back is the one
 	 * thing that stops it opening and that the caller can offer to fix.
 	 */
-	openAccountBrowser(steamId64: string, useProxy: boolean): Promise<OpenBrowserResult>;
+	openAccountBrowser(steamId64: string, route: BrowserRoute): Promise<OpenBrowserResult>;
 	/** Record that the code has been written down, clearing the account's warning. */
 	confirmRevocationBackup(steamId64: string): Promise<{ ok: true }>;
 }

@@ -56,7 +56,8 @@ export const CHROME_HTML = `<!doctype html>
 		border: none; border-radius: 6px; background: transparent; color: #8b93a1;
 		font-size: 16px; cursor: pointer;
 	}
-	#newtab:hover { background: #262a33; color: #e6eaf2; }
+	#newtab:hover:not(:disabled) { background: #262a33; color: #e6eaf2; }
+	#newtab:disabled { opacity: .35; cursor: default; }
 	#bar {
 		flex: none; height: 40px; display: flex; align-items: center; gap: 6px; padding: 0 8px;
 	}
@@ -107,7 +108,7 @@ export const CHROME_HTML = `<!doctype html>
 		if (event.key === 'Escape') { address.blur(); }
 	};
 
-	function drawTabs(tabs) {
+	function drawTabs(tabs, atLimit) {
 		strip.textContent = '';
 		for (var i = 0; i < tabs.length; i++) {
 			(function (tab) {
@@ -151,7 +152,11 @@ export const CHROME_HTML = `<!doctype html>
 		var plus = document.createElement('button');
 		plus.id = 'newtab';
 		plus.textContent = '+';
-		plus.title = 'New tab';
+		// Disabled at the ceiling rather than left to do nothing. A page can open
+		// tabs too, so this can be reached without the user having pressed it
+		// twenty times — and a + that silently stops working reads as a bug.
+		plus.disabled = atLimit;
+		plus.title = atLimit ? 'This window is full — close a tab first' : 'New tab';
 		plus.onclick = function () { window.odaBrowser.newTab(); };
 		strip.appendChild(plus);
 	}
@@ -170,7 +175,7 @@ export const CHROME_HTML = `<!doctype html>
 		reload.title = state.loading ? 'Stop' : 'Reload';
 		address.className = state.offSteam ? 'off' : '';
 		warn.className = state.offSteam ? 'on' : '';
-		drawTabs(state.tabs || []);
+		drawTabs(state.tabs || [], state.atTabLimit === true);
 	});
 </script>
 </body>

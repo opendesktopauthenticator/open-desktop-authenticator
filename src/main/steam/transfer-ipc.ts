@@ -1,7 +1,9 @@
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
+import { RevocationCeremony } from '../vault/revocation-ceremony';
 import { VaultLockedError, type VaultService } from '../vault/service';
-import type { TransferService } from './transfer';
+import { TransferError, type TransferService } from './transfer';
+import { PROXY_REQUIRED } from '../net/egress';
 
 /**
  * IPC for moving an authenticator off the Steam mobile app.
@@ -24,7 +26,30 @@ import type { TransferService } from './transfer';
  * the one failure this feature must not have, and the cheapest place to find
  * out is before the user has spent an SMS.
  */
-export function registerTransferHandlers(transfer: TransferService, vault: VaultService): void {
+export function registerTransferHandlers(
+	transfer: TransferService,
+	vault: VaultService,
+	/**
+	 * The show-then-confirm ceremony, so a completed transfer counts as a show.
+	 *
+	 * **The screen displayed the code and nothing recorded that it had.** A
+	 * transfer stores the account as `pendingRevocationBackup` on purpose, and
+	 * the completion screen ends with "I have written the recovery code down"
+	 * above a Done button — but Done only closed the screen. The acknowledgement
+	 * went nowhere, the account stayed pending, and the home screen went on
+	 * saying the code had never been backed up, about a code the user had just
+	 * been shown and had just confirmed writing down.
+	 *
+	 * The fix is not to weaken the ceremony. `revocationConfirmBackup` refuses
+	 * unless the code was revealed, which is exactly right — one IPC call must
+	 * not clear the warning for an account whose code nobody ever saw. It *was*
+	 * seen: on this screen, in this session, in the same breath as being
+	 * generated. Recording that here is what makes the confirm honest rather
+	 * than a second ceremony asking the user to prove something they have
+	 * already done.
+	 */
+	ceremony: RevocationCeremony = new RevocationCeremony()
+): void {
 	/**
 	 * Unlocked, and counted as activity.
 	 *
@@ -40,10 +65,31 @@ export function registerTransferHandlers(transfer: TransferService, vault: Vault
 		vault.touch();
 	};
 
+	/**
+	 * The code is on its way to a screen, so the ceremony has seen it shown.
+	 *
+	 * Recorded *with* the code, exactly as the reveal handler does it, so a
+	 * confirm cannot ride on this for some other code stored later.
+	 */
+	const revealed = <T extends { steamId64: string; revocationCode: string }>(result: T): T => {
+		ceremony.recordReveal(result.steamId64, result.revocationCode);
+		return result;
+	};
+
 	registerHandler(
 		CHANNELS.transferAuthenticate,
 		async ({ accountName, password, steamGuardCode, proxyUrl }) => {
 			requireUnlocked();
+			/*
+			 * The same refusal enrolment gets, for a heavier payload: this call
+			 * carries a password *and* a Steam Guard code. Like enrolment it goes
+			 * through `steam-session` rather than a transport, so the factory's
+			 * check never sees it — and like enrolment there is no stored account
+			 * yet, so the proxy field on the form is the only route there is.
+			 */
+			if (vault.settings().requireProxies && (proxyUrl === undefined || proxyUrl === '')) {
+				throw new TransferError(PROXY_REQUIRED);
+			}
 			return transfer.authenticate(accountName, password, steamGuardCode, proxyUrl);
 		}
 	);
@@ -69,13 +115,13 @@ export function registerTransferHandlers(transfer: TransferService, vault: Vault
 	 */
 	registerHandler(CHANNELS.transferComplete, async ({ smsCode }) => {
 		requireUnlocked();
-		return transfer.completeTransfer(smsCode);
+		return revealed(await transfer.completeTransfer(smsCode));
 	});
 
 	/** Storage only. Steam is not asked again — it could not be. */
 	registerHandler(CHANNELS.transferRetryPersist, async () => {
 		requireUnlocked();
-		return transfer.retryPersist();
+		return revealed(await transfer.retryPersist());
 	});
 
 	registerHandler(CHANNELS.transferStatus, () => {

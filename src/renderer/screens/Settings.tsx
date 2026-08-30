@@ -157,6 +157,26 @@ export function Settings({
 						since is left alone.
 					</p>
 
+					<h2>Routing</h2>
+					<label className="checkbox">
+						<input
+							type="checkbox"
+							checked={settings.requireProxies}
+							disabled={busy}
+							onChange={(event) => change({ requireProxies: event.target.checked })}
+						/>
+						Require proxies
+					</label>
+					{/* What it costs, next to the switch, because both consequences are
+					    things the user will otherwise meet as unexplained failures: a
+					    Trade button that refuses, and update checks that stop. */}
+					<p className="hint">
+						With this on, the browser refuses to open without a proxy — the Direct button goes away,
+						and an account that has no proxy cannot open one at all. Update checks stop too: they go
+						to GitHub rather than to Steam, so no account’s proxy applies to them, and this setting
+						says that request should not be made unrouted.
+					</p>
+
 					<h2>Update checks</h2>
 					<UpdateCheckSetting
 						installedFromStore={installedFromStore}
@@ -359,6 +379,15 @@ export function UpdateCheckSetting({
 					Asks GitHub once every few hours whether a newer release exists. It sends nothing about
 					you or your accounts — it is the same question any visitor to the releases page asks.
 					GitHub will see your IP address and that this application is running.
+				</p>
+				{/* Said plainly, because somebody who has set a proxy on every account
+				    would otherwise reasonably assume this went through one. It does
+				    not, and there is nowhere it could: proxies here belong to
+				    accounts, and this request belongs to none of them. */}
+				<p className="hint">
+					It goes out from this computer&rsquo;s own address. Account proxies are exactly that — per
+					account — and this request is not made on behalf of any account, so none of them applies
+					to it. Switch this off if that matters to you.
 				</p>
 				<p className="hint">
 					It never downloads or installs anything. When there is a new version you get a link, and

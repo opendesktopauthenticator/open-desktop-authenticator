@@ -108,6 +108,35 @@ export class VaultService {
 	 */
 	private generation = 0;
 
+	/**
+	 * Bumped whenever the vault **file** on disk is replaced. Every time.
+	 *
+	 * **It used to mean "replaced by something other than an ordinary save",
+	 * and that was the defect.** A restore derives a key from the backup's
+	 * passphrase, which is slow on purpose, and re-checks this counter before it
+	 * swaps the files. An ordinary save landing inside that window — a vault
+	 * created, an account added, a passphrase rotated — left the counter
+	 * untouched, so the check agreed and the restore moved the *newer* vault
+	 * aside and installed the older backup over it. The restore could then fail
+	 * for an unrelated reason and tell the user nothing had happened, with the
+	 * live vault already rolled back.
+	 *
+	 * A save is exactly as much a replacement of the file as an adoption is, so
+	 * every successful `writeEnvelope` to `this.file` advances this. After the
+	 * write, never before: a write that threw replaced nothing.
+	 *
+	 * **Separate from `generation`, which means "locked".** Restoring is
+	 * deliberately allowed to survive a lock that lands during its derivation:
+	 * the backup is on disk by then and undoing the swap would be the more
+	 * destructive reading. So restore cannot use that counter to detect a file
+	 * appearing underneath it, and without a second one it detected nothing at
+	 * all — `adoptFrom` writes a vault without opening it, so the `this.state`
+	 * check sails past, and the restore then set the just-adopted vault aside and
+	 * installed the backup over it. Both operations reported success and the
+	 * application opened the older one.
+	 */
+	private fileGeneration = 0;
+
 	/** Guards `create` against a concurrent second creation. */
 	private creating = false;
 
@@ -215,6 +244,9 @@ export class VaultService {
 		}
 		try {
 			writeEnvelope(this.file, sealWithKey(JSON.stringify(contents), key, kdf));
+			// The file now exists where it did not. A restore deriving against a
+			// backup must not conclude the ground has not moved.
+			this.fileGeneration += 1;
 		} catch (err) {
 			wipe(key);
 			throw err;
@@ -355,6 +387,42 @@ export class VaultService {
 		return structuredClone(this.require().contents.settings);
 	}
 
+	/**
+	 * Just what the auto-confirm scheduler needs. Throws when locked.
+	 *
+	 * **Read once a second, for the whole life of an unlocked session.** The
+	 * scheduler beats every second and keeps a cached `earliestDueAt` so most
+	 * beats can answer "not yet" without asking here — but that cache is only
+	 * populated by accounts it has actually scheduled, and the common case is a
+	 * vault where nobody has switched auto-confirm on at all. Nothing is
+	 * scheduled, so nothing is cached, so the early-out never fires, so every
+	 * single beat called `read()` and deep-cloned every shared secret, identity
+	 * secret and revocation code in the vault to rediscover that there was
+	 * nothing to do.
+	 *
+	 * The same reasoning as `settings()`, one step further: §11 already admits
+	 * that strings survive until collection, and a per-second copy of every
+	 * secret the user owns makes an acknowledged limit measurably worse for no
+	 * benefit at all.
+	 *
+	 * What comes back holds no secrets — an account id, two switches and an
+	 * interval — so the clone is cheap and there is nothing here worth
+	 * protecting.
+	 */
+	autoConfirmSchedule(): {
+		steamId64: string;
+		marketListings: boolean;
+		trades: boolean;
+		pollIntervalSeconds: number;
+	}[] {
+		return this.require().contents.accounts.map((account) => ({
+			steamId64: account.steamId64,
+			marketListings: account.autoConfirm.marketListings,
+			trades: account.autoConfirm.trades,
+			pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds
+		}));
+	}
+
 	/** Record user activity, deferring the idle auto-lock. */
 	touch(): void {
 		if (this.state) {
@@ -431,6 +499,9 @@ export class VaultService {
 		// reason to disown an older open as a lock is.
 		this.generation += 1;
 		writeEnvelope(this.file, sealWithKey(JSON.stringify(validated), state.key, state.kdf));
+		// See `fileGeneration`: a save replaces the file, and a restore in flight
+		// has to notice that as surely as it notices an adoption.
+		this.fileGeneration += 1;
 
 		state.contents = validated;
 		state.lastActivity = this.now();
@@ -513,6 +584,9 @@ export class VaultService {
 
 		try {
 			writeEnvelope(this.file, sealWithKey(JSON.stringify(contents), newKey, kdf));
+			// A rotation rewrites the file under a new key, which is the case a
+			// restore most needs to notice: the backup it holds cannot open it.
+			this.fileGeneration += 1;
 		} catch (err) {
 			wipe(newKey);
 			throw err;
@@ -659,6 +733,10 @@ export class VaultService {
 		}
 
 		writeEnvelope(this.file, envelope);
+
+		// A vault now exists where one did not. Anything that checked for its
+		// absence before an await has to find out. See `fileGeneration`.
+		this.fileGeneration += 1;
 	}
 
 	/**
@@ -720,6 +798,9 @@ export class VaultService {
 
 		// Proves the passphrase and the file before a byte is written.
 		const generation = this.generation;
+		// And which vault file this restore was authorised against. See
+		// `fileGeneration`.
+		const fileGeneration = this.fileGeneration;
 		const { plaintext, key, kdf } = await unseal(envelope, passphrase);
 
 		// **Refused while the vault is open** — checked after the derivation, so an
@@ -732,6 +813,26 @@ export class VaultService {
 			wipe(key);
 			throw new VaultServiceError(
 				'the vault is open. Restoring the backup replaces the live vault, so lock it first.'
+			);
+		}
+
+		/*
+		 * **And nothing else replaced the vault file while the key was deriving.**
+		 *
+		 * The check above catches an unlock, because an unlock installs state.
+		 * `adoptFrom` does not: it writes a vault file and leaves it closed. So
+		 * adopting a vault during this derivation passed every guard here, and the
+		 * restore went on to set the newly adopted vault aside and install the
+		 * backup over it — two operations, both reporting success, and the
+		 * application then open on the older one. The adopted file survives at its
+		 * source, so nothing is destroyed; the user is simply told the wrong thing
+		 * about which accounts they are looking at.
+		 */
+		if (fileGeneration !== this.fileGeneration) {
+			wipe(key);
+			throw new VaultServiceError(
+				'another vault was put in place while the backup was being unlocked, so nothing was ' +
+					'replaced. Check which vault you want and try again.'
 			);
 		}
 
@@ -786,6 +887,8 @@ export class VaultService {
 		// generation here makes that unlock's own `stillCurrent` check refuse, the
 		// same way a lock does.
 		this.generation += 1;
+		// The file is not the one anything earlier was authorised against either.
+		this.fileGeneration += 1;
 
 		// The restore itself stands: the backup is on disk and is the vault now.
 		// A lock that arrived mid-derivation cancels leaving it open, not the

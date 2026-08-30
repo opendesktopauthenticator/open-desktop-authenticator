@@ -6,6 +6,8 @@ import { maFileName, toMaFile } from '../import/export';
 import { DEACTIVATE_ACK, matchesDeactivateAck } from '../../shared/ipc';
 import { readRecoveryFile, RecoveryError } from '../vault/recovery';
 import type { EnrollmentService } from './enrollment';
+import { EnrollmentError } from './enroll';
+import { PROXY_REQUIRED } from '../net/egress';
 import { VaultLockedError, type VaultService } from '../vault/service';
 
 /**
@@ -56,6 +58,23 @@ export function registerEnrollmentHandlers(
 
 	registerHandler(CHANNELS.enrollBegin, async ({ accountName, password, proxyUrl }) => {
 		requireUnlocked();
+		/*
+		 * **`Require proxies` reaches this, and it did not.**
+		 *
+		 * The setting is enforced at `SteamTransportFactory.forAccount`, which
+		 * every Steam request crosses — except the ones that do not use a
+		 * transport. `steam-session` speaks over Node's own HTTP stack, so an
+		 * enrolment sent a password to Steam's login servers from this machine's
+		 * own address, on a vault that forbade exactly that.
+		 *
+		 * There is no stored account to read a proxy from: this is the call that
+		 * creates one. So the field on the form is what decides, and empty means
+		 * refused rather than "unrouted for now" — an account enrolled from the
+		 * user's own address has already told Steam the thing the proxy was for.
+		 */
+		if (vault.settings().requireProxies && (proxyUrl === undefined || proxyUrl === '')) {
+			throw new EnrollmentError(PROXY_REQUIRED);
+		}
 		return enrollment.begin(accountName, password, proxyUrl);
 	});
 
@@ -217,12 +236,146 @@ export function registerEnrollmentHandlers(
 		// delete the other's work. The random name makes collisions impossible and
 		// `wx` makes this write constitutionally unable to empty an existing file.
 		const temp = `${destination}.${randomUUID()}.tmp`;
-		try {
-			await writeFile(temp, toMaFile(current), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-			await rename(temp, destination);
-		} catch {
+
+		/*
+		 * Cleanup and refusal in one place, so both failure paths below can keep a
+		 * **bare** `catch`.
+		 *
+		 * That is not style. `preserve-caught-error` wants a `cause` on anything
+		 * rethrown from a bound error — and the whole rule of this module is that
+		 * no filesystem path crosses IPC. A failed write throws with the absolute
+		 * destination in its message, so attaching it as a cause would hand the
+		 * renderer the user's folder layout through the back door, to satisfy a
+		 * lint rule about diagnostics.
+		 */
+		const giveUp = async (): Promise<never> => {
 			await rm(temp, { force: true }).catch(() => undefined);
 			throw new Error(`${suggested} could not be written to that location.`);
+		};
+
+		try {
+			await writeFile(temp, toMaFile(current), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+		} catch {
+			await giveUp();
+		}
+
+		{
+			/*
+			 * **Checked once more, between writing and publishing.**
+			 *
+			 * The check before this covers the save dialog, which is the long wait —
+			 * but the write is a wait too, and a slow one on the drives people
+			 * actually export to: a USB stick, a network share, an SD card. Lock the
+			 * vault during it — manually, by idling, by shutting the lid — and the
+			 * rename still completed and put a plaintext maFile at the destination,
+			 * carrying the same secrets as the vault and none of its encryption,
+			 * after the application had been told nobody is present.
+			 *
+			 * The rename is the moment the file becomes real, so this is the last
+			 * place the answer can still be no. The temp goes with it: it holds the
+			 * same plaintext, and it exists only because the destination is not
+			 * safe to write directly.
+			 */
+			// A lock is not a disk problem, and telling somebody their drive would
+			// not take the file when what actually happened is that their vault
+			// locked sends them to fix the wrong thing — so this is thrown from
+			// outside the write's own catch, where it cannot be mistaken for one.
+			if (!vault.isUnlocked()) {
+				await rm(temp, { force: true }).catch(() => undefined);
+				throw new VaultLockedError();
+			}
+		}
+
+		/*
+		 * Whether the destination was already there, read before the rename.
+		 *
+		 * It decides what a lock *during* the rename is allowed to do about it —
+		 * see below. `access` rather than a stat: only existence matters, and this
+		 * is a question about the path, not about its contents.
+		 */
+		/*
+		 * **The previous file is set aside, not merely noted.**
+		 *
+		 * An earlier version recorded whether the destination existed and, if it
+		 * did, left the replacement in place when a lock landed during the rename —
+		 * on the reasoning that deleting would destroy a backup the user had before
+		 * they pressed anything.
+		 *
+		 * That reasoning had a hole, and it produced the worst available outcome:
+		 * the old backup was gone, freshly exported plaintext was sitting at that
+		 * path, and the user was told the export had failed because the vault
+		 * locked. Every part of that is wrong at once — a destroyed file, a new
+		 * exposure, and a message saying neither happened.
+		 *
+		 * Moving it aside first makes the rename undoable, so the lock can be
+		 * honoured exactly: the new file goes, the old one comes back, and
+		 * "nothing was replaced" is true. The same set-aside-then-restore the vault
+		 * writer has always used, for the same reason.
+		 */
+		const kept = `${destination}.${randomUUID()}.prev`;
+		const replacing = await rename(destination, kept)
+			.then(() => true)
+			.catch(() => false);
+
+		try {
+			await rename(temp, destination);
+		} catch {
+			// Put back whatever was there before saying the export failed.
+			if (replacing) {
+				await rename(kept, destination).catch(() => undefined);
+			}
+			await giveUp();
+		}
+
+		/*
+		 * **The rename is the commit, and it is not instant.**
+		 *
+		 * The check above covers everything up to it. The rename itself is a
+		 * filesystem round trip — on the removable and network drives people
+		 * actually export to, a slow one — and a lock landing inside it still
+		 * published the plaintext maFile, then answered `saved`.
+		 *
+		 * There is no way to make a rename part of the same transaction as a lock,
+		 * so this undoes it instead, and only where undoing is honest:
+		 *
+		 *  - **Nothing was there before.** This export created the file, so
+		 *    removing it restores the directory exactly as it was, and the lock
+		 *    means nobody is present to have wanted it.
+		 *  - **Something was there.** The rename has already replaced it, and
+		 *    deleting now would destroy a backup the user had before they pressed
+		 *    anything — a worse outcome than a plaintext file for the same account
+		 *    that already existed at that path a second ago, which is no new
+		 *    exposure at all. It stays, and the refusal still says the vault
+		 *    locked.
+		 */
+		if (!vault.isUnlocked()) {
+			// Undone completely: the export this lock cancelled leaves the directory
+			// exactly as it found it, whether or not something was already there.
+			await rm(destination, { force: true }).catch(() => undefined);
+			if (replacing) {
+				await rename(kept, destination).catch(() => undefined);
+			}
+			throw new VaultLockedError();
+		}
+
+		/*
+		 * The export stands, so the copy it replaced is no longer needed. Removed
+		 * rather than left beside it: a stray `.prev` full of the same secrets is
+		 * a second plaintext file nobody asked for.
+		 *
+		 * **And when it cannot be removed, the caller is told.** A swallowed
+		 * failure here answered `saved` while a second plaintext file sat in the
+		 * user's folder — the previous authenticator's secrets, at a path only the
+		 * OS dialog knows, with nothing anywhere mentioning it. A scanner holding
+		 * the file, a network share dropping, a removable drive pulled: all
+		 * ordinary, all silent.
+		 */
+		let staleCopy = false;
+		if (replacing) {
+			staleCopy = await rm(kept, { force: true }).then(
+				() => false,
+				() => true
+			);
 		}
 		// **`mode` alone was not enough.** POSIX applies it only when the file is
 		// created, so exporting over a file that already existed — a second export to
@@ -239,6 +392,6 @@ export function registerEnrollmentHandlers(
 			/* not supported here; the directory's own permissions still apply */
 		}
 
-		return { state: 'saved' as const, fileName: suggested };
+		return { state: 'saved' as const, fileName: suggested, ...(staleCopy ? { staleCopy } : {}) };
 	});
 }

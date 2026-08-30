@@ -26,7 +26,8 @@
     "test:watch": "vitest",
     "benchmark:kdf": "node scripts/benchmark-kdf.mjs",
     "icons": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/make-icons.mjs",
-    "smoke:browser": "electron-vite build && electron tools/smoke-browser-chrome.mjs && esbuild tools/smoke-browser-window.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/smoke/browser-window.js --log-level=error && electron out/smoke/browser-window.js"
+    "smoke:browser": "electron-vite build && electron tools/smoke-browser-chrome.mjs && esbuild tools/smoke-browser-window.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/smoke/browser-window.js --log-level=error && electron out/smoke/browser-window.js",
+    "stress:browser": "electron-vite build && esbuild tools/stress-browser.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/stress/browser.js --log-level=error && electron out/stress/browser.js"
   },
   "dependencies": {
     "protobufjs": "7.6.5",

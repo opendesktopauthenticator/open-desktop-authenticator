@@ -111,9 +111,38 @@ describe('the Electron adapter for the in-app browser', () => {
 	 */
 	it('turns a page’s window.open into a tab in this window', () => {
 		const handler = ADAPTER.slice(ADAPTER.indexOf('setWindowOpenHandler((details)'));
-		const body = handler.slice(0, handler.indexOf('});'));
-		expect(body).toMatch(/openTab\(details\.url\)/);
-		expect(body).toMatch(/action: 'deny'/);
+		// To the end of the handler, not to its first `return`: the scheme check
+		// and the ceiling each return a `deny` before the interesting part.
+		const body = handler.slice(0, handler.indexOf("view.webContents.on('login'"));
+		// Chromium performs the navigation now; the adapter only supplies the tab.
+		expect(body).toMatch(/action: 'allow'/);
+		expect(handler).toMatch(/createWindow:/);
+		// Still refused for a scheme the address bar would not take, and at the
+		// ceiling.
+		expect(handler).toMatch(/action: 'deny'/);
+	});
+
+	/*
+	 * **This test used to require the bug.**
+	 *
+	 * It asserted `openTab(details.url)` — the page's own string handed straight
+	 * to `loadURL` in the main process, where none of the renderer's navigation
+	 * restrictions apply. So a trading page could `window.open` a `file:` or
+	 * `data:` URL and have this application open it: the two schemes
+	 * `addressToUrl` refuses *by name* for anything typed in the address bar,
+	 * reachable by getting a page to ask instead of typing.
+	 *
+	 * The assertion was not merely missing the hole; it was holding it open.
+	 */
+	it('puts a page’s chosen address through the same gate the address bar uses', () => {
+		const handler = ADAPTER.slice(ADAPTER.indexOf('setWindowOpenHandler((details)'));
+		// To the end of the handler, not to its first `return`: the scheme check
+		// and the ceiling each return a `deny` before the interesting part.
+		const body = handler.slice(0, handler.indexOf("view.webContents.on('login'"));
+		expect(body).toMatch(/addressToUrl\(details\.url\)/);
+		expect(body, 'the raw page-supplied URL still reaches openTab').not.toMatch(
+			/openTab\(details\.url\)/
+		);
 	});
 
 	it('refuses to let a caller replace that handler', () => {
@@ -187,11 +216,13 @@ describe('the Electron adapter for the in-app browser', () => {
 	 * constructs a tab view.
 	 */
 	it('hardens every tab in one place', () => {
-		const open = ADAPTER.slice(ADAPTER.indexOf('const openTab ='));
+		// `newTab` is that one place: `openTab` wraps it to load a URL, and the
+		// window-open handler wraps it to adopt the contents Chromium made.
+		const open = ADAPTER.slice(ADAPTER.indexOf('const newTab ='));
 		const body = open.slice(0, open.indexOf('const closeTab'));
-		expect(body).toMatch(/\.\.\.HARDENED/);
-		expect(body).toMatch(/partition: options\.partition/);
-		expect(body).toMatch(/setUserAgent\(options\.userAgent\)/);
+		expect(ADAPTER).toMatch(/\.\.\.HARDENED/);
+		expect(ADAPTER).toMatch(/partition: options\.partition/);
+		expect(ADAPTER).toMatch(/setUserAgent\(options\.userAgent\)/);
 		expect(body).toMatch(/setWebRTCIPHandlingPolicy\(webRtcPolicy\)/);
 		expect(body).toMatch(/setWindowOpenHandler/);
 	});
@@ -205,7 +236,9 @@ describe('the Electron adapter for the in-app browser', () => {
 	 * had to clear the address bar before they could type.
 	 */
 	it('opens a new tab blank, and puts the cursor in the address bar', () => {
-		expect(ADAPTER).toMatch(/loadURL\(url \?\? 'about:blank'\)/);
+		// The call now carries the request a popup was making — its POST body and
+		// referrer — so the assertion is on the fallback, not the whole call.
+		expect(ADAPTER).toMatch(/loadURL\(url \?\? 'about:blank'/);
 
 		const handler = ADAPTER.slice(ADAPTER.indexOf('const onNewTab ='));
 		const body = handler.slice(0, handler.indexOf('const onSelectTab'));
@@ -220,9 +253,19 @@ describe('the Electron adapter for the in-app browser', () => {
 	});
 
 	it('builds tab views nowhere else', () => {
-		// Two constructions in the file: the chrome, and the one inside openTab.
+		/*
+		 * Three constructions in the file: the chrome, and the two branches of
+		 * `newTab` — one that makes fresh contents, one that adopts the contents
+		 * Chromium already built for a popup. Both are inside `newTab`, which is
+		 * what "one place" means here.
+		 */
 		const constructions = ADAPTER.match(/new WebContentsView\(/g) ?? [];
-		expect(constructions).toHaveLength(2);
+		expect(constructions).toHaveLength(3);
+		const outside = ADAPTER.slice(0, ADAPTER.indexOf('const newTab ='));
+		expect(
+			(outside.match(/new WebContentsView\(/g) ?? []).length,
+			'a tab view is built outside newTab'
+		).toBe(1);
 	});
 
 	/*
@@ -232,7 +275,7 @@ describe('the Electron adapter for the in-app browser', () => {
 	 */
 	it('gives a later tab the WebRTC policy the window already had', () => {
 		expect(ADAPTER).toMatch(/webRtcPolicy = policy/);
-		const open = ADAPTER.slice(ADAPTER.indexOf('const openTab ='));
+		const open = ADAPTER.slice(ADAPTER.indexOf('const newTab ='));
 		expect(open.slice(0, open.indexOf('const closeTab'))).toMatch(
 			/setWebRTCIPHandlingPolicy\(webRtcPolicy\)/
 		);
@@ -260,5 +303,101 @@ describe('the Electron adapter for the in-app browser', () => {
 		// are bad in fullscreen" looked like.
 		expect(ADAPTER).toMatch(/window\.on\('resize', layout\)/);
 		expect(ADAPTER).toMatch(/enter-full-screen/);
+	});
+});
+
+/*
+ * **A tab is a renderer process, and nothing was counting them.**
+ *
+ * `window.open` from a page went straight to the `WebContentsView` constructor
+ * with no ceiling and no rate limit, in a window signed in to somebody's Steam
+ * account. A page in a loop — or merely a broken one — could accumulate
+ * renderer processes until the machine gave up.
+ */
+describe('the number of tabs one window will hold', () => {
+	it('has a ceiling at all', () => {
+		expect(ADAPTER).toMatch(/const MAX_TABS = \d+;/);
+	});
+
+	it('checks it before building anything', () => {
+		const open = ADAPTER.slice(ADAPTER.indexOf('const newTab ='));
+		const guard = open.indexOf('tabs.size >= MAX_TABS');
+		const construct = open.indexOf('new WebContentsView');
+		expect(guard).toBeGreaterThan(-1);
+		expect(guard, 'the view is built before the ceiling is consulted').toBeLessThan(construct);
+	});
+
+	/*
+	 * The same ceiling for a page and for the user's own `+`. A limit a page can
+	 * reach and a person cannot is a limit that gets reported as a bug — so the
+	 * button is disabled at it rather than left to do nothing, which is the one
+	 * answer this codebase says a button must never give.
+	 */
+	it('tells the toolbar when it has been reached', () => {
+		expect(ADAPTER).toMatch(/atTabLimit: tabs\.size >= MAX_TABS/);
+	});
+});
+
+/*
+ * **A popup carries a request, not just an address.**
+ *
+ * Only `details.url` used to survive the conversion, so a form submitted with
+ * `target="_blank"` reached the server as a bare `GET` with no body — the user
+ * pressed a button, a tab opened, and the thing they asked for never happened.
+ * Proved on the wire in `smoke-browser-window.mjs` against a real local server;
+ * these guard the two fields that carry it.
+ */
+describe('what a page’s window.open carries into its tab', () => {
+	const handler = ADAPTER.slice(ADAPTER.indexOf('setWindowOpenHandler((details)'));
+	// The whole handler: the scheme check and the ceiling each return a `deny`
+	// before the part that decides how the request is made.
+	const body = handler.slice(0, handler.indexOf("view.webContents.on('login'"));
+
+	/*
+	 * **Not by transcription any more.** Carrying the method, body, content type
+	 * and boundary across by hand produced a request that was faithful enough to
+	 * be dangerous: rebuilt with `loadURL` it had no initiator, so Chromium
+	 * attached `SameSite=Strict` cookies a real cross-site post never carries.
+	 *
+	 * Letting Chromium navigate a tab we supply makes every one of those correct
+	 * by construction. The wire evidence is in `smoke-browser-window.mjs`, which
+	 * posts across sites and compares against a plain navigation.
+	 */
+	it('lets Chromium make the request rather than rebuilding it', () => {
+		expect(body).toMatch(/createWindow:/);
+		expect(body, 'the request is being transcribed again').not.toMatch(/postData/);
+		expect(body).not.toMatch(/httpReferrer/);
+	});
+
+	it('adopts the contents Chromium already created', () => {
+		expect(body).toMatch(/webContents/);
+		expect(ADAPTER).toMatch(/new WebContentsView\(\{ webContents: adopt \}\)/);
+	});
+
+	/*
+	 * `window.opener` is deliberately **not** carried, and cannot be: honouring
+	 * the popup would mean a real window with no address bar and no tab strip,
+	 * which a page could then dress up as anything it liked. A missing opener
+	 * breaks a callback; a chromeless window signed in to Steam is what this
+	 * application exists to warn people about.
+	 *
+	 * Asserted as "the popup is still refused" rather than by looking for the
+	 * word — `ADAPTER` has its comments stripped, deliberately, so that these
+	 * tests read code and not prose.
+	 */
+	/*
+	 * **The popup is allowed now, and that is the fix — but into a tab.**
+	 *
+	 * Denying it and rebuilding the request was what broke SameSite. What must
+	 * never happen is a separate *window*: chromeless, no address bar, no strip,
+	 * and a page free to draw its own. `createWindow` returning one of our own
+	 * views is what keeps the navigation Chromium's and the frame ours.
+	 */
+	it('never lets the popup become a window of its own', () => {
+		expect(body).toMatch(/createWindow:/);
+		expect(body, 'a real popup window is being created').not.toMatch(/new BrowserWindow/);
+		expect(body).not.toMatch(/overrideBrowserWindowOptions/);
+		// And a scheme the address bar refuses, or a full window, still gets one.
+		expect(handler).toMatch(/action: 'deny'/);
 	});
 });

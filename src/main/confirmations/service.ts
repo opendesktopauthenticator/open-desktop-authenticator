@@ -2,11 +2,11 @@ import { ConfirmationsClient, buildSessionCookie, type ConfirmationAccount } fro
 import { describeType, isAutoConfirmable, isSecurityCritical } from './policy';
 import type { Confirmation, ConfirmationAction } from './protocol';
 import { AccessTokenError, mintAccessToken } from '../steam/access-token';
-import { signIn, SteamLoginError } from '../steam/login';
+import { PROXY_POLICY_STOPPED, signIn, SteamLoginError } from '../steam/login';
 import { isUsableMobileToken, jwtExpiry } from '../steam-jwt';
 import type { VaultService } from '../vault/service';
 import type { SteamTransportFactory } from '../net/transport';
-import type { ConfirmationSummary } from '../../shared/ipc';
+import type { BrowserRoute, ConfirmationSummary } from '../../shared/ipc';
 
 /**
  * Confirmations, joined up (§12 F5).
@@ -52,6 +52,14 @@ export interface ConfirmationsServiceOptions {
 	 * a caching rule nobody can prove.
 	 */
 	signIn?: typeof signIn;
+	/**
+	 * Whether the vault refuses to talk to Steam without a proxy.
+	 *
+	 * Needed here and not only at the transport because this one path does not
+	 * use a transport: `steam-session` speaks over Node's own HTTP stack, so the
+	 * factory's refusal never sees it.
+	 */
+	requireProxies?: () => boolean;
 }
 
 /** Re-mint this long before expiry rather than discovering it mid-request. */
@@ -123,8 +131,27 @@ export class ConfirmationsService {
 	private readonly now: () => number;
 	private readonly offset: () => number;
 	private readonly performSignIn: typeof signIn;
+	private readonly requireProxies: () => boolean;
 
 	private readonly sessions = new Map<string, SessionState>();
+
+	/**
+	 * Sign-ins currently talking to Steam, and how to stop each one.
+	 *
+	 * **Refusing a result is not the same as stopping the work.** `forget` bumps
+	 * the generation, so a token that arrives after a lock is thrown away — and
+	 * that was the whole of it. A sign-in takes as long as Steam takes, up to the
+	 * ninety-second timeout, and the vault can lock in the middle of one by the
+	 * idle timer alone. Underneath, `steam-session` polls; the closure holding
+	 * the user's password stays alive with it. So the account went on
+	 * authenticating over its proxy, with a password in memory, for up to a
+	 * minute and a half after the user had locked the vault — which is the exact
+	 * shape of thing every other `forget` in this file exists to prevent.
+	 */
+	private readonly signingIn = new Map<
+		string,
+		{ cancel: (reason?: string) => void; routed: boolean }
+	>();
 	/**
 	 * steamId64 → (confirmation id → what acting on it needs), from the last fetch.
 	 *
@@ -179,6 +206,7 @@ export class ConfirmationsService {
 		this.now = options.now ?? (() => Date.now());
 		this.offset = options.timeOffsetSeconds ?? ((): number => 0);
 		this.performSignIn = options.signIn ?? signIn;
+		this.requireProxies = options.requireProxies ?? (() => false);
 	}
 
 	/** Pending confirmations for one account, as the renderer may see them. */
@@ -351,13 +379,51 @@ export class ConfirmationsService {
 	 * credential to disk would add exposure and buy a saved round trip after a
 	 * restart.
 	 */
-	async signIn(steamId64: string, password: string): Promise<void> {
+	async signIn(steamId64: string, password: string, route: BrowserRoute = 'proxy'): Promise<void> {
 		const grant = this.grantFor(steamId64);
 
 		return this.serialise(steamId64, async () => {
+			/*
+			 * **Before Steam is contacted, not only before the answer is kept.**
+			 *
+			 * The grant is captured at the call and checked after the sign-in
+			 * returns, which refuses the *token* — and `forget` cancels attempts
+			 * that are already running. Neither reaches one still sitting in this
+			 * queue behind another request: it had no session to cancel, so a lock
+			 * passed straight over it, and when the queue drained it went on to
+			 * authenticate against Steam with a password captured before the vault
+			 * closed. The result was thrown away afterwards, by which point Steam
+			 * had been asked.
+			 *
+			 * Checked here, one line inside the queue, so work that was queued
+			 * before a lock never starts after one.
+			 */
+			this.requireGrant(steamId64, grant);
+
 			const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
 			if (!stored) {
 				throw new ConfirmationsError('no such account in this vault');
+			}
+
+			/*
+			 * **`Require proxies`, on the one Steam path that has no transport.**
+			 *
+			 * The IPC handler above this refuses a `route` of `direct`, and that is
+			 * not enough twice over. The Confirmations screen sends no route at all,
+			 * so the check saw `undefined` and passed — and the account it was
+			 * signing in might have no proxy stored, in which case the route was
+			 * never the thing that made it unrouted.
+			 *
+			 * So the stored account is what decides, and the route only adds to it.
+			 * What travels on this request is a password, which makes it the worst
+			 * of the paths that were unguarded.
+			 */
+			if (this.requireProxies() && (route !== 'proxy' || !stored.proxyUrl)) {
+				throw new ConfirmationsError(
+					'this vault is set to require proxies, so this account cannot sign in to Steam ' +
+						'without one. Give the account a proxy, or turn off "Require proxies" in ' +
+						'Settings.'
+				);
 			}
 
 			// No transport is built here. `steam-session` speaks to Steam over Node's
@@ -373,12 +439,42 @@ export class ConfirmationsService {
 						sharedSecret: stored.sharedSecret,
 						unixSeconds: Math.floor(this.now() / 1000) + this.offset()
 					},
-					stored.proxyUrl
+					/*
+					 * The account's route, unless the caller asked for the machine's.
+					 *
+					 * Only the browser's *Direct* option asks, and only because the
+					 * stored proxy is the thing it is trying to get past — so a re-auth
+					 * that insisted on it failed at exactly the step Direct was chosen
+					 * to avoid. Defaulting to `true` keeps every other caller, and
+					 * every stored account, on its own routing.
+					 */
+					// Both proxied routes mint through the account's proxy: "Steam only"
+					// still sends every Steam request that way, and a sign-in is one.
+					route === 'direct' ? undefined : stored.proxyUrl,
+					undefined,
+					undefined,
+					/*
+					 * Kept only while this attempt is in the air. See `signingIn`.
+					 *
+					 * **With the route it is actually taking**, which is not the same
+					 * question as whether the account has a proxy stored. A Direct
+					 * sign-in on a routed account is unrouted, and a cancellation that
+					 * consulted the vault saw the stored proxy and left it running —
+					 * so turning `Require proxies` on mid-flight did nothing about the
+					 * one sign-in it most needed to stop.
+					 */
+					(cancel) =>
+						this.signingIn.set(steamId64, {
+							cancel,
+							routed: route === 'proxy' && !!stored.proxyUrl
+						})
 				);
 			} catch (err) {
 				throw err instanceof SteamLoginError
 					? new ConfirmationsError(err.message, true, err.permanent)
 					: err;
+			} finally {
+				this.signingIn.delete(steamId64);
 			}
 
 			this.requireGrant(steamId64, grant);
@@ -429,6 +525,9 @@ export class ConfirmationsService {
 		this.epochs.set(steamId64, (this.epochs.get(steamId64) ?? 0) + 1);
 		this.sessions.delete(steamId64);
 		this.pending.delete(steamId64);
+		// A sign-in still in the air is being authenticated over the route that
+		// just stopped being this account's. Stopping it is the point.
+		this.cancelSignIn(steamId64);
 	}
 
 	/** Drop cached sessions and lists. Called when the vault locks. */
@@ -438,6 +537,51 @@ export class ConfirmationsService {
 		this.generation++;
 		this.sessions.clear();
 		this.pending.clear();
+		// And anything still talking to Steam is told to stop, rather than merely
+		// having its answer discarded when it eventually arrives.
+		for (const steamId64 of [...this.signingIn.keys()]) {
+			this.cancelSignIn(steamId64);
+		}
+	}
+
+	/**
+	 * Abandon sign-ins that `Require proxies` has just forbidden.
+	 *
+	 * **Turning the rule on has to stop what is already on the wire.** The guard
+	 * in `signIn` refuses new attempts; an attempt already talking to Steam was
+	 * untouched, so a password kept travelling unrouted from a vault that had
+	 * just been told never to allow that, and the switch reported success.
+	 *
+	 * Targeted rather than a `forget()`: a sign-in through the account's own
+	 * proxy still satisfies the new rule, and cancelling it would make enabling
+	 * the setting destroy exactly the work it exists to protect.
+	 */
+	cancelUnroutedSignIns(): void {
+		for (const [steamId64, attempt] of [...this.signingIn]) {
+			if (!attempt.routed) {
+				// Named, or the user is told their vault locked — which it did not,
+				// and which sends them to unlock something already open.
+				this.cancelSignIn(steamId64, PROXY_POLICY_STOPPED);
+			}
+		}
+	}
+
+	/**
+	 * Abandon a sign-in that is still running, if there is one.
+	 *
+	 * Swallowing is deliberate: this is called from lock handling, where every
+	 * other step is synchronous and unconditional, and a library that has already
+	 * finished is not a problem worth reporting to somebody who just locked their
+	 * vault.
+	 */
+	private cancelSignIn(steamId64: string, reason?: string): void {
+		const attempt = this.signingIn.get(steamId64);
+		this.signingIn.delete(steamId64);
+		try {
+			attempt?.cancel(reason);
+		} catch {
+			// Already finished, or never started.
+		}
 	}
 
 	/**

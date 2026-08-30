@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
 	AccountSummary,
+	BrowserRoute,
 	CodesList,
 	RendererApi,
 	UpdateCheckResult,
@@ -40,6 +41,28 @@ declare global {
 const STATUS_POLL_MS = 1000;
 /** Activity is reported at most this often; a ping per keystroke is pointless. */
 const TOUCH_THROTTLE_MS = 15_000;
+
+/**
+ * May this update-check answer reach the screen?
+ *
+ * Named and exported so both settlement orders can be tested: the rule is
+ * ordering-sensitive and lives inside an effect, and this project has no DOM
+ * test runner to drive one.
+ *
+ * Two ways an answer is stale, and they are different questions. It can belong
+ * to a check that has since been superseded — the effect re-runs when either
+ * gating setting moves, so two can be in the air, and the main process aborts
+ * the older one, which settles as `unknown` *after* the newer one succeeded.
+ * Or the user can have switched update checks off while it was in the air, in
+ * which case no answer is welcome.
+ */
+export function updateAnswerIsCurrent(
+	newest: number,
+	mine: number,
+	bannerSuppressed: boolean
+): boolean {
+	return newest === mine && !bannerSuppressed;
+}
 
 export function App(): React.JSX.Element {
 	const api = window.api;
@@ -93,7 +116,7 @@ export function App(): React.JSX.Element {
 	 * the same thing for the same reason.
 	 */
 	const [browserSignIn, setBrowserSignIn] = useState<
-		{ account: AccountSummary; useProxy: boolean; reason?: string } | undefined
+		{ account: AccountSummary; route: BrowserRoute; reason?: string } | undefined
 	>();
 	/**
 	 * Unrecoverable, and only ever one thing: the bridge to the main process does
@@ -344,27 +367,72 @@ export function App(): React.JSX.Element {
 	 */
 	const updateBannerSuppressed = useRef(false);
 
+	/**
+	 * Which update check is newest, so an older one cannot answer for it.
+	 *
+	 * **Every check could write the banner, whichever order they settled in.**
+	 * The effect re-runs when `Require proxies` or the update setting moves, so
+	 * two can be in the air at once — and the main process aborts the older one,
+	 * which settles as `unknown`. Landing after the newer check succeeded, it
+	 * replaced a real "update available" with "could not check": the cache in
+	 * the main process stayed correct and the screen stopped saying there was a
+	 * release.
+	 *
+	 * The same shape as `refreshSeq` above, and for the same reason.
+	 */
+	const updateSeq = useRef(0);
+
+	/**
+	 * How many times settings have been saved this session.
+	 *
+	 * **The update effect is driven by this rather than by the settings' values.**
+	 * Watching `status.requireProxies` and `status.updateCheck` looked equivalent
+	 * and is not: turn `Require proxies` on and straight off again between two
+	 * status polls and both fields come back to what they already were, so React
+	 * sees no dependency change and never re-runs. No newer check starts — and
+	 * the answer from the check the *first* save aborted is then still the newest
+	 * one anybody claimed, so `updateAnswerIsCurrent` lets it through. The screen
+	 * ends up showing "could not check" because of a setting the user turned on
+	 * and off again.
+	 *
+	 * A counter cannot come back to where it was. Every successful save moves it,
+	 * whether or not the values ended up different, so every save starts a fresh
+	 * check and supersedes whatever was in the air.
+	 */
+	const [settingsRevision, setSettingsRevision] = useState(0);
+
 	useEffect(() => {
 		if (!api || !status?.unlocked) {
 			return;
 		}
+		const mine = (updateSeq.current += 1);
 		// Never `.catch(setFatal)`. A failed update check is background work the
 		// user did not ask for, and it must not be able to replace the screen they
 		// are using — the handler already reports failure as a value.
 		api
 			.checkForUpdate()
 			.then((result) => {
-				// A result that arrives after the user switched the check off stays
-				// off-screen. Saving `updateCheck: false` clears the banner, and this
-				// promise resolving a moment later put it straight back — the one
-				// visible consequence of the setting, undone by a race the user could
-				// not see.
-				if (!updateBannerSuppressed.current) {
+				// Both staleness questions in one place. See `updateAnswerIsCurrent`.
+				if (updateAnswerIsCurrent(updateSeq.current, mine, updateBannerSuppressed.current)) {
 					setUpdate(result);
 				}
 			})
 			.catch(() => undefined);
-	}, [api, status?.unlocked]);
+		/*
+		 * **Both settings that gate the check, not just the unlock.**
+		 *
+		 * This asked once per unlock, so the two switches that stop a check could
+		 * not start one again: turning update checks back on, or turning `Require
+		 * proxies` off — the other thing that stops it — left the app waiting for
+		 * the next unlock to discover there was a release.
+		 */
+		/*
+		 * **The revision, not the values.** `settingsUpdate` is the only writer of
+		 * either setting, so a bump covers every way they can change — and unlike
+		 * the values, it cannot return to a number it has already been. See
+		 * `settingsRevision`.
+		 */
+	}, [api, status?.unlocked, settingsRevision]);
 
 	if (fatal || !api) {
 		return (
@@ -510,7 +578,14 @@ export function App(): React.JSX.Element {
 					accountName={browserSignIn.account.accountName}
 					{...(browserSignIn.reason === undefined ? {} : { reason: browserSignIn.reason })}
 					onSignIn={async (password) => {
-						const result = await api.signInToSteam(browserSignIn.account.steamId64, password);
+						const result = await api.signInToSteam(
+							browserSignIn.account.steamId64,
+							password,
+							// The same route the window will use. Signing in through a proxy
+							// the user chose Direct to get past is the failure this whole
+							// screen exists downstream of.
+							browserSignIn.route
+						);
 						// **Only on success**, for the reason `Confirmations` records: a
 						// failure comes back rather than throwing, so advancing here would
 						// clear the form as though the sign-in had worked.
@@ -523,7 +598,7 @@ export function App(): React.JSX.Element {
 						const opened = await api.openAccountBrowser(
 							browserSignIn.account.steamId64,
 							// The retry keeps the choice the user made when they pressed.
-							browserSignIn.useProxy
+							browserSignIn.route
 						);
 						if (opened.signInRequired) {
 							/*
@@ -629,6 +704,27 @@ export function App(): React.JSX.Element {
 						if (!settings.updateCheck) {
 							setUpdate(undefined);
 						}
+						/*
+						 * **What actually restarts the update check.**
+						 *
+						 * Bumped after the save succeeded, so it is not reached when
+						 * `updateSettings` throws. Nothing here reads the settings back to
+						 * decide: a save that changed nothing still supersedes a check the
+						 * previous save aborted, and a counter cannot land on a value it
+						 * has already had. See `settingsRevision`.
+						 */
+						setSettingsRevision((revision) => revision + 1);
+
+						/*
+						 * And the status, for the rest of the screen — the account list
+						 * hides its Direct and Steam-only buttons on `requireProxies`, and
+						 * waiting a poll tick for that is a second of offering a button
+						 * the main process would refuse. Deliberately **not** what drives
+						 * the update effect: this is fire-and-forget, so two of them can
+						 * be in flight and the older is discarded by `refreshSeq` — which
+						 * is exactly the hole the revision above closes.
+						 */
+						void refresh({ includeCodes: false });
 						return result;
 					}}
 					onClose={() => setView('accounts')}
@@ -639,6 +735,7 @@ export function App(): React.JSX.Element {
 		if (view === 'move') {
 			return (
 				<MoveAuthenticator
+					requireProxies={status.requireProxies}
 					onAuthenticate={(accountName, password, code, proxyUrl) =>
 						api.authenticateTransfer(accountName, password, code, proxyUrl)
 					}
@@ -647,6 +744,11 @@ export function App(): React.JSX.Element {
 					onRetryPersist={() => api.retryTransferPersist()}
 					onStatus={() => api.getTransferStatus()}
 					onCancel={() => api.cancelTransfer()}
+					// The same channel the standalone back-up ceremony uses. It is
+					// accepted here because the transfer handler recorded the reveal
+					// when it handed this screen the code — the confirm still refuses
+					// for an account whose code nobody has seen.
+					onAcknowledgeBackup={(steamId64) => api.confirmRevocationBackup(steamId64)}
 					onClose={() => setView('accounts')}
 				/>
 			);
@@ -655,6 +757,7 @@ export function App(): React.JSX.Element {
 		if (view === 'enroll') {
 			return (
 				<AddAuthenticator
+					requireProxies={status.requireProxies}
 					onMove={() => setView('move')}
 					{...(resumeEnrollment
 						? {
@@ -733,15 +836,16 @@ export function App(): React.JSX.Element {
 				onBackUpRevocationCode={setBackupFor}
 				onChangeRouting={setRoutingFor}
 				onShowConfirmations={setConfirmingFor}
-				onOpenBrowser={async (account, useProxy) => {
-					const result = await api.openAccountBrowser(account.steamId64, useProxy);
+				requireProxies={status.requireProxies}
+				onOpenBrowser={async (account, route) => {
+					const result = await api.openAccountBrowser(account.steamId64, route);
 					// Taking over the screen here rather than in `VaultHome`: the row has
 					// nowhere to put a password field, and this is the component that owns
 					// which screen is showing.
 					if (result.signInRequired) {
 						setBrowserSignIn({
 							account,
-							useProxy,
+							route,
 							...(result.reason === undefined ? {} : { reason: result.reason })
 						});
 					}

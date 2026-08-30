@@ -70,6 +70,8 @@ interface Scenario {
 	/** Emitted as an `error` event after the start resolves. */
 	lateError?: Error;
 	emitTimeout?: boolean;
+	/** Start resolves and nothing ever settles, as a real slow Steam does. */
+	stalls?: boolean;
 }
 
 /**
@@ -109,6 +111,12 @@ function fakeSession(scenario: Scenario = {}): {
 			const actions = scenario.validActions ?? [];
 			if (actions.length > 0) {
 				return Promise.resolve({ actionRequired: true, validActions: actions });
+			}
+
+			if (scenario.stalls === true) {
+				// Steam has the request and has not answered. This is the state a
+				// lock can arrive in, and the one nothing could interrupt.
+				return Promise.resolve({ actionRequired: false });
 			}
 
 			queueMicrotask(() => {
@@ -541,5 +549,144 @@ describe('a portless SOCKS proxy', () => {
 		expect(steamSessionProxy('http://user:pa55%40word@1.2.3.4:8080')).toEqual({
 			httpProxy: 'http://user:pa55%40word@1.2.3.4:8080'
 		});
+	});
+});
+
+/*
+ * **Refusing the answer is not the same as stopping the question.**
+ *
+ * A sign-in runs for as long as Steam takes, up to the ninety-second timeout,
+ * and the vault can lock in the middle of one — the idle timer alone will do
+ * it. `ConfirmationsService.forget` bumped its generation so the eventual token
+ * was thrown away, and that was the whole of it: underneath, `steam-session`
+ * went on polling, over the account's proxy, holding the user's password in a
+ * closure, for up to a minute and a half after the user had said stop.
+ */
+describe('a sign-in that is still running when the vault locks', () => {
+	it('hands out a way to cancel it', async () => {
+		const { session, cancelled } = fakeSession({ stalls: true });
+		let cancel: (() => void) | undefined;
+
+		const attempt = signIn(
+			REQUEST,
+			undefined,
+			() => session,
+			at,
+			(stop) => {
+				cancel = stop;
+			}
+		);
+
+		expect(cancel, 'nothing was offered to cancel').toBeTypeOf('function');
+		expect(cancelled()).toBe(0);
+
+		cancel?.();
+
+		await expect(attempt).rejects.toThrow(/vault locked/i);
+		expect(cancelled(), 'the library kept polling Steam').toBe(1);
+	});
+
+	/*
+	 * Cancelling without settling would leave the caller awaiting a promise
+	 * nothing will ever resolve — which is a worse failure than the one being
+	 * fixed, because it never ends.
+	 */
+	it('settles the promise rather than leaving the caller hanging', async () => {
+		const { session } = fakeSession({ stalls: true });
+		let cancel: (() => void) | undefined;
+		const attempt = signIn(
+			REQUEST,
+			undefined,
+			() => session,
+			at,
+			(stop) => {
+				cancel = stop;
+			}
+		);
+		cancel?.();
+
+		const error = await attempt.catch((err: unknown) => err);
+		expect(error).toBeInstanceOf(SteamLoginError);
+		// Retryable: the vault locking says nothing about the credentials.
+		expect((error as SteamLoginError).permanent).toBe(false);
+	});
+
+	it('is harmless once the sign-in has already finished', async () => {
+		const { session, cancelled } = fakeSession({ accessToken: 'access-abc' });
+		let cancel: (() => void) | undefined;
+
+		await signIn(
+			REQUEST,
+			undefined,
+			() => session,
+			at,
+			(stop) => {
+				cancel = stop;
+			}
+		);
+		const after = cancelled();
+
+		expect(() => cancel?.()).not.toThrow();
+		// `finish` is idempotent, so a late cancel neither cancels nor rejects.
+		expect(cancelled()).toBe(after);
+	});
+
+	it('is optional, so every existing caller is unchanged', async () => {
+		const { session } = fakeSession({ accessToken: 'access-abc' });
+		await expect(signIn(REQUEST, undefined, () => session, at)).resolves.toMatchObject({
+			refreshToken: expect.any(String)
+		});
+	});
+});
+
+/**
+ * **The cancellation says why it happened.**
+ *
+ * This closure hard-coded "The vault locked before Steam finished signing in",
+ * because a lock was the only thing that ever cancelled a sign-in. `Require
+ * proxies` now cancels unrouted ones through the same callback, so a user who
+ * had just turned that setting on was told their vault had locked — false, and
+ * it sends them to unlock a vault that is already open.
+ */
+describe('abandoning a sign-in that is still running', () => {
+	it('carries the reason the caller gave', async () => {
+		const { session } = fakeSession({ stalls: true });
+		let cancel: ((reason?: string) => void) | undefined;
+
+		const attempt = signIn(
+			REQUEST,
+			undefined,
+			() => session,
+			at,
+			(stop) => {
+				cancel = stop;
+			}
+		);
+		cancel?.('This vault is set to require proxies, so the sign-in was stopped.');
+
+		await expect(attempt).rejects.toThrow(/require proxies/i);
+		await expect(attempt).rejects.not.toThrow(/vault locked/i);
+	});
+
+	/*
+	 * And the lock is still the default, because it is still the common case and
+	 * every existing caller relies on it.
+	 */
+	it('still blames the lock when no reason is given', async () => {
+		const { session } = fakeSession({ stalls: true });
+		let cancel: ((reason?: string) => void) | undefined;
+
+		const attempt = signIn(
+			REQUEST,
+			undefined,
+			() => session,
+			at,
+			(stop) => {
+				cancel = stop;
+			}
+		);
+		cancel?.();
+
+		await expect(attempt).rejects.toThrow(/vault locked/i);
 	});
 });

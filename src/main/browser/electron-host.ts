@@ -71,6 +71,22 @@ const HARDENED = {
 const browserSessions = new WeakSet<Session>();
 
 /**
+ * How many tabs one browser window will hold.
+ *
+ * **Because a page can ask for one, and nothing counted.** Every tab is a real
+ * `WebContentsView` with its own renderer process, and `window.open` from a
+ * trading page went straight to the constructor — no ceiling, no rate limit, in
+ * a window that is signed in to somebody's Steam account. A page in a loop, or
+ * merely a broken one, could take the machine down with renderer processes
+ * until the application stopped responding.
+ *
+ * Twenty is far past what a trade needs and far short of what hurts. The
+ * ceiling is the same for the user's own `+`, because a limit that a page can
+ * reach and a person cannot is a limit that would be reported as a bug.
+ */
+const MAX_TABS = 20;
+
+/**
  * Is this `WebContents` part of the in-app browser?
  *
  * Passed to `hardenAllWebContents`. Registration happens in
@@ -220,7 +236,7 @@ export const electronBrowserHost: BrowserHost = {
 			if (!alive() || chrome.webContents.isDestroyed()) {
 				return;
 			}
-			const active = tabs.get(activeId);
+			const active = living(activeId);
 			const url = shown(active);
 			/*
 			 * Only when the address actually changed.
@@ -240,6 +256,9 @@ export const electronBrowserHost: BrowserHost = {
 				canGoForward: active ? active.webContents.navigationHistory.canGoForward() : false,
 				loading: active ? active.webContents.isLoading() : false,
 				offSteam: url !== '' && !isSteamHost(url),
+				// So the strip can disable `+` rather than let it do nothing, which is
+				// the one answer a button must never give.
+				atTabLimit: tabs.size >= MAX_TABS,
 				tabs: [...tabs.entries()].map(([id, view]) => {
 					const at = shown(view);
 					return {
@@ -261,27 +280,95 @@ export const electronBrowserHost: BrowserHost = {
 			});
 		};
 
+		/**
+		 * A tab whose contents are still alive, or nothing.
+		 *
+		 * **`tabs` can hold a corpse.** A popup that closes itself — which is what
+		 * an authentication or payment callback does the moment it is finished —
+		 * destroys its `WebContents` without going anywhere near `closeTab`. The
+		 * entry stayed, the strip drew a tab for it, and selecting that tab reached
+		 * `focus()` on undefined and took the main process down.
+		 *
+		 * **A second line, not the fix.** The `destroyed` listener retires the entry
+		 * and is what actually closes that hole; removing this check alone changes
+		 * nothing observable, because by the time anything selects a tab the entry
+		 * is already gone. It covers the gap between the contents dying and the
+		 * event arriving, which is real but not reachable from a test — so it is
+		 * here on the argument, not on the evidence.
+		 */
+		const living = (id: number): WebContentsView | undefined => {
+			const view = tabs.get(id);
+			return view && !view.webContents.isDestroyed() ? view : undefined;
+		};
+
 		const show = (id: number): void => {
-			const chosen = tabs.get(id);
+			const chosen = living(id);
 			if (!chosen || !alive()) {
 				return;
 			}
 			activeId = id;
 			for (const [at, view] of tabs) {
-				view.setVisible(at === id);
+				if (!view.webContents.isDestroyed()) {
+					view.setVisible(at === id);
+				}
 			}
 			chosen.setBounds(bodyBounds());
 			chosen.webContents.focus();
 			publish();
 		};
 
-		const openTab = (url?: string): number => {
-			const view = new WebContentsView({
-				webPreferences: {
-					...HARDENED,
-					partition: options.partition
-				}
-			});
+		/**
+		 * How a page asked for the window it did not get.
+		 *
+		 * Carried so the tab that replaces it makes the *same request*. See the
+		 * window-open handler.
+		 */
+		/**
+		 * Build a tab and register it, without deciding what goes in it.
+		 *
+		 * Split out because there are now two ways a tab is filled: this process
+		 * loads a URL into it, or **Chromium navigates it itself** for a popup. The
+		 * second is the reason the split exists — see the window-open handler.
+		 */
+		const newTab = (
+			/**
+			 * Electron's own preferences for a pending popup navigation.
+			 *
+			 * **Not optional decoration.** When `createWindow` supplies the contents
+			 * for a `window.open`, Electron passes preferences carrying an internal
+			 * handle for the navigation it is about to perform, and rejects any
+			 * `WebContents` not built from them — "Created window should be connected
+			 * to webContents passed with options object". A view made ahead of time
+			 * and handed back is refused, once per popup, as an uncaught error.
+			 *
+			 * **It has already been created.** Electron builds the contents for a
+			 * pending `window.open`, hands them to `createWindow` as
+			 * `options.webContents`, and refuses anything else that comes back —
+			 * "Created window should be connected to webContents passed with options
+			 * object", once per popup. Two earlier attempts here missed that and
+			 * built a fresh view: spreading the preferences, then mutating them.
+			 * Both produced a `WebContents` that was simply not the one Electron was
+			 * waiting for.
+			 *
+			 * `WebContentsView` adopts an existing one, which is what makes this
+			 * work: Chromium keeps the navigation, with its initiator and its cookie
+			 * rules, and the contents land in our strip hardened by the preferences
+			 * Chromium inherited from the opener — itself one of these tabs.
+			 */
+			adopt?: WebContents
+		): { id: number; view: WebContentsView } | undefined => {
+			// The ceiling, checked before anything is built. See `MAX_TABS`.
+			if (tabs.size >= MAX_TABS) {
+				return undefined;
+			}
+			const view = adopt
+				? new WebContentsView({ webContents: adopt })
+				: new WebContentsView({
+						webPreferences: {
+							...HARDENED,
+							partition: options.partition
+						}
+					});
 			const id = nextId++;
 			tabs.set(id, view);
 
@@ -290,10 +377,111 @@ export const electronBrowserHost: BrowserHost = {
 			view.webContents.setUserAgent(options.userAgent);
 			view.webContents.setWebRTCIPHandlingPolicy(webRtcPolicy);
 			view.webContents.setWindowOpenHandler((details) => {
-				// A page asking for a window gets a tab in this window instead —
-				// hardened the same way, and visible in the same strip.
-				openTab(details.url);
-				return { action: 'deny' };
+				/*
+				 * **Chromium performs the navigation; we only supply the tab.**
+				 *
+				 * This used to deny the popup and re-issue the request from the main
+				 * process with `loadURL`, carrying the method, body, content type and
+				 * boundary across by hand. Every one of those was right, and the
+				 * request was still not the one the page had made: a `loadURL` is a
+				 * fresh top-level navigation with no initiator, so Chromium attached
+				 * `SameSite=Strict` and `Lax` cookies it withholds from a real
+				 * cross-site form post, and sent `Origin: null` with
+				 * `Sec-Fetch-Site: none`.
+				 *
+				 * That is a security boundary, not a fidelity detail. A page opened in
+				 * this window — which is signed in to somebody's Steam account — could
+				 * cross-site POST anywhere with cookies the browser exists to withhold.
+				 * Reconstructing a request faithfully enough to be dangerous and not
+				 * faithfully enough to be honest is the worst of both.
+				 *
+				 * `createWindow` hands Chromium a `WebContents` of our making and lets
+				 * it do the navigation. The initiator, the cookies, `Origin` and every
+				 * `Sec-Fetch-*` header are then the browser's own — correct by
+				 * construction rather than by transcription — and the tab is still
+				 * ours: hardened identically, in this window, listed in the same
+				 * strip, with no chromeless popup anywhere.
+				 *
+				 * `details.url` is still checked first. Chromium refuses `file:` and
+				 * `data:` from web content on its own; this refuses them a step
+				 * earlier, and is the same gate the address bar uses.
+				 */
+				if (addressToUrl(details.url) === undefined) {
+					return { action: 'deny' };
+				}
+				// The ceiling is decided here, because `createWindow` below has no way
+				// to decline: a page in a loop gets nothing rather than a process.
+				if (tabs.size >= MAX_TABS) {
+					return { action: 'deny' };
+				}
+				return {
+					action: 'allow',
+					// A tab does not vanish because the tab that opened it was closed.
+					// That is popup behaviour, and these are tabs.
+					outlivesOpener: true,
+					createWindow: (opened) => {
+						/*
+						 * `webContents` is on the options object Electron passes and is
+						 * not in the public typings, so it is read rather than declared.
+						 * Returning anything else is refused outright — see `newTab`.
+						 */
+						const pending = (opened as { webContents?: WebContents }).webContents;
+						const built = newTab(pending);
+						if (!built || !pending) {
+							// Unreachable given the ceiling check above, and `createWindow`
+							// cannot refuse — so this is the honest failure rather than a
+							// silent one.
+							throw new Error('the browser window could not take another tab');
+						}
+						show(built.id);
+						return pending;
+					}
+				};
+			});
+
+			/*
+			 * **Only ever the proxy.**
+			 *
+			 * `authInfo.isProxy` separates "the proxy wants its password" from "this
+			 * website wants a password", and the two must never be confused: a site
+			 * that returns 401 would otherwise be handed the proxy operator's
+			 * credentials by a browser the user is signed in to Steam on. Anything
+			 * that is not the proxy is left alone, so Electron's default applies and
+			 * the challenge is cancelled — a page needing site credentials is the
+			 * user's business, not this window's.
+			 *
+			 * The same rule and the same shape as `transport.ts`, deliberately: two
+			 * places answer proxy challenges in this application and they should not
+			 * be able to drift apart.
+			 */
+			view.webContents.on('login', (event, _request, authInfo, callback) => {
+				if (!authInfo.isProxy || proxyCredentials === undefined) {
+					return;
+				}
+				event.preventDefault();
+				callback(proxyCredentials.username, proxyCredentials.password);
+			});
+
+			/*
+			 * **The page can end this tab, and nothing was listening.**
+			 *
+			 * `window.close()` on a popup is ordinary — an authentication or payment
+			 * callback does it the moment it is done — and now that Chromium performs
+			 * those navigations for real, it reaches us. The contents were destroyed
+			 * and the entry stayed: the strip drew a tab backed by nothing, selecting
+			 * it crashed the main process, and a page could open and close children
+			 * until the ceiling was full of corpses and no real tab could be made.
+			 *
+			 * Retiring by identity, not by id: `closeTab` may already have removed
+			 * this entry and put another there, and taking that one out would close a
+			 * tab the user is looking at. Idempotent for the same reason — this fires
+			 * for the app's own closes too.
+			 */
+			view.webContents.once('destroyed', () => {
+				if (tabs.get(id) !== view) {
+					return;
+				}
+				retire(id, view);
 			});
 
 			// Listed rather than looped: TypeScript types each of these separately,
@@ -309,27 +497,41 @@ export const electronBrowserHost: BrowserHost = {
 			view.setBackgroundColor('#101216');
 			window.contentView.addChildView(view);
 			view.setBounds(bodyBounds());
+			return { id, view };
+		};
+
+		const openTab = (url?: string): number | undefined => {
+			const opened = newTab();
+			if (!opened) {
+				return undefined;
+			}
 			// `about:blank` rather than nothing at all: a view with no document
 			// reports no title and no URL, which the strip and the address bar both
 			// read as an empty tab — which is exactly what it is.
-			void view.webContents.loadURL(url ?? 'about:blank').catch(publish);
-			show(id);
-			return id;
+			void opened.view.webContents.loadURL(url ?? 'about:blank').catch(publish);
+			show(opened.id);
+			return opened.id;
 		};
 
-		const closeTab = (id: number): void => {
-			const view = tabs.get(id);
-			if (!view || !alive()) {
+		/**
+		 * Take one tab out of the strip and settle what the window shows next.
+		 *
+		 * Shared by `closeTab` and by the `destroyed` listener, because a tab
+		 * ending is one thing whether the user closed it or the page did — and two
+		 * copies of "pick a neighbour, or close the window" is how the two paths
+		 * would drift apart.
+		 */
+		const retire = (id: number, view: WebContentsView): void => {
+			if (!alive()) {
 				return;
 			}
 			const order = [...tabs.keys()];
 			tabs.delete(id);
 			window.contentView.removeChildView(view);
-			if (!view.webContents.isDestroyed()) {
-				view.webContents.close();
-			}
+
 			if (tabs.size === 0) {
-				// Closing the last tab closes the window, as it does everywhere else.
+				// The last tab going takes the window with it, as it does everywhere
+				// else — including when the page itself was the one to end it.
 				window.close();
 				return;
 			}
@@ -341,6 +543,19 @@ export const electronBrowserHost: BrowserHost = {
 			}
 		};
 
+		const closeTab = (id: number): void => {
+			const view = tabs.get(id);
+			if (!view || !alive()) {
+				return;
+			}
+			if (!view.webContents.isDestroyed()) {
+				// Fires `destroyed`, which finds the entry already gone and does
+				// nothing — the two paths meet here rather than racing.
+				view.webContents.close();
+			}
+			retire(id, view);
+		};
+
 		/*
 		 * WebRTC is decided before the first tab exists, so every tab is opened
 		 * with it rather than having it applied afterwards. A tab that ran even
@@ -348,6 +563,12 @@ export const electronBrowserHost: BrowserHost = {
 		 * and given away the address the proxy exists to hide.
 		 */
 		let webRtcPolicy: 'disable_non_proxied_udp' | 'default' = 'default';
+
+		/**
+		 * The proxy's credentials, kept for the same reason `webRtcPolicy` is: a
+		 * tab has to be born with it rather than have it applied afterwards.
+		 */
+		let proxyCredentials: { username: string; password: string } | undefined;
 
 		const layout = (): void => {
 			if (!alive()) {
@@ -380,7 +601,9 @@ export const electronBrowserHost: BrowserHost = {
 		 * would steer all of them — including one signed in as another account.
 		 */
 		const mine = (event: IpcMainEvent): boolean => event.sender === chrome.webContents;
-		const active = (): WebContentsView | undefined => tabs.get(activeId);
+		// A dead tab answers nothing: every verb below would otherwise reach into
+		// destroyed contents the moment a popup closed itself.
+		const active = (): WebContentsView | undefined => living(activeId);
 
 		const onBack = (event: IpcMainEvent): void => {
 			if (mine(event)) active()?.webContents.navigationHistory.goBack();
@@ -446,6 +669,41 @@ export const electronBrowserHost: BrowserHost = {
 			ipcMain.removeListener('browser-chrome:new-tab', onNewTab);
 			ipcMain.removeListener('browser-chrome:select-tab', onSelectTab);
 			ipcMain.removeListener('browser-chrome:close-tab', onCloseTab);
+
+			/*
+			 * **A `BaseWindow` does not take its views with it.**
+			 *
+			 * This is the one place the migration off `BrowserWindow` changed a
+			 * guarantee rather than a mechanism. A `BrowserWindow` destroys the
+			 * `WebContents` it owns; a `BaseWindow` owns views, and a
+			 * `WebContentsView` outlives the window it was added to. Measured in a
+			 * real Electron 43 run rather than reasoned about: after closing,
+			 * `window.isDestroyed()` was true, the tab's `webContents.isDestroyed()`
+			 * was false, and script in it still executed.
+			 *
+			 * So the close handler that removed the IPC listeners was tidying the
+			 * small half of the leak. The large half is a live renderer, still
+			 * holding the account's partition, that:
+			 *
+			 *  - keeps a signed-in Steam session running with no window to show it,
+			 *  - is not reachable by anything — `AccountBrowsers` has already
+			 *    forgotten the account, so the next vault lock cannot find it to
+			 *    wipe the partition it is using,
+			 *  - and accumulates, one native `WebContents` per open/close cycle,
+			 *    for as long as the process runs.
+			 *
+			 * The chrome goes the same way. It has no Steam session, but it is the
+			 * same kind of leak and there is no reason to keep it.
+			 */
+			for (const view of tabs.values()) {
+				if (!view.webContents.isDestroyed()) {
+					view.webContents.close();
+				}
+			}
+			tabs.clear();
+			if (!chrome.webContents.isDestroyed()) {
+				chrome.webContents.close();
+			}
 		});
 
 		return {
@@ -455,7 +713,7 @@ export const electronBrowserHost: BrowserHost = {
 					return Promise.reject(new Error('the browser window has already closed'));
 				}
 				const id = tabs.size === 0 ? openTab() : activeId;
-				const view = tabs.get(id);
+				const view = id === undefined ? undefined : tabs.get(id);
 				if (!view) {
 					return Promise.reject(new Error('the browser window has no tab to load into'));
 				}
@@ -482,6 +740,9 @@ export const electronBrowserHost: BrowserHost = {
 				if (alive()) {
 					window.setTitle(title);
 				}
+			},
+			setProxyCredentials: (credentials) => {
+				proxyCredentials = credentials;
 			},
 			setWebRtcPolicy: (policy) => {
 				// Kept, so tabs opened later start with it rather than having it

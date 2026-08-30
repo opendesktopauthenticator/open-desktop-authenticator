@@ -79,6 +79,17 @@ const CHROMIUM_SCHEME: Record<string, string> = {
 	'socks4:': 'socks4'
 };
 
+/**
+ * What a user is told when `Require proxies` stops a request that has no route.
+ *
+ * Shared, because the same refusal is reached from four places — a transport, a
+ * confirmation sign-in, an enrolment and a transfer — and four sentences for one
+ * cause reads as four different problems.
+ */
+export const PROXY_REQUIRED =
+	'this vault is set to require proxies, so nothing can be sent without one. Give the ' +
+	'account a proxy, or turn off "Require proxies" in Settings.';
+
 export class EgressError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -356,6 +367,154 @@ export function routedEndpoint(resolved: string): string | undefined {
  * the second outcome is a connection that quietly fails to authenticate. They
  * are answered through the session's `login` event instead.
  */
+/**
+ * The registrable domains a Steam session actually talks to.
+ *
+ * **This list is the whole of the "Steam only" promise.** Anything missing from
+ * it leaves by the machine's own address while the account is signed in, which
+ * is the one thing that mode exists to prevent — so it errs wide. The cost of an
+ * extra domain is a slower asset load through the proxy; the cost of a missing
+ * one is the account being seen from home.
+ *
+ * `steamstatic.com` and `steamusercontent.com` are Valve's own asset and
+ * user-content hosts: an inventory page fetches item images from them by the
+ * hundred, and a request pattern that specific, arriving from a different
+ * address at the same moment as the page, is not meaningfully anonymous.
+ *
+ * Worth reviewing rather than trusting: it is a judgement about somebody else's
+ * infrastructure, and it is the kind of thing that changes without notice.
+ */
+export const STEAM_ROUTED_DOMAINS = [
+	'steampowered.com',
+	'steamcommunity.com',
+	'steamstatic.com',
+	'steamusercontent.com',
+	'steamcontent.com',
+	'steamgames.com',
+	'steamserver.net',
+	'steam-chat.com',
+	// Not a Valve-owned name, and listed anyway: Steam serves community images
+	// through it, so a request for one carries the referring Steam page.
+	'steamcdn-a.akamaihd.net',
+	'valvesoftware.com'
+] as const;
+
+/**
+ * Hosts the "Steam only" route is willing to send straight out.
+ *
+ * **An allowlist, and a short one.** The route's default is the proxy — see
+ * `steamOnlyBypass` — so this list is the *entire* set of addresses that mode
+ * lets out directly, and every entry is a deliberate decision that this host
+ * seeing the machine's own address costs nothing the user cares about.
+ *
+ * They are the third-party trade and case sites people open beside Steam.
+ * Those are the pages that make a proxied window unbearable: heavy, chatty,
+ * and behind Cloudflare, which challenges a shared proxy address far more
+ * readily than a home connection. None of them is where the account lives.
+ *
+ * **`challenges.cloudflare.com` is deliberately absent.** Turnstile has to
+ * egress from the same address as the page being challenged, or the clearance
+ * cookie is issued to an address that never browses and the challenge loops.
+ * This window opens on Steam, which is proxied — so Turnstile must be proxied
+ * too, and the default does that without an entry here. A user who needs a
+ * challenged third-party site has the Direct button.
+ */
+export const DIRECT_CONTENT_DOMAINS = [
+	'csfloat.com',
+	'csgoempire.com',
+	'csgoroll.com',
+	'market.csgo.com',
+	'shadowpay.com',
+	'waxpeer.com',
+	'skinport.com',
+	'buff.163.com',
+	'dmarket.com',
+	'bitskins.com'
+] as const;
+
+/**
+ * The bypass list for the "Steam only" route.
+ *
+ * ## Why this is a bypass list and not a PAC script
+ *
+ * It was a PAC script, and that was wrong twice over.
+ *
+ * The first design routed Steam and sent everything else direct, which a bypass
+ * list genuinely cannot express — `proxyBypassRules` says what *skips* the
+ * proxy and has no negation. Inverting the default (see `steamOnlyBypass`'s
+ * callers, and the note on `DIRECT_CONTENT_DOMAINS`) so that unrecognised hosts
+ * stay on the proxy turned the rule into "proxy everything except this short
+ * list" — which is precisely what a bypass list *is*. The PAC survived that
+ * change as leftovers.
+ *
+ * The second reason is the one that made it a defect rather than a detour.
+ * **Chromium bypasses loopback and link-local addresses before it consults a
+ * PAC script at all, and `<-loopback>` does not turn that off in `pac_script`
+ * mode.** Measured in Electron 43.3.0 rather than reasoned about: with the PAC
+ * installed, and again with `proxyBypassRules: '<-loopback>'` alongside it,
+ * `localhost`, `127.0.0.1`, `[::1]` and `169.254.169.254` all resolved
+ * `DIRECT`. The window could reach local services and the cloud-metadata
+ * address without touching the proxy, in the mode whose whole promise is that
+ * traffic it does not name goes through it. `fixed_servers` honours
+ * `<-loopback>`, so the same measurement there routes every one of them.
+ *
+ * ## The two spellings
+ *
+ * Both are required, and this was measured too: `csfloat.com` alone does not
+ * match `www.csfloat.com`, and `*.csfloat.com` alone does not match the apex.
+ * A list carrying only one of them silently proxies half of each site — the
+ * half nobody thought to open while testing.
+ *
+ * `<-loopback>` comes last and applies to the whole list: it removes Chromium's
+ * implicit bypass rather than adding to it, so loopback and link-local go
+ * through the proxy like everything else that is not named above.
+ */
+export function steamOnlyBypass(): string {
+	return [
+		...DIRECT_CONTENT_DOMAINS.flatMap((domain) => [domain, `*.${domain}`]),
+		'<-loopback>'
+	].join(',');
+}
+
+/**
+ * `host` is `domain` or something under it.
+ *
+ * Matches on label boundaries, like Chromium's own bypass matching: `.example`
+ * or the whole name, never a bare suffix — otherwise `evil-csfloat.com` would
+ * inherit `csfloat.com`'s exemption.
+ */
+function hostIsUnder(host: string, domains: readonly string[]): boolean {
+	const lower = host.toLowerCase().replace(/\.$/, '');
+	return domains.some((domain) => lower === domain || lower.endsWith(`.${domain}`));
+}
+
+/**
+ * Is this host one the "Steam only" mode routes?
+ *
+ * **Not the routing rule.** Chromium's bypass list decides that, and its
+ * default is the proxy — so the mode routes this list *and* everything else it
+ * does not recognise. What this answers is the narrower question the tests and
+ * `openAccountBrowser`'s verification sweep need: is this one of the names the
+ * mode explicitly promises to route, and therefore one whose configuration is
+ * worth checking against Chromium before a window opens.
+ */
+export function isSteamRoutedHost(host: string): boolean {
+	return hostIsUnder(host, STEAM_ROUTED_DOMAINS);
+}
+
+/**
+ * Is this a host the "Steam only" mode lets out directly?
+ *
+ * Steam wins first: this answers `false` for a Steam host even if one were ever
+ * added to `DIRECT_CONTENT_DOMAINS`. That ordering used to be enforced by where
+ * the two blocks sat in a generated PAC script; it is now enforced by
+ * `steamOnlyBypass` never putting a Steam name in the bypass list at all, which
+ * `browser-window.test.ts` checks entry by entry.
+ */
+export function isDirectContentHost(host: string): boolean {
+	return !isSteamRoutedHost(host) && hostIsUnder(host, DIRECT_CONTENT_DOMAINS);
+}
+
 export function planProxy(proxyUrl: string): ProxyPlan {
 	let url: URL;
 	try {

@@ -86,6 +86,7 @@ function registerEverything(): void {
 		account: () => undefined,
 		mintToken: () => Promise.resolve(''),
 		isUnlocked: () => false,
+		requireProxies: () => false,
 		touch: () => undefined
 	});
 }

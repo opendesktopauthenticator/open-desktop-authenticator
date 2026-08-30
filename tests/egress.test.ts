@@ -150,6 +150,8 @@ function fakeElectron(
 	sessions: {
 		partition: string;
 		proxy: unknown;
+		/** How many times `setProxy` landed, so churn is visible. */
+		proxyCalls: number;
 		userAgent?: string;
 		cleared?: number;
 	}[];
@@ -174,11 +176,19 @@ function fakeElectron(
 	 * matter what the filter did.
 	 */
 	headerFilter: () => (headers: Record<string, string>) => Record<string, string>;
+	/**
+	 * The live knobs object, not the spread below.
+	 *
+	 * `...state` copies the values as they are at return time, so a test that
+	 * sets `failSetProxy` afterwards was setting it on nothing.
+	 */
+	state: { failSetProxy?: Error };
 	failSetProxy?: Error;
 } {
 	const sessions: {
 		partition: string;
 		proxy: unknown;
+		proxyCalls: number;
 		userAgent?: string;
 		cleared?: number;
 	}[] = [];
@@ -219,11 +229,14 @@ function fakeElectron(
 			const record: {
 				partition: string;
 				proxy: unknown;
+				/** How many times `setProxy` landed, so churn is visible. */
+				proxyCalls: number;
 				userAgent?: string;
 				cleared?: number;
 			} = {
 				partition,
 				proxy: undefined,
+				proxyCalls: 0,
 				cleared: 0
 			};
 			sessions.push(record);
@@ -233,6 +246,7 @@ function fakeElectron(
 						return Promise.reject(state.failSetProxy);
 					}
 					record.proxy = config;
+					record.proxyCalls += 1;
 					return Promise.resolve();
 				},
 				setUserAgent(userAgent) {
@@ -376,6 +390,12 @@ function fakeElectron(
 			});
 			return result;
 		},
+		/*
+		 * The live object, not the spread below. `...state` copies the values as
+		 * they are at return time, so a test that sets `failSetProxy` afterwards
+		 * was setting it on nothing.
+		 */
+		state,
 		...state
 	};
 }
@@ -1611,5 +1631,487 @@ describe('proxies the two network stacks would route differently', () => {
 			const source = readFileSync(join(__dirname, `../src/renderer/screens/${screen}.tsx`), 'utf8');
 			expect(source).not.toMatch(/placeholder="socks[^"]*@/);
 		}
+	});
+});
+
+/*
+ * **The browser's "Direct" option needs a session of its own.**
+ *
+ * That option is the way past a proxy that is rate-limited, blocked or dead —
+ * and the Steam token behind the window was still minted through the proxy
+ * being avoided. So a dead proxy failed at the token and no window opened at
+ * all, and a working one issued the session cookie to the proxy's address and
+ * then spent it from the user's own: two addresses for one sign-in, which is
+ * the correlation this whole file exists to prevent.
+ *
+ * The fix cannot be "ask the account's factory for an unrouted transport".
+ * Electron returns the *same* session object for the same partition name, so
+ * that would reconfigure the account's own session — and every later
+ * confirmation would be refused by `assertRouted`, correctly, for an account
+ * whose proxy nobody had touched.
+ */
+describe('a second transport factory for unrouted work', () => {
+	const routed = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.1:1080' };
+
+	it('partitions its sessions away from the account transport', async () => {
+		const { electron, sessions } = fakeElectron();
+
+		await new SteamTransportFactory(electron).forAccount(routed);
+		await new SteamTransportFactory(electron, () => Date.now(), 'steam-direct-').forAccount({
+			steamId64: routed.steamId64
+		});
+
+		const names = sessions.map((session) => session.partition);
+		expect(names).toContain('steam-76561198000000001');
+		expect(names).toContain('steam-direct-76561198000000001');
+		expect(new Set(names).size, 'the two factories shared one session').toBe(names.length);
+	});
+
+	/*
+	 * The account's session keeps its proxy. If these shared a partition, the
+	 * direct factory's `setProxy` would land on the account's session and unroute
+	 * it — the failure this separation exists to make impossible.
+	 */
+	it('leaves the account session routed', async () => {
+		const { electron, sessions } = fakeElectron();
+
+		await new SteamTransportFactory(electron).forAccount(routed);
+		await new SteamTransportFactory(electron, () => Date.now(), 'steam-direct-').forAccount({
+			steamId64: routed.steamId64
+		});
+
+		const account = sessions.find((session) => session.partition === 'steam-76561198000000001');
+		expect(JSON.stringify(account?.proxy ?? {}), 'the account session was unrouted').toContain(
+			'10.0.0.1:1080'
+		);
+	});
+
+	it('asks for no proxy on its own', async () => {
+		const { electron, sessions } = fakeElectron();
+
+		await new SteamTransportFactory(electron, () => Date.now(), 'steam-direct-').forAccount({
+			steamId64: routed.steamId64
+		});
+
+		const direct = sessions.find(
+			(session) => session.partition === 'steam-direct-76561198000000001'
+		);
+		expect(JSON.stringify(direct?.proxy ?? {})).not.toContain('10.0.0.1');
+	});
+
+	it('still defaults to the account prefix when none is given', async () => {
+		const { electron, sessions } = fakeElectron();
+		await new SteamTransportFactory(electron).forAccount(routed);
+		expect(sessions[0]?.partition).toBe('steam-76561198000000001');
+	});
+});
+
+/*
+ * **A stale construction must not revoke the one that replaced it.**
+ *
+ * Saving a new proxy while an older `setProxy` is still pending leaves two
+ * constructions in the air. The older one finds its grant stale — correctly —
+ * and used to clean up by calling the public `forget()`, which bumps the
+ * account epoch a second time and clears the cache. By then the cache holds the
+ * *newer* transport's session, so a confirmation started right after saving the
+ * new proxy failed with "this account was closed before the request was sent",
+ * using the new configuration, for no reason visible anywhere.
+ *
+ * Fail-closed, so no address leaked. It simply did not work.
+ */
+/** Hold a rejection at the call site; see `browser-window.test.ts` for why. */
+const settledValue = (work: Promise<unknown>): Promise<unknown> =>
+	work.then(
+		(value) => value,
+		(err: unknown) => err
+	);
+
+describe('two transport constructions overlapping a routing change', () => {
+	/*
+	 * **A session whose `setProxy` can be held open.**
+	 *
+	 * The first version of this test used the shared fake, which applies the
+	 * configuration synchronously the moment `setProxy` is called — so the newest
+	 * call always won no matter what order the promises settled in, and the test
+	 * named after that ordering never produced it. A real `setProxy` is a round
+	 * trip to the network service, and whichever finishes last is what Chromium
+	 * ends up using.
+	 */
+	function heldProxySession() {
+		const applied: string[] = [];
+		const pending: (() => void)[] = [];
+		let current = 'DIRECT';
+		const session = {
+			setProxy: (config: { mode: string; proxyRules?: string }) =>
+				new Promise<void>((resolve) => {
+					pending.push(() => {
+						// Applied when it *finishes*, which is the whole point.
+						applied.push(config.proxyRules ?? config.mode);
+						current =
+							config.mode === 'fixed_servers' && config.proxyRules
+								? `SOCKS5 ${config.proxyRules.replace(/^[a-z0-9]+:\/\//, '')}`
+								: 'DIRECT';
+						resolve();
+					});
+				}),
+			setUserAgent: () => undefined,
+			resolveProxy: () => Promise.resolve(current),
+			webRequest: { onBeforeSendHeaders: () => undefined },
+			clearStorageData: () => Promise.resolve(),
+			cookies: { set: () => Promise.resolve() }
+		};
+		return {
+			electron: { sessionFromPartition: () => session } as unknown as ElectronNetworking,
+			applied,
+			/** Let the oldest held application finish. */
+			releaseOldest: () => pending.shift()?.(),
+			/** Let the newest held application finish. */
+			releaseNewest: () => pending.pop()?.(),
+			held: () => pending.length
+		};
+	}
+
+	it('applies the newest configuration last, whatever order they settle in', async () => {
+		const { electron, applied, releaseOldest, releaseNewest, held } = heldProxySession();
+		const factory = new SteamTransportFactory(electron);
+		const before = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.1:1080' };
+		const after = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.2:1080' };
+
+		// The old construction is in flight when the routing changes.
+		const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0));
+
+		const stale = settledValue(factory.forAccount(before));
+		// A macrotask, not a microtask: `forAccount` waits on any pending wipe and
+		// then builds the session before it ever reaches `setProxy`.
+		await tick();
+		expect(held(), 'the old application never started').toBe(1);
+
+		factory.forget(before.steamId64);
+		const replacement = settledValue(factory.forAccount(after));
+		await tick();
+
+		/*
+		 * The old one is let go **last**, which without ordering left its address
+		 * applied to a session the replacement had already been built against.
+		 * Chained, the second application cannot start until the first has
+		 * finished, so this releases them in the order they were issued and the
+		 * newest is still the last word.
+		 */
+		releaseNewest();
+		await tick();
+		releaseOldest();
+		await tick();
+		releaseNewest();
+		await tick();
+
+		await stale;
+		await replacement;
+
+		expect(applied.at(-1), 'an older application was the last word on the session').toBe(
+			'socks5://10.0.0.2:1080'
+		);
+	});
+
+	/*
+	 * A lock is the other reason a grant goes stale, and there the cleanup is
+	 * still right: nothing for this account is legitimate any more, and the
+	 * session was cached after the sweep had already looked for it.
+	 */
+	it('still wipes a session cached after a lock swept past it', async () => {
+		const { electron, sessions } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+		const account = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.1:1080' };
+
+		const opening = factory.forAccount(account);
+		factory.forgetAll();
+
+		await expect(opening).rejects.toThrow(/closed before the request was sent/i);
+
+		const own = sessions.find((s) => s.partition === 'steam-76561198000000001');
+		expect(own?.cleared, 'a session the lock never saw was left holding a jar').toBeGreaterThan(0);
+	});
+});
+
+/**
+ * **`Require proxies`, at the boundary every Steam request crosses.**
+ *
+ * It was enforced in three handlers — opening a browser, an explicitly direct
+ * sign-in, the update check. Everything else this application does to Steam
+ * went out unguarded on an account with no proxy: fetching confirmations,
+ * approving them, the background auto-confirm loop, clock synchronisation,
+ * enrolling an authenticator, transferring one. Each of those looked as correct
+ * as the three that were guarded, which is why guarding callers one at a time
+ * was the wrong shape of fix — the next feature to make a request would have
+ * been unguarded too.
+ *
+ * A transport is the thing that makes requests. One that cannot honour the
+ * policy is not built.
+ */
+describe('the transport under Require proxies', () => {
+	const routed = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.1:1080' };
+	const unrouted = { steamId64: '76561198000000002' };
+	const strict = (electron: ElectronNetworking): SteamTransportFactory =>
+		new SteamTransportFactory(
+			electron,
+			() => Date.now(),
+			'steam-',
+			() => true
+		);
+
+	it('refuses to build one for an account with no proxy', async () => {
+		const { electron } = fakeElectron();
+		await expect(strict(electron).forAccount(unrouted)).rejects.toThrow(/require proxies/i);
+	});
+
+	it('refuses one whose proxy is the empty string', async () => {
+		// How a cleared field arrives from the vault, and it is not "no proxy
+		// configured" to a `?? undefined` check written the obvious way.
+		const { electron } = fakeElectron();
+		await expect(
+			strict(electron).forAccount({ steamId64: '76561198000000003', proxyUrl: '' })
+		).rejects.toThrow(/require proxies/i);
+	});
+
+	it('opens no session at all for the refused account', async () => {
+		// Refusing after construction would leave a Steam-shaped session cached
+		// under that partition, which the next unlock would find and reuse.
+		const { electron, sessions } = fakeElectron();
+		await expect(strict(electron).forAccount(unrouted)).rejects.toThrow();
+		expect(sessions, 'a session was built for an account that may not talk to Steam').toEqual([]);
+	});
+
+	it('still builds one for a routed account', async () => {
+		const { electron } = fakeElectron();
+		await expect(strict(electron).forAccount(routed)).resolves.toBeDefined();
+	});
+
+	it('builds one for an unrouted account when the setting is off', async () => {
+		const { electron } = fakeElectron();
+		await expect(new SteamTransportFactory(electron).forAccount(unrouted)).resolves.toBeDefined();
+	});
+
+	/*
+	 * Read per construction, not captured once. The setting is saved while the
+	 * application is running, and a factory built at launch would otherwise go on
+	 * answering with the policy that was in force then.
+	 */
+	it('reads the setting again for every transport', async () => {
+		const { electron } = fakeElectron();
+		let on = false;
+		const factory = new SteamTransportFactory(
+			electron,
+			() => Date.now(),
+			'steam-',
+			() => on
+		);
+
+		await expect(factory.forAccount(unrouted)).resolves.toBeDefined();
+		on = true;
+		factory.forget(unrouted.steamId64);
+		await expect(factory.forAccount(unrouted)).rejects.toThrow(/require proxies/i);
+	});
+
+	it('says what to do about it', async () => {
+		const { electron } = fakeElectron();
+		await expect(strict(electron).forAccount(unrouted)).rejects.toThrow(/Settings/);
+		await expect(strict(electron).forAccount(unrouted)).rejects.toThrow(
+			/Give the account a proxy/i
+		);
+	});
+});
+
+/**
+ * **A cached session keeps the proxy it was given, and the cache did not check.**
+ *
+ * Electron returns the same session object for a partition name forever, so a
+ * proxy applied to it outlives our cache of it. `sessionFor` returned a cached
+ * session without looking at what that session was configured with — so
+ * clearing an account's proxy could reuse one still holding the old rule:
+ * traffic went out through a proxy the user had deleted, `setProxy` was never
+ * called, and the account card reported routing as off.
+ */
+describe('a session cached with the wrong proxy', () => {
+	const id = '76561198000000001';
+	const routed = { steamId64: id, proxyUrl: 'socks5://10.0.0.1:1080' };
+	const cleared = { steamId64: id };
+
+	it('applies system mode when the proxy is cleared', async () => {
+		const { electron, sessions } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+
+		await factory.forAccount(routed);
+		expect(sessions[0]?.proxy).toMatchObject({ proxyRules: 'socks5://10.0.0.1:1080' });
+
+		await factory.forAccount(cleared);
+
+		expect(sessions[0]?.proxy, 'the session kept a proxy the account no longer has').toMatchObject({
+			mode: 'system'
+		});
+	});
+
+	/*
+	 * The case the audit reproduced: a routing change drops our cache but
+	 * deliberately keeps the session — so the next proxyless call found it and
+	 * returned early, before anything could reconsider the rule on it.
+	 */
+	it('applies it even when the session survived a forget', async () => {
+		const { electron, sessions } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+
+		await factory.forAccount(routed);
+		factory.forget(id);
+		await factory.forAccount(cleared);
+
+		expect(sessions[0]?.proxy).toMatchObject({ mode: 'system' });
+	});
+
+	it('re-applies when the proxy changes to a different one', async () => {
+		const { electron, sessions } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+
+		await factory.forAccount(routed);
+		await factory.forAccount({ steamId64: id, proxyUrl: 'socks5://10.0.0.2:1080' });
+
+		expect(sessions[0]?.proxy).toMatchObject({ proxyRules: 'socks5://10.0.0.2:1080' });
+	});
+
+	/**
+	 * **A failed application must not be recorded as one.**
+	 *
+	 * The record is what lets the cache be reused, so writing it before the
+	 * `setProxy` lands would mean a rejected application still counted: the
+	 * session keeps whatever rule it had, and the next call reuses it as though
+	 * the new configuration were in place. An absent record means "unknown",
+	 * which fails toward applying it again.
+	 */
+	it('applies again after an application that failed', async () => {
+		const { electron, sessions, state } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+
+		await factory.forAccount(routed);
+		const before = sessions[0]?.proxyCalls ?? 0;
+
+		state.failSetProxy = new Error('Chromium refused');
+		await expect(factory.forAccount(cleared)).rejects.toThrow();
+		delete state.failSetProxy;
+
+		await factory.forAccount(cleared);
+		expect(
+			sessions[0]?.proxyCalls ?? 0,
+			'a rejected application was remembered as though it had landed'
+		).toBeGreaterThan(before);
+		expect(sessions[0]?.proxy).toMatchObject({ mode: 'system' });
+	});
+
+	/**
+	 * **The same failure reads the same way whether the session was cached.**
+	 *
+	 * Only the fresh-session path translated a rejected `setProxy` into a message
+	 * naming the proxy — and, crucially, ran it through `redactCredentials`. The
+	 * cached branch threw Chromium's own error straight out, so an account whose
+	 * session happened to exist already could surface a proxy password in an
+	 * error the user is shown.
+	 */
+	it('reports a failed re-application the same way, without the password', async () => {
+		const { electron, state } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+		const withPassword = { steamId64: id, proxyUrl: 'http://alice:hunter2@10.0.0.1:8080' };
+
+		// First call builds and caches the session.
+		await factory.forAccount(withPassword);
+
+		// Second call has to re-apply, and that is the one that fails.
+		state.failSetProxy = new Error('Chromium refused http://alice:hunter2@10.0.0.1:8080');
+		const failure = await factory
+			.forAccount({ steamId64: id, proxyUrl: 'http://alice:hunter2@10.0.0.2:8080' })
+			.catch((err: unknown) => err);
+
+		expect(failure).toBeInstanceOf(EgressError);
+		expect((failure as Error).message).toMatch(/could not route this account/);
+		expect(
+			(failure as Error).message,
+			'a proxy password reached a message shown to the user'
+		).not.toContain('hunter2');
+	});
+
+	/**
+	 * **The hard case: the first application is still in flight when the routing
+	 * changes.**
+	 *
+	 * `setProxy(P1)` is held. `forget` drops the cache for a routing change, and
+	 * the held call then completes — so the stale construction caches a session
+	 * carrying P1 and, because the failure was a routing change rather than a
+	 * lock, `forAccount` deliberately keeps that session. The next proxyless call
+	 * finds it.
+	 *
+	 * Before the fix, that call returned the cached session untouched: traffic
+	 * went out through a proxy the user had deleted while the account card said
+	 * routing was off. The `setProxy` this now issues has to be released
+	 * concurrently — awaiting the call first deadlocks on the very work being
+	 * asserted, which is how this scenario first looked like a hang.
+	 */
+	it('applies system mode even when the old proxy landed after a forget', async () => {
+		const applied: string[] = [];
+		const pending: (() => void)[] = [];
+		const session = {
+			setProxy: (config: { mode: string; proxyRules?: string }) =>
+				new Promise<void>((resolve) => {
+					pending.push(() => {
+						applied.push(config.proxyRules ?? config.mode);
+						resolve();
+					});
+				}),
+			setUserAgent: () => undefined,
+			resolveProxy: () => Promise.resolve('DIRECT'),
+			webRequest: { onBeforeSendHeaders: () => undefined },
+			clearStorageData: () => Promise.resolve()
+		};
+		const factory = new SteamTransportFactory({
+			sessionFromPartition: () => session
+		} as unknown as ElectronNetworking);
+
+		/** Release every held `setProxy` until none is outstanding. */
+		const drain = async (): Promise<void> => {
+			for (let i = 0; i < 20; i += 1) {
+				while (pending.length > 0) {
+					pending.shift()?.();
+					await new Promise((resolve) => setTimeout(resolve, 0));
+				}
+				await new Promise((resolve) => setTimeout(resolve, 0));
+			}
+		};
+
+		// The routed construction, held at `setProxy`.
+		const stale = factory.forAccount(routed).catch((err: unknown) => err);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(pending).toHaveLength(1);
+
+		// The routing changes underneath it, and only then does P1 land.
+		factory.forget(id);
+		await Promise.all([stale, drain()]);
+		expect(applied).toEqual(['socks5://10.0.0.1:1080']);
+
+		// The proxy is cleared. This must not reuse the session as it stands.
+		const cleared = factory.forAccount({ steamId64: id }).catch((err: unknown) => err);
+		await Promise.all([cleared, drain()]);
+
+		expect(applied.at(-1), 'a session still holding the deleted proxy was handed back').toBe(
+			'system'
+		);
+	});
+
+	/*
+	 * And does not churn: an unchanged configuration must not re-apply on every
+	 * request, which would put a `setProxy` in front of work that needs none.
+	 */
+	it('leaves an unchanged configuration alone', async () => {
+		const { electron, sessions } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+
+		await factory.forAccount(routed);
+		const applied = sessions[0]?.proxyCalls ?? 0;
+		await factory.forAccount(routed);
+
+		expect(sessions[0]?.proxyCalls ?? 0, 'the proxy was re-applied for no reason').toBe(applied);
 	});
 });

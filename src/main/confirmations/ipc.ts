@@ -2,6 +2,7 @@ import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { ConfirmationsError, type ConfirmationsService } from './service';
 import { VaultLockedError, type VaultService } from '../vault/service';
+import { DIRECT_REFUSED } from '../browser/ipc';
 import type { ActivityLog } from './activity';
 import type { SteamClock } from '../steam/clock';
 
@@ -86,13 +87,27 @@ export function registerConfirmationHandlers(
 		return { ok: true as const };
 	});
 
-	registerHandler(CHANNELS.steamSignIn, async ({ steamId64, password }) => {
+	registerHandler(CHANNELS.steamSignIn, async ({ steamId64, password, route }) => {
 		vault.touch();
+		/*
+		 * **The same refusal the browser gives, on the request that carries a
+		 * password.**
+		 *
+		 * Not reachable through the UI today: the browser refuses a `direct`
+		 * route before it can ever answer `signInRequired`, so the screen that
+		 * sends this is never reached with one. It is guarded anyway because the
+		 * channel is reachable without that screen, and because of what is in the
+		 * request — a sign-in sent unrouted from a vault that forbids unrouted
+		 * traffic puts the account's password on this machine's own connection.
+		 */
+		if (route === 'direct' && vault.settings().requireProxies) {
+			throw new ConfirmationsError(DIRECT_REFUSED);
+		}
 		// The password is a parameter here and nothing more: it is not returned, not
 		// cached, and not written anywhere. What survives this call is the refresh
 		// token the service stores in the vault.
 		try {
-			await confirmations.signIn(steamId64, password);
+			await confirmations.signIn(steamId64, password, route);
 			return { ok: true as const };
 		} catch (err) {
 			// **Only a sign-in failure becomes a value.** Anything else — a bug here,

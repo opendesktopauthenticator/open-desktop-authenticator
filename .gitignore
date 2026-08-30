@@ -64,3 +64,6 @@ tickets/*.db-wal
 tickets/*.db-shm
 tickets/*.db-journal
 tickets/attachments/
+
+# Scratch: generated PDFs and other working files. Never part of a release.
+tmp/

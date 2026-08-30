@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -32,6 +32,7 @@ beforeEach(() => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 const PASSPHRASE = 'a-passphrase-long-enough-to-be-accepted';
+const CREATED_WITH = 'a-different-passphrase-for-the-create';
 
 const service = (onLock?: (reason: string) => void) => new VaultService({ file, onLock });
 
@@ -125,5 +126,173 @@ describe('a lock during key derivation wins', () => {
 		// And the next unlock works — the generation is a counter, not a latch.
 		await vault.unlock(PASSPHRASE);
 		expect(vault.isUnlocked()).toBe(true);
+	});
+});
+
+/*
+ * **Two operations that replace the vault file, overlapping.**
+ *
+ * Restoring is deliberately slow — it derives a key from the backup — and the
+ * only guard against something else touching the file during it was a check for
+ * an *open session*. `adoptFrom` writes a vault and leaves it closed, so that
+ * check sailed straight past: the restore then set the just-adopted vault aside
+ * and installed the backup over it. Both operations returned success, and the
+ * application opened the older of the two.
+ *
+ * Nothing is destroyed — the adopted file survives where the user picked it —
+ * but they are told their vault was adopted while the app runs on different
+ * accounts, which is the worst kind of wrong answer.
+ */
+describe('an adoption that lands during a restore', () => {
+	/** A second vault, elsewhere, carrying a value the backup does not have. */
+	async function elsewhere(marker: number): Promise<string> {
+		const other = join(dir, 'adopt-me.json');
+		const source = new VaultService({ file: other });
+		await source.create(PASSPHRASE);
+		await source.mutate((draft) => {
+			draft.settings.autoLockMinutes = marker;
+		});
+		source.lock();
+		return other;
+	}
+
+	/** A backup, and no main vault, which is the state restore is offered in. */
+	async function backupOnly(marker: number): Promise<void> {
+		const setup = service();
+		await setup.create(PASSPHRASE);
+		await setup.mutate((draft) => {
+			draft.settings.autoLockMinutes = marker;
+		});
+		// A second write leaves the first as the backup.
+		await setup.mutate((draft) => {
+			draft.settings.autoLockMinutes = marker;
+		});
+		setup.lock();
+		rmSync(file, { force: true });
+	}
+
+	/**
+	 * **An ordinary save is as much a replacement of the file as an adoption is.**
+	 *
+	 * `fileGeneration` existed to catch a vault appearing under a restore, and it
+	 * advanced only for adoptions and restores. So a *save* landing inside the
+	 * backup's key derivation — which is slow on purpose — left the counter
+	 * untouched, the restore's check agreed with itself, and the newer vault was
+	 * moved aside and the older backup installed over it. The restore could then
+	 * fail for an unrelated reason and report that nothing had happened, with the
+	 * live vault already rolled back.
+	 *
+	 * One case per write path, because each was a separate line that did not
+	 * bump the counter.
+	 */
+	/**
+	 * **A save landing during a restore, raced deterministically after all.**
+	 *
+	 * I claimed this could not be done: `create`, `mutate` and `changePassphrase`
+	 * all derive keys, so racing one against a restore's own derivation is
+	 * decided by whichever finishes first, and my attempts passed and failed at
+	 * random. The shape below is the one I missed, and it is deterministic:
+	 *
+	 *  1. `create` starts and begins its scrypt.
+	 *  2. A short head start guarantees the restore captures `fileGeneration`
+	 *     *before* create's write lands — create is still deriving.
+	 *  3. The lock makes create fail its own install check, but only *after* it
+	 *     has written the file and advanced the counter.
+	 *  4. The restore then finds the counter moved and refuses.
+	 *
+	 * The load-bearing part is that a create's key derivation is far longer than
+	 * the head start, so step 2 cannot lose. `mutate` and `changePassphrase`
+	 * still have no deterministic shape — both need an unlock, and a restore
+	 * refuses while the vault is open — so the counter's other write paths stay
+	 * covered by `the vault-file revision` below.
+	 */
+	it('refuses rather than replacing a vault created while it derived', async () => {
+		await backupOnly(17);
+
+		const vault = service();
+		const creating = vault.create(CREATED_WITH);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		const restoring = vault.restoreFromBackup(PASSPHRASE);
+		vault.lock('suspend');
+
+		// The create wrote the file and then found itself locked out of it.
+		await expect(creating).rejects.toThrow(LOCKED_DURING_OPEN);
+		// And the restore noticed the write, rather than installing over it.
+		await expect(restoring).rejects.toThrow(/another vault was put in place/i);
+	});
+
+	it('refuses rather than replacing the vault that was just adopted', async () => {
+		await backupOnly(17);
+		const other = await elsewhere(42);
+
+		const vault = service();
+		const restoring = vault.restoreFromBackup(PASSPHRASE);
+		// The adoption lands while the backup's key is still deriving.
+		vault.adoptFrom(other);
+
+		await expect(restoring).rejects.toThrow(/another vault was put in place/i);
+
+		// And the adopted vault is the one that is actually there.
+		await vault.unlock(PASSPHRASE);
+		expect(
+			vault.settings().autoLockMinutes,
+			'the restore replaced a vault adopted after it started'
+		).toBe(42);
+	});
+
+	it('still restores when nothing else touched the file', async () => {
+		await backupOnly(17);
+
+		const vault = service();
+		await vault.restoreFromBackup(PASSPHRASE);
+		await vault.unlock(PASSPHRASE);
+		expect(vault.settings().autoLockMinutes).toBe(17);
+	});
+});
+
+/**
+ * **Every write to the vault file advances the counter a restore checks.**
+ *
+ * `fileGeneration` was bumped only by adoptions and restores. A restore derives
+ * a key from the backup's passphrase — slow on purpose — and re-checks the
+ * counter before swapping the files. An ordinary save landing inside that
+ * window left it untouched, so the check agreed and the restore moved the
+ * *newer* vault aside and installed the older backup over it. It could then
+ * fail for an unrelated reason and report that nothing had happened, with the
+ * live vault already rolled back.
+ *
+ * **Asserted on the source rather than by racing.** The existing adoption case
+ * above can be raced deterministically because `adoptFrom` is synchronous;
+ * `create`, `mutate` and `changePassphrase` all derive keys of their own, so a
+ * race against them is decided by whichever derivation finishes first and the
+ * test passes or fails at random. A flaky gate is worse than none. What is
+ * deterministic — and what actually regresses — is a write path added without
+ * the bump, so that is what is checked.
+ */
+describe('the vault-file revision', () => {
+	const source = readFileSync(join(__dirname, '../src/main/vault/service.ts'), 'utf8');
+
+	it('advances after every write to the main vault file', () => {
+		const writes = [...source.matchAll(/writeEnvelope\(this\.file,[\s\S]{0,400}?\n/g)];
+		expect(writes.length, 'no writes found — the pattern has drifted').toBeGreaterThanOrEqual(3);
+
+		for (const write of writes) {
+			const after = source.slice(write.index ?? 0, (write.index ?? 0) + 2000);
+			expect(
+				after,
+				`a write to the vault file does not advance fileGeneration:\n${write[0].slice(0, 120)}`
+			).toMatch(/this\.fileGeneration \+= 1/);
+		}
+	});
+
+	it('advances it after the write, never before', () => {
+		// A write that threw replaced nothing. Bumping first would make a restore
+		// refuse over a save that never happened.
+		for (const match of source.matchAll(/this\.fileGeneration \+= 1;/g)) {
+			const before = source.slice(Math.max(0, (match.index ?? 0) - 2000), match.index);
+			expect(before, 'fileGeneration advanced with no preceding write or rename').toMatch(
+				/writeEnvelope\(|renameSync|rename\(/
+			);
+		}
 	});
 });

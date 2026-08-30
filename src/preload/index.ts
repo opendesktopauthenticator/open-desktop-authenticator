@@ -4,6 +4,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 // bundle, which a sandboxed preload cannot resolve — see shared/channels.ts.
 import { CHANNELS } from '../shared/channels';
 import type {
+	BrowserRoute,
 	AccountSummary,
 	ActivityList,
 	AppInfo,
@@ -186,8 +187,14 @@ const api: RendererApi = {
 		ipcRenderer.invoke(CHANNELS.confirmationsAct, { steamId64, action, ids }) as Promise<{
 			ok: true;
 		}>,
-	signInToSteam: (steamId64: string, password: string) =>
-		ipcRenderer.invoke(CHANNELS.steamSignIn, { steamId64, password }) as Promise<SignInResult>,
+	signInToSteam: (steamId64: string, password: string, route?: BrowserRoute) =>
+		ipcRenderer.invoke(CHANNELS.steamSignIn, {
+			steamId64,
+			password,
+			// Omitted rather than sent as `true`: absent means "the account's own
+			// routing", which is what every caller but the browser's Direct wants.
+			...(route === undefined ? {} : { route })
+		}) as Promise<SignInResult>,
 
 	/**
 	 * Open a signed-in, routed browser for this account.
@@ -196,10 +203,10 @@ const api: RendererApi = {
 	 * a URL crossing this bridge would be a way to aim a live Steam session at
 	 * any page that reached the renderer.
 	 */
-	openAccountBrowser: (steamId64: string, useProxy: boolean) =>
+	openAccountBrowser: (steamId64: string, route: BrowserRoute) =>
 		ipcRenderer.invoke(CHANNELS.accountOpenBrowser, {
 			steamId64,
-			useProxy
+			route
 		}) as Promise<OpenBrowserResult>,
 
 	// §11 S2 exception (a). The passphrase is required again on purpose.

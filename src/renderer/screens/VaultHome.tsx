@@ -2,7 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { CompanyMark } from '../CompanyMark';
 import { Logo } from '../Logo';
 import { branding } from '../../shared/branding';
-import type { AccountSummary, CodesList, ExportResult, OpenBrowserResult } from '../../shared/ipc';
+import type {
+	AccountSummary,
+	BrowserRoute,
+	CodesList,
+	ExportResult,
+	OpenBrowserResult
+} from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -13,6 +19,52 @@ import { messageOf } from '../ipc-message';
  * countdown — a user who can see when the vault will lock is far less likely to
  * disable the timeout, which is the outcome that actually costs security.
  */
+/**
+ * Add one account to a set of in-flight operations, leaving the rest alone.
+ *
+ * Written as updater functions rather than inline object spreads so that two
+ * presses landing in the same React batch cannot lose one another — each reads
+ * the set it is actually applied to.
+ */
+export const running =
+	(steamId64: string) =>
+	(prev: ReadonlySet<string>): ReadonlySet<string> =>
+		new Set(prev).add(steamId64);
+
+/** And take it out again when it settles, however it settled. */
+export const finished =
+	(steamId64: string) =>
+	(prev: ReadonlySet<string>): ReadonlySet<string> => {
+		const next = new Set(prev);
+		next.delete(steamId64);
+		return next;
+	};
+
+/**
+ * Record or clear one account's message, leaving every other row alone.
+ *
+ * **One object used to serve the whole list, twice over.** These messages are
+ * rendered on the row they belong to, so two accounts never compete for the
+ * slot — but a single object meant the second overwrote the first, and starting
+ * anything on a third row cleared what was on screen. Two people pressed a
+ * button, neither got what they asked for, and one of them was told nothing.
+ *
+ * Used for the browser's failures and for export results, which include the
+ * warning that a plaintext copy is still on disk — the last message that should
+ * be dismissible by somebody else's action.
+ */
+export const noted =
+	(steamId64: string, message: string | undefined) =>
+	(prev: ReadonlyMap<string, string>): ReadonlyMap<string, string> => {
+		const next = new Map(prev);
+		if (message === undefined) {
+			next.delete(steamId64);
+		} else {
+			next.set(steamId64, message);
+		}
+		return next;
+	};
+
 export function VaultHome({
 	accounts,
 	codes,
@@ -22,6 +74,7 @@ export function VaultHome({
 	onChangeRouting,
 	onShowConfirmations,
 	onOpenBrowser,
+	requireProxies,
 	onRemoveAccount,
 	onChangeAutoConfirm,
 	onImport,
@@ -51,7 +104,16 @@ export function VaultHome({
 	 * error this screen would only print. When it comes back `signInRequired` the
 	 * caller has already taken over the screen, so nothing is shown here.
 	 */
-	onOpenBrowser: (account: AccountSummary, useProxy: boolean) => Promise<OpenBrowserResult>;
+	onOpenBrowser: (account: AccountSummary, route: BrowserRoute) => Promise<OpenBrowserResult>;
+	/**
+	 * Whether the vault refuses unrouted browsing.
+	 *
+	 * Only removes the Direct button. The refusal itself lives in the main
+	 * process — see `browser/ipc.ts` — because "the renderer stopped offering
+	 * it" has never counted as a control here, and this screen is reloaded from
+	 * a vault whose settings it does not own.
+	 */
+	requireProxies: boolean;
 	onRemoveAccount: (account: AccountSummary) => void;
 	onChangeAutoConfirm: (account: AccountSummary) => void;
 	onImport: () => void;
@@ -89,38 +151,127 @@ export function VaultHome({
 	const [copied, setCopied] = useState<{ steamId64: string; seconds: number } | undefined>();
 	/** A copy that failed. Silently doing nothing is the one response a button must never give. */
 	const [copyError, setCopyError] = useState<{ steamId64: string; message: string } | undefined>();
-	/** The account whose code is being copied, if any. */
-	const [copying, setCopying] = useState<string | undefined>();
-	/** The account being exported, and what came of the last one. */
 	/**
-	 * Which copy/export attempt owns the shared status slot.
+	 * Every account whose code is being copied right now — a set, not one name.
 	 *
-	 * There is one `copied`/`copyError` pair and one `exported` for the whole
-	 * list, so two attempts on different rows raced: the first copy after an
-	 * unlock waits on the Steam clock sync and can take seconds, while another
-	 * row's button stays live. Whichever settled last won — so an older failure
-	 * could overwrite a newer success, leaving the row that actually worked
-	 * showing another row's error.
+	 * **A single name only ever described the newest press.** Start a copy on one
+	 * account, start another before it settles, and the first row's button came
+	 * straight back to life still saying "Copy" while its request was very much
+	 * in flight. Pressing it again ran a second one; the export version of the
+	 * same bug opened a second save dialog.
+	 *
+	 * The `finally` below was already careful not to clear somebody else's flag,
+	 * which made the completion path correct and left the *starting* path wrong.
 	 */
-	const attempt = useRef(0);
+	const [copying, setCopying] = useState<ReadonlySet<string>>(() => new Set());
+	/**
+	 * Which copy attempt owns the copy status slot.
+	 *
+	 * There is one `copied`/`copyError` pair for the whole list, so two attempts
+	 * on different rows raced: the first copy after an unlock waits on the Steam
+	 * clock sync and can take seconds, while another row's button stays live.
+	 * Whichever settled last won — so an older failure could overwrite a newer
+	 * success, leaving the row that actually worked showing another row's error.
+	 */
+	const copyAttempt = useRef(0);
 
-	const [exporting, setExporting] = useState<string | undefined>();
-	const [exported, setExported] = useState<{ steamId64: string; message: string } | undefined>();
+	/**
+	 * And which export attempt owns the export slot, which is a different slot.
+	 *
+	 * **One counter used to serve both, and that made them cancel each other.**
+	 * Copy writes `copied`; export writes `exported`; they are rendered
+	 * separately and neither is a reason to discard the other. Sharing the
+	 * counter meant starting an export while a copy was still waiting on the
+	 * clock sync made the copy — which then succeeded, and put a live Steam Guard
+	 * code on the clipboard with a timer running — say nothing at all. The
+	 * reverse silenced a save that had already written a file holding the keys to
+	 * an account.
+	 *
+	 * The rule this file already applies to the browser button: a counter guards
+	 * one status slot, and a separate slot gets a separate counter.
+	 */
+	const exportAttempt = useRef(new Map<string, number>());
+
+	/** The same, for exports. See `copying`. */
+	const [exporting, setExporting] = useState<ReadonlySet<string>>(() => new Set());
+	/** What came of the last export. */
+	const [exported, setExported] = useState<ReadonlyMap<string, string>>(() => new Map());
 
 	/** The account whose browser is being opened, and why the last one was not. */
-	const [opening, setOpening] = useState<string | undefined>();
-	const [browserError, setBrowserError] = useState<
-		{ steamId64: string; message: string } | undefined
-	>();
+	const [opening, setOpening] = useState<ReadonlySet<string>>(() => new Set());
 	/**
-	 * Its own counter, not the one copy and export share.
+	 * Why each account's browser did not open, keyed by account.
+	 *
+	 * **One object served the whole list, and rows do not share failures.** The
+	 * message is rendered on the row it belongs to, so two accounts failing meant
+	 * the second overwrote the first: only one row explained itself, and starting
+	 * any third browser cleared what was on screen. Both users pressed a button,
+	 * neither browser opened, and one of them was told nothing at all.
+	 */
+	const [browserError, setBrowserError] = useState<ReadonlyMap<string, string>>(() => new Map());
+	/**
+	 * Its own counter, like copy's and export's.
 	 *
 	 * Same problem, same fix: one status slot for the whole list, so a slow
 	 * failure on one row could land under another row's newer attempt. Separate
-	 * from `attempt` because these are separate slots — opening a browser should
-	 * not silence an export's result, which is still on screen and still true.
+	 * because these are separate slots — opening a browser should not silence an
+	 * export's result, which is still on screen and still true.
 	 */
-	const browserAttempt = useRef(0);
+	const browserAttempt = useRef(new Map<string, number>());
+
+	/**
+	 * Claim the newest browser attempt **for one account**, and answer whether it
+	 * is still the newest when it settles.
+	 *
+	 * **A single counter suppressed the wrong failures.** `browserError` is shown
+	 * on the row it belongs to, so account A's failure and account B's compete
+	 * for nothing — but one global counter made B's press "newer" than A's, and
+	 * A's failure was then discarded as stale. A's browser had not opened and
+	 * nothing on screen said why.
+	 */
+	const claimExport = (steamId64: string): (() => boolean) => {
+		const mine = (exportAttempt.current.get(steamId64) ?? 0) + 1;
+		exportAttempt.current.set(steamId64, mine);
+		return () => exportAttempt.current.get(steamId64) === mine;
+	};
+
+	const claimBrowser = (steamId64: string): (() => boolean) => {
+		const mine = (browserAttempt.current.get(steamId64) ?? 0) + 1;
+		browserAttempt.current.set(steamId64, mine);
+		return () => browserAttempt.current.get(steamId64) === mine;
+	};
+
+	/**
+	 * Open the browser for one account by one route, and report the outcome on
+	 * that account's row.
+	 *
+	 * Shared by all three buttons deliberately. It was written out per button
+	 * while there were two, and the second copy had already lost the note
+	 * explaining why `finally` clears one account's flag rather than all of
+	 * them — three copies would have been three chances to lose the `newest()`
+	 * check that keeps a stale failure off a row that has since succeeded.
+	 */
+	const openBrowserAs = (account: AccountSummary, route: BrowserRoute): void => {
+		const newest = claimBrowser(account.steamId64);
+		setBrowserError(noted(account.steamId64, undefined));
+		setOpening(running(account.steamId64));
+		onOpenBrowser(account, route)
+			.catch((err: unknown) => {
+				// A sign-in is not an error and never arrives here — it comes back
+				// as a state and the caller shows the form. What reaches this is
+				// routing that could not be applied, or Steam being unreachable.
+				if (!newest()) {
+					return;
+				}
+				setBrowserError(noted(account.steamId64, messageOf(err)));
+			})
+			.finally(() =>
+				// Only this account's flag, for the reason the copy button
+				// documents: clearing unconditionally re-enables a row whose own
+				// open is still in flight.
+				setOpening(finished(account.steamId64))
+			);
+	};
 
 	// Retire the message when the clipboard clear it describes has happened.
 	// Left up, it goes from true to false without changing: the clipboard is
@@ -378,12 +529,12 @@ export function VaultHome({
 												// The first copy after an unlock waits on the Steam clock
 												// sync, which can take seconds. Without this the button
 												// looked inert and invited a second click.
-												disabled={copying === account.steamId64}
+												disabled={copying.has(account.steamId64)}
 												onClick={() => {
-													const mine = (attempt.current += 1);
-													const newest = (): boolean => attempt.current === mine;
+													const mine = (copyAttempt.current += 1);
+													const newest = (): boolean => copyAttempt.current === mine;
 													setCopyError(undefined);
-													setCopying(account.steamId64);
+													setCopying(running(account.steamId64));
 													onCopyCode(account.steamId64)
 														.then((result) => {
 															if (!newest()) {
@@ -408,13 +559,14 @@ export function VaultHome({
 															});
 														})
 														.finally(() =>
-															// Only this account's flag. Clearing unconditionally re-enabled
-															// every button, including one whose own copy was still in flight.
-															setCopying((prev) => (prev === account.steamId64 ? undefined : prev))
+															// Only this account's entry. Clearing the whole set would
+															// re-enable every button, including one whose own copy is
+															// still in flight.
+															setCopying(finished(account.steamId64))
 														);
 												}}
 											>
-												{copying === account.steamId64
+												{copying.has(account.steamId64)
 													? 'Copying…'
 													: justCopied
 														? 'Copied'
@@ -436,82 +588,77 @@ export function VaultHome({
 									    puts the machine's own address on an account the user was
 									    careful to route — and does it while they are logged in and
 									    trading, which is the worst moment for it. */}
-									{/* Two buttons when the account is routed, because both answers are
-					    reasonable and only the user knows which they want. A shared proxy
-					    address collects rate limits and Cloudflare challenges that a home
-					    connection never sees, so the routed window is sometimes the one
-					    that will not load — and somebody who only wants to accept a single
-					    trade is better served by a choice than by a window that fails. */}
+									{/* Three buttons when the account is routed, because all three
+									    answers are reasonable and only the user knows which they want.
+
+									    A shared proxy address collects rate limits and Cloudflare
+									    challenges that a home connection never sees, so the fully routed
+									    window is sometimes the one that will not load. Direct fixes that
+									    by taking the account's proxy out of the path — which puts
+									    whatever address this machine normally uses on the account, and
+									    that is what the proxy was for.
+
+									    Note "normally uses" rather than "its own": Direct applies the
+									    machine's own network settings, system proxy included, because
+									    the token is minted the same way and the two must not disagree.
+									    `window.ts` explains at the `system` branch.
+
+									    "Steam only" is the middle answer: Steam and everything
+									    unrecognised keep going through the proxy, and a short list of
+									    known third-party trade sites goes direct. Those are the pages
+									    that make a proxied window unbearable, and none of them is where
+									    the account lives. Unknown stays proxied on purpose — see
+									    `steamOnlyBypass`. */}
 									<button
 										type="button"
 										className="secondary"
-										disabled={opening === account.steamId64}
+										disabled={opening.has(account.steamId64)}
 										title={
 											account.hasProxy
 												? 'Open a signed-in browser routed through this account’s proxy. Everything in the window goes through it. Starts at your trade offers.'
 												: 'Open a signed-in browser for this account. Starts at your trade offers.'
 										}
-										onClick={() => {
-											const mine = (browserAttempt.current += 1);
-											const newest = (): boolean => browserAttempt.current === mine;
-											setBrowserError(undefined);
-											setOpening(account.steamId64);
-											onOpenBrowser(account, account.hasProxy)
-												.catch((err: unknown) => {
-													// A sign-in is not an error and never arrives here — it
-													// comes back as a state and the caller shows the form.
-													// What reaches this is routing that could not be applied,
-													// or Steam being unreachable.
-													if (!newest()) {
-														return;
-													}
-													setBrowserError({
-														steamId64: account.steamId64,
-														message: messageOf(err)
-													});
-												})
-												.finally(() =>
-													// Only this account's flag, for the reason the copy button
-													// documents: clearing unconditionally re-enables a row whose
-													// own open is still in flight.
-													setOpening((prev) => (prev === account.steamId64 ? undefined : prev))
-												);
-										}}
+										onClick={() =>
+											// A routed account's first button is the fully proxied one. An
+											// unrouted account has no proxy to route through, so its only
+											// button is the direct one — and saying that outright, rather
+											// than passing a route meaning "proxy if there is one", keeps
+											// the token mint on the same session the window will use.
+											openBrowserAs(account, account.hasProxy ? 'proxy' : 'direct')
+										}
 									>
-										{opening === account.steamId64
+										{opening.has(account.steamId64)
 											? 'Opening…'
 											: account.hasProxy
 												? 'Trade (proxied)'
 												: 'Trade'}
 									</button>
-									{account.hasProxy && (
-										<button
-											type="button"
-											className="secondary"
-											disabled={opening === account.steamId64}
-											title="Open the same browser without the proxy, from this machine’s own address. Use it when a proxied page is rate-limited or stuck on a Cloudflare check — but Steam will see your real address on this account."
-											onClick={() => {
-												const mine = (browserAttempt.current += 1);
-												const newest = (): boolean => browserAttempt.current === mine;
-												setBrowserError(undefined);
-												setOpening(account.steamId64);
-												onOpenBrowser(account, false)
-													.catch((err: unknown) => {
-														if (!newest()) {
-															return;
-														}
-														setBrowserError({
-															steamId64: account.steamId64,
-															message: messageOf(err)
-														});
-													})
-													.finally(() =>
-														setOpening((prev) => (prev === account.steamId64 ? undefined : prev))
-													);
-											}}
-										>
-											Direct
-										</button>
+									{/* Both of the alternatives go under `Require proxies`, not just
+									    Direct. "Steam only" keeps Steam on the proxy but sends a short
+									    list of trade sites straight out from this machine, and a
+									    deliberate direct request is the thing that setting forbids. The
+									    main process refuses both; this only stops offering them. */}
+									{account.hasProxy && !requireProxies && (
+										<>
+											<button
+												type="button"
+												className="secondary"
+												disabled={opening.has(account.steamId64)}
+												title="Open the same browser with Steam — including its image and video hosts — still going through the proxy, while a short list of known trade sites goes direct so they load at full speed. Anything else still goes through the proxy. Steam never sees your real address."
+												onClick={() => openBrowserAs(account, 'steam-only')}
+											>
+												Steam only
+											</button>
+											<button
+												type="button"
+												className="secondary"
+												disabled={opening.has(account.steamId64)}
+												title="Open the same browser without this account’s proxy. Your machine’s own network settings still apply — including a system or company proxy, if this machine has one — so Steam sees whatever address this machine normally uses. Use it when a proxied page is rate-limited or stuck on a Cloudflare check."
+												onClick={() => openBrowserAs(account, 'direct')}
+											>
+												Direct
+											</button>
+										</>
 									)}
 									{/* Last, and visually quietest of the three. It is the only one
 									    here that destroys something. */}
@@ -521,41 +668,43 @@ export function VaultHome({
 									<button
 										type="button"
 										className="secondary"
-										disabled={exporting === account.steamId64}
+										disabled={exporting.has(account.steamId64)}
 										onClick={() => {
-											const mine = (attempt.current += 1);
-											const newest = (): boolean => attempt.current === mine;
-											setExported(undefined);
-											setExporting(account.steamId64);
+											const newest = claimExport(account.steamId64);
+											setExported(noted(account.steamId64, undefined));
+											setExporting(running(account.steamId64));
 											onExport(account)
 												.then((result) => {
 													if (!newest()) {
 														return;
 													}
-													setExported({
-														steamId64: account.steamId64,
-														message:
+													setExported(
+														noted(
+															account.steamId64,
 															result.state === 'saved'
-																? `Saved as ${result.fileName}. Treat that file as a key to this account.`
+																? // The stale copy is named, because a second plaintext file
+																	// nobody mentions is worse than one they can go and delete.
+																	`Saved as ${result.fileName}. Treat that file as a key to this account.` +
+																		(result.staleCopy
+																			? ` The previous export could not be deleted — a file ending “.prev” is still beside it, holding the older secrets. Delete it when you can.`
+																			: '')
 																: 'Nothing was saved.'
-													});
+														)
+													);
 												})
 												.catch((err: unknown) => {
 													if (!newest()) {
 														return;
 													}
-													setExported({
-														steamId64: account.steamId64,
-														message: `It could not be saved: ${messageOf(err)}`
-													});
+													setExported(
+														noted(account.steamId64, `It could not be saved: ${messageOf(err)}`)
+													);
 												})
-												.finally(() =>
-													setExporting((prev) => (prev === account.steamId64 ? undefined : prev))
-												);
+												.finally(() => setExporting(finished(account.steamId64)));
 										}}
 										title="Save this account as a .maFile, readable by SDA and anything else in the ecosystem."
 									>
-										{exporting === account.steamId64 ? 'Saving…' : 'Export'}
+										{exporting.has(account.steamId64) ? 'Saving…' : 'Export'}
 									</button>
 									<button
 										type="button"
@@ -565,11 +714,11 @@ export function VaultHome({
 									>
 										Remove
 									</button>
-									{exported?.steamId64 === account.steamId64 && (
-										<p className="hint">{exported.message}</p>
+									{exported.has(account.steamId64) && (
+										<p className="hint">{exported.get(account.steamId64)}</p>
 									)}
-									{browserError?.steamId64 === account.steamId64 && (
-										<p className="hint bad">{browserError.message}</p>
+									{browserError.has(account.steamId64) && (
+										<p className="hint bad">{browserError.get(account.steamId64)}</p>
 									)}
 								</div>
 

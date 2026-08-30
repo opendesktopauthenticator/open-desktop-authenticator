@@ -194,11 +194,47 @@ export const createLoginSession: LoginSessionFactory = (proxyUrl) => {
  *
  * @throws SteamLoginError — `permanent: false` only when retrying could help.
  */
+/**
+ * Why a sign-in was stopped when the proxy policy forbade it.
+ *
+ * Exported so the two callers that cancel for this reason say the same thing —
+ * a password path is a bad place for two sentences describing one cause.
+ */
+/**
+ * Why a sign-in was stopped when the vault locked under it.
+ *
+ * Shared for the same reason as `PROXY_POLICY_STOPPED`: enrolment cancels its
+ * session directly rather than through the callback below, so without a name
+ * to reach for it reported "Steam refused the sign-in" — blaming Steam for a
+ * lock this application performed.
+ */
+export const VAULT_LOCKED_DURING_SIGN_IN = 'The vault locked before Steam finished signing in.';
+
+export const PROXY_POLICY_STOPPED =
+	'This vault is set to require proxies, so the sign-in was stopped. Give the account a ' +
+	'proxy, or turn off "Require proxies" in Settings.';
+
 export async function signIn(
 	request: SignInRequest,
 	proxyUrl: string | undefined,
 	factory: LoginSessionFactory = createLoginSession,
-	now: () => number = () => Date.now()
+	now: () => number = () => Date.now(),
+	/**
+	 * Handed a way to abandon this attempt while it is still running.
+	 *
+	 * **Every failure path already cancels; nothing outside could.** A sign-in
+	 * takes as long as Steam takes, up to the ninety-second timeout, and the
+	 * vault can lock in the middle of it — by the idle timer, by the lid, by the
+	 * user. `ConfirmationsService.forget` bumps its generation so the token that
+	 * eventually arrives is refused, which is the important half; but the
+	 * authentication polling kept running against Steam over the account's proxy,
+	 * and the closure holding the user's password stayed alive with it, for up to
+	 * a minute and a half after the user had said "stop".
+	 *
+	 * Refusing the result is not the same as stopping the work. This is the
+	 * other half.
+	 */
+	onAttempt?: (cancel: (reason?: string) => void) => void
 ): Promise<SignInResult> {
 	const session = factory(proxyUrl);
 
@@ -259,6 +295,29 @@ export async function signIn(
 			SIGN_IN_TIMEOUT_MS
 		);
 		timer.unref?.();
+
+		/*
+		 * Handed out before the attempt starts, so a lock arriving between the
+		 * first packet and the last always finds something to cancel — and after
+		 * `timer` exists, because `fail` clears it.
+		 *
+		 * Routed through `fail` rather than calling the library directly:
+		 * cancelling without settling would leave the caller awaiting a promise
+		 * nothing will ever resolve.
+		 */
+		/*
+		 * **The caller says why, because there is now more than one why.**
+		 *
+		 * This read "The vault locked before Steam finished signing in" and was
+		 * the only sentence a cancellation could produce. `Require proxies` now
+		 * cancels unrouted sign-ins through the same callback, and told the user
+		 * their vault had locked — which had not happened, and sends them to
+		 * unlock a vault that is already open. The default is still the lock,
+		 * because that is still the common case.
+		 */
+		onAttempt?.((reason) =>
+			fail(new SteamLoginError(reason ?? VAULT_LOCKED_DURING_SIGN_IN, false))
+		);
 
 		session.on('timeout', () =>
 			fail(new SteamLoginError('Steam did not finish the sign-in in time. Try again.', false))

@@ -1,4 +1,4 @@
-import { signIn, type LoginSessionFactory } from './login';
+import { PROXY_POLICY_STOPPED, signIn, type LoginSessionFactory } from './login';
 import { redactCredentials } from '../net/egress';
 import { mintAccessToken } from './access-token';
 import {
@@ -309,6 +309,34 @@ export class TransferService {
 	 * Nothing about the Steam account changes here. This call is safe to repeat
 	 * and safe to abandon.
 	 */
+	/**
+	 * The sign-in this transfer is running, while it is running.
+	 *
+	 * `routed` is the route it actually took, not what the account has stored —
+	 * there is no stored account yet, so the form's proxy field is the only
+	 * answer there is.
+	 */
+	private authenticatingAttempt: { cancel: (reason?: string) => void; routed: boolean } | undefined;
+
+	/**
+	 * Abandon an authentication `Require proxies` has just forbidden.
+	 *
+	 * Narrow on purpose: see the note where the callback is registered. Only the
+	 * stage that has changed nothing is stopped.
+	 */
+	cancelUnroutedAuthentication(): void {
+		const attempt = this.authenticatingAttempt;
+		if (attempt === undefined || attempt.routed) {
+			return;
+		}
+		this.authenticatingAttempt = undefined;
+		try {
+			attempt.cancel(PROXY_POLICY_STOPPED);
+		} catch {
+			// Already finished. Nothing left to stop.
+		}
+	}
+
 	async authenticate(
 		accountName: string,
 		password: string,
@@ -369,7 +397,27 @@ export class TransferService {
 				},
 				proxyUrl,
 				this.loginSession,
-				this.now
+				this.now,
+				/*
+				 * **Only this stage registers a cancellation, and deliberately.**
+				 *
+				 * `authenticate` changes nothing on Steam — the docblock above says
+				 * so — which makes it the one transfer stage safe to abandon. It
+				 * sends a password *and* a Steam Guard code, so a policy change that
+				 * cannot reach it leaves both travelling unrouted for as long as the
+				 * sign-in timeout allows.
+				 *
+				 * The later stages are the opposite: by then Steam may have rotated
+				 * the authenticator and `pending` holds the only route back to
+				 * secrets Steam will not reissue. `cancel()` refuses during those for
+				 * that reason, and nothing here overrides it.
+				 */
+				(cancel) => {
+					this.authenticatingAttempt = {
+						cancel,
+						routed: proxyUrl !== undefined && proxyUrl !== ''
+					};
+				}
 			).catch((err: unknown) => {
 				throw new TransferError(
 					scrub(err instanceof Error ? err.message : String(err), [password, code]),
@@ -436,6 +484,8 @@ export class TransferService {
 			return { state: 'authenticated', steamId64, accountName };
 		} finally {
 			this.authenticating = false;
+			// Whatever happened, nothing is in the air for this stage any more.
+			this.authenticatingAttempt = undefined;
 		}
 	}
 

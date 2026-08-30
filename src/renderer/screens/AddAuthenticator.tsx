@@ -33,10 +33,20 @@ export function AddAuthenticator({
 	onBackup,
 	onClose,
 	onMove,
-	resume
+	resume,
+	requireProxies
 }: {
 	onBegin: (accountName: string, password: string, proxyUrl?: string) => Promise<EnrollBegin>;
 	onEmailCode: (code: string) => Promise<EnrollBegin>;
+	/**
+	 * Whether the vault refuses to talk to Steam without a proxy.
+	 *
+	 * The main process already refuses a proxyless enrolment under this setting.
+	 * Without it here the form said "optional" and offered a submit button that
+	 * could only ever fail — inviting an action that cannot succeed, which is
+	 * worse than not offering it.
+	 */
+	requireProxies: boolean;
 	/** Drops the pending sign-in in the main process. Safe only before anything is attached. */
 	onCancel: () => Promise<unknown>;
 	onActivate: (steamId64: string, code: string) => Promise<{ state: 'activated' | 'wantMore' }>;
@@ -259,7 +269,11 @@ export function AddAuthenticator({
 							Used once, to sign in, and never stored. What is kept is the session Steam gives back.
 						</p>
 
-						<label htmlFor="enroll-proxy">Route this account through a proxy (optional)</label>
+						<label htmlFor="enroll-proxy">
+							{requireProxies
+								? 'Route this account through a proxy (required)'
+								: 'Route this account through a proxy (optional)'}
+						</label>
 						<input
 							id="enroll-proxy"
 							type="text"
@@ -274,14 +288,30 @@ export function AddAuthenticator({
 						    through another is linked to both, by Steam, through the account
 						    itself. Adding routing later cannot undo the first request. */}
 						<p className="hint">
-							HTTP, HTTPS, SOCKS4 and SOCKS5 are all accepted; the example is only an example. Leave
-							empty to use this machine&rsquo;s own connection. If you intend to route this account
-							at all, <strong>set it now</strong> — Steam sees the address every request comes from,
-							so enrolling here and routing later ties the two together permanently.
+							HTTP, HTTPS, SOCKS4 and SOCKS5 are all accepted; the example is only an example.{' '}
+							{/* The label above says required under this setting, and the main
+							    process refuses an empty field. A hint still offering to leave
+							    it empty contradicted both. */}
+							{requireProxies
+								? 'This vault requires a proxy, so it cannot be left empty.'
+								: 'Leave empty to use this machine’s own connection.'}{' '}
+							If you intend to route this account at all, <strong>set it now</strong> — Steam sees
+							the address every request comes from, so enrolling here and routing later ties the two
+							together permanently.
 						</p>
 
 						<div className="controls">
-							<button type="submit" disabled={busy || accountName.trim() === '' || password === ''}>
+							<button
+								type="submit"
+								disabled={
+									busy ||
+									accountName.trim() === '' ||
+									password === '' ||
+									// Under `Require proxies` an empty field is a submission the
+									// main process will refuse, so it is not offered.
+									(requireProxies && proxyUrl.trim() === '')
+								}
+							>
 								{busy ? 'Talking to Steam…' : 'Sign in and add authenticator'}
 							</button>
 						</div>

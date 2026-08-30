@@ -34,6 +34,36 @@ function account(overrides: Partial<{ marketListings: boolean; trades: boolean }
 	};
 }
 
+/**
+ * The projection the scheduler actually reads, derived from the same accounts
+ * the fake's `read` returns.
+ *
+ * Written as a derivation rather than a second literal on purpose. The engine
+ * stopped calling `read()` on its hot path because that deep-clones every
+ * secret in the vault once a second; a fake that answered the two independently
+ * could drift, and then these tests would be asserting against a vault no user
+ * has.
+ */
+function scheduleOf(accounts: readonly VaultAccountLike[] = []): {
+	steamId64: string;
+	marketListings: boolean;
+	trades: boolean;
+	pollIntervalSeconds: number;
+}[] {
+	return accounts.map((account) => ({
+		steamId64: account.steamId64,
+		marketListings: account.autoConfirm.marketListings,
+		trades: account.autoConfirm.trades,
+		pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds
+	}));
+}
+
+/** Only the fields these fakes actually populate. */
+interface VaultAccountLike {
+	steamId64: string;
+	autoConfirm: { marketListings: boolean; trades: boolean; pollIntervalSeconds: number };
+}
+
 function harness(options: {
 	accounts?: ReturnType<typeof account>[];
 	unlocked?: boolean;
@@ -59,7 +89,8 @@ function harness(options: {
 
 	const vault = {
 		isUnlocked: () => options.unlocked ?? true,
-		read: () => ({ accounts: options.accounts ?? [] })
+		read: () => ({ accounts: options.accounts ?? [] }),
+		autoConfirmSchedule: () => scheduleOf(options.accounts)
 	} as unknown as VaultService;
 
 	const confirmations = { runAutoConfirm } as unknown as ConfirmationsService;
@@ -435,7 +466,8 @@ describe('the scheduler chain', () => {
 		const engine = new AutoConfirmEngine({
 			vault: {
 				isUnlocked: () => true,
-				read: () => ({ accounts: [account({ trades: true })] })
+				read: () => ({ accounts: [account({ trades: true })] }),
+				autoConfirmSchedule: () => scheduleOf([account({ trades: true })])
 			} as unknown as VaultService,
 			confirmations: {
 				runAutoConfirm: async (): Promise<AutoConfirmOutcome> => {
@@ -596,7 +628,8 @@ describe('the clock is checked before a pass signs anything', () => {
 		const engine = new AutoConfirmEngine({
 			vault: {
 				isUnlocked: () => true,
-				read: () => ({ accounts: [account({ trades: true })] })
+				read: () => ({ accounts: [account({ trades: true })] }),
+				autoConfirmSchedule: () => scheduleOf([account({ trades: true })])
 			} as unknown as VaultService,
 			confirmations: {
 				runAutoConfirm: () => {
@@ -636,7 +669,8 @@ describe('the clock is checked before a pass signs anything', () => {
 		const engine = new AutoConfirmEngine({
 			vault: {
 				isUnlocked: () => true,
-				read: () => ({ accounts: [account({ trades: true })] })
+				read: () => ({ accounts: [account({ trades: true })] }),
+				autoConfirmSchedule: () => scheduleOf([account({ trades: true })])
 			} as unknown as VaultService,
 			confirmations: { runAutoConfirm } as unknown as ConfirmationsService,
 			ensureClock: () => clockDone,
@@ -668,20 +702,20 @@ describe('one slow account does not block the others', () => {
 			releaseA = resolve;
 		});
 		const ran: string[] = [];
+		const both: VaultAccountLike[] = [
+			{
+				steamId64: '76561198000000001',
+				autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
+			},
+			{
+				steamId64: '76561198000000002',
+				autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
+			}
+		];
 		const vault = {
 			isUnlocked: () => true,
-			read: () => ({
-				accounts: [
-					{
-						steamId64: '76561198000000001',
-						autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
-					},
-					{
-						steamId64: '76561198000000002',
-						autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
-					}
-				]
-			})
+			read: () => ({ accounts: both }),
+			autoConfirmSchedule: () => scheduleOf(both)
 		} as unknown as VaultService;
 		const confirmations = {
 			runAutoConfirm: async (steamId64: string) => {
@@ -724,7 +758,8 @@ describe('scheduling two accounts on the same interval', () => {
 		}));
 		const vault = {
 			isUnlocked: () => true,
-			read: () => ({ accounts })
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
 		} as unknown as VaultService;
 		let ranThisBeat = 0;
 		const confirmations = {
@@ -762,18 +797,18 @@ describe('after auto-confirm halts', () => {
 	it('stops reading the vault on every beat', async () => {
 		let at = 0;
 		let reads = 0;
+		const enabled: VaultAccountLike[] = [
+			{
+				steamId64: '76561198000000001',
+				autoConfirm: { marketListings: false, trades: true, pollIntervalSeconds: 15 }
+			}
+		];
 		const vault = {
 			isUnlocked: () => true,
-			read: () => {
+			read: () => ({ accounts: enabled }),
+			autoConfirmSchedule: () => {
 				reads += 1;
-				return {
-					accounts: [
-						{
-							steamId64: '76561198000000001',
-							autoConfirm: { marketListings: false, trades: true, pollIntervalSeconds: 15 }
-						}
-					]
-				};
+				return scheduleOf(enabled);
 			}
 		} as unknown as VaultService;
 		const confirmations = {
@@ -801,5 +836,85 @@ describe('after auto-confirm halts', () => {
 			await engine.tick();
 		}
 		expect(reads).toBe(atHalt);
+	});
+});
+
+/*
+ * **The default vault, which is the one almost everybody has.**
+ *
+ * The halted case above was fixed and tested; this one was neither. With
+ * auto-confirm switched off everywhere, no account is ever scheduled, so
+ * `earliestDueAt` never leaves 0, so the cheap early-out never fires — and
+ * every single beat, for the whole life of an unlocked session, went to the
+ * vault. That read used to be `read()`, which deep-clones every shared secret,
+ * identity secret and revocation code the user owns; §11 already admits those
+ * strings survive until collection, and this made an acknowledged limit
+ * measurably worse once a second in exchange for nothing.
+ *
+ * It still asks the vault every beat — that is what keeps a switch flipped in
+ * settings taking effect within a second — but what it asks for now holds no
+ * secrets.
+ */
+describe('a vault with auto-confirm switched off everywhere', () => {
+	it('never deep-clones the vault to discover there is nothing to do', async () => {
+		let clones = 0;
+		let projections = 0;
+		const idle: VaultAccountLike[] = [
+			{
+				steamId64: '76561198000000001',
+				autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+			},
+			{
+				steamId64: '76561198000000002',
+				autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+			}
+		];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => {
+				clones += 1;
+				return { accounts: idle };
+			},
+			autoConfirmSchedule: () => {
+				projections += 1;
+				return scheduleOf(idle);
+			}
+		} as unknown as VaultService;
+
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: () => Promise.reject(new Error('nothing should be polled'))
+			} as unknown as ConfirmationsService,
+			now: () => 0,
+			onFailure: () => undefined
+		});
+
+		for (let i = 0; i < 30; i += 1) {
+			await engine.tick();
+		}
+
+		expect(clones, 'the whole secret-bearing vault was cloned on a beat').toBe(0);
+		// The projection is still consulted, so switching auto-confirm on takes
+		// effect on the next beat rather than on the next unlock.
+		expect(projections).toBeGreaterThan(0);
+	});
+
+	it('carries the same fields the scheduler used to read off the vault', () => {
+		expect(
+			scheduleOf([
+				{
+					steamId64: '76561198000000001',
+					autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 45 }
+				}
+			])
+		).toEqual([
+			{
+				steamId64: '76561198000000001',
+				marketListings: true,
+				trades: false,
+				pollIntervalSeconds: 45
+			}
+		]);
 	});
 });

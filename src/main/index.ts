@@ -18,7 +18,8 @@ import { isAllowedNavigation, type NavigationTarget } from '../shared/security-p
 import { setTrustedSender } from './ipc/router';
 import { registerAppInfoHandler } from './app-info';
 import { VaultService } from './vault/service';
-import { registerVaultHandlers, RevocationCeremony } from './vault/ipc';
+import { registerVaultHandlers } from './vault/ipc';
+import { RevocationCeremony } from './vault/revocation-ceremony';
 import { ImportService } from './import/service';
 import { registerImportHandlers } from './import/ipc';
 import { CodeService } from './codes/service';
@@ -273,6 +274,8 @@ function start(): void {
 			// Chromium keeps them in the per-account session, and a web session that
 			// survived the lock would make the lock a smaller thing than it claims.
 			transports.forgetAll();
+			// And the Direct mints', which are Steam sessions by any other name.
+			directTransports.forgetAll();
 
 			// The in-app browsers hold their own sessions, in their own partitions,
 			// which `forgetAll` above does not reach — it only knows the ones it
@@ -370,12 +373,74 @@ function start(): void {
 				...(redirect === undefined ? {} : { redirect })
 			})
 	};
-	const transports = new SteamTransportFactory(networking);
+	/*
+	 * The policy is read from the vault on every construction, so turning
+	 * `Require proxies` on stops the next request rather than the next launch.
+	 * Locked reads false, and a locked vault has nothing to request with anyway.
+	 */
+	const requireProxies = (): boolean => vault.isUnlocked() && vault.settings().requireProxies;
+
+	/**
+	 * Aborts an update check that `Require proxies` has just forbidden.
+	 *
+	 * Replaced after each abort rather than reused: an `AbortController` stays
+	 * aborted, so keeping one would refuse every later check for the lifetime of
+	 * the process — including the ones the user turns back on.
+	 */
+	let updatePolicyAbort = new AbortController();
+
+	/**
+	 * Which proxy-policy state the update check is in. Bumped on every change.
+	 *
+	 * The abort alone was not enough: the aborted request had not settled yet, so
+	 * a caller arriving after the policy was turned back off joined it and got
+	 * the abort — cached, by then, as an ordinary failure. See
+	 * `UpdateCheckDeps.policyGeneration`.
+	 */
+	let updatePolicyGeneration = 0;
+	const transports = new SteamTransportFactory(
+		networking,
+		() => Date.now(),
+		'steam-',
+		requireProxies
+	);
+
+	/*
+	 * A second factory, for the browser's **Direct** option only.
+	 *
+	 * That option exists because a shared proxy address collects rate limits and
+	 * Cloudflare challenges a home connection never sees — so it is the way past
+	 * a proxy that is stuck, and until now it was not: the choice reached the
+	 * window and the Steam token was still minted through the proxy being avoided.
+	 * A dead proxy therefore failed at the token and no window opened at all, and
+	 * a working one issued the session cookie to the proxy's address and then
+	 * spent it from the user's own — two addresses for one sign-in, the exact
+	 * correlation routing exists to prevent.
+	 *
+	 * A separate **factory**, not an unrouted call into the one above, and not a
+	 * shared partition: Electron hands back the same session object for the same
+	 * partition name, so asking the account's factory for a direct transport
+	 * would reconfigure the account's own session and every later confirmation
+	 * would be refused by `assertRouted` — correctly, and for no reason the user
+	 * could see. Its own prefix keeps the two apart, and it is swept by the same
+	 * hooks as the first.
+	 */
+	const directTransports = new SteamTransportFactory(
+		networking,
+		() => Date.now(),
+		'steam-direct-',
+		// Its accounts never carry a proxy, so under `Require proxies` this
+		// factory builds nothing at all. That is the point: Direct is the route
+		// the setting exists to remove, and removing it at the factory means a
+		// caller that forgets to check cannot route around the setting.
+		requireProxies
+	);
 	const ceremony = new RevocationCeremony();
 	// Shares the codes' notion of Steam's time, so a confirmation and a code can
 	// never disagree about what "now" is.
 	const confirmations = new ConfirmationsService(vault, transports, {
-		timeOffsetSeconds: () => codes.timeOffsetSeconds()
+		timeOffsetSeconds: () => codes.timeOffsetSeconds(),
+		requireProxies
 	});
 	const clock = new SteamClock({ codes, vault, transports });
 
@@ -385,7 +450,24 @@ function start(): void {
 		// inside the same vault write (settings path) or left alone (import only
 		// changes the proxy URL).
 		transports.forget(steamId64);
+		// The Direct mint's session holds a Steam cookie jar of its own, so it goes
+		// wherever the account's does.
+		directTransports.forget(steamId64);
 		confirmations.forgetAccount(steamId64);
+
+		// **And the browser window, which is the newest thing tied to a route.**
+		// The two calls above drop what this process holds; a window opened for
+		// this account holds its own Steam session in its own partition, and left
+		// alone it would go on browsing over the proxy the user just replaced —
+		// with the old address still attached to the account, on the one screen
+		// where they are actually looking at Steam. Removal has the same problem
+		// with a worse ending: a signed-in window for an account this vault no
+		// longer has.
+		//
+		// Fired rather than awaited, because every caller of this is a synchronous
+		// handler. `closeAccount` is written not to reject for that reason; the
+		// catch is the belt to those braces.
+		void browsers.closeAccount(steamId64).catch(() => undefined);
 	};
 
 	// Constructed after the network pieces so a commit that changes routing can
@@ -488,10 +570,81 @@ function start(): void {
 			(steamId64) => autoConfirm.reset(steamId64),
 			// So the account list can say what is actually known about each
 			// account's egress rather than only what was configured for it.
-			(steamId64) => transports.routingStatus(steamId64)
+			(steamId64) => transports.routingStatus(steamId64),
+			() => {
+				/*
+				 * **`Require proxies` was just saved on, so make it true of what is
+				 * already running.**
+				 *
+				 * Writing the field is not enforcing the rule. A Direct or
+				 * Steam-only window opened a minute ago stays on screen, stays
+				 * signed in to Steam, and goes on making the requests the user has
+				 * just forbidden — and cached transports keep answering for
+				 * unproxied accounts, because the refusal is at construction.
+				 *
+				 * Not awaited, matching every other callback here: this runs inside
+				 * the settings handler, and a save must not wait on a window
+				 * teardown to report success.
+				 */
+				void browsers.closeNotFullyRouted();
+				// Every cached transport goes, proxied or not. Rebuilding one is a
+				// session construction, and the next build is the check — so this
+				// is what makes an already-running unproxied account stop.
+				transports.forgetAll();
+				directTransports.forgetAll();
+
+				/*
+				 * **And the paths that never build a transport.**
+				 *
+				 * `steam-session` speaks over Node's own HTTP stack, so nothing
+				 * above reaches a sign-in already talking to Steam. Each of these
+				 * cancels only the unrouted work: a password travelling through
+				 * the account's own proxy still satisfies the new rule, and
+				 * killing it would make enabling the setting destroy the traffic
+				 * it exists to protect.
+				 */
+				confirmations.cancelUnroutedSignIns();
+				enrollment.forgetUnrouted();
+				/*
+				 * The transfer's *authentication* stage only. It changes nothing on
+				 * Steam and carries both a password and a Guard code, so it is the
+				 * one transfer stage that is safe to abandon and expensive to leave
+				 * running. `transfer.ts` records why the later stages are not.
+				 */
+				transfer.cancelUnroutedAuthentication();
+
+				/*
+				 * The update check is nobody's account: it goes to GitHub over
+				 * whatever route the machine has. Aborting the request rather than
+				 * discarding its answer, which is all the handler could do.
+				 */
+				updatePolicyAbort.abort();
+				updatePolicyAbort = new AbortController();
+				// So nothing joins, or caches on behalf of, the attempt just aborted.
+				updatePolicyGeneration += 1;
+
+				/*
+				 * **A transfer in flight is deliberately not cancelled.**
+				 *
+				 * `TransferService.cancel` refuses while a request is in the air,
+				 * and the reason is stronger than this policy: by then Steam may
+				 * have rotated the authenticator, and `pending` holds the only
+				 * route back to secrets Steam will not reissue. Abandoning it to
+				 * stop one unrouted request would risk locking the user out of the
+				 * account permanently.
+				 *
+				 * New transfers are refused before any credential is sent — see
+				 * `transfer-ipc.ts` — so the exposure is one request already
+				 * begun, and it ends on its own.
+				 */
+			}
 		);
 		registerImportHandlers(imports);
-		registerTransferHandlers(transfer, vault);
+		// The same ceremony the vault handlers use, not a second one: a transfer
+		// shows the recovery code, and `revocation:confirmBackup` refuses to mark a
+		// code as written down unless it was shown. Two instances would mean the
+		// showing and the confirming disagreed about whether it ever happened.
+		registerTransferHandlers(transfer, vault, ceremony);
 		registerEnrollmentHandlers(
 			enrollment,
 			vault,
@@ -563,6 +716,10 @@ function start(): void {
 
 		registerBrowserHandlers({
 			browsers,
+			// Read at call time for the same reason `account` is: the setting can be
+			// turned on while a window is being opened, and the answer that matters
+			// is the one true when the route is decided.
+			requireProxies: () => vault.settings().requireProxies,
 			// Read at call time. A captured account would go stale the moment the
 			// user changed its routing, and the browser would then open through the
 			// proxy they had just moved off.
@@ -578,18 +735,36 @@ function start(): void {
 				};
 			},
 			/*
-			 * Minted through the account's own transport, so the request that
-			 * fetches the token leaves by the same address the browsing will. Doing
-			 * it any other way would mean the token arrived from the user's own
-			 * connection and was then used from a proxy — two addresses for one
-			 * session, which is the pattern routing exists to avoid.
+			 * Minted by the same route the browsing will use, so the request that
+			 * fetches the token leaves by the same address that will spend it. Any
+			 * other way means the token arrived from one connection and was used
+			 * from another — two addresses for one session, which is the pattern
+			 * routing exists to avoid.
+			 *
+			 * **`useProxy`, not the stored proxy.** This read the account's proxy
+			 * unconditionally, so the user's choice reached the window and stopped
+			 * there. That broke it in both directions: _Direct_ is offered as the
+			 * way past a proxy that is rate-limited, blocked or dead, and it still
+			 * minted through that proxy — so the fallback failed at the token and
+			 * the window never opened. With a working proxy it was the correlation
+			 * above, in the one flow this comment is about.
 			 */
-			mintToken: async (steamId64, refreshToken) => {
-				const transport = await transports.forAccount({
-					steamId64,
-					proxyUrl: vault.read().accounts.find((candidate) => candidate.steamId64 === steamId64)
-						?.proxyUrl
-				});
+			mintToken: async (steamId64, refreshToken, route) => {
+				const stored = vault
+					.read()
+					.accounts.find((candidate) => candidate.steamId64 === steamId64)?.proxyUrl;
+				const transport =
+					route === 'direct'
+						? // No proxy, in a session of its own. See `directTransports`.
+							await directTransports.forAccount({ steamId64 })
+						: /*
+							 * Both proxied routes mint through the account's proxy. "Steam
+							 * only" is a promise about *Steam* traffic, and a token mint is
+							 * a request to Steam's own API — so it goes the same way the
+							 * window's Steam requests will, which is the whole point of
+							 * minting it by the route that will spend it.
+							 */
+							await transports.forAccount({ steamId64, proxyUrl: stored });
 				return mintAccessToken(transport, steamId64, refreshToken, Date.now());
 			},
 			isUnlocked: () => vault.isUnlocked(),
@@ -597,14 +772,45 @@ function start(): void {
 		});
 
 		registerUpdateHandlers({
+			policyGeneration: () => updatePolicyGeneration,
 			// Read at call time, not captured: a vault that is locked has no settings
 			// to consult, and "locked" is not consent to make a network request.
-			isEnabled: () => vault.isUnlocked() && vault.settings().updateCheck,
+			/*
+			 * **`requireProxies` refuses this outright.**
+			 *
+			 * The update check is the one request this application makes that no
+			 * account's proxy applies to — it goes to GitHub, from this machine,
+			 * over whatever route the machine has. A vault whose owner has said
+			 * "everything goes through a proxy" has said something this request
+			 * cannot honour, so it does not run rather than running unrouted. The
+			 * Settings screen says so where the switch is.
+			 */
+			isEnabled: () =>
+				vault.isUnlocked() && vault.settings().updateCheck && !vault.settings().requireProxies,
 			currentVersion: app.getVersion(),
-			// Electron's own stack rather than `fetch`, so this obeys the same
-			// proxy/network configuration as the rest of the process — and so the one
-			// non-Steam request the app makes is not made by a different client than
-			// everything else.
+			/*
+			 * Electron's own stack rather than Node's `fetch`, so the one non-Steam
+			 * request this application makes is made by the same client as
+			 * everything else.
+			 *
+			 * **It is not routed, and this used to claim it was.** `net.fetch` uses
+			 * `session.defaultSession`; per-account proxies are applied to the
+			 * per-account sessions and to the browser's, and nothing configures the
+			 * default one. So an update check leaves by the machine's own address
+			 * even for someone who routes every account — and the comment here said
+			 * the opposite, which is the worse half of the problem.
+			 *
+			 * Left direct on purpose rather than fixed by picking a proxy. There is
+			 * no application-wide proxy setting, only per-account ones, and sending
+			 * an app-wide request down one account's route would tell that operator
+			 * this application is running while linking the check to an account it
+			 * has nothing to do with. What this request reveals — an IP, and that
+			 * ODA is running — GitHub already saw when the build was downloaded.
+			 *
+			 * So it is disclosed instead: on the Settings control beside the toggle,
+			 * and in THREAT_MODEL §2.6. It is one switch, and it is off in a Store
+			 * build entirely.
+			 */
 			fetchText: async (url) => {
 				const response = await net.fetch(url, {
 					headers: { Accept: 'application/vnd.github+json', 'User-Agent': branding.binaryName },
@@ -612,7 +818,21 @@ function start(): void {
 					// that hangs leaves this handler unresolved for as long as the socket
 					// stays open — a leak rather than a stall, since the renderer fires
 					// this and forgets it, but there is no reason to hold either.
-					signal: AbortSignal.timeout(UPDATE_CHECK_TIMEOUT_MS),
+					/*
+					 * Two ways to give up: the timeout, and the proxy policy changing
+					 * under it.
+					 *
+					 * Re-reading the setting when the response arrives discards the
+					 * *answer* and leaves the request running — which is the half that
+					 * matters here, because this one goes to GitHub over whatever route
+					 * the machine has and no account's proxy applies to it. A user who
+					 * has just said "everything goes through a proxy" has forbidden it,
+					 * and it was still on the wire.
+					 */
+					signal: AbortSignal.any([
+						AbortSignal.timeout(UPDATE_CHECK_TIMEOUT_MS),
+						updatePolicyAbort.signal
+					]),
 					// The URL is derived from `branding.repository` and pinned to
 					// api.github.com. Following a redirect would let whatever answers
 					// that name send us somewhere else, and the only thing checked

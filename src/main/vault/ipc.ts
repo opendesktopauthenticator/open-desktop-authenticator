@@ -1,11 +1,22 @@
-import { createHash } from 'node:crypto';
-import type { VaultService } from './service';
 import { BrowserWindow, dialog } from 'electron';
+import type { VaultService } from './service';
+import { RevocationCeremony } from './revocation-ceremony';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { planProxy } from '../net/egress';
 import type { RoutingStatus } from '../net/transport';
 import { matchesTradesAck, TRADES_ACK, type AccountSummary } from '../../shared/ipc';
+
+/*
+ * Re-exported, not redefined.
+ *
+ * The ceremony moved to its own module once the transfer handlers needed to
+ * record a reveal too — importing it from here would have pulled the whole
+ * vault IPC surface, and Electron's `dialog`, into a module that needs a `Map`
+ * and a hash. This keeps the name available where it has always been imported
+ * from.
+ */
+export { RevocationCeremony };
 
 /**
  * The vault's IPC surface (§11 S6, §24.3).
@@ -20,55 +31,6 @@ import { matchesTradesAck, TRADES_ACK, type AccountSummary } from '../../shared/
  *    a damaged file already produce the same message inside the crypto layer;
  *    nothing here reintroduces a distinction.
  */
-
-/**
- * Which accounts have actually had their revocation code shown, this unlock.
- *
- * §11 S12's ceremony is *show the code, then confirm you wrote it down*. The UI
- * presents it that way, but the UI is not what enforces it — the renderer is
- * untrusted, and a `confirmRevocationBackup` call on its own would clear the
- * warning for an account whose code nobody ever saw. Marking a backup done that
- * did not happen is worse than nagging, because it is the one warning standing
- * between a user and an unrecoverable account.
- *
- * Reset on lock: an unlock is a new sitting, and the ceremony is per sitting.
- */
-export class RevocationCeremony {
-	/**
-	 * SteamID to a digest of the code that was shown for it.
-	 *
-	 * **Not a `Set` of SteamIDs**, which is what this was. The ceremony is about a
-	 * *code*, and identity alone cannot express that: reveal code A, import a
-	 * maFile carrying a different code B for the same account, and confirming
-	 * marked B written down on the strength of having shown A. `mergeAccount` gets
-	 * this right — it clears `revocationBackedUpAt` when the code changes, with a
-	 * comment saying the ceremony is owed again — so the two halves actively
-	 * disagreed, and the half that wins is the one that silences the warning.
-	 *
-	 * A digest rather than the code, because this outlives the handler that read
-	 * it and a second plaintext copy of an unrecoverable secret earns nothing: the
-	 * only question ever asked of it is whether it equals the stored code.
-	 */
-	private readonly revealed = new Map<string, string>();
-
-	recordReveal(steamId64: string, revocationCode: string): void {
-		this.revealed.set(steamId64, digest(revocationCode));
-	}
-
-	/** Whether *this* code is the one that was shown for this account. */
-	hasRevealed(steamId64: string, revocationCode: string): boolean {
-		const shown = this.revealed.get(steamId64);
-		return shown !== undefined && shown === digest(revocationCode);
-	}
-
-	forget(): void {
-		this.revealed.clear();
-	}
-}
-
-function digest(revocationCode: string): string {
-	return createHash('sha256').update(revocationCode, 'utf8').digest('hex');
-}
 
 /**
  * @param onProxyChanged told when an account's routing changed, so the network
@@ -86,12 +48,33 @@ export function registerVaultHandlers(
 	onAutoConfirmChanged: (steamId64: string) => void = () => undefined,
 	// A lookup rather than the transport factory itself: this module has no other
 	// business with the network layer, and the account list only needs an answer.
-	routingStatus: (steamId64: string) => RoutingStatus | undefined = () => undefined
+	routingStatus: (steamId64: string) => RoutingStatus | undefined = () => undefined,
+	/**
+	 * Fired when a save turns `Require proxies` **on**, and only then.
+	 *
+	 * A callback rather than something this module does itself: the work is
+	 * closing browser windows and dropping cached transports, and this file has
+	 * no business with either.
+	 *
+	 * **On the transition, not on every save that leaves it on.** Firing it
+	 * whenever the value was true looked idempotent — with the rule in force
+	 * there is nothing non-compliant left to close — and it is not, because the
+	 * callback also calls `forgetAll()`. That advances every transport's
+	 * generation and cancels requests in flight. So with strict mode already on,
+	 * saving an unrelated setting like the clipboard timeout killed a correctly
+	 * proxied confirmation that happened to be running: enforcement interrupting
+	 * exactly the traffic it exists to protect.
+	 */
+	onRequireProxies: () => void = () => undefined
 ): void {
 	registerHandler(CHANNELS.vaultStatus, () => ({
 		exists: vault.exists(),
 		unlocked: vault.isUnlocked(),
 		msUntilAutoLock: vault.msUntilAutoLock() ?? null,
+		// Locked means no settings to read, and nothing on screen to gate.
+		requireProxies: vault.isUnlocked() && vault.settings().requireProxies,
+		// Locked reads false for the same reason: nothing is being checked then.
+		updateCheck: vault.isUnlocked() && vault.settings().updateCheck,
 		backupAvailable: vault.backupAvailable() !== undefined
 	}));
 
@@ -170,6 +153,7 @@ export function registerVaultHandlers(
 		// the vault to hand back two numbers.
 		const settings = vault.settings();
 		return {
+			requireProxies: settings.requireProxies,
 			autoLockMinutes: settings.autoLockMinutes,
 			clipboardClearSeconds: settings.clipboardClearSeconds,
 			updateCheck: settings.updateCheck
@@ -178,12 +162,16 @@ export function registerVaultHandlers(
 
 	registerHandler(
 		CHANNELS.settingsUpdate,
-		async ({ autoLockMinutes, clipboardClearSeconds, updateCheck }) => {
+		async ({ requireProxies, autoLockMinutes, clipboardClearSeconds, updateCheck }) => {
+			// Read before the write, because after it there is nothing left to
+			// compare against and every save would look like a transition.
+			const wasRequired = vault.settings().requireProxies;
 			await vault.mutate((draft) => {
 				// Assigned field by field, not spread. Spreading the request would let a
 				// future field arrive here without anyone deciding it should be writable,
 				// and `convenienceUnlock` is exactly the sort of thing that must not be
 				// settable by accident.
+				draft.settings.requireProxies = requireProxies;
 				draft.settings.autoLockMinutes = autoLockMinutes;
 				draft.settings.clipboardClearSeconds = clipboardClearSeconds;
 				draft.settings.updateCheck = updateCheck;
@@ -194,6 +182,13 @@ export function registerVaultHandlers(
 			// only has to survive the write — but touching also stops a save from
 			// counting as idle time.
 			vault.touch();
+
+			// After the write, so whatever the callback tears down is judged
+			// against the new rule rather than the old one — and only when the
+			// rule is new, for the reason `onRequireProxies` documents.
+			if (requireProxies && !wasRequired) {
+				onRequireProxies();
+			}
 			return { ok: true as const };
 		}
 	);

@@ -209,7 +209,31 @@ describe('no filesystem path crosses IPC', () => {
 	const MAIN = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
 
 	it('does not let a failed export throw the destination path', () => {
-		expect(ENROLL).toMatch(/catch \{[\s\S]{0,200}could not be written to that location/);
+		/*
+		 * Asserted on what is thrown rather than on the shape of the `catch`.
+		 *
+		 * The refusal moved into a helper when the write and the rename were split
+		 * apart — so a pattern anchored on `catch {` was checking punctuation, not
+		 * the rule. The rule is that the message names the *file the user asked
+		 * for* and never the path the OS dialog chose, and that is what these two
+		 * lines say.
+		 */
+		expect(ENROLL).toMatch(/`\$\{suggested\} could not be written to that location\.`/);
+		expect(ENROLL, 'a full path can reach the renderer in an error').not.toMatch(
+			/throw new Error\(`\$\{(destination|temp)\}/
+		);
+	});
+
+	/*
+	 * The one exception, and it is not a path: a lock is reported as a lock.
+	 * Wrapping it in "could not be written to that location" would send somebody
+	 * to check their drive over a vault that timed out while they watched.
+	 */
+	it('reports a lock during the write as a lock', () => {
+		const write = ENROLL.slice(ENROLL.indexOf('const temp = `${destination}'));
+		// Thrown from outside the write's own catch, so it can never be dressed up
+		// as a disk problem and send somebody to check their drive.
+		expect(write).toMatch(/if \(!vault\.isUnlocked\(\)\) \{[\s\S]{0,200}new VaultLockedError\(\)/);
 	});
 
 	it('does not let a failed recovery read throw the chosen path', () => {
@@ -424,5 +448,59 @@ describe('a recovery file is not decrypted after the vault locks', () => {
 		const decrypt = recover.indexOf('readRecoveryFile(');
 		expect(check).toBeGreaterThan(pick);
 		expect(check).toBeLessThan(decrypt);
+	});
+});
+
+/*
+ * **A checkbox that led nowhere.**
+ *
+ * The completion screen shows the recovery code Steam will never issue again
+ * and asks the user to confirm they wrote it down, above a Done button that
+ * only closed the screen. The account stayed `pendingRevocationBackup` and the
+ * home screen went on warning that the code had never been backed up — about a
+ * code the user had just been shown and had just confirmed keeping. The only
+ * way to clear it was a second ceremony re-revealing the same code behind the
+ * passphrase, which teaches people the warning means nothing.
+ */
+describe('the recovery-code acknowledgement on the completion screen', () => {
+	it('is recorded, not only used to enable the button', () => {
+		expect(SCREEN).toMatch(/onAcknowledgeBackup\(done\.steamId64\)/);
+	});
+
+	it('still requires the box to be ticked first', () => {
+		expect(SCREEN).toMatch(/disabled=\{!savedCode/);
+	});
+
+	/*
+	 * **This assertion used to require the failure to be silent.**
+	 *
+	 * It read `.finally(onClose)` and called that deliberate: the account is
+	 * stored, the standalone ceremony can clear the warning later, so closing
+	 * regardless seemed kinder than trapping somebody on the screen. It is not.
+	 * A vault lock, a storage error or an IPC failure meant the user ticked the
+	 * box, pressed Done, and the home screen went on saying the recovery code
+	 * had never been backed up — with nothing anywhere explaining why. That is
+	 * the "you asked for something and it did not happen" shape the rest of this
+	 * application is written against, and the test was holding it in place.
+	 *
+	 * The code is still on screen at that moment, which is the one point where
+	 * retrying costs nothing at all.
+	 */
+	it('closes only when the acknowledgement was actually recorded', () => {
+		expect(SCREEN).not.toMatch(/\.finally\(onClose\)/);
+		expect(SCREEN).toMatch(/onAcknowledgeBackup\(done\.steamId64\)\.then\(/);
+		expect(SCREEN).toMatch(/setAcknowledgeError\(messageOf\(err\)\)/);
+	});
+
+	it('says what went wrong, and offers a way out that does not pretend', () => {
+		expect(SCREEN).toMatch(/acknowledgeError !== undefined/);
+		expect(SCREEN).toMatch(/role="alert"/);
+		// Somebody whose vault locked mid-press cannot record anything from here,
+		// and holding them on this screen would be its own trap.
+		expect(SCREEN).toMatch(/Close without recording it/);
+	});
+
+	it('is wired to the same channel the standalone ceremony uses', () => {
+		expect(APP).toMatch(/onAcknowledgeBackup=\{\(steamId64\) => api\.confirmRevocationBackup/);
 	});
 });

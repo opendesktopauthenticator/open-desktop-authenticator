@@ -143,19 +143,51 @@ describe('S2 — no long-term secret has a path to the renderer', () => {
 		for (const channel of Object.values(CHANNELS)) {
 			const { response } = IPC_CONTRACT[channel];
 
-			// The reveal channel legitimately returns a revocation code, so injecting
-			// one there proves nothing. Every OTHER secret must still be stripped
-			// from it — the exception is one field on one channel, not a hole.
+			/*
+			 * Three channels legitimately return a revocation code, so injecting one
+			 * there proves nothing. Every OTHER secret must still be stripped from
+			 * them — the exception is one field on three channels, not a hole.
+			 *
+			 * It read "one field on one channel" and listed one, because the two
+			 * transfer channels had invalid samples and were skipped entirely. See
+			 * the enumeration below for why a transfer shows the code.
+			 */
+			const revealsRevocationCode: string[] = [
+				CHANNELS.revocationReveal,
+				CHANNELS.transferComplete,
+				CHANNELS.transferRetryPersist
+			];
 			const injected = { ...SECRETS };
-			if (channel === CHANNELS.revocationReveal) {
+			if (revealsRevocationCode.includes(channel)) {
 				delete (injected as Partial<typeof SECRETS>).revocationCode;
 			}
+
+			/*
+			 * **The clean sample has to be valid, and that is now asserted.**
+			 *
+			 * Only the *contaminated* response may be rejected — that is a channel
+			 * refusing a secret, which is the outcome this check is happy with. A
+			 * sample that cannot parse on its own is a different thing entirely: it
+			 * means this channel is silently skipped, and the skip is invisible
+			 * because the test still passes.
+			 *
+			 * That is not hypothetical. Adding two required fields to
+			 * `vaultStatusResponse` left its sample short of them, and the
+			 * secret-stripping check for that channel stopped running without a
+			 * single assertion failing.
+			 */
+			const clean = response.safeParse(sampleResponse(channel));
+			expect(
+				clean.success,
+				`${channel}: the sample response is not valid, so this channel is not being checked`
+			).toBe(true);
 
 			// Build a minimal valid response, then contaminate it.
 			const parsed = response.safeParse({ ...sampleResponse(channel), ...injected });
 
 			if (!parsed.success) {
-				// Rejecting outright is also an acceptable outcome.
+				// Rejecting the contaminated one outright is an acceptable outcome:
+				// the secret did not get through.
 				continue;
 			}
 			const leaked = values(parsed.data).filter((v) => v === 'LEAKED');
@@ -297,9 +329,22 @@ describe('S2 — no long-term secret has a path to the renderer', () => {
 		}
 	});
 
-	it('reveals a revocation code on exactly one channel, by design', () => {
-		// §11 S2 exception (a). If a second channel ever returns one, this fails —
-		// which is the point: the exception has to stay deliberate and singular.
+	/**
+	 * §11 S2 exception (a), enumerated.
+	 *
+	 * **This said "exactly one channel" and named one, and it was wrong.** A
+	 * transfer ends by showing the user the revocation code Steam issued for the
+	 * authenticator it just moved — that is the ceremony, and `transfer:complete`
+	 * and `transfer:retryPersist` both return it in their schemas. The assertion
+	 * did not notice because both samples were invalid, so `safeParse` failed and
+	 * the filter skipped them: a check counting channels, blind to two of the
+	 * three it was counting.
+	 *
+	 * Enumerated rather than loosened. Each of these shows a code the user is
+	 * being told to write down, at the moment they are told to; a fourth would
+	 * still be a finding, which is what this test is for.
+	 */
+	it('reveals a revocation code on exactly these channels, by design', () => {
 		const revealing = Object.values(CHANNELS).filter((channel) => {
 			const parsed = IPC_CONTRACT[channel].response.safeParse({
 				...sampleResponse(channel),
@@ -307,7 +352,9 @@ describe('S2 — no long-term secret has a path to the renderer', () => {
 			});
 			return parsed.success && values(parsed.data).includes('R12345');
 		});
-		expect(revealing).toEqual([CHANNELS.revocationReveal]);
+		expect(revealing.sort()).toEqual(
+			[CHANNELS.revocationReveal, CHANNELS.transferComplete, CHANNELS.transferRetryPersist].sort()
+		);
 	});
 });
 
@@ -319,6 +366,12 @@ function sampleResponse(channel: string): Record<string, unknown> {
 				productName: 'x',
 				version: '0.0.0',
 				company: 'MASTERPANEL LLC',
+				// These four were missing, so this channel's secret-stripping check
+				// had been skipped in silence — see the assertion that now catches it.
+				companyShort: 'MASTERPANEL',
+				companyWebsite: 'https://example.invalid',
+				website: 'https://example.invalid',
+				repository: 'https://example.invalid/repo',
 				brandingUnresolved: true,
 				platform: 'win32',
 				installedFromStore: false,
@@ -326,7 +379,14 @@ function sampleResponse(channel: string): Record<string, unknown> {
 				security: { sandbox: true, contextIsolation: true, nodeIntegration: false }
 			};
 		case CHANNELS.vaultStatus:
-			return { exists: true, unlocked: false, msUntilAutoLock: null, backupAvailable: false };
+			return {
+				exists: true,
+				unlocked: false,
+				msUntilAutoLock: null,
+				requireProxies: false,
+				updateCheck: true,
+				backupAvailable: false
+			};
 		case CHANNELS.accountsList:
 			return { accounts: [] };
 		case CHANNELS.importScan:
@@ -365,6 +425,59 @@ function sampleResponse(channel: string): Record<string, unknown> {
 				failures: [],
 				clockUnverified: true
 			};
+		case CHANNELS.settingsGet:
+			return {
+				requireProxies: false,
+				autoLockMinutes: 10,
+				clipboardClearSeconds: 30,
+				updateCheck: true
+			};
+		case CHANNELS.updateCheck:
+			return { state: 'upToDate' };
+		case CHANNELS.transferAuthenticate:
+			return { state: 'authenticated', steamId64: '76561198000000001', accountName: 'trader' };
+		case CHANNELS.transferStartChallenge:
+			return { sent: true, shape: 'json' };
+		case CHANNELS.transferComplete:
+		case CHANNELS.transferRetryPersist:
+			return {
+				steamId64: '76561198000000001',
+				accountName: 'trader',
+				revocationCode: 'R12345',
+				timeOffsetSeconds: 0
+			};
+		case CHANNELS.transferCancel:
+			return {};
+		case CHANNELS.enrollBegin:
+		case CHANNELS.enrollEmailCode:
+			return { state: 'needsEmailCode' };
+		case CHANNELS.enrollActivate:
+			return { state: 'activated' };
+		case CHANNELS.accountExport:
+			return { state: 'saved', fileName: 'a.maFile' };
+		case CHANNELS.accountRecover:
+			return { state: 'cancelled' };
+		case CHANNELS.accountOpenBrowser:
+			return { signInRequired: false };
+		case CHANNELS.vaultAdopt:
+			return { state: 'cancelled' };
+		case CHANNELS.importUnlock:
+			return { cancelled: false, candidates: [], rejected: [] };
+		case CHANNELS.activityList:
+			// Populated for the same reason the import and confirmation samples are:
+			// an empty array cannot carry a leaked field.
+			return {
+				entries: [
+					{
+						steamId64: '76561198000000001',
+						entry: { kind: 'failed', at: '2026-08-01T00:00:00.000Z', reason: 'a reason' }
+					}
+				],
+				urgent: false,
+				seq: 0
+			};
+		case CHANNELS.activityAcknowledge:
+			return { ok: true, urgent: false };
 		case CHANNELS.codeCopy:
 			return { code: 'X45RP', clipboardClearsInSeconds: 30 };
 		case CHANNELS.confirmationsList:
@@ -372,6 +485,7 @@ function sampleResponse(channel: string): Record<string, unknown> {
 			// the secret-stripping checks would pass without testing anything.
 			return {
 				signInRequired: false,
+				unreadable: 0,
 				confirmations: [
 					{
 						id: '11',

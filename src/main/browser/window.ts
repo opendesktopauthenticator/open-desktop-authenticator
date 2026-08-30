@@ -1,4 +1,12 @@
-import { describesDirectRoute, planProxy, routedEndpoint, type ProxyPlan } from '../net/egress';
+import {
+	STEAM_ROUTED_DOMAINS,
+	describesDirectRoute,
+	planProxy,
+	routedEndpoint,
+	steamOnlyBypass,
+	type ProxyPlan
+} from '../net/egress';
+import type { BrowserRoute } from '../../shared/ipc';
 
 /**
  * An in-app browser, signed in as one account and routed like that account.
@@ -106,6 +114,24 @@ export interface BrowserWindowHandle {
 	 * has been told their traffic is routed.
 	 */
 	setWebRtcPolicy(policy: 'disable_non_proxied_udp' | 'default'): void;
+	/**
+	 * What to answer when the **proxy** asks who we are.
+	 *
+	 * `planProxy` strips credentials out of the Chromium rule on purpose — a
+	 * password in `proxyRules` ends up in `resolveProxy` output and in every
+	 * message quoting it — and hands them back separately for whoever does the
+	 * authenticating. `transport.ts` has answered its own `login` event with them
+	 * since routing existed. This window never did.
+	 *
+	 * Electron cancels an unhandled `login`, so the effect was a proxy this
+	 * application accepts, stores, and successfully mints tokens through, whose
+	 * every page load in the browser died on a 407. Fails closed, which is the
+	 * right direction, but a supported configuration that silently only half
+	 * works is still a defect.
+	 *
+	 * Undefined when the proxy needs no credentials, or when there is no proxy.
+	 */
+	setProxyCredentials(credentials: { username: string; password: string } | undefined): void;
 	/** Replace the window's own title. Never called with anything a page supplied. */
 	setTitle(title: string): void;
 	/** Bring this window to the user, restoring it if it was minimised. */
@@ -142,6 +168,40 @@ export const BROWSER_USER_AGENT =
 
 /** Where a signed-in browsing session starts. */
 export const START_URL = 'https://steamcommunity.com/my/tradeoffers/';
+
+/**
+ * A host no list mentions, used to check that a routed window sends the
+ * unrecognised ones through the proxy rather than around it.
+ *
+ * `.invalid` is reserved by RFC 2606 and cannot resolve, so asking about it
+ * touches no network — and if it ever *did* resolve, the answer being checked
+ * is that it is proxied.
+ */
+const UNKNOWN_HOST_PROBE = 'https://route-check.invalid/';
+
+/**
+ * The addresses Chromium bypasses unless it is told not to.
+ *
+ * **These are checked because they were once wrong and nothing noticed.** With
+ * the "Steam only" route configured as a PAC script, every one of them resolved
+ * `DIRECT` — the implicit bypass is applied before a PAC is consulted, and
+ * `<-loopback>` does not switch it off in that mode. A window advertised as
+ * routed could reach local services and the cloud-metadata address off-proxy.
+ *
+ * `169.254.169.254` earns its place by name rather than as a sample of the
+ * link-local range: on a cloud host it is the instance metadata service, which
+ * hands out credentials to anything that can make an unauthenticated request to
+ * it. A browser window is exactly that.
+ *
+ * Asking costs nothing — `resolveProxy` consults the configuration and connects
+ * to nothing.
+ */
+const IMPLICIT_BYPASS_PROBES = [
+	'http://localhost/',
+	'http://127.0.0.1/',
+	'http://[::1]/',
+	'http://169.254.169.254/'
+];
 
 /**
  * The domains a Steam session cookie is set on.
@@ -181,7 +241,7 @@ export interface OpenBrowserOptions {
 	 * Ignored when the account has no proxy. When it is true and routing cannot
 	 * be proved, no window opens.
 	 */
-	useProxy: boolean;
+	route: BrowserRoute;
 	/**
 	 * A freshly minted access token.
 	 *
@@ -216,7 +276,7 @@ export async function openAccountBrowser(
 	session.denyPermissions();
 
 	let plan: ProxyPlan | undefined;
-	if (options.useProxy && options.proxyUrl !== undefined && options.proxyUrl !== '') {
+	if (options.route !== 'direct' && options.proxyUrl !== undefined && options.proxyUrl !== '') {
 		// Validated before use, for the same reason the transport does it: a
 		// scheme Chromium does not know is accepted by `setProxy` without
 		// complaint and fails much later, per request, as an error the user
@@ -224,24 +284,58 @@ export async function openAccountBrowser(
 		plan = planProxy(options.proxyUrl);
 	}
 
+	/**
+	 * Whether Steam alone is routed, or everything is.
+	 *
+	 * Only meaningful with a plan: an account with no proxy has nothing to route
+	 * Steam *through*, and `plan` is already undefined for it.
+	 */
+	const steamOnly = plan !== undefined && options.route === 'steam-only';
+
 	try {
 		await session.setProxy(
 			plan
 				? {
+						/*
+						 * **One shape for both routed choices, differing only in what may
+						 * skip the proxy.**
+						 *
+						 * `<-loopback>` is the part neither of them may go without. Chromium
+						 * bypasses loopback and link-local addresses by default, so "routed"
+						 * quietly meant "routed except for a list nobody was shown" — and
+						 * that list includes `169.254.169.254`, the cloud-metadata address.
+						 * `<-loopback>` removes the default rather than adding to it.
+						 *
+						 * This route used to be a PAC script, which looked equivalent and
+						 * was not: Chromium applies the implicit bypass *before* consulting
+						 * a PAC, and `<-loopback>` does not switch it off in that mode.
+						 * `egress.ts` records the measurement.
+						 *
+						 * "Steam only" then adds the third-party sites that may go direct.
+						 * Steam is not in that list and neither is anything unrecognised, so
+						 * both keep going through the proxy — which is why a Steam domain
+						 * nobody remembered to write down cannot leak.
+						 */
 						mode: 'fixed_servers',
 						proxyRules: plan.proxyRules,
-						/*
-						 * **Nothing skips the proxy.**
-						 *
-						 * Chromium bypasses loopback and link-local addresses by default,
-						 * so "routed" quietly meant "routed except for a list nobody was
-						 * shown". `<-loopback>` removes that default rather than adding to
-						 * it: with a proxy chosen, every request this window makes goes
-						 * through it or does not happen.
-						 */
-						proxyBypassRules: '<-loopback>'
+						proxyBypassRules: steamOnly ? steamOnlyBypass() : '<-loopback>'
 					}
-				: { mode: 'direct' }
+				: /*
+					 * **`system`, not `direct`, and for the reason `transport.ts` gives.**
+					 *
+					 * These two are halves of one action — the token is minted by the
+					 * transport and spent by this window — and they disagreed: an
+					 * unrouted transport follows the machine's proxy settings, an
+					 * unrouted window ignored them. On a machine with an OS proxy that
+					 * meant the Steam cookie was issued to one address and used from
+					 * another, which is the correlation routing exists to prevent,
+					 * reintroduced by the option offered as the way *around* routing.
+					 *
+					 * It also simply did not work there: `direct` on a network that
+					 * requires a proxy reaches nothing, so the window opened and loaded
+					 * no page.
+					 */
+					{ mode: 'system' }
 		);
 	} catch (cause) {
 		throw new BrowserSessionError(
@@ -262,21 +356,53 @@ export async function openAccountBrowser(
 	 * the strength of the configuration alone.
 	 */
 	if (plan) {
-		let resolved: string;
-		try {
-			resolved = await session.resolveProxy(START_URL);
-		} catch (cause) {
-			throw new BrowserSessionError(
-				`the routing through ${plan.redacted} could not be checked, so no window was opened`,
-				{ cause }
-			);
-		}
-		if (describesDirectRoute(resolved) || routedEndpoint(resolved) !== plan.endpoint) {
-			throw new BrowserSessionError(
-				`this account is set to route through ${plan.redacted}, but this window would not. ` +
-					'Refusing to open it: browsing anyway would put your own address on the account ' +
-					'the proxy exists to hide.'
-			);
+		/*
+		 * **What has to be true before a window opens.**
+		 *
+		 * The fully routed window has one question: does the start page go through
+		 * the proxy. Everything in that session is routed by one rule, so one
+		 * answer settles it.
+		 *
+		 * "Steam only" adds a bypass list, and a bypass list can be wrong in ways
+		 * a bare rule cannot: an entry with the wrong spelling covers more or less
+		 * than it reads as, and a Steam domain that fell into it would be sent
+		 * around the proxy by the very mode that promises to route it. None of
+		 * that fails loudly — the window opens, Steam loads, and the address on
+		 * the account is this machine's. So every domain the mode promises to
+		 * route is asked about individually, plus one host on no list at all,
+		 * which is the fail-closed default being checked rather than assumed.
+		 */
+		const mustRoute = [
+			START_URL,
+			/*
+			 * Both routed choices carry `<-loopback>`, so both are checked. The
+			 * fully routed window has always set it and never proved it — and
+			 * "configured is not applied" is the failure this whole block exists
+			 * for, whichever route asked.
+			 */
+			...IMPLICIT_BYPASS_PROBES,
+			...(options.route === 'steam-only'
+				? [...STEAM_ROUTED_DOMAINS.map((d) => `https://${d}/`), UNKNOWN_HOST_PROBE]
+				: [])
+		];
+
+		for (const target of mustRoute) {
+			let resolved: string;
+			try {
+				resolved = await session.resolveProxy(target);
+			} catch (cause) {
+				throw new BrowserSessionError(
+					`the routing through ${plan.redacted} could not be checked, so no window was opened`,
+					{ cause }
+				);
+			}
+			if (describesDirectRoute(resolved) || routedEndpoint(resolved) !== plan.endpoint) {
+				throw new BrowserSessionError(
+					`this account is set to route through ${plan.redacted}, but this window would not. ` +
+						'Refusing to open it: browsing anyway would put your own address on the account ' +
+						'the proxy exists to hide.'
+				);
+			}
 		}
 	}
 
@@ -299,6 +425,13 @@ export async function openAccountBrowser(
 	window.setWebRtcPolicy(plan ? 'disable_non_proxied_udp' : 'default');
 
 	/*
+	 * Before the first tab exists, like the WebRTC policy above and for the same
+	 * reason: a tab that loaded before this was set would meet the proxy's 407
+	 * with nothing to say, and Electron cancels an unanswered `login`.
+	 */
+	window.setProxyCredentials(plan?.credentials);
+
+	/*
 	 * Popups stay inside this window's partition rather than opening in the
 	 * user's own browser. Steam's trade and market flows use them, and a popup
 	 * that escaped to the default browser would arrive unrouted and signed out —
@@ -311,7 +444,48 @@ export async function openAccountBrowser(
 	 * `page-title-updated` is prevented in the adapter, so this is the only
 	 * thing that writes a title and a page cannot overwrite it.
 	 */
+	/**
+	 * Whether the first load has been judged yet.
+	 *
+	 * **The guard below must not fire during the first load, and armed eagerly it
+	 * did.** Steam answers a dead session with a 302 to its own login form, so
+	 * the login page is not some later surprise — it is precisely what the most
+	 * common failure looks like from *inside* `loadURL`. Firing there closed the
+	 * window before the landing check could reach it, the load then aborted, and
+	 * the user was told "the browser could not reach Steam": a routing-shaped
+	 * error for a sign-in-shaped problem, on the one screen whose whole job is to
+	 * offer the sign-in.
+	 *
+	 * So the first load belongs to the landing check, which reports it properly,
+	 * and this belongs to everything after.
+	 */
+	let landed = false;
+
 	window.on('navigated', (url) => {
+		if (!landed) {
+			// The landing check owns this one. It runs on the URL the load actually
+			// ended on, which is the same question asked once rather than at every
+			// hop through it.
+			return;
+		}
+
+		/*
+		 * **The landing check, applied for the rest of the window's life.**
+		 *
+		 * It used to run once. A Steam session that expires mid-trade is answered
+		 * with a redirect to Steam's own login form, and that form would then have
+		 * been drawn inside this application's chrome, under the account's name,
+		 * with a correct `steamcommunity.com` in the address bar — a password
+		 * prompt where every signal a careful person checks agrees.
+		 *
+		 * Closed and wiped rather than merely navigated away from: the session is
+		 * over either way, and leaving the window open on some other Steam page
+		 * would only postpone the next redirect back to the same form.
+		 */
+		if (isSteamLoginPage(url)) {
+			void abandon(window, session);
+			return;
+		}
 		window.setTitle(titleFor(options.accountName, url));
 	});
 
@@ -341,11 +515,25 @@ export async function openAccountBrowser(
 		);
 	}
 
+	// Landed, signed in, on Steam. From here every navigation is the user's, and
+	// the guard above takes over.
+	landed = true;
+	// The title the first load earned, which the guard deliberately did not write
+	// while it was still being judged.
+	window.setTitle(titleFor(options.accountName, window.currentUrl()));
+
 	return window;
 }
 
 /** Steam's own hosts, and the only ones a signed-in landing may be on. */
-const STEAM_HOSTS = ['steamcommunity.com', 'store.steampowered.com', 'help.steampowered.com'];
+const STEAM_HOSTS = [
+	'steamcommunity.com',
+	'store.steampowered.com',
+	'help.steampowered.com',
+	// Valve's sign-in host. Recognised so `isSteamLoginPage` can refuse it — see
+	// `LOGIN_HOST`.
+	'login.steampowered.com'
+];
 
 /**
  * Did the browser land on a login page rather than on the user's trade offers?
@@ -376,7 +564,96 @@ export function looksSignedOut(url: string): boolean {
 	if (!STEAM_HOSTS.includes(parsed.hostname.replace(/^www\./, ''))) {
 		return true;
 	}
+	return isSteamLoginPage(url);
+}
+
+/**
+ * Is this one of Valve's own sign-in forms?
+ *
+ * **Split out of `looksSignedOut` because the landing was not the only way to
+ * reach one.** That check runs once, against the URL the first load ended on,
+ * and everything after it was only ever used to write a title. So a session
+ * that expired an hour into a trade — Steam answers with a redirect to
+ * `/login/home/?goto=…`, which is ordinary and expected — put a real Steam
+ * password form inside this application's chrome, under the account's own name,
+ * which is exactly the deception §2.6b promises never happens here. The address
+ * bar would have said `steamcommunity.com`, correctly, and that makes it worse:
+ * every signal a careful person checks would have agreed.
+ *
+ * Narrower than `looksSignedOut` on purpose. That one answers "should this
+ * window have opened at all", so anything unexpected counts. This one answers
+ * "is a password being asked for", and being wrong in the other direction closes
+ * a window somebody was using.
+ *
+ * `/openid/login` is deliberately not included. It is how Steam signs a user in
+ * to third-party trading sites, it is a page an already-signed-in account passes
+ * through without typing anything, and refusing it would break the workflow this
+ * browser exists for.
+ */
+export function isSteamLoginPage(url: string): boolean {
+	if (!isSteamHost(url)) {
+		return false;
+	}
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return false;
+	}
+	const host = parsed.hostname.replace(/^www\./, '');
+
+	// A host that exists to sign people in, so every path on it is one.
+	if (host === LOGIN_HOST) {
+		return true;
+	}
+
+	/*
+	 * **Steam Support is a different application with different URLs.**
+	 *
+	 * `help.steampowered.com` puts a locale in the path and calls the page a
+	 * wizard step: the real sign-in is `/en/wizard/Login`. Matching `^/login`
+	 * answered *false* for it — so the one Valve password form this predicate
+	 * missed was the one on Valve's own support site, sitting under this
+	 * application's chrome with the account's name on the window.
+	 *
+	 * The locale is stripped only here, and deliberately not on the other two
+	 * hosts: `steamcommunity.com/id/<name>` is a vanity profile, so stripping a
+	 * two-letter first segment there would read `/id/login` — a real person whose
+	 * profile name is "login" — as a password form and close the window on them.
+	 */
+	if (host === HELP_HOST) {
+		const path = withoutLocale(parsed.pathname);
+		return /^login(\/|$)/i.test(path) || /^wizard\/login(\/|$)/i.test(path);
+	}
+
 	return /^\/login(\/|$)/i.test(parsed.pathname);
+}
+
+/** Steam Support's sign-in lives behind a locale segment; nothing else does. */
+const HELP_HOST = 'help.steampowered.com';
+
+/**
+ * Valve's dedicated sign-in host.
+ *
+ * Every path on it is part of signing in, so it needs no path test — and a
+ * signed-in window has no business arriving here at all. Listed among the Steam
+ * hosts so it is recognised rather than merely labelled "NOT STEAM", which
+ * would have warned about the right page for the wrong reason and left it open.
+ */
+const LOGIN_HOST = 'login.steampowered.com';
+
+/**
+ * A Steam Support path with its `/en/`-style prefix removed, if it had one.
+ *
+ * Conservative about what counts: a locale, and only when something follows it.
+ * `/wizard/Login` has no prefix and must survive unchanged.
+ */
+function withoutLocale(pathname: string): string {
+	const trimmed = pathname.replace(/^\/+/, '');
+	const [first, ...rest] = trimmed.split('/');
+	return /^[a-z]{2}(-[a-z0-9]{2,4})?$/i.test(first ?? '') && rest.length > 0
+		? rest.join('/')
+		: trimmed;
 }
 
 /**
@@ -420,31 +697,483 @@ async function abandon(window: BrowserWindowHandle, session: BrowserSessionHandl
 export class AccountBrowsers {
 	private readonly windows = new Map<string, BrowserWindowHandle>();
 
+	/**
+	 * Opens that have started and not yet produced a window.
+	 *
+	 * **The map above only ever held finished windows, and that was the hole.**
+	 * An open is four awaits long — proxy applied, route verified, cookie set,
+	 * first page loaded — and for all of it there was no record anywhere that a
+	 * window was on its way. So a second press created a second one, and only the
+	 * later of the two was ever tracked; the earlier stayed on screen, signed in,
+	 * invisible to the lock.
+	 */
+	private readonly opening = new Map<string, { route: string; done: Promise<void> }>();
+
+	/**
+	 * The route each open window is actually on.
+	 *
+	 * **Because "one window per account" was answering a question nobody asked.**
+	 * The account list offers two buttons — _Open browser_, routed, and _Direct_
+	 * beside it — and this map was keyed by account alone. So somebody who opened
+	 * an account directly to get past a Cloudflare check, finished, and then
+	 * pressed the routed button was handed the **direct window back**, focused,
+	 * with no proxy applied and nothing said. They had asked for the proxy in the
+	 * one place the application lets them ask, and their real address kept going
+	 * to Steam on that account.
+	 *
+	 * Focusing is right for a second press of the *same* button. It is exactly
+	 * wrong for the other one.
+	 */
+	private readonly routes = new Map<string, string>();
+
+	/**
+	 * Bumped by `closeAll`, so an open that began before the lock cannot outlive
+	 * it.
+	 *
+	 * `closeAll` sweeps the map. An open in flight is not in the map — it has not
+	 * finished — so the sweep passed straight over it and the window appeared
+	 * afterwards: a signed-in Steam window created **by** a locked vault, which
+	 * is the one thing the lock is supposed to make impossible. Checking the
+	 * counter after the last await is what closes that.
+	 *
+	 * Global here and per-account below, the same pair `ConfirmationsService`
+	 * uses and for the same reason: a lock stops everything, a routing change
+	 * stops one account.
+	 */
+	private generation = 0;
+	private readonly epochs = new Map<string, number>();
+
+	/**
+	 * Session wipes that have started and not finished, per account.
+	 *
+	 * **A wipe outlives the call that started it.** `dropAccountRouting` fires
+	 * `closeAccount` and moves on — it has to, every caller of it is a
+	 * synchronous handler — so `clearStorageData` is still running after the map
+	 * entry is gone. Press Trade in that gap and a *new* browser opened on the
+	 * same partition, set its Steam cookie, and then the old wipe arrived and
+	 * erased it: a window that signs itself out a moment after opening, for
+	 * reasons nothing on screen could explain.
+	 *
+	 * So an open waits for a wipe that is still going, rather than racing it.
+	 */
+	private readonly clearing = new Map<string, Promise<void>>();
+
+	/**
+	 * Every account whose browser partition has ever been given a Steam cookie.
+	 *
+	 * **`windows` is a map of what is *open*, and the lock swept that.** So a
+	 * window the user closed themselves had already removed its own entry, and
+	 * `closeAll` then had nothing to wipe: the partition kept its `steamLoginSecure`
+	 * until the process exited, and reopening the browser found it still signed
+	 * in — which is the precise thing `closeAll` exists to prevent, defeated by
+	 * the ordinary act of closing a window.
+	 *
+	 * A set rather than reusing `windows`, because the question is different.
+	 * "Which windows are on screen" changes constantly; "which partitions hold a
+	 * session that has to die with the vault" only ever grows within an unlock,
+	 * and it includes the ones whose window never finished being built.
+	 */
+	private readonly seeded = new Set<string>();
+
 	constructor(private readonly host: BrowserHost) {}
 
-	async open(options: OpenBrowserOptions): Promise<void> {
-		// One window per account. A second would share the partition and the
-		// session, so it adds nothing except a way to lose track of one.
+	/**
+	 * What `closeAll` has bumped so far.
+	 *
+	 * Read by the IPC handler *before* it mints a Steam token, so a lock during
+	 * that round trip is caught by the same counter as a lock during the open
+	 * itself. Without it the handler's own `isUnlocked()` answered a question
+	 * about the moment the button was pressed, and the mint takes seconds.
+	 */
+	/**
+	 * This account's routing epoch right now.
+	 *
+	 * The per-account half of `generationNow`, and needed for the same reason:
+	 * a caller that awaits something slow before calling `open` has to say
+	 * *when* it asked. `open` defaults this parameter to the current value,
+	 * which is right for a direct call and wrong for a deferred one — the
+	 * default is read after the wait, so it compares the new epoch with itself
+	 * and agrees.
+	 *
+	 * `browser/ipc.ts` mints a Steam token between the press and the open, and a
+	 * proxy change or an account removal inside that window bumps this. Without
+	 * capturing it first, the browser opened on the routing the user had just
+	 * moved off, or for an account that was no longer in the vault.
+	 */
+	epochNow(steamId64: string): number {
+		return this.epochOf(steamId64);
+	}
+
+	generationNow(): number {
+		return this.generation;
+	}
+
+	/**
+	 * @param since the generation this request belongs to. Defaults to now, which
+	 * is right for a caller with nothing to do beforehand; the browser IPC
+	 * handler passes the value it read before minting a token.
+	 */
+	async open(
+		options: OpenBrowserOptions,
+		since = this.generation,
+		/**
+		 * The account's routing epoch when this request was made.
+		 *
+		 * **The lock counter travelled with a retry and this did not.** A press of
+		 * the other routing button waits for the open already running, then takes
+		 * the decision again — and that retry re-read the epoch *fresh*, after any
+		 * routing change that had happened while it waited. So saving a new proxy
+		 * cancelled the request in flight, correctly, and the one queued behind it
+		 * carried on and opened a signed-in Steam window through the proxy the
+		 * user had just replaced.
+		 */
+		sinceEpoch = this.epochOf(options.steamId64)
+	): Promise<void> {
+		const wanted = routeKey(options);
+
+		/*
+		 * **Captured before the first await, not after the last one.**
+		 *
+		 * This used to be read further down, which was fine while everything above
+		 * it was synchronous. Tearing down a window on a route switch put an
+		 * `await` in front of it, and that reopened the hole the counter exists to
+		 * close: a lock landing during the teardown would bump the generation, the
+		 * capture below would read the *new* value, and the check would compare it
+		 * with itself and agree — producing a signed-in Steam window after the
+		 * vault had locked, which is the one thing this whole mechanism is for.
+		 *
+		 * Now it comes from the caller by default, which pushes the same reasoning
+		 * one step further out: the request begins when the *user* asked, not when
+		 * this method happened to be reached.
+		 */
+		const generation = since;
+
+		/*
+		 * A lock or a routing change that has already happened needs no await to
+		 * be noticed. Checked here, at the door, and **before** the route-switch
+		 * teardown below bumps the epoch on purpose — otherwise this request would
+		 * cancel itself over its own cleanup.
+		 */
+		if (generation !== this.generation) {
+			throw new BrowserSessionError(
+				'the vault locked while the browser was opening, so it was closed'
+			);
+		}
+		if (sinceEpoch !== this.epochOf(options.steamId64)) {
+			throw new BrowserSessionError(
+				"this account's routing changed while the browser was opening, so it was closed"
+			);
+		}
+
+		// One window per account **on one route**. A second on the same route would
+		// share the partition and the session, so it adds nothing except a way to
+		// lose track of one.
 		const existing = this.windows.get(options.steamId64);
 		if (existing && !existing.isDestroyed()) {
+			if (this.routes.get(options.steamId64) === wanted) {
+				/*
+				 * **Raised, not ignored.**
+				 *
+				 * The window is almost certainly behind the one the button was pressed
+				 * in, so returning quietly makes the second press do nothing visible —
+				 * and a user who cannot see the window they just asked for concludes the
+				 * feature is broken and presses again. This screen's own copy button
+				 * carries the rule: silently doing nothing is the one response a button
+				 * must never give.
+				 */
+				existing.focus();
+				return;
+			}
+
 			/*
-			 * **Raised, not ignored.**
+			 * A different route was asked for, so the window on the old one goes.
 			 *
-			 * The window is almost certainly behind the one the button was pressed
-			 * in, so returning quietly makes the second press do nothing visible —
-			 * and a user who cannot see the window they just asked for concludes the
-			 * feature is broken and presses again. This screen's own copy button
-			 * carries the rule: silently doing nothing is the one response a button
-			 * must never give.
+			 * Closed and wiped rather than re-proxied. `setProxy` would change where
+			 * the *next* request goes and leave the pages already on screen, and the
+			 * cookies they collected, belonging to the previous route — a window that
+			 * is half one thing and half the other, which is precisely the state the
+			 * user pressed a button to leave. A fresh window has one answer for
+			 * "where does this leave from", which is the only answer worth giving.
 			 */
-			existing.focus();
-			return;
+			await this.closeAccount(options.steamId64);
 		}
-		const window = await openAccountBrowser(this.host, options);
-		this.windows.set(options.steamId64, window);
-		window.on('closed', () => {
-			this.windows.delete(options.steamId64);
-		});
+
+		// A press while one is already opening joins it rather than starting a
+		// second. The window takes a few seconds to appear, which is exactly long
+		// enough for somebody to press again.
+		const inFlight = this.opening.get(options.steamId64);
+		if (inFlight) {
+			if (inFlight.route === wanted) {
+				await inFlight.done;
+				this.windows.get(options.steamId64)?.focus();
+				return;
+			}
+			/*
+			 * The other button, pressed while this one was still opening. Let it
+			 * finish or fail — its failure is not this caller's to report — and then
+			 * take the decision again against whatever it left behind, which is the
+			 * branch above.
+			 */
+			await inFlight.done.catch(() => undefined);
+			/*
+			 * **Carrying both counters, not starting fresh.**
+			 *
+			 * This recursed with no argument, so the retry read the counter *again*
+			 * — after the lock that had just cancelled the request it was waiting
+			 * on. So locking the vault cancelled the first open and the queued one
+			 * went on to succeed, leaving exactly the window the lock existed to
+			 * prevent. A request is cancelled by a lock once and stays cancelled.
+			 */
+			return this.open(options, generation, sinceEpoch);
+		}
+
+		// The epoch, unlike the generation, is read *here* — a route switch bumps it
+		// deliberately a few lines above, and capturing it at the door would make
+		// this open cancel itself over its own teardown.
+		const epoch = this.epochOf(options.steamId64);
+		const attempt = (async () => {
+			/*
+			 * **Synchronously, before anything is built.**
+			 *
+			 * A route switch tears the old window down first, and that teardown is
+			 * awaited out in the caller — so a lock landing inside it went unnoticed
+			 * until *after* `openAccountBrowser` had set the Steam cookie, created
+			 * the window and loaded Steam into it. The generation check then closed
+			 * what it had just finished making: right in the end, and a signed-in
+			 * Steam window had existed and fetched a page for a locked vault to get
+			 * there.
+			 *
+			 * No `await` above this line, so it runs in the tick the attempt starts
+			 * — which is what makes it cost nothing and still catch that case.
+			 */
+			this.stillWanted(options.steamId64, generation, epoch);
+
+			/*
+			 * **Wait for any wipe still running on this partition.**
+			 *
+			 * `dropAccountRouting` fires `closeAccount` and does not await it, so
+			 * saving a proxy and immediately pressing Trade raced the cleanup: the
+			 * new window opened, set its Steam cookie, and the previous account's
+			 * `clearStorageData` then erased it. A browser that signs itself out a
+			 * second after opening, with nothing on screen able to explain why.
+			 */
+			const wiping = this.clearing.get(options.steamId64);
+			if (wiping) {
+				// Only when there is something to wait for. An unconditional `await`
+				// here would put a microtask between this method being called and its
+				// first real step, for every open, to serve the rare one.
+				await wiping.catch(() => undefined);
+				this.stillWanted(options.steamId64, generation, epoch);
+			}
+
+			/*
+			 * Recorded *before* the attempt, not after it succeeds.
+			 *
+			 * `openAccountBrowser` sets the Steam cookie and then loads a page, and
+			 * either half can fail. A failure between the two leaves a partition
+			 * holding a live session with no window and no map entry anywhere —
+			 * `abandon` cleans up the paths it knows about, and this is the backstop
+			 * for the ones it does not.
+			 */
+			this.seeded.add(options.steamId64);
+			const window = await openAccountBrowser(this.host, options);
+			if (generation !== this.generation || epoch !== this.epochOf(options.steamId64)) {
+				// The vault locked, or this account's routing changed, while the
+				// window was being built. Either way what just opened is signed in
+				// under conditions that no longer hold.
+				await abandon(window, this.sessionFor(options.steamId64));
+				throw new BrowserSessionError(
+					generation !== this.generation
+						? 'the vault locked while the browser was opening, so it was closed'
+						: "this account's routing changed while the browser was opening, so it was closed"
+				);
+			}
+			this.windows.set(options.steamId64, window);
+			// Recorded with the window, so the next press can tell which button this
+			// one came from.
+			this.routes.set(options.steamId64, wanted);
+			window.on('closed', () => {
+				// Only if it is still ours. Deleting unconditionally let a window
+				// that had already been replaced in the map remove its successor's
+				// entry on the way out — leaving a live window the next lock could
+				// not see.
+				if (this.windows.get(options.steamId64) !== window) {
+					return;
+				}
+				this.windows.delete(options.steamId64);
+				this.routes.delete(options.steamId64);
+
+				/*
+				 * **And the session goes with it.**
+				 *
+				 * Closing the window used to be the one way to end a browsing session
+				 * without ending the session: the entry left the map, so the vault
+				 * lock had nothing to sweep, and `fromPartition` handed the same
+				 * signed-in jar back the next time the account was opened. Reopening
+				 * found Steam still logged in, with no passphrase asked for in
+				 * between.
+				 *
+				 * Fired rather than awaited — this is an event handler — and safe to
+				 * repeat: `wipe` serialises per account, so a close during a lock
+				 * sweep queues behind it instead of racing it.
+				 */
+				void this.wipe(options.steamId64).catch(() => undefined);
+			});
+		})();
+
+		const entry = { route: wanted, done: attempt };
+		this.opening.set(options.steamId64, entry);
+		try {
+			await attempt;
+		} finally {
+			if (this.opening.get(options.steamId64) === entry) {
+				this.opening.delete(options.steamId64);
+			}
+		}
+	}
+
+	private epochOf(steamId64: string): number {
+		return this.epochs.get(steamId64) ?? 0;
+	}
+
+	/**
+	 * Throw if a lock or a routing change has overtaken this request.
+	 *
+	 * One place, so every point that needs asking reads the same two counters the
+	 * same way. Called before the window is built as well as after, because
+	 * "built and then closed" still means a signed-in Steam window existed and
+	 * loaded a page to get there.
+	 */
+	private stillWanted(steamId64: string, generation: number, epoch: number): void {
+		if (generation !== this.generation) {
+			throw new BrowserSessionError(
+				'the vault locked while the browser was opening, so it was closed'
+			);
+		}
+		if (epoch !== this.epochOf(steamId64)) {
+			throw new BrowserSessionError(
+				"this account's routing changed while the browser was opening, so it was closed"
+			);
+		}
+	}
+
+	private sessionFor(steamId64: string): BrowserSessionHandle {
+		return this.host.sessionFromPartition(browserPartitionFor(steamId64), { cache: false });
+	}
+
+	/**
+	 * Close a window and wipe its session, remembering the wipe until it is done.
+	 *
+	 * The remembering is the point: `closeAccount` is fired and forgotten by
+	 * every caller, so without this a later `open` on the same partition could
+	 * finish first and have its brand-new cookie erased by the previous
+	 * account's cleanup.
+	 */
+	private async wipe(steamId64: string, window?: BrowserWindowHandle): Promise<void> {
+		const done = (async () => {
+			// Anything already wiping for this account finishes first, so two
+			// overlapping teardowns cannot interleave with an open between them.
+			await this.clearing.get(steamId64)?.catch(() => undefined);
+			if (window) {
+				await abandon(window, this.sessionFor(steamId64));
+				return;
+			}
+			try {
+				await this.sessionFor(steamId64).clearStorageData?.();
+			} catch {
+				// Unreachable session; still worth having tried.
+			}
+		})();
+		this.clearing.set(steamId64, done);
+		try {
+			await done;
+		} finally {
+			if (this.clearing.get(steamId64) === done) {
+				this.clearing.delete(steamId64);
+			}
+		}
+	}
+
+	/**
+	 * Close and wipe one account's browser, because its routing changed or it is
+	 * being removed.
+	 *
+	 * **The lock reached these windows and a proxy change did not.**
+	 * `dropAccountRouting` dropped the transport's cookie jar and the cached
+	 * access token, which is everything an account had *until this window
+	 * existed*. The browser has its own session in its own partition, so saving a
+	 * new proxy left a signed-in Steam window running on the old route — the
+	 * previous address still attached to the account, in the one place the user
+	 * is actually looking at Steam. Removing the account left the same window
+	 * open for an account that no longer exists here.
+	 *
+	 * Cancels an open in flight too, through the per-account epoch: a routing
+	 * change during those few seconds would otherwise be overtaken by the window
+	 * it was meant to invalidate.
+	 *
+	 * **Never rejects**, for the same reason `closeAll` does not: every caller is
+	 * a synchronous handler that fires this and moves on.
+	 */
+	async closeAccount(steamId64: string): Promise<void> {
+		this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
+		// Wiped now, so the lock has nothing left to find for this account.
+		this.seeded.delete(steamId64);
+		const window = this.windows.get(steamId64);
+		this.windows.delete(steamId64);
+		this.routes.delete(steamId64);
+		await this.wipe(steamId64, window);
+	}
+
+	/**
+	 * Close every window that is not fully routed, and wipe its session.
+	 *
+	 * **Turning a rule on has to reach the work already running.** Saving
+	 * `Require proxies` used to write a vault field and nothing else, so a Direct
+	 * or Steam-only window opened a minute earlier stayed open, stayed signed in,
+	 * and went on making requests the vault now forbade — and the user had just
+	 * been told the opposite by the switch they pressed.
+	 *
+	 * `closeAccount` per offender rather than `closeAll`: a fully routed window
+	 * satisfies the new rule and there is no reason to take it down. It also
+	 * bumps that account's epoch, which cancels an open still in flight for it.
+	 *
+	 * An open that has not yet reached `routes` is invisible here, and is caught
+	 * instead by the re-check `browser/ipc.ts` performs after minting. Neither
+	 * mechanism covers the other's window on its own.
+	 */
+	async closeNotFullyRouted(): Promise<void> {
+		/*
+		 * **Opens in flight, invalidated first and synchronously.**
+		 *
+		 * A window that has not finished opening is not in `routes` yet, so a
+		 * sweep reading only that map walked straight past the request most likely
+		 * to be non-compliant — the one somebody started a second before turning
+		 * the rule on. Bumping the epoch is what `open` re-reads after every
+		 * await, so the request is disowned before its window can exist.
+		 *
+		 * Before any await, for the reason `closeAll` gives about its own counter:
+		 * anything that runs later races the sweep, and wins.
+		 */
+		for (const [steamId64, entry] of this.opening) {
+			if (!entry.route.startsWith('proxy:')) {
+				this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
+			}
+		}
+
+		/*
+		 * Then the windows already up. Snapshotted, because `closeAccount` deletes
+		 * from the map being read — and closed **in parallel**, because each one
+		 * ends in a session wipe. Awaited one at a time, a slow wipe on the first
+		 * offender left the second window open, signed in, and making requests for
+		 * as long as that took: the sweep's own bookkeeping holding the door for
+		 * the thing it was sent to close.
+		 *
+		 * `closeAccount` never rejects, so nothing here needs a catch.
+		 */
+		const windowed = [...this.routes.entries()]
+			.filter(([, key]) => !key.startsWith('proxy:'))
+			.map(([steamId64]) => steamId64);
+		await Promise.all(windowed.map((steamId64) => this.closeAccount(steamId64)));
 	}
 
 	/** True while a window for this account is on screen. */
@@ -472,10 +1201,30 @@ export class AccountBrowsers {
 	 * must not leave the others signed in.
 	 */
 	async closeAll(): Promise<void> {
+		/*
+		 * **First, and synchronously.**
+		 *
+		 * This is what an open in flight checks after its last await. Bumping it
+		 * before anything else means a window still being built is already
+		 * disowned by the time it exists, rather than racing the sweep below —
+		 * which it would win, because the sweep only knows about windows that have
+		 * finished opening.
+		 */
+		this.generation += 1;
+
 		// Snapshot before clearing, so a window removing itself on `closed`
 		// cannot mutate what is being iterated.
 		const closing = new Map(this.windows);
 		this.windows.clear();
+		this.routes.clear();
+
+		/*
+		 * Every partition seeded this unlock, not only the ones still on screen.
+		 * A window the user closed themselves is exactly the case the map cannot
+		 * answer for, and it is the common one.
+		 */
+		const partitions = new Set([...closing.keys(), ...this.seeded]);
+		this.seeded.clear();
 
 		for (const window of closing.values()) {
 			try {
@@ -487,19 +1236,9 @@ export class AccountBrowsers {
 			}
 		}
 
-		await Promise.all(
-			[...closing.keys()].map(async (steamId64) => {
-				try {
-					const session = this.host.sessionFromPartition(browserPartitionFor(steamId64), {
-						cache: false
-					});
-					await session.clearStorageData?.();
-				} catch {
-					// The window is already closed; a session that outlives it is
-					// unreachable but still worth having tried to remove.
-				}
-			})
-		);
+		// Through the same tracker the routing path uses, so an open that begins
+		// during a lock sweep waits for the wipe rather than racing it.
+		await Promise.all([...partitions].map((steamId64) => this.wipe(steamId64)));
 	}
 }
 
@@ -592,6 +1331,26 @@ export function titleFor(accountName: string, url: string): string {
 		return accountName;
 	}
 	return isSteamHost(url) ? `${accountName} — ${host}` : `${accountName} — NOT STEAM: ${host}`;
+}
+
+/**
+ * Which route a request to open a browser is asking for.
+ *
+ * The *effective* route, not the raw switch: an account with no proxy is direct
+ * whichever route is asked for, so pressing the same button twice on such an
+ * account must not be read as changing anything. What matters is where the
+ * traffic actually leaves from, because that is the fact the user pressed a
+ * button to choose.
+ *
+ * The proxy URL rather than a bare "routed": if the stored proxy changed, the
+ * open window is on an address the account no longer uses.
+ * `dropAccountRouting` already closes it when the change goes through this
+ * process, and this is the belt to that braces.
+ */
+function routeKey(options: OpenBrowserOptions): string {
+	return options.route !== 'direct' && options.proxyUrl !== undefined && options.proxyUrl !== ''
+		? `${options.route}:${options.proxyUrl}`
+		: 'direct';
 }
 
 /** The partition name, kept in one place so the wipe and the open agree. */

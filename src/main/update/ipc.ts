@@ -33,6 +33,22 @@ export interface UpdateCheckDeps {
 	 * value, which Electron sets only for an appx package.
 	 */
 	isStoreBuild?: () => boolean;
+	/**
+	 * Which proxy-policy state we are in. Any change means a new number.
+	 *
+	 * **Sharing one request across a policy change is what kept the abort
+	 * alive.** Turning `Require proxies` on aborts the check on the wire; that
+	 * request has not settled yet, so a caller arriving after the policy is
+	 * turned back off joined it — and when it finally settled, `isEnabled()` was
+	 * true again, so the abort was cached as an ordinary `unknown` for six
+	 * hours. The user's retry was answered by the failure their own setting had
+	 * caused, and could not clear it.
+	 *
+	 * With a generation, an attempt belongs to the policy it began under: a
+	 * caller from a later one starts its own, and an attempt from an earlier one
+	 * cannot write the cache.
+	 */
+	policyGeneration?: () => number;
 }
 
 /**
@@ -52,6 +68,8 @@ const MIN_INTERVAL_MS = 6 * 60 * 60 * 1000;
 export function registerUpdateHandlers(deps: UpdateCheckDeps): void {
 	const now = deps.now ?? ((): number => Date.now());
 
+	const policyGeneration = deps.policyGeneration ?? ((): number => 0);
+
 	let cached: { at: number; result: UpdateCheckResult } | undefined;
 	/**
 	 * The request currently on the wire, so simultaneous calls share it.
@@ -61,7 +79,7 @@ export function registerUpdateHandlers(deps: UpdateCheckDeps): void {
 	 * React's Strict Mode double-runs effects in development, making the pair the
 	 * ordinary case rather than a race.
 	 */
-	let inFlight: Promise<UpdateCheckResult> | undefined;
+	let inFlight: { generation: number; promise: Promise<UpdateCheckResult> } | undefined;
 
 	const isStoreBuild = deps.isStoreBuild ?? installedFromStore;
 
@@ -102,11 +120,17 @@ export function registerUpdateHandlers(deps: UpdateCheckDeps): void {
 			return previous.result;
 		}
 
-		if (inFlight) {
-			return inFlight;
+		/*
+		 * Shared only with callers from the same policy state. An attempt begun
+		 * before `Require proxies` moved is answering a question the caller is no
+		 * longer asking — and in the abort case it is not answering at all.
+		 */
+		const generation = policyGeneration();
+		if (inFlight && inFlight.generation === generation) {
+			return inFlight.promise;
 		}
 
-		inFlight = (async (): Promise<UpdateCheckResult> => {
+		const attempt = (async (): Promise<UpdateCheckResult> => {
 			const outcome = await checkForUpdate({
 				// Wrapped rather than passed by reference: `deps.fetchText` detached from
 				// `deps` is a method with no `this`, which lint rightly objects to.
@@ -128,21 +152,49 @@ export function registerUpdateHandlers(deps: UpdateCheckDeps): void {
 						? { state: 'upToDate' as const }
 						: { state: 'unknown' as const, reason: outcome.reason };
 
-			// A failure is cached too, deliberately. Retrying a broken network on every
-			// mount is how a transient outage becomes a request storm.
-			cached = { at: now(), result };
-
-			// Consent, checked **again** with the answer in hand. The check at the top
-			// ran before the network round trip, and switching the setting off during
-			// it must win: returning `updateAvailable` here is what put the banner
-			// back up after the user had just watched it come down.
+			/*
+			 * Consent, checked **again** with the answer in hand, and checked *before*
+			 * anything is remembered.
+			 *
+			 * The check at the top ran before the network round trip, and switching
+			 * the setting off during it must win: returning `updateAvailable` here is
+			 * what put the banner back up after the user had just watched it come
+			 * down.
+			 *
+			 * **Nothing is cached in that case**, which is the half this used to get
+			 * wrong. Turning `Require proxies` on aborts the request in flight, and
+			 * the abort arrives here as `unknown` — which was then cached for six
+			 * hours. Turning the policy back off could not retry, because the failure
+			 * the policy itself caused was sitting in the cache answering for it. A
+			 * result the user's own setting prevented is not evidence about the
+			 * network.
+			 */
 			if (!deps.isEnabled()) {
 				return { state: 'disabled' as const };
 			}
+
+			/*
+			 * And nothing is remembered from a policy state that has since moved.
+			 * The abort settles as `unknown`; by then the user may have turned the
+			 * policy back off, so `isEnabled()` is true again and the check above
+			 * lets it through. Caching it there is what made the retry impossible.
+			 */
+			if (policyGeneration() !== generation) {
+				return result;
+			}
+
+			// A failure is cached too, deliberately. Retrying a broken network on every
+			// mount is how a transient outage becomes a request storm.
+			cached = { at: now(), result };
 			return result;
 		})().finally(() => {
-			inFlight = undefined;
+			// Only if this is still the attempt on record: a later policy state has
+			// its own, and clearing unconditionally would drop theirs.
+			if (inFlight?.promise === attempt) {
+				inFlight = undefined;
+			}
 		});
-		return inFlight;
+		inFlight = { generation, promise: attempt };
+		return attempt;
 	});
 }

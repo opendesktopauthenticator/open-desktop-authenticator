@@ -164,6 +164,23 @@ The users most likely to want this feature are the most likely to buy cheap
 residential proxies of unknown ownership. The warning belongs next to the
 setting, not only here.
 
+**One request in this application is not routed, and it is not an account's.**
+The update check asks GitHub whether a newer release exists. It uses Electron's
+default session, which no proxy is applied to — so it leaves by the machine's
+own address even for somebody who routes every account through one.
+
+This is deliberate rather than missed. Proxies here belong to accounts; there is
+no application-wide one, and sending an app-wide request down a particular
+account's route would tell that operator this application is running while
+linking the check to an account it has nothing to do with. What the request
+reveals — an IP, and that ODA is running — GitHub already saw when the build was
+downloaded from it.
+
+So it is disclosed where the switch is, and it is a switch: off by choice
+anywhere, and absent entirely in a Store build, where Windows does the updating
+and the check is refused before it reads the preference. It carries nothing
+about you or your accounts.
+
 ### 2.6b The in-app browser
 
 **New, and the largest attack surface this application has.** A window that
@@ -176,9 +193,67 @@ What it is given, and nothing more:
 - **Its own session.** Not the account transport's, which is disguised as the
   Steam Android app. Sharing that one would either serve Steam's web pages to an
   `okhttp` client or strip the disguise off the application's own requests.
-- **The account's proxy.** If routing is configured and cannot be applied, **no
-  window opens** — the same fail-closed rule the transport follows, where the
-  unit of work happens to be a window rather than a request.
+- **The account's proxy, on one of three routes the user picks per window.** An
+  account with a proxy is offered _Trade (proxied)_, _Steam only_ and _Direct_;
+  an account without one gets a single button, because there is nothing to route
+  through. Once a route is asked for it is absolute — if it cannot be applied,
+  or Chromium says it would go somewhere else, **no window opens**, the same
+  fail-closed rule the transport follows with a window as the unit of work
+  instead of a request. Nothing skips it either: Chromium bypasses loopback and
+  link-local by default, so `<-loopback>` removes that list rather than adding
+  to it, and WebRTC — which opens its own UDP around any proxy — is turned off
+  for the window.
+
+  **_Steam only_ routes Steam and everything it does not recognise**, and lets
+  out a short, named list of third-party trade sites. It is not "Steam through
+  the proxy, everything else direct": that was the first design, and it put the
+  cost of an incomplete list on the wrong side. Valve renames CDN hosts without
+  announcing it, and under that rule the first one nobody had listed became a
+  direct request from a window whose whole promise is that Steam does not see
+  this machine's address. Defaulting the other way costs a slow load on an
+  unknown host and cannot leak. Before the window opens, every domain the mode
+  names is checked against Chromium individually, plus one host on no list at
+  all — the fail-closed default being verified rather than assumed.
+
+  **_Direct_ is a real choice with a real cost, and it is stated where it is
+  made.** A shared proxy address collects rate limits and Cloudflare challenges
+  a home connection never sees, so the routed window is sometimes the one that
+  will not load, and somebody who only wants to accept one trade is better
+  served by an honest option than by a window that refuses to open. The control
+  says what it does — and says it precisely: this applies the machine's own
+  network settings, **including a system or company proxy if the machine has
+  one**, so it shows Steam whatever address this machine normally uses rather
+  than promising a bare connection it cannot guarantee. This is the one place in
+  the application where a configured route is not taken, it happens only when
+  the user says so, and it is per window — the next one starts from the choice
+  again.
+
+- **`Require proxies`, for people who want the choice removed.** Off by default,
+  because both alternatives above are reasonable answers and only the user knows
+  which they want. Turned on, the vault refuses to talk to Steam without a
+  proxy at all: only the fully routed window opens, an account with no proxy
+  cannot open one, and enrolment and transfer refuse before a password is sent.
+
+  Enforced at `SteamTransportFactory.forAccount` — the boundary every Steam
+  request crosses — rather than in the handlers that happen to be on screen.
+  Confirmations, the auto-confirm loop, clock synchronisation, enrolment and
+  transfer all pass through it, and a transport that cannot honour the policy is
+  not built. The paths that never build one, because `steam-session` speaks over
+  Node's own stack, are guarded individually and named in the code.
+
+  Turning it on reaches work already running: non-compliant browser windows are
+  closed and their sessions wiped, cached transports are dropped, unrouted
+  sign-ins are cancelled — each of them by the route it actually took, not by
+  what the account has stored — and the update check in flight is aborted rather
+  than having its answer discarded. A transfer past its authentication stage is
+  the one exception, and deliberately: by then Steam may have rotated the
+  authenticator, and abandoning it would risk the only route back to secrets
+  Steam will not reissue.
+
+  A proxy that needs a username and password is answered as such, on the
+  **proxy's** challenge only. A site asking for credentials gets nothing: the
+  proxy operator's password must never be handed to a page.
+
 - **A short-lived access token**, set as Steam's own `steamLoginSecure` cookie.
   No password is typed into a window this application drew, and the module that
   opens it never sees a refresh token.
@@ -213,6 +288,19 @@ The same rule covers a load that fails outright. Until it did, a window that
 could not reach Steam stayed on screen holding a signed-in session that
 `AccountBrowsers` had never recorded, and so the vault lock could not reach it.
 
+**And it is checked for the whole life of the window, not only at the landing.**
+That check ran once, against the URL the first load ended on; everything after
+it was used to write a title and nothing else. So a session that expired an hour
+into a trade — Steam answers that with a redirect to its own login form, which
+is ordinary and expected — put a real Steam password form inside this
+application's chrome, under the account's own name, with a correct
+`steamcommunity.com` in the address bar. Every signal a careful person checks
+would have agreed with it. Reaching a Steam login page now closes the window and
+wipes its session wherever it happens. Steam's OpenID hand-off (`/openid/login`)
+is deliberately excluded: it is how an already-signed-in account signs in to a
+third-party trading site, nothing is typed there, and refusing it would break
+the workflow this browser exists for.
+
 **Accepted:** the user can navigate anywhere. That is the feature — a browser
 that only reached one page would not finish a trade. Ordinary browser
 same-origin rules apply, so a page on another domain cannot read Steam's
@@ -243,6 +331,37 @@ their sessions when the vault locks. Closing alone would not be enough:
 `fromPartition` returns the same session next time it is asked, so the cookie
 would outlive the window and a reopened browser would still be signed in without
 a passphrase.
+
+**Including a window that had not finished opening.** The sweep iterates windows
+that exist, and an open takes four round trips to get there — proxy applied,
+route verified, cookie set, first page loaded. For all of that there was no
+record anywhere that a window was coming, so a lock landing mid-open swept an
+empty list and the window appeared afterwards: a signed-in Steam window created
+_by_ a locked vault. The same gap let a second press of the button build a
+second window while the first was still in flight, with only the later of the
+two ever recorded — the earlier stayed on screen, signed in, invisible to
+everything. Opens are now tracked from the moment they start, a second press
+joins the first rather than racing it, and an open that finishes after a lock
+closes and wipes itself instead of appearing.
+
+**Ends with a routing change, too.** Saving a new proxy for an account, or
+removing the account, drops its cached token and its cookie jar — everything it
+had until this window existed. The browser holds its own session in its own
+partition, so it kept going on the old route: the previous address still
+attached to the account, in the one place the user is actually looking at Steam,
+and for a removed account a signed-in window belonging to nothing. Both now
+close the window and wipe it, and both cancel an open still in flight.
+
+**And the window's views end with it.** This is the one guarantee that changed
+when the browser moved from `BrowserWindow` to `BaseWindow` for the tab strip: a
+`BrowserWindow` destroys the contents it owns, a `BaseWindow` does not — a
+`WebContentsView` outlives the window it was added to. Measured in a real run,
+not reasoned about: after closing, the window reported destroyed and the tab's
+`WebContents` did not, and script in it still ran. That left a live renderer
+holding the account's partition with no window to show it, unreachable by the
+next lock because `AccountBrowsers` had already forgotten the account, and one
+more of them for every open-and-close. Closing a window now destroys its tabs
+and its chrome.
 
 ### 2.7 An attacker with your unlocked vault, stripping 2FA
 

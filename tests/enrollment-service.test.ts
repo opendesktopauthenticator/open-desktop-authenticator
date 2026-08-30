@@ -1368,3 +1368,186 @@ describe('a row replaced while Steam is answering', () => {
 		expect(accounts[0]?.sharedSecret).toBe(SHARED_B);
 	});
 });
+
+/**
+ * **Cancelling an enrolment that `Require proxies` has just forbidden.**
+ *
+ * The IPC guard refuses a *new* proxyless enrolment. One already running was
+ * untouched, so a password kept travelling unrouted after the user turned the
+ * rule on — and enrolling is precisely when an account's address is first shown
+ * to Steam.
+ *
+ * **`pendingLogin` was the wrong thing to read.** It is assigned only after
+ * `startWithCredentials` has been awaited, which is exactly the window in which
+ * the password is on the wire. A policy change landing there found nothing
+ * pending and cancelled nothing. `liveSessions` is registered the moment the
+ * session exists, for that same reason.
+ */
+describe('forgetting an unrouted enrolment', () => {
+	function stalled(): {
+		service: EnrollmentService;
+		cancelled: () => number;
+	} {
+		const { vault } = fakeVault();
+		let cancelled = 0;
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => ({
+				...fakeSession(),
+				// Never settles: the sign-in is still talking to Steam, which is the
+				// only moment this method exists for.
+				startWithCredentials: () => new Promise(() => undefined),
+				cancelLoginAttempt: () => {
+					cancelled += 1;
+				}
+			}),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+		return { service, cancelled: () => cancelled };
+	}
+
+	it('cancels one that is still signing in, before any pendingLogin exists', async () => {
+		const { service, cancelled } = stalled();
+		void service.begin('trader', 'a-password');
+		await Promise.resolve();
+		await Promise.resolve();
+
+		service.forgetUnrouted();
+
+		expect(cancelled(), 'the password was still going out unrouted').toBe(1);
+	});
+
+	/*
+	 * And leaves a proxied one alone. An enrolment through a proxy satisfies the
+	 * new rule, and enrolling is an attended act with a code arriving on a phone
+	 * — cancelling it because an unrelated switch moved is a poor trade for a
+	 * leak that is not happening.
+	 */
+	it('leaves one that named a proxy running', async () => {
+		const { service, cancelled } = stalled();
+		void service.begin('trader', 'a-password', 'socks5://10.0.0.1:1080');
+		await Promise.resolve();
+		await Promise.resolve();
+
+		service.forgetUnrouted();
+
+		expect(cancelled()).toBe(0);
+	});
+
+	/**
+	 * **And the set empties as sessions end.**
+	 *
+	 * It is a second registry beside `liveSessions`, so it has to be cleared on
+	 * both of the paths that stop tracking a session — the cancel and the
+	 * successful release. Missed, it grows for the life of the process and a
+	 * later sweep reaches into finished sign-ins: harmless in effect, because
+	 * cancelling a completed session is swallowed, and a leak either way.
+	 */
+	it('stops tracking an enrolment that finished', async () => {
+		const { vault } = fakeVault();
+		let cancelled = 0;
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => ({
+				...fakeSession(),
+				cancelLoginAttempt: () => {
+					cancelled += 1;
+				}
+			}),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		await service.begin('trader', 'a-password');
+		service.forgetUnrouted();
+
+		expect(cancelled, 'a finished sign-in was still being tracked as in flight').toBe(0);
+	});
+
+	/*
+	 * The other half of the same cleanup: a session this sweep has already
+	 * cancelled must leave the set too, or a second sweep reaches back into it.
+	 * Two registries kept in step is exactly the arrangement that drifts.
+	 */
+	it('does not cancel the same enrolment twice', async () => {
+		const { service, cancelled } = stalled();
+		void service.begin('trader', 'a-password');
+		await Promise.resolve();
+		await Promise.resolve();
+
+		service.forgetUnrouted();
+		service.forgetUnrouted();
+
+		expect(cancelled(), 'a cancelled sign-in stayed on the in-flight list').toBe(1);
+	});
+
+	/**
+	 * **Ours or Steam's?**
+	 *
+	 * A cancelled `startWithCredentials` rejects, and the catch reported "Steam
+	 * refused the sign-in" — true of a rejected password, false of every
+	 * cancellation. Enrolment does not use the callback `login.ts` threads a
+	 * reason through, so it had no way to say which had happened: a user who had
+	 * just switched `Require proxies` on was told Steam had turned them away.
+	 */
+	it('says the policy stopped it, not that Steam refused', async () => {
+		const { vault } = fakeVault();
+		let reject: ((err: Error) => void) | undefined;
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => ({
+				...fakeSession(),
+				startWithCredentials: () =>
+					new Promise((_resolve, fail) => {
+						reject = fail;
+					}),
+				// What the library does when the attempt is abandoned.
+				cancelLoginAttempt: () => reject?.(new Error('LoginSession was cancelled'))
+			}),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		const enrolling = service.begin('trader', 'a-password');
+		await Promise.resolve();
+		await Promise.resolve();
+		service.forgetUnrouted();
+
+		await expect(enrolling).rejects.toThrow(/require proxies/i);
+		await expect(enrolling).rejects.not.toThrow(/Steam refused/i);
+	});
+
+	it('still says Steam refused when Steam actually did', async () => {
+		const { vault } = fakeVault();
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => ({
+				...fakeSession(),
+				startWithCredentials: () => Promise.reject(new Error('InvalidPassword'))
+			}),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		await expect(service.begin('trader', 'wrong')).rejects.toThrow(/Steam refused/i);
+	});
+
+	it('does nothing when no enrolment is running', () => {
+		const { service, cancelled } = stalled();
+		expect(() => service.forgetUnrouted()).not.toThrow();
+		expect(cancelled()).toBe(0);
+	});
+});

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CHANNELS } from '../src/shared/ipc';
 import { __resetRouterForTests, setTrustedSender } from '../src/main/ipc/router';
 import { registerTransferHandlers } from '../src/main/steam/transfer-ipc';
-import type { TransferService } from '../src/main/steam/transfer';
+import { TransferService } from '../src/main/steam/transfer';
 import type { VaultService } from '../src/main/vault/service';
 
 /*
@@ -31,6 +31,8 @@ const STEAM_ID = '76561198000000001';
 function harness(
 	options: {
 		unlocked?: boolean;
+		/** Whether the vault refuses to talk to Steam without a proxy. */
+		requireProxies?: boolean;
 		authenticate?: unknown;
 		/** What the service says it is still waiting on, if anything. */
 		awaiting?: 'persist' | 'unanswered' | 'unreadable';
@@ -57,6 +59,9 @@ function harness(
 	};
 	const vault = {
 		isUnlocked: () => options.unlocked !== false,
+		// Strict mode off unless a test says otherwise. A fake without this threw
+		// on every transfer the moment `Require proxies` reached this handler.
+		settings: () => ({ requireProxies: options.requireProxies === true }),
 		touch: () => {
 			touches += 1;
 		}
@@ -235,5 +240,271 @@ describe('transfer status while locked', () => {
 		const { transfer } = harness({ awaiting: 'persist', unlocked: false });
 		await call(CHANNELS.transferStatus, {});
 		expect(transfer.awaiting).not.toHaveBeenCalled();
+	});
+});
+
+/*
+ * **The checkbox on the completion screen used to lead nowhere.**
+ *
+ * A transfer stores the account as `pendingRevocationBackup` deliberately; the
+ * screen shows the code Steam will never issue again and asks the user to
+ * confirm they wrote it down. Done only closed the screen. The account stayed
+ * pending and the home screen went on warning that the code had never been
+ * backed up — about the code the user had just been shown and had just
+ * confirmed keeping.
+ *
+ * The confirm channel refuses unless the code was *revealed*, which is right: one
+ * IPC call must not clear that warning for an account nobody ever showed. A
+ * completed transfer is a reveal, and nothing was recording it.
+ */
+describe('a completed transfer and the recovery-code ceremony', () => {
+	const completed = {
+		steamId64: STEAM_ID,
+		accountName: 'someone',
+		revocationCode: 'R12345',
+		timeOffsetSeconds: 0
+	};
+
+	/** A ceremony that reports what it was told, without reaching a vault. */
+	function watchedCeremony() {
+		const revealed: { steamId64: string; code: string }[] = [];
+		return {
+			ceremony: {
+				recordReveal: (steamId64: string, code: string) => revealed.push({ steamId64, code }),
+				hasRevealed: (steamId64: string, code: string) =>
+					revealed.some((entry) => entry.steamId64 === steamId64 && entry.code === code),
+				forget: () => revealed.splice(0)
+			},
+			revealed
+		};
+	}
+
+	function transferHarness(result: typeof completed) {
+		const { ceremony, revealed } = watchedCeremony();
+		const transfer = {
+			authenticate: vi.fn(),
+			cancel: vi.fn(),
+			current: vi.fn(() => ({ steamId64: STEAM_ID, accountName: 'someone' })),
+			awaiting: vi.fn(() => undefined),
+			completeTransfer: vi.fn(() => Promise.resolve(result)),
+			retryPersist: vi.fn(() => Promise.resolve(result))
+		};
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			settings: () => ({ requireProxies: false })
+		} as unknown as VaultService;
+		registerTransferHandlers(transfer as unknown as TransferService, vault, ceremony as never);
+		return { revealed };
+	}
+
+	it('counts finishing the transfer as having shown the code', async () => {
+		const { revealed } = transferHarness(completed);
+
+		await call(CHANNELS.transferComplete, { smsCode: '12345' });
+
+		expect(revealed, 'the confirm will refuse for a code it was never told about').toEqual([
+			{ steamId64: STEAM_ID, code: 'R12345' }
+		]);
+	});
+
+	/*
+	 * The retry shows the same code on the same screen. A transfer whose storage
+	 * failed the first time must not end up in the one state where the
+	 * acknowledgement cannot be recorded.
+	 */
+	it('counts a retried persist the same way', async () => {
+		const { revealed } = transferHarness(completed);
+
+		await call(CHANNELS.transferRetryPersist);
+
+		expect(revealed).toEqual([{ steamId64: STEAM_ID, code: 'R12345' }]);
+	});
+
+	it('records the code itself, so a confirm cannot ride on it for another', async () => {
+		const { revealed } = transferHarness(completed);
+		await call(CHANNELS.transferComplete, { smsCode: '12345' });
+
+		// The reveal handler in `vault/ipc.ts` checks the stored code against what
+		// was shown. Recording the account alone would let a code imported after
+		// this point be marked as backed up by a reveal that never included it.
+		expect(revealed[0]?.code).toBe(completed.revocationCode);
+	});
+
+	it('still answers the renderer with the completed transfer', async () => {
+		transferHarness(completed);
+		expect(await call(CHANNELS.transferComplete, { smsCode: '12345' })).toMatchObject({
+			steamId64: STEAM_ID,
+			revocationCode: 'R12345'
+		});
+	});
+});
+
+/**
+ * **Transfer carries a password and a Steam Guard code, and had no guard.**
+ *
+ * `Require proxies` is enforced at `SteamTransportFactory.forAccount`, which
+ * every Steam request crosses — except the ones that never build a transport.
+ * `steam-session` speaks over Node's own stack, so this call sent both secrets
+ * to Steam from the machine's own address on a vault that forbade it, and
+ * returned `{ state: 'authenticated' }` as though nothing were wrong.
+ *
+ * There is no stored account to read a proxy from; this is the call that
+ * authenticates one for import. The field on the form is the only route there
+ * is, and empty means refused.
+ */
+describe('transferring under Require proxies', () => {
+	it('refuses an authenticate with no proxy', async () => {
+		const { transfer } = harness({ requireProxies: true });
+
+		await expect(
+			call(CHANNELS.transferAuthenticate, {
+				accountName: 'alice',
+				password: 'secret',
+				steamGuardCode: 'ABCDE'
+			})
+		).rejects.toThrow(/require proxies/i);
+
+		expect(
+			transfer.authenticate,
+			'the password and Guard code were sent anyway'
+		).not.toHaveBeenCalled();
+	});
+
+	it('refuses one whose proxy field is empty', async () => {
+		const { transfer } = harness({ requireProxies: true });
+		await expect(
+			call(CHANNELS.transferAuthenticate, {
+				accountName: 'alice',
+				password: 'secret',
+				steamGuardCode: 'ABCDE',
+				proxyUrl: ''
+			})
+		).rejects.toThrow(/require proxies/i);
+		expect(transfer.authenticate).not.toHaveBeenCalled();
+	});
+
+	it('allows one that names a proxy', async () => {
+		const { transfer } = harness({ requireProxies: true });
+		await call(CHANNELS.transferAuthenticate, {
+			accountName: 'alice',
+			password: 'secret',
+			steamGuardCode: 'ABCDE',
+			proxyUrl: 'http://10.0.0.9:8080'
+		});
+		expect(transfer.authenticate).toHaveBeenCalledWith(
+			'alice',
+			'secret',
+			'ABCDE',
+			'http://10.0.0.9:8080'
+		);
+	});
+
+	it('changes nothing when the setting is off', async () => {
+		const { transfer } = harness();
+		await call(CHANNELS.transferAuthenticate, {
+			accountName: 'alice',
+			password: 'secret',
+			steamGuardCode: 'ABCDE'
+		});
+		expect(transfer.authenticate).toHaveBeenCalled();
+	});
+});
+
+/**
+ * **The one transfer stage that is safe to abandon.**
+ *
+ * Cancelling a transfer mid-flight is refused by design: past the challenge,
+ * Steam may have rotated the authenticator and `pending` holds the only route
+ * back to secrets it will not reissue. That reasoning was applied to the whole
+ * of `TransferService`, and it is too broad — `authenticate` changes nothing on
+ * Steam and its own docblock says so. It also carries a password *and* a Steam
+ * Guard code, so leaving it running was the most expensive exception of the
+ * lot: turning `Require proxies` on did nothing about it for as long as the
+ * sign-in timeout allowed.
+ */
+describe('cancelling a transfer authentication the policy forbids', () => {
+	function stalled(proxyUrl?: string) {
+		let cancelled = 0;
+		const transfer = new TransferService({} as never, {} as never, () => 0, {
+			signIn: (
+				_request: unknown,
+				_proxyUrl: string | undefined,
+				_factory: unknown,
+				_now: unknown,
+				onAttempt?: (cancel: () => void) => void
+			) => {
+				onAttempt?.(() => {
+					cancelled += 1;
+				});
+				// Never settles: still talking to Steam, which is the only moment
+				// this method exists for.
+				return new Promise(() => undefined);
+			}
+		} as never);
+		void transfer.authenticate('alice', 'secret', 'ABCDE', proxyUrl).catch(() => undefined);
+		return { transfer, cancelled: () => cancelled };
+	}
+
+	it('cancels one that named no proxy', async () => {
+		const { transfer, cancelled } = stalled();
+		await Promise.resolve();
+
+		transfer.cancelUnroutedAuthentication();
+
+		expect(cancelled(), 'the password and Guard code kept going out').toBe(1);
+	});
+
+	it('leaves one that named a proxy running', async () => {
+		const { transfer, cancelled } = stalled('http://10.0.0.9:8080');
+		await Promise.resolve();
+
+		transfer.cancelUnroutedAuthentication();
+
+		expect(cancelled()).toBe(0);
+	});
+
+	it('does not cancel the same authentication twice', async () => {
+		const { transfer, cancelled } = stalled();
+		await Promise.resolve();
+
+		transfer.cancelUnroutedAuthentication();
+		transfer.cancelUnroutedAuthentication();
+
+		expect(cancelled()).toBe(1);
+	});
+
+	/*
+	 * And the record does not outlive the stage. Left behind, a later sweep
+	 * reaches into a sign-in that has already finished — harmless in effect,
+	 * because a second cancel is swallowed, and a stale handle to a closure that
+	 * held a password either way.
+	 */
+	it('stops tracking an authentication that has finished', async () => {
+		let cancelled = 0;
+		const transfer = new TransferService({} as never, {} as never, () => 0, {
+			signIn: (
+				_request: unknown,
+				_proxyUrl: string | undefined,
+				_factory: unknown,
+				_now: unknown,
+				onAttempt?: (cancel: () => void) => void
+			) => {
+				onAttempt?.(() => {
+					cancelled += 1;
+				});
+				return Promise.reject(new Error('Steam said no'));
+			}
+		});
+
+		await transfer.authenticate('alice', 'secret', 'ABCDE').catch(() => undefined);
+		transfer.cancelUnroutedAuthentication();
+
+		expect(cancelled, 'a finished sign-in was still tracked as in flight').toBe(0);
+	});
+
+	it('does nothing when no authentication is running', () => {
+		const transfer = new TransferService({} as never, {} as never, () => 0);
+		expect(() => transfer.cancelUnroutedAuthentication()).not.toThrow();
 	});
 });

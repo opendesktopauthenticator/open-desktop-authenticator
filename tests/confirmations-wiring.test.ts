@@ -54,3 +54,36 @@ describe('the confirmations screen wires up its incomplete-list warning', () => 
 		).toHaveLength(2);
 	});
 });
+
+/**
+ * The sign-in channel refuses a direct route on a vault that forbids one.
+ *
+ * Source-level rather than through the handler: this channel is registered
+ * against a live `ConfirmationsService` and a live vault, and the point being
+ * checked is that the guard exists at all and reads the setting rather than the
+ * request. It is not reachable from the UI — the browser refuses first, so the
+ * sign-in screen is never reached with a direct route — which is exactly why it
+ * would rot unnoticed without this.
+ */
+describe('signing in under Require proxies', () => {
+	const source = readFileSync(join(__dirname, '../src/main/confirmations/ipc.ts'), 'utf8');
+
+	it('refuses a direct sign-in', () => {
+		expect(source).toMatch(/route === 'direct' && vault\.settings\(\)\.requireProxies/);
+	});
+
+	it('refuses before the password is used', () => {
+		// The throw sits above the `confirmations.signIn` call, not in its catch:
+		// a sign-in sent and then reported would already have put the password on
+		// the connection this setting exists to keep it off.
+		const guard = source.indexOf('requireProxies');
+		const call = source.indexOf('confirmations.signIn(');
+		expect(guard, 'the guard runs after the sign-in').toBeLessThan(call);
+	});
+
+	it('says the same thing the browser says', () => {
+		// One message for one setting. Two sentences for one cause reads as two
+		// different problems.
+		expect(source).toContain('DIRECT_REFUSED');
+	});
+});
