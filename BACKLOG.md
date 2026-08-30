@@ -13,7 +13,26 @@ Nothing in this file is a commitment.
 - Encrypted-backup sync guidance (user's own cloud; still serverless)
 - Portable-build polish
 - GPG release signatures (Q7)
-- Reproducible-builds hardening toward byte-for-byte claims (§P3)
+- Reproducible-builds hardening toward byte-for-byte claims (§P3). **Measured,
+  not guessed** — two builds back to back on one machine:
+  - `out/` and `app.asar` are already byte-identical, as is every file inside
+    the NSIS installer, including the 95 MB `app-64.7z` payload and the
+    compiled uninstaller.
+  - The installer `.exe` is not. The sole cause is that NSIS records each
+    embedded file's mtime in its compressed header, and both `app-64.7z` and
+    the uninstaller are generated at build time. The recompressed header
+    changed length by one byte, which shifts the whole payload — which is why
+    a naive diff reports ~100 MB differing while nothing in the content does.
+  - `SOURCE_DATE_EPOCH` does **not** help; electron-builder's NSIS path ignores
+    it. Tested.
+  - So the achievable claim is _payload_ reproducibility, not installer. What it
+    still needs: a full version in `.nvmrc` (it floats on `24`), dated runner
+    images, a CI job that builds `app.asar` twice and fails on a mismatch, and
+    a published hash plus rebuild recipe. Only then flip the site flag — and it
+    needs a **narrower** flag than `reproducible`, which currently licenses
+    "builds are reproducible" across five pages.
+  - The appx is moot: Microsoft re-signs it on ingestion, so that channel can
+    never be byte-compared.
 - `/guides/*` SEO cluster
 - Maintainer #2 onboarding (Q8)
 
