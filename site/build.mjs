@@ -54,6 +54,16 @@ if (badAddresses.length) {
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Gridinsoft's ownership token for this domain.
+ *
+ * Named rather than inlined because it appears twice — in the home page's head
+ * and as the name of a file at the site root — and the two have to agree. They
+ * are issued per domain, so this one is `opendesktopauthenticator.com`'s and
+ * nothing else's: the same token on another site verifies neither.
+ */
+const GRIDINSOFT_KEY = 'nxu0pl5j85cxvlp60subwgz6bicyp3qv4zd1j7mr0b2jm3f9d1cunqqwqupqls81';
 const out = join(here, 'dist');
 
 export const SITE = {
@@ -103,7 +113,18 @@ export const SITE = {
 	verifications: [
 		// Requested by Trustpilot support, 2026-08-26, to verify domain ownership
 		// for the review profile.
-		{ service: 'Trustpilot', token: 'r2qnjwvklb' }
+		{ service: 'Trustpilot', token: 'r2qnjwvklb' },
+		/*
+		 * Gridinsoft, 2026-08-30. A `meta` name rather than a comment because that
+		 * is what they read — Trustpilot accepts a comment and Gridinsoft does not,
+		 * so the shape is per service rather than a house style.
+		 *
+		 * They offer a root file as an alternative and this site publishes both:
+		 * `file` puts the same token at `/gridinsoft-<token>.txt`. Either alone
+		 * would verify; together, neither a rewritten head nor a missing file can
+		 * quietly un-verify the domain.
+		 */
+		{ service: 'Gridinsoft', token: GRIDINSOFT_KEY, meta: 'gridinsoft-key', file: true }
 	],
 
 	/*
@@ -364,8 +385,14 @@ function head(page) {
 	const verifications =
 		page.slug === 'index'
 			? SITE.verifications
-					.map(
-						(v) => `
+					.map((v) =>
+						// A comment satisfies the services that read one; the rest want a
+						// real tag, and a comment they cannot see is indistinguishable
+						// from having done nothing.
+						v.meta
+							? `
+	<meta name="${escape(v.meta)}" content="${escape(v.token)}">`
+							: `
 	<!-- ${escape(v.service)} verification: ${escape(v.token)} -->`
 					)
 					.join('')
@@ -796,6 +823,17 @@ writeFileSync(join(out, 'site.webmanifest'), manifest(SITE, asset));
  */
 const expires = new Date(`${SITE.updated}T00:00:00Z`);
 expires.setUTCFullYear(expires.getUTCFullYear() + 1);
+/*
+ * The file half of each verification that asks for one.
+ *
+ * Written from the same token the head carries, so the pair cannot drift: a
+ * meta tag and a file naming different keys is the one failure mode of
+ * publishing both, and it verifies nothing while looking like it should.
+ */
+for (const v of SITE.verifications.filter((entry) => entry.file)) {
+	writeFileSync(join(out, `gridinsoft-${v.token}.txt`), v.token);
+}
+
 writeFileSync(
 	join(out, 'security.txt'),
 	`# ${SITE.name} — how to report a security problem.

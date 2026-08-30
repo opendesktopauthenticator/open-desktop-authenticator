@@ -298,20 +298,66 @@ const fileFor = (id) => {
 };
 
 /** Drop uploads nobody ever attached to a report, from disk and from the table. */
+/**
+ * Send a file, and survive it going away underneath us.
+ *
+ * **`pipe` does not forward errors, and there was no listener.** The size is
+ * read with `statSync` and the stream is opened afterwards — a gap the
+ * retention sweep, a failed disk, or an operator with `rm` can all land in. The
+ * resulting `error` event fires on a stream nobody is listening to, outside the
+ * request's promise, which in Node is an uncaught exception: **one attachment
+ * view could stop the entire ticket service**, for every other reporter at
+ * once.
+ *
+ * Headers are already sent by the time this can happen, so there is no status
+ * left to change. Ending the response is the whole of what is still available,
+ * and it is enough: the client sees a truncated body rather than a dead server.
+ */
+function stream(source, response) {
+	source.on('error', () => {
+		// `destroy` rather than `end`: a half-sent body should read as broken to
+		// the client, not as complete.
+		response.destroy();
+	});
+	// If the client goes away mid-send, stop reading the file for them.
+	response.on('close', () => source.destroy());
+	return source.pipe(response);
+}
+
 function sweepUnclaimed() {
 	const cutoff = new Date(Date.now() - UNCLAIMED_LIFETIME_MS).toISOString();
 	const stale = db
 		.prepare('SELECT id FROM attachments WHERE ticket_id IS NULL AND created_at < ?')
 		.all(cutoff);
+	/*
+	 * **A row is only dropped once its bytes are actually gone.**
+	 *
+	 * `rmSync(..., { force: true })` already swallows ENOENT, which is the only
+	 * case this `catch` was written for. Everything else it caught was a real
+	 * failure — EACCES, EBUSY, an I/O fault — and the row was deleted anyway.
+	 *
+	 * The file then stops existing as far as this service is concerned: the
+	 * orphan sweep keeps retrying the delete, but `storedBytes()` counts rows, so
+	 * those bytes drop out of the two-gigabyte budget while still sitting on the
+	 * disk. Enough persistent failures and real usage passes the cap the limit
+	 * exists to enforce, silently, with the accounting insisting everything is
+	 * fine. The same shape as the withdraw endpoint's bug, one sweep along.
+	 */
+	const removed = [];
 	for (const row of stale) {
 		try {
 			rmSync(fileFor(row.id), { force: true });
+			removed.push(row.id);
 		} catch {
-			// A file already gone is the state we wanted; the row still goes.
+			// Left in place *and* left counted, so the next sweep tries again and the
+			// budget keeps seeing it in the meantime.
 		}
 	}
-	if (stale.length) {
-		db.prepare('DELETE FROM attachments WHERE ticket_id IS NULL AND created_at < ?').run(cutoff);
+	if (removed.length) {
+		const drop = db.prepare('DELETE FROM attachments WHERE id = ?');
+		for (const id of removed) {
+			drop.run(id);
+		}
 	}
 	sweepOrphans();
 	sweepClosed();
@@ -333,19 +379,45 @@ function sweepClosed() {
 	if (!done.length) {
 		return 0;
 	}
+	/*
+	 * **A report is only deleted once its pictures actually are.**
+	 *
+	 * A failed `rmSync` used to be shrugged off — "swept again by sweepOrphans
+	 * once the row is gone" — and the ticket was deleted anyway. The cascade then
+	 * took the attachment rows with it, and `storedBytes()` counts rows, so the
+	 * bytes vanished from the two-gigabyte budget while still sitting on the
+	 * disk. Worse for the reporter: the text of their report was deleted while
+	 * part of its private evidence stayed.
+	 *
+	 * `sweepOrphans` does keep retrying, so this usually resolves itself. A
+	 * persistent EACCES does not, and nothing would ever have counted it again.
+	 * Holding the ticket back costs a retry an hour later and keeps the
+	 * accounting honest in the meantime.
+	 */
 	const files = db.prepare('SELECT id FROM attachments WHERE ticket_id = ?');
+	const cleared = [];
 	for (const ticket of done) {
+		let complete = true;
 		for (const file of files.all(ticket.id)) {
 			try {
 				rmSync(fileFor(file.id), { force: true });
 			} catch {
-				// Swept again by sweepOrphans once the row is gone.
+				complete = false;
 			}
 		}
+		if (complete) {
+			cleared.push(ticket.id);
+		}
 	}
-	return db
-		.prepare("DELETE FROM tickets WHERE status IN ('resolved', 'declined') AND updated_at < ?")
-		.run(cutoff).changes;
+	if (!cleared.length) {
+		return 0;
+	}
+	const drop = db.prepare('DELETE FROM tickets WHERE id = ?');
+	let changes = 0;
+	for (const id of cleared) {
+		changes += drop.run(id).changes;
+	}
+	return changes;
 }
 
 /**
@@ -478,9 +550,30 @@ function storeUpload(buffer) {
 	// 0o600: readable by the service account and nothing else. These are other
 	// people's screenshots and some of them will contain more than intended.
 	writeFileSync(fileFor(id), buffer, { mode: 0o600 });
-	db.prepare(
-		'INSERT INTO attachments (id, ticket_id, media_type, bytes, created_at) VALUES (?, NULL, ?, ?, ?)'
-	).run(id, media.type, buffer.length, now());
+	/*
+	 * **The row is what makes the file findable, so a failed insert must take the
+	 * file with it.**
+	 *
+	 * Bytes were written first and tracked second, with nothing in between. An
+	 * insert that threw — a locked database, a full disk, a constraint — left the
+	 * upload on disk with no row: invisible to the unclaimed sweep, which reads
+	 * rows, and uncounted by the size accounting, which also reads rows. So the
+	 * caller was told nothing was saved while somebody's screenshot sat in the
+	 * attachment directory permanently, outside the two-gigabyte budget that
+	 * exists to bound exactly this.
+	 */
+	try {
+		db.prepare(
+			'INSERT INTO attachments (id, ticket_id, media_type, bytes, created_at) VALUES (?, NULL, ?, ?, ?)'
+		).run(id, media.type, buffer.length, now());
+	} catch (err) {
+		try {
+			rmSync(fileFor(id), { force: true });
+		} catch {
+			// Nothing further to try. The throw below is still the right answer.
+		}
+		throw err;
+	}
 	return { attachment: { id, type: media.type, kind: media.kind, bytes: buffer.length } };
 }
 
@@ -1592,16 +1685,35 @@ async function handle(request, response, url) {
 			.prepare('SELECT id FROM attachments WHERE id = ? AND ticket_id IS NULL')
 			.get(withdraw[1]);
 		if (row) {
+			/*
+			 * **A failed unlink is not "already gone".**
+			 *
+			 * `rmSync(..., { force: true })` already swallows ENOENT, which is the
+			 * case this catch was written for. Everything it caught on top of that
+			 * was a real failure — EACCES, EBUSY, an I/O fault — and the row was
+			 * deleted anyway. That is the worst available outcome: the file stays on
+			 * disk, the only record of it is gone, so the unclaimed sweep can never
+			 * find it either, and the caller is told 204. Somebody who pulled a
+			 * screenshot back because their account name was in the corner of it was
+			 * told it had been removed, and it had become permanent instead.
+			 *
+			 * The row now outlives a failed delete, so the sweep retries it, and the
+			 * caller is told the truth.
+			 */
 			try {
 				rmSync(fileFor(row.id), { force: true });
 			} catch {
-				// Already gone is the state we wanted; the row still goes.
+				return send(response, 500, JSON.stringify({ error: 'That file could not be removed.' }), {
+					'content-type': 'application/json'
+				});
 			}
 			db.prepare('DELETE FROM attachments WHERE id = ? AND ticket_id IS NULL').run(row.id);
 		}
 		// 204 either way: whether it was already gone or never existed, the caller's
 		// desired state is "not stored", and distinguishing the two would tell an
-		// unauthenticated caller which ids are real.
+		// unauthenticated caller which ids are real. A row that *is* here and could
+		// not be removed is the one case that answers differently, above — that is
+		// not a probe answering, it is our own failure being reported.
 		return send(response, 204, '');
 	}
 
@@ -1778,11 +1890,11 @@ async function handle(request, response, url) {
 					'content-range': `bytes ${from}-${to}/${size}`,
 					'content-length': to - from + 1
 				});
-				return createReadStream(filePath, { start: from, end: to }).pipe(response);
+				return stream(createReadStream(filePath, { start: from, end: to }), response);
 			}
 
 			response.writeHead(200, { ...common, 'content-length': size });
-			return createReadStream(filePath).pipe(response);
+			return stream(createReadStream(filePath), response);
 		}
 
 		/* ---- the reporter adds to their own report ---- */
