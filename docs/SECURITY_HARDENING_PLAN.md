@@ -348,10 +348,13 @@ renderer API. `src/shared/ipc.ts:942-954` constrains `proxyUrl` to
 `z.string().max(2048).nullable()` — no scheme, host or format rule at the
 contract layer. `src/main/vault/ipc.ts:246-270` validates with `planProxy`
 (`egress.ts:518-580`), which is purely syntactic and offline: the URL must
-parse, the scheme must be one of http/https/socks5/socks5h/socks4, the hostname
-must be non-empty, and SOCKS may not carry inline credentials. There is no
-allowlist, no denylist, and no rejection of loopback, link-local, RFC1918 or
-cloud-metadata addresses.
+parse, the scheme must be one of http/https/socks5/socks5h, the hostname must be
+non-empty, and SOCKS may not carry inline credentials. **SOCKS4 and SOCKS4a were
+on that list when this section was written and are now refused by name**: the
+protocol cannot carry a hostname, so the client has to resolve DNS itself, which
+hands the destination to the local resolver and undoes the one thing routing an
+account through a proxy is for. There is no allowlist, no denylist, and no
+rejection of loopback, link-local, RFC1918 or cloud-metadata addresses.
 
 The asymmetry is in the gating. `accountRemove` (`ipc.ts:200`) and
 `revocationReveal` (`ipc.ts:281`) both take a passphrase. `accountSetProxy`

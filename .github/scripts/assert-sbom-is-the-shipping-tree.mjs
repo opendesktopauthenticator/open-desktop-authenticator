@@ -41,6 +41,7 @@ import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { basename, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { excludedPackagesFrom } from './builder-exclusions.mjs';
 
 const sbomPath = process.env.SBOM || process.argv[2];
 const manifestPath = process.env.MANIFEST || 'package.json';
@@ -268,15 +269,19 @@ if (!builderFiles) {
 // the test-directory pattern trim files out of packages that still ship as
 // directories, and folding those in here would claim react's fate for every
 // dependency in the tree.
-const excludedPackages = new Set();
-for (const pattern of builderFiles) {
-	const match = /^!node_modules\/(?:\{([^}]+)\}|([^/*{}]+))\/\*\*$/.exec(String(pattern));
-	if (!match) {
-		continue;
-	}
-	for (const name of (match[1] ?? match[2]).split(',')) {
-		excludedPackages.add(name.trim());
-	}
+/*
+ * Read by `builder-exclusions.mjs`, which is unit-tested — this is the part
+ * that decides what the published report *claims* about every dependency, and
+ * a verifier defeated the first version of it with an equivalent glob.
+ */
+let excludedPackages;
+try {
+	excludedPackages = excludedPackagesFrom(builderFiles);
+} catch (err) {
+	fail(
+		`${builderConfigPath}: ${err instanceof Error ? err.message : String(err)} The report below ` +
+			'says how each dependency reaches the user, and it must not guess.'
+	);
 }
 
 const bundled = [...required].filter((id) =>

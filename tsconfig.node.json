@@ -23,6 +23,7 @@
     "electron.vite.config.mts",
     "vitest.config.mts",
     "tests/**/*.ts",
+    ".github/scripts/*.d.mts",
     "tickets/*.d.mts",
     "site/*.d.mts",
     "site/pages/*.d.mts",

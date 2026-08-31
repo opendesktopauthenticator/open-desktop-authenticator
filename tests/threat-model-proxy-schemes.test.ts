@@ -88,16 +88,21 @@ import { planProxy } from '../src/main/net/egress';
  *
  * ## Why only this document
  *
- * `docs/SECURITY_HARDENING_PLAN.md` also names `socks4`, and is left alone on
- * purpose: it is a record of what was decided when, not a description of what
- * the program does today. Rewriting a dated plan to match current behaviour
- * would destroy the only thing it is for. THREAT_MODEL.md is the one that claims
- * the present tense, so it is the one held to it.
+ * `docs/SECURITY_HARDENING_PLAN.md` was left out of this on the argument that a
+ * dated plan is a record of what was decided when, and rewriting one to match
+ * current behaviour destroys the only thing it is for. That is true of the
+ * narrative and was false of the sentence: it described `planProxy` **in the
+ * present tense**, listing socks4 among the schemes the current code accepts.
+ * A reader checking the program against it would have configured one.
+ *
+ * So both are held to the same rule, and the plan keeps its history by saying
+ * what changed rather than by leaving a wrong sentence in place.
  */
 
 const ROOT = join(__dirname, '..');
 const EGRESS_SOURCE = readFileSync(join(ROOT, 'src', 'main', 'net', 'egress.ts'), 'utf8');
 const THREAT_MODEL = readFileSync(join(ROOT, 'docs', 'THREAT_MODEL.md'), 'utf8');
+const HARDENING_PLAN = readFileSync(join(ROOT, 'docs', 'SECURITY_HARDENING_PLAN.md'), 'utf8');
 
 /**
  * Comments gone, so the vocabulary comes from the tables and not the essay.
@@ -167,6 +172,21 @@ const REFUSED = SCHEME_VOCABULARY.filter((scheme) => !egressAccepts(scheme));
  */
 const REFUSAL_LANGUAGE =
 	/\b(?:refused|refuses|refuse|rejected|rejects|reject|unsupported|turned away|turns away|turn away|turned down|not supported|not accepted|never accepted|not allowed|cannot be used|can(?:not| ?not|'t|’t) be routed|will not work|won(?:'|’)t work|does not work|doesn(?:'|’)t work)\b/i;
+
+/**
+ * Words that *promise* a scheme, which is the half a refusal check cannot see.
+ *
+ * **A refusal somewhere in the sentence is not a refusal of this scheme.** The
+ * first version required refusal language and nothing else, so a fragment could
+ * satisfy it by turning something *else* away in the same breath: "SOCKS4 works
+ * too, though inline credentials are not accepted" carries `not accepted` and
+ * passed, while promising a reader exactly what `planProxy` rejects.
+ *
+ * So a sentence naming a refused scheme must contain no promise at all. The two
+ * checks together mean it may only say the scheme is turned away.
+ */
+const ACCEPTANCE_LANGUAGE =
+	/\b(?:accepted|accepts|accept|supported|supports|support|allowed|allows|allow|works|work|usable|available|permitted|permits|fine|welcome|handled|handles)\b/i;
 
 /**
  * The document as a reader sees it: markup off, words untouched.
@@ -342,6 +362,19 @@ describe('docs/THREAT_MODEL.md tells the truth about proxy schemes', () => {
 				if (!mentions(fragment, scheme)) {
 					continue;
 				}
+				/*
+				 * **And no promise in the same sentence.** Requiring refusal language
+				 * alone let a fragment satisfy the rule by refusing something else:
+				 * "SOCKS4 works too, though inline credentials are not accepted"
+				 * carries `not accepted`, and promises the reader what planProxy
+				 * rejects.
+				 */
+				expect(
+					ACCEPTANCE_LANGUAGE.test(fragment),
+					`docs/THREAT_MODEL.md says ${scheme} is available to a reader. planProxy refuses ` +
+						`it, so the sentence is a promise the program does not keep — a refusal of ` +
+						`something else in the same breath does not make it true. The text: "${fragment}"`
+				).toBe(false);
 				expect(
 					REFUSAL_LANGUAGE.test(fragment),
 					`docs/THREAT_MODEL.md puts the name ${scheme} in front of a reader without turning ` +
@@ -385,6 +418,65 @@ describe('docs/THREAT_MODEL.md tells the truth about proxy schemes', () => {
 					`docs/THREAT_MODEL.md names "${dialect}", which egress.ts has no table entry for, ` +
 						`so nothing in this app can say whether it routes or leaks. Name a scheme ` +
 						`egress knows. The text: "${fragment}"`
+				).toBe(true);
+			}
+		}
+	});
+});
+
+/**
+ * **And the other document that describes `planProxy` in the present tense.**
+ *
+ * `SECURITY_HARDENING_PLAN.md` was scoped out of the rule above as a dated
+ * record. Its narrative is exactly that — but one sentence described what the
+ * validator does *today* and listed socks4 among the schemes it accepts, so a
+ * reader checking the program against it would have configured one and been
+ * turned away by the layer the document was describing.
+ *
+ * Held to the same rule now. A plan keeps its history by saying what changed,
+ * not by leaving a wrong sentence in place.
+ */
+describe('docs/SECURITY_HARDENING_PLAN.md tells the truth about proxy schemes', () => {
+	const fragments = sentences(readable(HARDENING_PLAN));
+
+	it('reads the plan as sentences', () => {
+		expect(
+			fragments.length,
+			'the plan produced no sentences, so this asserts nothing'
+		).toBeGreaterThan(10);
+	});
+
+	it('never names a scheme the transport refuses except to refuse it', () => {
+		for (const fragment of fragments) {
+			for (const scheme of REFUSED) {
+				if (!mentions(fragment, scheme)) {
+					continue;
+				}
+				expect(
+					ACCEPTANCE_LANGUAGE.test(fragment),
+					`docs/SECURITY_HARDENING_PLAN.md tells a reader ${scheme} is available. planProxy ` +
+						`refuses it, and this document describes planProxy. The text: "${fragment}"`
+				).toBe(false);
+				/*
+				 * **The half that was missing, and the one the audit finding needed.**
+				 *
+				 * Checking only for a promise looks for words like "supported" — and
+				 * the sentence that actually shipped used none of them. It read "the
+				 * scheme must be one of http/https/socks5/socks5h/socks4": a bare
+				 * list, no verb of permission anywhere in it, and a reader takes
+				 * socks4 from it as surely as from the word "supported".
+				 *
+				 * A vocabulary of promises can always be evaded by not using one.
+				 * Requiring the refusal cannot be: the sentence has to say the thing
+				 * is turned away, or not name it.
+				 */
+				expect(
+					REFUSAL_LANGUAGE.test(fragment),
+					`docs/SECURITY_HARDENING_PLAN.md puts the name ${scheme} in front of a reader ` +
+						`without turning it away, and planProxy refuses ${scheme}. A reader checking ` +
+						`the program against this document configures what it names and is refused by ` +
+						`the very layer the sentence describes. Say plainly that it is refused and ` +
+						`why, or stop naming it. The text: "${fragment}"`
 				).toBe(true);
 			}
 		}
