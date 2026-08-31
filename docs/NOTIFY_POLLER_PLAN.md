@@ -2,8 +2,22 @@
 
 **Status: signed off on the decisions; implementation held pending further
 review.**
-**Revision 5** — four corrections from a verification pass against the real
-tree, marked **[r5]**. Two audit findings were **refuted** and are recorded as
+**Revision 7** — a consistency pass over the whole document found seven
+defects that would have produced broken code, chief among them that **phase 6
+was unbuildable**: nothing in the plan produced the toast click it is built on.
+Those fixes are marked **[r7]**.
+
+**Revision 6** removed the session-lock degrade proposed in revision 5: `full`
+means `full`, in every condition, by the owner's ruling (§2.1). Revision 5's
+corrections from a verification pass against the real tree are marked **[r5]**;
+§13 records three findings from that pass that were **refuted**, with the
+evidence, because a plan that quietly drops a claim invites the next reviewer
+to raise it again.
+
+**Reference convention**, since it has caught two readers: sections are `§N`
+and steps are `Step P.M`, where `P` is the **phase** number and `N` the section
+number — they are not the same. §6 is phase 4, so its steps are `Step 4.x`.
+A cross-reference names both: “§6 step 4.2”. Two audit findings were **refuted** and are recorded as
 refuted (§13), because a plan that quietly drops a claim teaches the next
 reader nothing. The toast default is **`full`**, set by the owner against the
 recommendation in revision 3 (§2.1 records both). Revision 2's corrections,
@@ -71,7 +85,7 @@ All five answered. No open questions remain.
 
 | #   | Decision                        | Detail                                                                                                                                                                                                                                                                                                                                                                                                  |
 | --- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Toast default is **`full`**     | `"Trade with SomeTrader — you give: AK-47 Redline"`. **Owner's decision, against revision 3's recommendation of `type`; see §2.1 for both sides.**                                                                                                                                                                                                                                                      |
+| 1   | Toast default is **`full`**     | `"Trade with SomeTrader — you give: AK-47 Redline"`. **Owner's decision, twice: against revision 3's recommendation of `type`, and again in revision 6 against revision 5's proposed degrade under a Windows session lock. `full` is unconditional. See §2.1 for every side.**                                                                                                                          |
 | 2   | Silent seed **with carve-outs** | The first poll for an account seeds without toasting, so unlocking with twenty pending confirmations does not fire twenty toasts — **except** for `securityCritical` entries and a non-zero `unreadable`, which notify even on the first poll. Without that, unlocking to a pending account takeover would show nothing at all: notify-only polls write no activity entry, so there is no badge either. |
 | 3   | **Per-account**                 | Beside the interval it already shares.                                                                                                                                                                                                                                                                                                                                                                  |
 | 4   | A halt **does** notify          | And `onFailure`'s copy — _"Automatic confirmation stopped for this account…"_ — is reworded, because it is the wrong sentence for an account that was only ever watching.                                                                                                                                                                                                                               |
@@ -101,19 +115,23 @@ says what the trade is.
 
 - The disclosure on the AutoConfirm screen is no longer a footnote on an opt-in
   path. It sits **beside the enable switch**, not beside the `full` radio, and
-  states plainly that toasts will name the trade and its items and that Windows
-  keeps them in notification history.
+  states plainly that toasts will name the trade and its items, and that
+  Windows shows them **on the lock screen** and keeps them in notification
+  history. **[r7]** Naming only the history — which is what revision 4 wrote
+  here — states the smaller of the two disclosures; §7 step 5.4 has the exact
+  copy, and mutation 24 pins it.
 - `count` and `type` remain, and the screen presents them as the answer for a
-  shared or overlooked machine.
+  shared or overlooked machine — including a machine whose Windows session gets
+  locked while the vault stays open.
 - The Steam-controlled strings are **length-capped and stripped of control
   characters** before they reach a toast. This is the one place text this app
   did not write reaches an OS surface, and `full` makes it the default path
   rather than an opt-in one.
 
-#### **[r5] The Windows lock screen, which is not the vault lock**
+#### **[r5] The two locks are different things** — ruled on in **[r6]**
 
 Revision 4 leaned on "a toast appears on the lock screen" without separating
-two different locks, and the distinction changes what has to be built.
+two locks. They behave differently and only one of them was ever a question.
 
 **The vault lock needs nothing.** When the vault locks, `tick()` returns at its
 `!this.vault.isUnlocked()` check (`auto.ts:225`) before any poll happens, and
@@ -121,36 +139,46 @@ two different locks, and the distinction changes what has to be built.
 renderer independently clears its account list (`App.tsx:192-198`), the main
 process reloads the whole document (`index.ts:347-349`), and `accountsList`
 throws `VaultLockedError` while locked — three layers, all agreeing that a
-locked app shows no account names. Nothing further is required here, and an
-earlier draft of this section that proposed degrading `full` while the _vault_
-is locked was solving a case the engine already makes unreachable.
+locked app shows no account names. An earlier draft proposed degrading `full`
+while the _vault_ is locked; that was solving a case the engine already makes
+unreachable.
 
-**The Windows lock screen is a different condition, and the code does nothing
-about it.** The vault can be unlocked, the poller running, while the person has
-locked Windows and walked away. That is the case where a `full` toast prints
-the trade partner and the item on a screen in an empty room — and where it
-persists in notification history afterwards.
+**The Windows session lock is a separate condition, and `full` applies there
+too.** The vault can be unlocked and the poller running while the person has
+locked Windows and walked away, so a `full` toast can print the trade partner
+and the item on an unattended screen, and persists in notification history
+afterwards.
 
-So the rule is about the **session**, not the vault:
+Revision 5 proposed degrading to `count` while the Windows session is locked.
+**The owner ruled against it and `full` is unconditional.** The reasoning that
+settled the default settles this too, and is stronger here than revision 5
+credited:
 
-```ts
-// `powerMonitor` reports the Windows session lock, which is unrelated to the
-// vault's own lock. The vault lock stops polling outright; this one does not,
-// so it is the only case where a toast can reach an unattended screen.
-powerMonitor.on('lock-screen', () => notifier.setSessionLocked(true));
-powerMonitor.on('unlock-screen', () => notifier.setSessionLocked(false));
-```
+- Notifications are **off by default** and switched on per account. Somebody
+  who enables `full` toasts on a machine they walk away from has made that
+  choice about that machine.
+- A degrade would make the feature inconsistent in the exact moment it matters
+  most — the user is away, which is when a notification is most worth reading
+  on return.
+- It does not actually close the disclosure. A `full` toast raised while the
+  session was unlocked stays in notification history and is readable after a
+  later lock. Degrading on the transition retracts nothing already shown, so
+  the mechanism buys less than its complexity costs.
 
-While the session is locked the notifier composes at **`count`** regardless of
-the account's `detail`. The toast still fires — the point is that something is
-waiting — it just stops naming what. This is not a reversal of the `full`
-decision: `full` remains the default for the case the owner actually reasoned
-about, a person sitting at their machine.
+**Accepted, and named as accepted:** on a machine left unlocked-vault and
+locked-session, `full` toasts name trade partners and items on the lock screen
+and in notification history. That is the owner's decision, recorded here so a
+later reader does not mistake it for an oversight and "fix" it.
 
-**What this does not fix, and the disclosure must say so:** a `full` toast
-raised while the session was unlocked stays in Windows notification history and
-is readable after a later lock. Degrading on the transition does not retract
-what was already shown. The sentence beside the enable switch says this.
+**What this obliges instead:** the disclosure beside the enable switch names
+the lock screen and notification history explicitly — not just "Windows keeps
+them in history". A person choosing `full` should be choosing it knowing both.
+`count` and `type` remain, presented as the answer for a shared or unattended
+machine.
+
+There is no `powerMonitor` wiring, no `setSessionLocked`, and no lock-aware
+branch in the body formatter. **The notifier does not know what the Windows
+session is doing, and must not learn.**
 
 ---
 
@@ -370,6 +398,46 @@ if (mode === 'confirm') {
 }
 ```
 
+#### **[r7] `needsSignIn` has to be caught on _both_ arms**
+
+The snippet above catches it inside the `else` — the notify arm — only. That
+is exactly backwards from where the problem is.
+
+`mode` is `wantsConfirm ? 'confirm' : 'notify'` (step 3.2), so **every account
+with an auto type on takes the confirm arm**. Its `runAutoConfirm` can fail for
+the same expired-session reason, and with the catch where revision 6 put it,
+that failure falls to the generic handler: counted toward the ten-strike halt,
+logged as `kind: 'failed'`, and — since `failed` is not in `hasUrgent()` —
+silently. Ten polls later it surfaces as a halt phrased "failures in a row".
+
+That is precisely the condition §6 step 4.2b exists to fix, and as written the
+fix would be reachable only from the polls that do not have the problem.
+
+So the check moves to the **shared catch**, ahead of the backoff:
+
+```ts
+} catch (err) {
+  // Before the failure counter. An expired session is not a fault that backing
+  // off fixes, and it is the same condition whichever arm found it.
+  if (err instanceof ConfirmationsError && err.needsSignIn) {
+    if (this.generation !== generation) return;
+    this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
+    this.rememberEarliest();
+    this.onSignInNeeded(steamId64, accountName);
+    return;
+  }
+  // ...existing backoff, halt, onFailure...
+}
+```
+
+The `try` therefore wraps **both** arms rather than only the `list()` call.
+Everything else about the catch is unchanged.
+
+**Tests:** a confirm-mode sign-in failure calls `onSignInNeeded` and counts no
+failure · a notify-mode one still does · an ordinary error on either arm still
+backs off and still halts at ten · neither arm's sign-in path advances the
+failure counter.
+
 ### Step 3.5 · New options
 
 ```ts
@@ -387,14 +455,24 @@ onSignInNeeded: (steamId64: string, accountName: string) => void;
 requireProxies?: () => boolean;
 ```
 
-The activity log is **not** written on a notify-only poll — an entry per poll
-would bury the entries that matter. See open question 2 for what that costs.
+The activity log is **not** written for the ordinary result of a notify-only
+poll — an entry per poll would bury the entries that matter, and decision 2
+(§2) leans on exactly that when it justifies the seed carve-outs.
+
+> **[r7] One exception, and it is deliberate.** §6 step 4.2b adds a
+> `signInRequired` entry, which a notify-only poll _does_ write. That is not a
+> contradiction of the rule above: the rule is about the ordinary result of a
+> poll, and this is the one condition no amount of polling fixes. It is written
+> once per run rather than once per poll, which is what keeps it from burying
+> anything. Revision 6 stated the rule without the exception and revision 5
+> added the exception without amending the rule; both are recorded here so the
+> next reader does not delete one of them.
 
 ### Step 3.5a · `onFailure` has to widen — **[r5]**
 
 **Every revision of this plan up to r4 was internally inconsistent here.**
 Decision 4 says a halt notifies and that its copy is reworded for an account
-that was only ever watching. §4.2 says the toast title is the account name.
+that was only ever watching. §6 step 4.2 says the toast title is the account name.
 Neither is reachable, because the callback that reports a halt is unchanged
 from the shipped signature:
 
@@ -409,7 +487,7 @@ shared secret, identity secret and revocation code, and is the exact cost
 `autoConfirmSchedule()` exists to avoid. So the halt toast this plan promises
 could not have been built from what the plan gave it.
 
-The fix is small because §3.3 already threads `accountName` and `mode` into
+The fix is small because §5 step 3.3 already threads `accountName` and `mode` into
 `runOne`, which is where both call sites live. They just are not passed on:
 
 ```ts
@@ -477,21 +555,69 @@ export interface ToastHost {
 }
 ```
 
+> **[r7]** No `onClick` here. §8 widens this interface when it needs one, which
+> keeps this phase shippable on its own — and §8 step 6.0 now says so, because
+> revision 6 built phase 6 on a click nothing produced.
+
 State: `Map<steamId64, { seen: Set<string>; toldSignInNeeded: boolean }>`.
 
 > **[r2]** `toldSignInNeeded` is new. Revision 1 specified `onSignInNeeded` on
 > the engine and gave nothing that consumed it, then claimed "no repeat toast
 > per poll" with nothing to make that true.
 
-`pending(...)` behaviour:
+#### `pending(...)` — **[r7] the order matters and revision 6 had it wrong**
 
-1. **First poll for an account seeds** — record every id — **but still notifies
-   for `securityCritical` entries and a non-zero `unreadable`** (see Q2).
-   Everything else is silent.
-2. Otherwise the new ids are `awaiting` minus `seen`. If empty, return.
-3. Prune ids no longer pending, bounding the set.
-4. `unreadable > 0` notifies. Steam sent something this build could not parse,
-   which is exactly the case a person must look at.
+Revision 6 listed an early return for "no new ids" **above** pruning and above
+the `unreadable` check. That makes two of its own required behaviours
+unreachable: the poll on which a confirmation is resolved has no new ids by
+definition, so it would never prune, and "`unreadable > 0` with no new ids
+toasts" could never fire. Mutations 5 and 6 pinned behaviour the ordering
+forbade.
+
+The early return is a real optimisation, but it belongs **last**:
+
+1. **Prune first, always.** Drop seen ids no longer in `awaiting`. This runs on
+   every poll including the quiet ones, which is what bounds the set and what
+   lets a resolved-then-reappearing id toast again.
+2. **A successful poll clears `toldSignInNeeded`.** **[r7]** Nothing cleared it
+   before; step 4.4 asserted "not again until cleared" with no clearing
+   specified anywhere. Reaching `pending()` at all means the session worked.
+3. **First poll for an account seeds** — record every id — **but still
+   notifies for `securityCritical` entries and a non-zero `unreadable`**
+   (decision 2, §2). Everything else is silent. Return.
+4. `fresh` = `awaiting` minus `seen`. Add `fresh` to `seen`.
+5. **Notify if `fresh` is non-empty _or_ `unreadable > 0`.** One toast, not
+   two: a poll that brings both a new confirmation and an unparseable one is
+   still one thing happening. `unreadable` earns a toast on its own because
+   Steam sent something this build could not read, which is exactly the case a
+   person must look at.
+6. Otherwise return without notifying.
+
+#### `halted(...)` — **[r7] the halt toast had no consumer at all**
+
+Decision 4 promises a halt notifies. §5 step 3.5a widened `onFailure` to carry
+`{ accountName, mode }`. **Nothing read it.** The notifier had no method taking
+a failure, `index.ts` wired `onFailure` straight to `activity.recordFailure`,
+and no test existed — so mutation 18 could not have turned anything red.
+
+```ts
+/** Ten failures in a row; this account is no longer being polled. */
+halted(steamId64: string, accountName: string, mode: PollMode): void;
+```
+
+It does **not** take the reason string. The reason is redacted error text
+composed for the activity log; a toast says that polling stopped and sends the
+person to the log, which is where the detail already lives. Body by `mode`, per
+§5 step 3.5a:
+
+| `mode`    | Body                                                |
+| --------- | --------------------------------------------------- |
+| `confirm` | `Automatic confirmation stopped after 10 failures.` |
+| `notify`  | `Stopped checking after 10 failures.`               |
+
+Title is the account name, as everywhere else. It fires **once** — the engine
+sets `nextDueAt` to infinity on halt, so there is no second call to guard
+against, and adding a flag for one would be state that can only ever go stale.
 
 `forget()` (on lock) and `forgetAccount(steamId64)` clear state.
 **[r2]** `forgetAccount` must be called from the account-removal path, beside
@@ -510,23 +636,24 @@ the other per-account `forget`s.
 length and stripped of control characters — this is the only path on which text
 this application did not author reaches an OS-level surface.
 
-Title is the account name, from the projection (§2.1).
+Title is the account name, from the projection (§4 step 2.1).
 
-### Step 4.2a · The session-lock degrade — **[r5]**
+### Step 4.2a · No lock-aware branch — **[r6]**
 
-`setSessionLocked(boolean)` on the notifier, fed by `powerMonitor` (§2.1).
-While true, every body is composed at `count` whatever the account's `detail`
-says. It is one branch in the body formatter, not a second code path.
+Revision 5 specified a `setSessionLocked(boolean)` on the notifier, fed by
+`powerMonitor`, that composed at `count` while the Windows session was locked.
+**Removed by the owner's ruling** (§2.1). The body formatter reads the
+account's `detail` and nothing else.
 
-Tests: `full` with the session locked produces the `count` body · `type` with
-the session locked produces the `count` body · unlocking restores `full` · the
-account's stored `detail` is never mutated by a lock.
+Recorded rather than deleted because it is the kind of thing a reviewer
+proposes twice. If it comes back, the answer is in §2.1: it is an accepted
+disclosure, not a missing guard.
 
 ### Step 4.2b · "Sign in again" needs an activity kind — **[r5]**
 
 An audit asked for deduplicated transition-only activity entries for four
 conditions. **Three of the four already have what it asked for**, and the
-fourth needs something different from what it asked for. See §14 for the
+fourth needs something different from what it asked for. See §13 for the
 refutations; this step is the part that survived.
 
 A poll that fails because the saved session expired reaches the log through
@@ -537,10 +664,15 @@ retrying fixes, and that only the user can clear, is the one the activity badge
 stays silent about. It surfaces only after ten strikes, as a `halted` entry
 phrased as "failures in a row".
 
-The engine already distinguishes it: §3.4 catches
+The engine distinguishes it: §5 step 3.4 catches
 `err instanceof ConfirmationsError && err.needsSignIn` and calls
-`onSignInNeeded` rather than counting a failure. That branch currently writes
-nothing to the log.
+`onSignInNeeded` rather than counting a failure. That branch writes nothing to
+the log, which is what this step adds.
+
+> **[r7]** Revision 6 put that catch inside the notify arm only, which would
+> have made this entry unreachable from confirm-mode accounts — the very ones
+> whose `failed` entries it exists to fix. §5 step 3.4 now moves it to the
+> shared catch. This step depends on that; do not implement it without.
 
 ```ts
 // activity.ts — a sixth kind, mirrored in the wire schema's discriminated union.
@@ -572,35 +704,84 @@ second append · the reason text is never read to decide the kind.
 
 ```ts
 const notifier = new ConfirmationNotifier({
-  show: ({ title, body }) =>
-    new Notification({
-      title,
-      body,
-      // 256px. The tray icon exists at 16 and 32 only, and Windows upscaling it
-      // is what made the existing tray balloon blurry.
-      icon: notificationImage()
-    }).show()
+  show: ({ title, body }) => new Notification({ title, body, icon: notificationIcon() }).show()
 });
 ```
 
-`windows-identity.ts` already sets an AppUserModelID, which Windows requires for
-toasts, so there is no packaging work. `notifier.forget()` joins the existing
-lock teardown beside `confirmations.forget()`.
+**[r7] `notificationIcon()` has to be a real step, and the packaging claim was
+wrong.** Revision 6 called a `notificationImage()` that no step defined, under
+a comment demanding a 256px asset no phase produced, and then concluded "there
+is no packaging work". Two of those three cannot all be true.
 
-> **[r2] No click handler in this phase.** See §7.5.
+What is actually true: `windows-identity.ts` already sets an AppUserModelID,
+which is what Windows requires before a toast will show at all. **That** is the
+part needing no work. The icon does:
+
+- Add a 256px PNG to the existing icon generation, beside the sizes it already
+  emits — the same generator the listing avatar came from. This is one entry,
+  not a new pipeline.
+- `notificationIcon()` returns a `NativeImage` loaded once at startup, not per
+  toast.
+- If the asset is missing, **omit the icon rather than throwing**. A toast with
+  Windows' default app icon is a cosmetic fault; a poll that throws inside a
+  notification callback is a broken feature. Assert this — it is the kind of
+  branch that is never exercised until the one build where it matters.
+
+**[r7] `onFailure` gains the halt consumer**, which is the whole point of
+widening it:
+
+```ts
+onFailure: (steamId64, reason, halted, context) => {
+  activity.recordFailure(steamId64, reason, halted);
+  if (halted && context) {
+    notifier.halted(steamId64, context.accountName, context.mode);
+  }
+};
+```
+
+`context` is optional, so this is the only call site that has to change, and
+`activity.recordFailure` keeps its existing three arguments untouched.
+
+`notifier.forget()` joins the existing lock teardown beside
+`confirmations.forget()`.
+
+> **[r2] No click handler in this phase.** §8 step 6.0 adds one.
 
 ### Step 4.4 · Tests — `tests/confirmation-notify.test.ts` (new)
 
-first poll seeds silently · first poll **does** toast for `securityCritical` ·
-first poll **does** toast for `unreadable > 0` · second poll with a new id
-toasts once · same id twice toasts once · resolved id pruned, and a reappearing
-id toasts again · `unreadable > 0` with no new ids toasts · each `detail`
-produces its exact body · an over-long Steam string is capped · a Steam string
-containing control characters is stripped · several accounts have distinct titles and separate
-sets · `forget()` re-seeds · `forgetAccount` drops one · `onSignInNeeded` toasts
-once and not again until cleared.
+**Seeding and new ids.** first poll seeds silently · first poll **does** toast
+for `securityCritical` · first poll **does** toast for `unreadable > 0` ·
+second poll with a new id toasts once · same id twice toasts once · several
+accounts have distinct titles and separate sets · `forget()` re-seeds ·
+`forgetAccount` drops one account and leaves the others.
+
+**[r7] Ordering — the cases revision 6's ordering made impossible.** a poll
+with no new ids still prunes · a resolved id is pruned and toasts again when it
+reappears · `unreadable > 0` with **no** new ids still toasts · a poll with
+both a new id and `unreadable > 0` produces **one** toast, not two · the seen
+set does not grow without bound across many polls.
+
+**Bodies.** each `detail` produces its exact body · an over-long Steam string
+is capped · a Steam string containing control characters is stripped ·
+**[r7]** the body is a pure function of `(detail, awaiting, unreadable)` —
+pinned by constructing the notifier twice with identical input and asserting
+identical output, which is what mutation 23 turns red, because a lock-aware
+branch would need an input this signature does not have.
+
+**[r7] Sign-in.** `onSignInNeeded` toasts once and not again on a repeat · a
+**successful poll clears it**, so a later sign-in failure toasts again ·
+`forget()` clears it.
+
+**[r7] Halt.** a halt toasts once · `confirm` mode says "Automatic confirmation
+stopped" · `notify` mode says "Stopped checking" · the title is the account
+name · a non-halt failure toasts **nothing**.
+
+**[r7] The icon.** a missing icon asset omits the icon and still shows the
+toast, rather than throwing.
 
 ---
+
+## 7. Phase 5---
 
 ## 7. Phase 5 — reaching the screen
 
@@ -610,7 +791,7 @@ once and not again until cleared.
 > and the screen and nothing in between. Every item below is required for a
 > round trip.
 
-### Step 7.1 · Contract — `src/shared/ipc.ts`
+### Step 5.1 · Contract — `src/shared/ipc.ts`
 
 - `accountSetAutoConfirm` request is **`.strict()`**. An unrecognised `notify`
   key is _rejected_, not ignored, so it must be added explicitly:
@@ -622,30 +803,44 @@ once and not again until cleared.
 - The trades acknowledgement rules are untouched. Notifications do not spend
   money and must not inherit that ceremony.
 
-### Step 7.2 · Main — `src/main/vault/ipc.ts`
+### Step 5.2 · Main — `src/main/vault/ipc.ts`
 
 - `toSummary` (and its local type near line 444) gains `notify`.
 - The `accountSetAutoConfirm` handler writes `notify` **field by field**, not by
   spread, matching the existing note about a future field arriving without
   anyone deciding it should be writable.
 
-### Step 7.3 · Bridge
+### Step 5.3 · Bridge
 
 - `src/preload/index.ts` — `setAccountAutoConfirm` signature.
 - `RendererApi` in `src/shared/ipc.ts` — same.
 - `tests/ipc-contract.test.ts` — the `accountsList` sample response gains
   `notify`, or the clean-sample assertion added earlier this cycle will fail.
 
-### Step 7.4 · Renderer
+### Step 5.4 · Renderer
 
 - **`AutoConfirm.tsx`** — an `enabled` checkbox with the disclosure **beside
   it, not beside the `full` radio**: `full` is the default, so the sentence has
   to be read by anyone switching notifications on, not only by someone who goes
-  looking at the detail options. It states that toasts will name the trade and
-  its items and that Windows keeps them in notification history. A `detail`
-  radio group, disabled while off, presents `count` and `type` as the answer for
-  a shared or overlooked machine. The interval label changes to _"How often this
-  account is checked"_ because it now serves both.
+  looking at the detail options.
+
+  **[r6] The exact words, because this sentence is now the only thing standing
+  between `full` and an unattended screen.** Revision 5 proposed a lock-aware
+  degrade and §2.1 removed it; the disclosure is what replaced it, so it is
+  specified here rather than left to whoever writes the component:
+
+  > Notifications name the trade and its items. Windows shows them on the lock
+  > screen and keeps them in notification history, so they can be read by
+  > anyone at this machine. Choose **Count only** or **Type only** below to
+  > leave the details out.
+
+  It must name **both** the lock screen and notification history — revision 4's
+  version said only the latter, which is the smaller of the two.
+
+  A `detail` radio group, disabled while off, presents `count` and `type` as the
+  answer for a shared or unattended machine. The interval label changes to
+  _"How often this account is checked"_ because it now serves both.
+
 - **The rate warning**, below 30s:
 
   > About **N** requests a minute across **M** accounts. Steam rate-limits, and
@@ -661,7 +856,7 @@ once and not again until cleared.
   With notify-only as a real mode, both are wrong: an account that is watching
   reads as doing nothing. Add a state for it and reword the title.
 
-### Step 7.5 · Click-to-open — **now its own phase, see §8**
+### Step 5.5 · Click-to-open — **now its own phase, see §8**
 
 Revision 1 said a toast click "focuses the window and opens Confirmations,
 reusing the tray's existing show path". None of that was available, and the
@@ -676,12 +871,15 @@ reasons are why §8 exists rather than a line in this phase:
 - Locking **reloads** the window, so a click cannot carry renderer state across.
 - `ToastHost.show({ title, body })` has no `steamId64`.
 
-### Step 7.6 · Tests
+### Step 5.6 · Tests
 
 the switch round-trips through the contract · the warning appears below 30s and
-not at or above · its number matches interval × polled accounts · `full` states
-the disclosure · the detail group is disabled while off · VaultHome shows a
-notify-only account as watching, not as off.
+not at or above · **[r7]** its number matches `60 / interval × M`, the formula
+in step 5.4 — the earlier wording here said `interval × accounts`, which is its
+reciprocal and would have asserted 30 where the warning prints 8 · **[r7]** the
+disclosure names **both** the lock screen and notification history, not just
+one · the detail group is disabled while off · VaultHome shows a notify-only
+account as watching, not as off.
 
 ---
 
@@ -694,10 +892,60 @@ precedent for the shape — `preload/browser-chrome.ts` already exposes
 `onState` / `onFocusAddress` over `ipcRenderer.on` — but nothing like it exists
 for the main window.
 
-### Step 8.1 · Why a push alone is not enough
+### Step 6.0 · **[r7] Produce the click.** Nothing did.
 
-Three states the click has to survive, and a bare `webContents.send` handles
-only the first two:
+This phase's gate is "a toast click lands on that account's confirmations", and
+until this step there was **no toast click**. §6 step 4.1 defines
+`show({ title, body })` — no id, no callback — and §7 step 5.5 names exactly
+that as a reason this became its own phase. Revision 6 then wrote four steps of
+routing for an event with no source. This is the missing half.
+
+**Widen `ToastHost`:**
+
+```ts
+export interface ToastHost {
+  // `onClick` is optional so phase 4 keeps working unchanged, and so a host
+  // that cannot deliver clicks is still a valid host.
+  show(options: { title: string; body: string; onClick?: () => void }): void;
+}
+```
+
+**The notifier already holds the id** at every call site — it is the key of the
+state map — so it supplies the callback rather than the caller threading one
+in:
+
+```ts
+// One new option on the notifier, defaulted to a no-op.
+onActivate?: (steamId64: string) => void;
+```
+
+Every toast the notifier raises passes
+`onClick: () => this.onActivate?.(steamId64)`. That covers the pending toast,
+the sign-in toast and the halt toast without four separate wirings, and it is
+why the id lives on the notifier rather than in `ToastHost`.
+
+**`index.ts` implements it:**
+
+```ts
+show: ({ title, body, onClick }) => {
+  const toast = new Notification({ title, body, icon: notificationIcon() });
+  if (onClick) {
+    toast.on('click', onClick);
+  }
+  toast.show();
+};
+```
+
+`onActivate` is wired to the routing in step 6.2.
+
+**Tests:** a toast carries an `onClick` · invoking it calls `onActivate` with
+that account's id · a notifier with no `onActivate` still shows toasts and the
+click is inert · the halt and sign-in toasts carry it too.
+
+### Step 6.1 · Why a push alone is not enough
+
+**[r7]** Four states the click has to survive. A bare `webContents.send`
+handles the first two and loses the intent on the third:
 
 > **[r5] The second row of this table was false, and the conclusion survives
 > anyway.** Closing to tray destroys nothing: `index.ts:951-957` is
@@ -723,9 +971,10 @@ with the push as the fast path:
 let pendingConfirmationsFor: string | undefined;
 ```
 
-### Step 8.2 · Main
+### Step 6.2 · Main
 
-On toast click: set `pendingConfirmationsFor`, then reuse the tray's existing
+`onActivate` from step 6.0 lands here. It sets `pendingConfirmationsFor`, then
+reuses the tray's existing
 `showMainWindow` path — **[r5]** which already handles every case correctly
 (`index.ts:934-945`: restore if minimised, `show()`, `focus()`, and create only
 when `getAllWindows()` is empty). Then push `app:open-confirmations` with the
@@ -737,34 +986,85 @@ it does; the stored intent is what makes the reload and unlock cases work. Do
 not add a "was it hidden?" branch here — the two paths have to be able to run
 together, because a window can be hidden _and_ have been reloaded by a lock.
 
-### Step 8.3 · Channels
+### Step 6.3 · Channels — **[r7] they have to be declared**
 
-- **Push**, main→renderer: `app:open-confirmations`, payload `steamId64`.
-- **Invoke**, renderer→main: `app:takePendingConfirmations`, returns
-  `{ steamId64?: string }` and **clears** it. Called by the renderer once the
-  account list is available after an unlock — which is what makes the locked and
-  closed-to-tray cases work.
+Revision 6 named two wire strings and then wrote a preload that called
+`CHANNELS.takePendingConfirmations`, **which does not exist**, while addressing
+the other channel by raw literal four lines apart. Step 6.6 then asserted both
+were in `IPC_CONTRACT` with valid samples. Nothing added either.
+
+**`src/shared/channels.ts`** — both, so neither is addressed by literal:
+
+```ts
+openConfirmations: 'app:open-confirmations',
+takePendingConfirmations: 'app:takePendingConfirmations'
+```
+
+**`src/shared/ipc.ts`** — `takePendingConfirmations` joins `IPC_CONTRACT` like
+every other invoke channel:
+
+```ts
+[CHANNELS.takePendingConfirmations]: {
+  request: z.object({}).strict(),
+  response: z.object({ steamId64: z.string().optional() }).strict()
+}
+```
+
+**[r7] The push channel is not an `IPC_CONTRACT` entry**, and step 6.6's test
+has to say so rather than assert the opposite. `IPC_CONTRACT` describes
+`ipcMain.handle` request/response pairs; `app:open-confirmations` is a
+`webContents.send` push, which has no request and no response. The existing
+precedent is `browser-chrome:state`, which is likewise absent from the
+contract. The test asserts the **invoke** channel is in the contract with a
+valid sample, and that the push channel is declared in `CHANNELS` and never
+addressed by string literal.
 
 Both carry a SteamID the main process already holds. Neither carries a secret,
 and neither _acts_: navigating is all they do. Approving still goes through the
 existing confirmation channels with their own checks.
 
-### Step 8.4 · Preload — `src/preload/index.ts`
+### Step 6.4 · Preload and bridge
+
+**`src/preload/index.ts`:**
 
 ```ts
 onOpenConfirmations: (listener: (steamId64: string) => void) => {
-  ipcRenderer.on('app:open-confirmations', (_event, steamId64: string) =>
+  ipcRenderer.on(CHANNELS.openConfirmations, (_event, steamId64: string) =>
     listener(steamId64)
   );
 },
 takePendingConfirmations: () => ipcRenderer.invoke(CHANNELS.takePendingConfirmations)
 ```
 
-### Step 8.5 · Renderer — `src/renderer/App.tsx`
+**[r7] Both go on `RendererApi` in `src/shared/ipc.ts` too.** Step 5.3 makes
+that its own step for exactly one method and revision 6 skipped it here for
+two, while step 6.5 has the renderer calling both through the bridge — so
+`npm run typecheck`, which the gate runs every phase, would have had nothing to
+check them against. This is the same half-wired round trip the **[r2]** note on
+phase 5 says that phase was rewritten to avoid.
+
+```ts
+onOpenConfirmations(listener: (steamId64: string) => void): void;
+takePendingConfirmations(): Promise<{ steamId64?: string }>;
+```
+
+### Step 6.5 · Renderer — `src/renderer/App.tsx`
 
 A single `openConfirmationsFor(steamId64)` used by both paths:
 
 ```ts
+// **[r7] The lookup is the first line, and revision 6 left it out** — the
+// snippet ended `setConfirmingFor(account)` having never derived `account`
+// from the id. It is also the line two of this step's tests turn on, so it is
+// the one that could least afford to be prose.
+//
+// The renderer navigates to an account it already knows about, never to
+// whatever arrives on the wire.
+const account = accounts.find((a) => a.steamId64 === steamId64);
+if (!account) {
+  return;
+}
+
 // **The competing screens are cleared, not just the target set.**
 // `autoConfirmFor` and `removingFor` are tested above `confirmingFor` in the
 // view stack, so setting the target while one of those is open navigates
@@ -777,22 +1077,22 @@ setView('accounts');
 setConfirmingFor(account);
 ```
 
-- The id is **matched against the polled account list**, and ignored if absent.
-  The renderer navigates to an account it knows about, not to whatever arrives.
 - Subscribed once, in an effect. Collected via
   `takePendingConfirmations()` when `status.unlocked` becomes true and the
   account list is non-empty.
 
-### Step 8.6 · Tests
+### Step 6.6 · Tests
 
-| Test                       | Asserts                                                       |
-| -------------------------- | ------------------------------------------------------------- |
-| push navigates             | `confirmingFor` becomes that account                          |
-| a competing screen is open | it is cleared, and the navigation still lands                 |
-| unknown id                 | ignored; nothing changes                                      |
-| locked                     | nothing happens; after unlock the pending intent is collected |
-| pending is taken once      | a second call returns nothing                                 |
-| contract                   | both channels are in `IPC_CONTRACT` with valid samples        |
+| Test                       | Asserts                                                                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| push navigates             | `confirmingFor` becomes that account                                                                                          |
+| a competing screen is open | it is cleared, and the navigation still lands                                                                                 |
+| unknown id                 | ignored; nothing changes                                                                                                      |
+| locked                     | nothing happens; after unlock the pending intent is collected                                                                 |
+| pending is taken once      | a second call returns nothing                                                                                                 |
+| **[r7]** contract          | the invoke channel is in `IPC_CONTRACT` with a valid sample; the push channel is in `CHANNELS` and never written as a literal |
+| **[r7]** bridge            | both methods are declared on `RendererApi`                                                                                    |
+| **[r7]** click source      | a toast's `onClick` reaches `onActivate` with the right id                                                                    |
 
 The renderer half is asserted on `openConfirmationsFor` as an exported
 function — the same approach `updateAnswerIsCurrent` took, and for the same
@@ -803,73 +1103,104 @@ reason: the rule is ordering-sensitive and this project has no DOM runner.
 ## 9. Phase 7 — documentation
 
 - **`docs/THREAT_MODEL.md`** — a new recurring request class: what it asks
-  Steam, on whose route, how often, that it stops with the lock, and that a
-  toast is a lock-screen surface.
+  Steam, on whose route, how often, that it stops with the vault lock, and
+  that a `full` toast is a lock-screen and notification-history surface at the
+  account owner's election. **[r6]** State it as an accepted disclosure with
+  the reasoning, not as a limitation — §2.1 has the argument.
 - **`docs/FOUNDER_TEST_PLAN.md`** — **T34** (the next id after T33). Switch
   notifications on for one account at 60s **with market auto-confirm off** —
   otherwise the listing is approved and there is correctly no toast — make a
   listing from another device, confirm exactly one toast naming that account,
-  confirm the next poll does not repeat it, lock and confirm no further toasts.
+  confirm the next poll does not repeat it, then **lock the vault** and confirm
+  no further toasts. **[r7]** Say which lock: a separate step locks **Windows**
+  with the vault still open and confirms a `full` toast _does_ still arrive,
+  naming the trade — that is §2.1's accepted disclosure, and a tester who is
+  not told will file it as a bug.
 - **`README.md`** — one line in the feature list.
 
 ---
 
 ## 10. Edge cases
 
-| Case                                    | Behaviour                                                      |
-| --------------------------------------- | -------------------------------------------------------------- |
-| Vault locks                             | Engine stops, seen-sets cleared, no toast on the disowned path |
-| `Require proxies`, account has no proxy | Skipped in `dueAccounts`; halt counter untouched               |
-| `needsSignIn`                           | Caught in the engine; one toast; no failure counted            |
-| Auto-confirm approved it                | No toast; activity log already records it                      |
-| Resolved on the phone                   | Gone from the next list; pruned                                |
-| App closed when it arrived              | Seeded — except `securityCritical` / `unreadable`. See Q2      |
-| Ten failures → halt                     | Polling stops. See Q4                                          |
-| Account removed                         | `forgetAccount` clears its set                                 |
-| Windows Focus Assist                    | Electron respects OS settings. Nothing to do                   |
-| **[r5]** Windows session locked         | Toast fires, body degraded to `count`. See §2.1                |
-| **[r5]** Vault locked                   | No poll happens, so no toast. Needs nothing                    |
-| **[r5]** Saved session expired          | `onSignInNeeded`; one activity entry per run, not per poll     |
+| Case                                    | Behaviour                                                        |
+| --------------------------------------- | ---------------------------------------------------------------- |
+| Vault locks                             | Engine stops, seen-sets cleared, no toast on the disowned path   |
+| `Require proxies`, account has no proxy | Skipped in `dueAccounts`; halt counter untouched                 |
+| `needsSignIn`                           | Caught in the engine; one toast; no failure counted              |
+| Auto-confirm approved it                | No toast; activity log already records it                        |
+| Resolved on the phone                   | Gone from the next list; pruned                                  |
+| App closed when it arrived              | Seeded, except `securityCritical` / `unreadable`. Decision 2     |
+| Ten failures → halt                     | Polling stops, and notifies. Decision 4                          |
+| Account removed                         | `forgetAccount` clears its set                                   |
+| Windows Focus Assist                    | Electron respects OS settings. Nothing to do                     |
+| **[r6]** Windows session locked         | Toast fires at the account's chosen `detail`. Accepted; see §2.1 |
+| **[r5]** Vault locked                   | No poll happens, so no toast. Needs nothing                      |
+| **[r5]** Saved session expired          | `onSignInNeeded`; one activity entry per run, not per poll       |
 
 ---
 
 ## 11. Mutation inventory
 
-Each must be confirmed to turn its named test red.
+Each must be confirmed to turn a test red, and **[r7]** each entry names the
+test it turns red — four entries did not, which is how three of them came to
+pin behaviour no test could observe.
 
-1. notify-only account routed through `runAutoConfirm` — **pin it as "never
-   lists, so never notifies"**
-2. `dueAccounts` ignores `notify.enabled`
-3. first poll toasts instead of seeding
-4. first-poll seed swallows `securityCritical`
-5. first-poll seed swallows `unreadable`
-6. seen-set never pruned
-7. `Require proxies` skip removed
-8. `needsSignIn` counted as a failure
-9. `onPending` fires on the disowned generation
-10. `forget()` / `forgetAccount` no longer clear
-11. warning threshold moved off 30s
-12. warning counts all accounts rather than polled ones
-13. `detail` ignored — always `full`
-    13a. the default detail is not `full`
-    13b. Steam strings reach the toast uncapped
-    13c. Steam strings reach the toast unstripped
-    13d. the disclosure moves off the enable switch
-14. nested `notify` passthrough removed
-15. click-to-open does not clear the competing screens
-16. click-to-open trusts an id not in the account list
-17. the pending intent is not cleared when taken
-18. halt no longer notifies
-19. halt copy still says "Automatic confirmation" for a watching account
-20. **[r5]** `onFailure`'s context argument dropped — the halt toast loses the name
-21. **[r5]** halt copy stops branching on `mode`
-22. **[r5]** `halted` inferred from the sentence again instead of the flag
-23. **[r5]** the session-lock degrade removed — `full` reaches a locked screen
-24. **[r5]** the degrade mutates the stored `detail` instead of the composed body
-25. **[r5]** `signInRequired` left out of `hasUrgent()`
-26. **[r5]** `signInRequired` appends on every poll instead of once per run
-27. **[r5]** the dedup keys on the reason string rather than the kind
-28. **[r5]** click-to-open skips the push when the window is merely hidden
+**Phase 3 — the engine**
+
+| #   | Mutation                                                | Turns red                                                                  |
+| --- | ------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 1   | notify-only account routed through `runAutoConfirm`     | "notify-only uses `list`" — pin it as **"never lists, so never notifies"** |
+| 2   | `dueAccounts` ignores `notify.enabled`                  | "notify-only account is polled"                                            |
+| 7   | `Require proxies` skip removed                          | "`Require proxies` + no proxy"                                             |
+| 8   | `needsSignIn` counted as a failure                      | "`needsSignIn` — no failure counted"                                       |
+| 9   | `onPending` fires on the disowned generation            | "lock mid-poll"                                                            |
+| 11  | warning threshold moved off 30s                         | phase 5 "appears below 30s and not at or above"                            |
+| 12  | warning counts all accounts rather than polled ones     | phase 5 "its number matches `60 / interval × M`"                           |
+| 20  | `onFailure`'s context argument dropped                  | "halt carries context"                                                     |
+| 21  | halt copy stops branching on `mode`                     | "halt copy by mode"                                                        |
+| 22  | `halted` inferred from the sentence instead of the flag | "`halted` stays a flag"                                                    |
+| 29  | **[r7]** `needsSignIn` caught only on the notify arm    | "a confirm-mode sign-in failure notifies too"                              |
+
+**Phase 4 — the notifier**
+
+| #   | Mutation                                              | Turns red                                                                  |
+| --- | ----------------------------------------------------- | -------------------------------------------------------------------------- |
+| 3   | first poll toasts instead of seeding                  | "first poll seeds silently"                                                |
+| 4   | first-poll seed swallows `securityCritical`           | "first poll does toast for `securityCritical`"                             |
+| 5   | first-poll seed swallows `unreadable`                 | "first poll does toast for `unreadable > 0`"                               |
+| 6   | seen-set never pruned                                 | **[r7]** "a poll with no new ids still prunes"                             |
+| 10  | `forget()` / `forgetAccount` no longer clear          | "`forget()` re-seeds"                                                      |
+| 13  | `detail` ignored — always `full`                      | "each `detail` produces its exact body"                                    |
+| 14  | the default detail is not `full`                      | phase 1 "the default is `full`"                                            |
+| 15  | Steam strings reach the toast uncapped                | "an over-long Steam string is capped"                                      |
+| 16  | Steam strings reach the toast unstripped              | "control characters are stripped"                                          |
+| 18  | halt no longer notifies                               | **[r7]** "a halt toasts once"                                              |
+| 23  | a lock-aware branch is reintroduced                   | **[r7]** "the body is a pure function of `(detail, awaiting, unreadable)`" |
+| 30  | **[r7]** the early return moves back above pruning    | "a poll with no new ids still prunes"                                      |
+| 31  | **[r7]** `unreadable` alone does not notify           | "`unreadable > 0` with no new ids still toasts"                            |
+| 32  | **[r7]** a new id and `unreadable` produce two toasts | "produces one toast, not two"                                              |
+| 33  | **[r7]** `toldSignInNeeded` is never cleared          | "a successful poll clears it"                                              |
+| 34  | **[r7]** a missing icon asset throws                  | "a missing icon omits the icon and still shows"                            |
+
+**Phase 5 — reaching the screen**
+
+| #   | Mutation                                            | Turns red                               |
+| --- | --------------------------------------------------- | --------------------------------------- |
+| 17  | nested `notify` passthrough removed                 | phase 1 "keys inside `notify` survive"  |
+| 24  | the disclosure drops the lock screen                | **[r7]** "the disclosure names both"    |
+| 35  | **[r7]** the disclosure moves off the enable switch | "the disclosure sits beside the switch" |
+
+**Phase 6 — click-to-open**
+
+| #   | Mutation                                               | Turns red                         |
+| --- | ------------------------------------------------------ | --------------------------------- |
+| 25  | click-to-open does not clear the competing screens     | "a competing screen is open"      |
+| 26  | click-to-open trusts an id not in the account list     | "unknown id — ignored"            |
+| 27  | the pending intent is not cleared when taken           | "pending is taken once"           |
+| 28  | **[r7]** the toast carries no `onClick`                | "click source"                    |
+| 36  | **[r7]** a channel is addressed by string literal      | "contract"                        |
+| 37  | **[r7]** a bridge method is missing from `RendererApi` | "bridge" — and `typecheck`        |
+| 38  | **[r7]** the id→account lookup is removed              | "unknown id" and "push navigates" |
 
 ---
 
