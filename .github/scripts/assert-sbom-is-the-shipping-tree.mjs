@@ -37,11 +37,12 @@
 // and this one's are all missing. One comparison, and none of the three
 // escapes had to be predicted by name.
 
-import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { basename, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { excludedPackagesFrom } from './builder-exclusions.mjs';
+import { carriesCode, strippedExtensionsFrom } from './shipping-contents.mjs';
 
 const sbomPath = process.env.SBOM || process.argv[2];
 const manifestPath = process.env.MANIFEST || 'package.json';
@@ -284,23 +285,71 @@ try {
 	);
 }
 
-const bundled = [...required].filter((id) =>
-	excludedPackages.has(id.slice(0, id.lastIndexOf('@')))
-);
-const asDirectories = required.size - bundled.length;
+/** `zod@4.1.5` -> `zod`, `@types/node@24.13.3` -> `@types/node`. */
+const packageName = (id) => id.slice(0, id.lastIndexOf('@'));
+
+const bundled = [...required].filter((id) => excludedPackages.has(packageName(id)));
 // An exclusion naming something outside the production closure is not a
 // failure — a dev-only package can be excluded harmlessly — but it is also not
 // something this check should quietly absorb, because the next reader will want
 // to know why the two lists disagree.
 const excludedButNotShipping = [...excludedPackages]
-	.filter((name) => ![...required].some((id) => id.slice(0, id.lastIndexOf('@')) === name))
+	.filter((excluded) => ![...required].some((id) => packageName(id) === excluded))
 	.sort();
 
+/*
+ * **A third way a dependency reaches the user: not at all.**
+ *
+ * `@types/node` and `undici-types` are in the closure — `protobufjs` depends on
+ * the first and it depends on the second — and every file either one holds is a
+ * TypeScript declaration that the `files` rules strip. The directory ships;
+ * `package.json` and `LICENSE` ship; no loadable byte does. Calling that a
+ * package directory inside the asar, in the same breath as `zod`, overstated the
+ * installer's contents by two packages in a published document.
+ *
+ * Decided by reading the installed tree, because that is where the answer is.
+ * `assemble-shipping-tree.mjs` builds `sbom-root` in the same job and it is the
+ * exact tree the scanner was pointed at, so the classification and the SBOM
+ * describe the same bytes. Without a tree the split is not guessed and not
+ * silently dropped — the report says it could not be determined, and every
+ * package stays in the group that claims more.
+ */
+const treePath = process.env.TREE || 'sbom-root';
+const treeModules = join(treePath, 'node_modules');
+const strippedExtensions = strippedExtensionsFrom(builderFiles);
+const treeIsReadable = existsSync(treeModules);
+
+const shipped = [...required].filter((id) => !bundled.includes(id));
+const metadataOnly = treeIsReadable
+	? shipped
+			.filter((id) => !carriesCode(join(treeModules, packageName(id)), strippedExtensions))
+			.sort()
+	: [];
+const withCode = shipped.length - metadataOnly.length;
+
 function shape() {
-	if (bundled.length === 0) {
-		return `all ${required.size} as package directories inside the asar`;
+	const parts = [];
+	if (metadataOnly.length === 0 && bundled.length === 0) {
+		parts.push(`all ${required.size} as package directories inside the asar`);
+	} else if (withCode > 0) {
+		parts.push(`${withCode} as package directories inside the asar`);
 	}
-	return `${asDirectories} as package directories inside the asar and ${bundled.length} compiled into the renderer bundle, which is where ${builderConfigPath} sends ${bundled.sort().join(', ')}`;
+	if (bundled.length > 0) {
+		parts.push(
+			`${bundled.length} compiled into the renderer bundle, which is where ${builderConfigPath} sends ${bundled.sort().join(', ')}`
+		);
+	}
+	if (metadataOnly.length > 0) {
+		parts.push(
+			`${metadataOnly.length} as a manifest and a licence with no loadable file at all, the packaging rules having stripped every file they contain (${metadataOnly.join(', ')})`
+		);
+	}
+	if (!treeIsReadable) {
+		parts.push(
+			`with no split between the ones that carry code and the ones stripped to a manifest, because ${treeModules} is not there to read`
+		);
+	}
+	return parts.join(', and ');
 }
 
 // ---------------------------------------------------------------------------
@@ -380,7 +429,10 @@ if (extra.length > 0) {
 }
 if (missing.length > 0) {
 	problems.push(
-		`the SBOM omits ${missing.length} package(s) whose code the installer ships: ${missing.join(', ')}`
+		// Not "whose code the installer ships". Two of them ship no code — see the
+		// note over `metadataOnly` — and they still belong in the document, because
+		// an SBOM lists what is in the artifact and their licences are in it.
+		`the SBOM omits ${missing.length} package(s) the installer carries: ${missing.join(', ')}`
 	);
 }
 if (foreign.size > 0) {
