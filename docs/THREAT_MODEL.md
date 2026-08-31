@@ -132,6 +132,32 @@ All Steam traffic is HTTPS with standard certificate validation, originating in
 the main process. The renderer has no network access of its own —
 `connect-src 'none'` in the packaged CSP.
 
+**But it can ask the main process for one, and that was a real hole.** Three IPC
+calls take a proxy address chosen by the renderer — `account:setProxy`,
+`enroll:begin`, `transfer:authenticate` — and `planProxy` validates the scheme,
+the port and the credentials while never looking at the hostname. A compromised
+renderer could therefore name `http://<secret-encoded-as-a-label>.attacker.net`
+and have the main process resolve it, handing the label to whoever runs that
+zone's nameserver. The connection did not need to succeed: **DNS alone is the
+channel**, and everything the renderer can legitimately see — a Guard code, an
+account name — fits inside a hostname.
+
+That defeated the point of keeping long-term secrets out of the renderer. What
+the renderer _can_ read became sendable, and the row in §5 claiming a renderer
+compromise cannot exfiltrate was false as written.
+
+A destination the user has not agreed to now requires them to agree to it, in an
+OS dialog raised by the main process which the renderer cannot draw, dismiss or
+read (`src/main/net/proxy-consent.ts`). It is asked once per `host:port`, not per
+request; the addresses already in the vault are seeded as approved on unlock, so
+ordinary use raises nothing; and approvals are dropped when the vault locks, so
+what does not survive a lock is consent for an address that was never stored.
+
+**This reduces the channel rather than removing it.** A person can be talked
+into approving a plausible hostname, and an approved proxy still sees the traffic
+it carries — which is §2.6's subject. What it removes is the _silent, unlimited_
+version.
+
 ### 2.6 The proxy operator — **new, and easy to underestimate**
 
 Per-account proxy routing is supported. If you use it, **the proxy operator
@@ -640,17 +666,18 @@ one.
 
 ## 5. Design decisions that follow from all this
 
-| Decision                                                        | Threat it addresses                                                                  |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| No server, no sync, no telemetry                                | We cannot leak what we never receive                                                 |
-| Passphrase is the root of trust on every platform               | OS keystore compromise alone is not enough                                           |
-| Renderer sandboxed, no Node, `connect-src 'none'`               | A renderer compromise cannot exfiltrate                                              |
-| Every IPC channel declared and schema-validated                 | No generic bridge to pivot through                                                   |
-| Long-term secrets never cross IPC (two user-invoked exceptions) | Renderer compromise does not yield secrets                                           |
-| Updates notify, never silently install                          | Silent replacement of an authenticator binary is itself supply-chain surface         |
-| Forced revocation-code backup before an account is active       | The unrecoverable loss is made structurally hard                                     |
-| Single-instance lock                                            | Two writers would race on the vault file                                             |
-| Packaged navigation pinned to the exact bundled file            | Every `file:` URL shares the origin `"null"`; an origin check permits any local file |
+| Decision                                                        | Threat it addresses                                                                   |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| No server, no sync, no telemetry                                | We cannot leak what we never receive                                                  |
+| Passphrase is the root of trust on every platform               | OS keystore compromise alone is not enough                                            |
+| Renderer sandboxed, no Node, `connect-src 'none'`               | A renderer compromise cannot open an outbound channel of its own                      |
+| Proxy destinations confirmed in an OS dialog (§2.5)             | …nor ask the main process to open one for it, silently — the hostname was the channel |
+| Every IPC channel declared and schema-validated                 | No generic bridge to pivot through                                                    |
+| Long-term secrets never cross IPC (two user-invoked exceptions) | Renderer compromise does not yield secrets                                            |
+| Updates notify, never silently install                          | Silent replacement of an authenticator binary is itself supply-chain surface          |
+| Forced revocation-code backup before an account is active       | The unrecoverable loss is made structurally hard                                      |
+| Single-instance lock                                            | Two writers would race on the vault file                                              |
+| Packaged navigation pinned to the exact bundled file            | Every `file:` URL shares the origin `"null"`; an origin check permits any local file  |
 
 ---
 

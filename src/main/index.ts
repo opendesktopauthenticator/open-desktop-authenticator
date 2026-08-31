@@ -43,6 +43,7 @@ import { AutoConfirmEngine } from './confirmations/auto';
 import { ActivityLog } from './confirmations/activity';
 import { notificationImage, windowImage } from './logo-image';
 import { ConfirmationNotifier } from './confirmations/notify';
+import { ProxyConsent } from './net/proxy-consent';
 import { registerToastClickHandlers, ToastClickRouter } from './confirmations/toast-click';
 import { createTray } from './tray';
 import { registerWindowsIdentity } from './windows-identity';
@@ -306,6 +307,12 @@ function start(): void {
 			// again before it can be marked as written down.
 			ceremony.forget();
 
+			// And the outbound destinations somebody agreed to while they were here.
+			// The ones the vault itself holds are seeded back on the next unlock, so
+			// what this actually drops is approval for an address that was never
+			// stored — which is the shape an exfiltration attempt has.
+			proxyConsent.clear();
+
 			// Nothing gets approved on behalf of somebody who is not there. A lock
 			// is the clearest statement available that they are not.
 			autoConfirm.stop();
@@ -450,6 +457,40 @@ function start(): void {
 		requireProxies
 	);
 	const ceremony = new RevocationCeremony();
+
+	/**
+	 * **The renderer names a proxy host; a person has to agree to it.**
+	 *
+	 * See `ProxyConsent` for why. The dialog is raised here, by the main process,
+	 * because that is the whole mechanism: a compromised renderer can call the
+	 * IPC but cannot draw this window, cannot answer it, and cannot read what it
+	 * says.
+	 */
+	const proxyConsent = new ProxyConsent({
+		ask: async (request) => {
+			const whose = request.accountName === undefined ? 'an account' : `“${request.accountName}”`;
+			const { response } = await dialog.showMessageBox({
+				type: 'warning',
+				title: branding.productName,
+				message: `Send ${whose}'s Steam traffic through ${request.endpoint}?`,
+				detail:
+					`${request.redacted} will carry ` +
+					(request.reason === 'signIn'
+						? 'the sign-in you are about to make, including the password and Steam Guard code.'
+						: "this account's Steam requests.") +
+					'\n\nWhoever runs that address will see this traffic, and connecting to it ' +
+					'tells them the name exists. Approve it only if you chose it and recognise ' +
+					'it — if this appeared on its own, say no.',
+				buttons: ['Cancel', 'Use this proxy'],
+				// Cancel, and it is also what Escape and the close button return, so
+				// every way of dismissing this without reading it refuses.
+				defaultId: 0,
+				cancelId: 0,
+				noLink: true
+			});
+			return response === 1;
+		}
+	});
 	// Shares the codes' notion of Steam's time, so a confirmation and a code can
 	// never disagree about what "now" is.
 	const confirmations = new ConfirmationsService(vault, transports, {
@@ -689,6 +730,17 @@ function start(): void {
 				// Started only once a vault is open. Before that there is nothing to
 				// poll for and nobody to poll on behalf of.
 				autoConfirm.start();
+
+				/*
+				 * **The addresses in the vault are the user's own routing.**
+				 *
+				 * Without this, every stored proxy would raise a consent dialog on
+				 * its first use after each unlock — a prompt with no decision in it,
+				 * several times a day, which is how people are taught to click Allow
+				 * on the one that matters. Seeded here rather than at construction
+				 * because a locked vault has nothing to read.
+				 */
+				proxyConsent.seed(vault.read().accounts.map((account) => account.proxyUrl));
 			},
 			(steamId64) => autoConfirm.reset(steamId64),
 			// So the account list can say what is actually known about each
@@ -780,14 +832,15 @@ function start(): void {
 				 * `transfer-ipc.ts` — so the exposure is one request already
 				 * begun, and it ends on its own.
 				 */
-			}
+			},
+			proxyConsent
 		);
 		registerImportHandlers(imports);
 		// The same ceremony the vault handlers use, not a second one: a transfer
 		// shows the recovery code, and `revocation:confirmBackup` refuses to mark a
 		// code as written down unless it was shown. Two instances would mean the
 		// showing and the confirming disagreed about whether it ever happened.
-		registerTransferHandlers(transfer, vault, ceremony);
+		registerTransferHandlers(transfer, vault, ceremony, proxyConsent);
 		registerEnrollmentHandlers(
 			enrollment,
 			vault,
@@ -853,7 +906,8 @@ function start(): void {
 						throw new Error('that recovery file could not be read.');
 					}
 				}
-			}
+			},
+			proxyConsent
 		);
 		registerCodeHandlers(codes, vault, clipboard, clock);
 

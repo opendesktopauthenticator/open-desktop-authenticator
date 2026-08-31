@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CHANNELS } from '../src/shared/ipc';
 import { __resetRouterForTests, setTrustedSender } from '../src/main/ipc/router';
 import { registerTransferHandlers } from '../src/main/steam/transfer-ipc';
+import { ProxyConsent, type ProxyConsentRequest } from '../src/main/net/proxy-consent';
 import { TransferService } from '../src/main/steam/transfer';
 import type { VaultService } from '../src/main/vault/service';
 
@@ -36,6 +37,8 @@ function harness(
 		authenticate?: unknown;
 		/** What the service says it is still waiting on, if anything. */
 		awaiting?: 'persist' | 'unanswered' | 'unreadable';
+		/** Whether the user approves the proxy destination when asked. */
+		approveProxy?: boolean;
 	} = {}
 ): {
 	transfer: {
@@ -44,6 +47,8 @@ function harness(
 		awaiting: ReturnType<typeof vi.fn>;
 	};
 	touched: () => number;
+	/** Every destination the gate put to the user, in order. */
+	asked: ProxyConsentRequest[];
 } {
 	let touches = 0;
 	const authenticate =
@@ -67,8 +72,26 @@ function harness(
 		}
 	} as unknown as VaultService;
 
-	registerTransferHandlers(transfer as unknown as TransferService, vault);
-	return { transfer: transfer as never, touched: () => touches };
+	/*
+	 * **The destination gate.** The renderer names the proxy host on this call,
+	 * and this call carries a password and a Steam Guard code. Approving by
+	 * default keeps these cases about the policy they were written for; the
+	 * refusal is asserted in its own describe.
+	 */
+	const approveProxy = options.approveProxy ?? true;
+	const asked: ProxyConsentRequest[] = [];
+	registerTransferHandlers(
+		transfer as unknown as TransferService,
+		vault,
+		undefined,
+		new ProxyConsent({
+			ask: (request) => {
+				asked.push(request);
+				return Promise.resolve(approveProxy);
+			}
+		})
+	);
+	return { transfer: transfer as never, touched: () => touches, asked };
 }
 
 async function call(channel: string, request: unknown = {}): Promise<unknown> {
@@ -398,6 +421,45 @@ describe('transferring under Require proxies', () => {
 			'ABCDE',
 			'http://10.0.0.9:8080'
 		);
+	});
+
+	/**
+	 * **And the address is put to the user, because the renderer chose it.**
+	 *
+	 * Nothing validates the hostname — `planProxy` checks the scheme, the port
+	 * and the credentials — so this channel was an outbound connection to any
+	 * name the renderer liked, which is the exfiltration route the threat model
+	 * says a compromised renderer does not have. This call is the worst one to
+	 * leave open: the traffic it sends through the chosen host carries a password
+	 * *and* a Steam Guard code.
+	 */
+	it('puts the destination to the user before the credentials go down it', async () => {
+		const { asked } = harness({ requireProxies: true });
+		await call(CHANNELS.transferAuthenticate, {
+			accountName: 'alice',
+			password: 'secret',
+			steamGuardCode: 'ABCDE',
+			proxyUrl: 'http://10.0.0.9:8080'
+		});
+		expect(asked, 'the destination was used without anyone being asked').toHaveLength(1);
+		expect(asked[0]?.endpoint).toBe('10.0.0.9:8080');
+		expect(asked[0]?.reason).toBe('signIn');
+	});
+
+	it('stops the transfer when the answer is no', async () => {
+		const { transfer } = harness({ requireProxies: true, approveProxy: false });
+		await expect(
+			call(CHANNELS.transferAuthenticate, {
+				accountName: 'alice',
+				password: 'secret',
+				steamGuardCode: 'ABCDE',
+				proxyUrl: 'http://evil.example:8080'
+			})
+		).rejects.toThrow(/not approved/);
+		expect(
+			transfer.authenticate,
+			'a refused destination still received the password and the Guard code'
+		).not.toHaveBeenCalled();
 	});
 
 	it('changes nothing when the setting is off', async () => {

@@ -8,6 +8,7 @@ import { readRecoveryFile, RecoveryError } from '../vault/recovery';
 import type { EnrollmentService } from './enrollment';
 import { EnrollmentError } from './enroll';
 import { PROXY_REQUIRED } from '../net/egress';
+import { ProxyConsent } from '../net/proxy-consent';
 import { VaultLockedError, type VaultService } from '../vault/service';
 
 /**
@@ -56,7 +57,9 @@ export function registerEnrollmentHandlers(
 	dialog: SaveDialog,
 	/** Drops an account's in-memory session, exactly as a local removal does. */
 	onRemoved: (steamId64: string) => void = () => undefined,
-	recoveryDialog: OpenRecoveryDialog = { pick: () => Promise.resolve(undefined) }
+	recoveryDialog: OpenRecoveryDialog = { pick: () => Promise.resolve(undefined) },
+	/** See `ProxyConsent`. Refuses by default when nothing supplies a way to ask. */
+	proxyConsent: ProxyConsent = new ProxyConsent()
 ): void {
 	/**
 	 * Checked before a password is sent anywhere, and before a secret is read.
@@ -95,6 +98,19 @@ export function registerEnrollmentHandlers(
 		 */
 		if (vault.settings().requireProxies && (proxyUrl === undefined || proxyUrl === '')) {
 			throw new EnrollmentError(PROXY_REQUIRED);
+		}
+		/*
+		 * **And the address itself needs approving before a password goes down it.**
+		 *
+		 * There is no stored account to compare against here, so every proxy on
+		 * this path is a destination the vault has never seen — which is exactly
+		 * the case the gate exists for. The renderer chooses this host, and this
+		 * call sends a password and reaches Steam through it; without the gate a
+		 * compromised renderer picks the host and gets both the exfiltration
+		 * channel and the credential travelling through it.
+		 */
+		if (proxyUrl !== undefined && proxyUrl !== '') {
+			await proxyConsent.require(proxyUrl, { accountName, reason: 'signIn' });
 		}
 		return enrollment.begin(accountName, password, proxyUrl);
 	});

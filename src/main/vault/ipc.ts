@@ -4,6 +4,7 @@ import { RevocationCeremony } from './revocation-ceremony';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { planProxy } from '../net/egress';
+import { ProxyConsent } from '../net/proxy-consent';
 import type { RoutingStatus } from '../net/transport';
 import { matchesTradesAck, TRADES_ACK, type AccountSummary } from '../../shared/ipc';
 import type { NotifyDetail } from '../../shared/vault-schema';
@@ -68,7 +69,16 @@ export function registerVaultHandlers(
 	 * proxied confirmation that happened to be running: enforcement interrupting
 	 * exactly the traffic it exists to protect.
 	 */
-	onRequireProxies: () => void = () => undefined
+	onRequireProxies: () => void = () => undefined,
+	/**
+	 * Gate on a proxy destination the renderer has not been given permission for.
+	 *
+	 * Defaulted to a live instance rather than a permissive stub: an
+	 * `AccountBrowsers`-style seam that silently allows everything when a caller
+	 * forgets to pass it is the same hole with an extra step, and a bare
+	 * `ProxyConsent` refuses by default until it is given a way to ask.
+	 */
+	proxyConsent: ProxyConsent = new ProxyConsent()
 ): void {
 	registerHandler(CHANNELS.vaultStatus, () => ({
 		exists: vault.exists(),
@@ -270,6 +280,51 @@ export function registerVaultHandlers(
 		// silently stops fetching, with nothing pointing at the cause.
 		if (proxyUrl !== null) {
 			planProxy(proxyUrl);
+
+			/*
+			 * **And a destination the user has not agreed to needs them to.**
+			 *
+			 * `planProxy` checks the scheme, the port and the credentials, and
+			 * never the host — so this call is a renderer-controlled outbound
+			 * connection to any name it likes, which is an exfiltration channel the
+			 * threat model says the renderer does not have. Asked before the write,
+			 * so a refusal leaves the vault untouched, and skipped entirely when
+			 * the account already routes through that endpoint.
+			 */
+			const account = vault.read().accounts.find((candidate) => candidate.steamId64 === steamId64);
+
+			/*
+			 * **Saving the address it already uses introduces nothing**, so there is
+			 * no decision to put to anybody — and a dialog with no decision left in
+			 * it is how people are taught to click Allow on the one that matters.
+			 * The screen saves the whole routing form, so this is the ordinary case
+			 * whenever some other field on it changed.
+			 *
+			 * Compared here rather than left to the unlock-time seeding, so the
+			 * handler is right on its own: seeding is an optimisation for a
+			 * different problem, and a rule that only holds because something else
+			 * happened first is a rule waiting to be broken by a refactor.
+			 */
+			/*
+			 * The *stored* address is parsed defensively, unlike the incoming one:
+			 * this is a value an older build may have written, and throwing on it
+			 * would block the very edit that replaces it. Unreadable means "not a
+			 * destination", which asks rather than skips — the safe direction.
+			 */
+			let current: string | undefined;
+			if (account?.proxyUrl !== undefined && account.proxyUrl !== '') {
+				try {
+					current = planProxy(account.proxyUrl).endpoint;
+				} catch {
+					current = undefined;
+				}
+			}
+			if (current !== planProxy(proxyUrl).endpoint) {
+				await proxyConsent.require(proxyUrl, {
+					...(account?.accountName === undefined ? {} : { accountName: account.accountName }),
+					reason: 'route'
+				});
+			}
 		}
 
 		let changed = false;

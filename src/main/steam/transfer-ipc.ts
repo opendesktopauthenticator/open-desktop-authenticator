@@ -4,6 +4,7 @@ import { RevocationCeremony } from '../vault/revocation-ceremony';
 import { VaultLockedError, type VaultService } from '../vault/service';
 import { TransferError, type TransferService } from './transfer';
 import { PROXY_REQUIRED } from '../net/egress';
+import { ProxyConsent } from '../net/proxy-consent';
 
 /**
  * IPC for moving an authenticator off the Steam mobile app.
@@ -48,7 +49,9 @@ export function registerTransferHandlers(
 	 * than a second ceremony asking the user to prove something they have
 	 * already done.
 	 */
-	ceremony: RevocationCeremony = new RevocationCeremony()
+	ceremony: RevocationCeremony = new RevocationCeremony(),
+	/** See `ProxyConsent`. Refuses by default when nothing supplies a way to ask. */
+	proxyConsent: ProxyConsent = new ProxyConsent()
 ): void {
 	/**
 	 * Unlocked, and counted as activity.
@@ -89,6 +92,17 @@ export function registerTransferHandlers(
 			 */
 			if (vault.settings().requireProxies && (proxyUrl === undefined || proxyUrl === '')) {
 				throw new TransferError(PROXY_REQUIRED);
+			}
+			/*
+			 * **And the destination needs approving, for the heaviest payload here.**
+			 *
+			 * Same gate as enrolment and the same reason — the renderer names the
+			 * host and nothing validates it — but this call carries a password *and*
+			 * a Steam Guard code, so the traffic a chosen proxy would see is worth
+			 * more than the hostname it could smuggle out.
+			 */
+			if (proxyUrl !== undefined && proxyUrl !== '') {
+				await proxyConsent.require(proxyUrl, { accountName, reason: 'signIn' });
 			}
 			return transfer.authenticate(accountName, password, steamGuardCode, proxyUrl);
 		}
