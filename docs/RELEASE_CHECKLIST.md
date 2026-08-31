@@ -17,9 +17,20 @@ Platforms: **Windows and Linux** (D11 — macOS built but not published; see
 - [ ] `main` is green: lint, format, typecheck, build, tests on both platforms.
 - [ ] `npm audit --omit=dev` clean, or every finding has a written, dated
       justification linked from the release notes. Never "we'll look at it later".
+- [ ] `osv-scanner --lockfile=package-lock.json` clean, on the same terms. It
+      covers advisories npm's own database does not, which is the entire reason
+      CI gates on it — and for a while the release workflow did not, so a
+      finding only OSV knows about could block every pull request and not block
+      a release.
 - [ ] Dependency diff since the last release reviewed by a human. Any new
       transitive dependency understood and named.
 - [ ] CHANGELOG entry written — user-facing language, not commit subjects.
+- [ ] **Run the published verify command against a real asset**, exactly as
+      written on /verify and in the draft release notes, with the tag
+      substituted. The workflow verifies its own signature with an identity it
+      builds itself; that proves nothing about the command strangers are handed.
+      Those two drifted once — the published copy checked only that the signer
+      was somewhere under the GitHub organisation.
 - [ ] Version bumped, `.nvmrc` and `engines` still correct.
 - [ ] **Branding resolved.** `hasUnresolvedBranding()` returns false.
 - [ ] **`branding.repository` opened in a browser and it loads.** The automated

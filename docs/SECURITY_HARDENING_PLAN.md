@@ -15,14 +15,14 @@ the code below.
 Findings are ordered by what they cost if left alone, not by how hard they are
 to fix. H1 is the one to do first.
 
-| #   | Finding                                                                | Severity | Effort |
-| --- | ---------------------------------------------------------------------- | -------- | ------ |
-| H1  | ~~Browser tabs run with DevTools and spellcheck enabled~~ **fixed**    | High     | Small  |
-| H2  | Published signature-verification instructions check only the org       | High     | Small  |
-| M1  | `osv-scanner` gates CI but not releases                                | Medium   | Small  |
-| M2  | A tag-mismatched dispatch produces a valid signature for the wrong tag | Medium   | Medium |
-| M3  | `account:setProxy` is ungated relative to its blast radius             | Medium   | Medium |
-| L1  | `inputs.tag` is interpolated into shell in `release.yml`               | Low\*    | Small  |
+| #   | Finding                                                             | Severity | Effort |
+| --- | ------------------------------------------------------------------- | -------- | ------ |
+| H1  | ~~Browser tabs run with DevTools and spellcheck enabled~~ **fixed** | High     | Small  |
+| H2  | ~~Published instructions check only the org~~ **fixed**             | High     | Small  |
+| M1  | ~~`osv-scanner` gates CI but not releases~~ **fixed**               | Medium   | Small  |
+| M2  | ~~A tag-mismatched dispatch signs the wrong tag~~ **fixed**         | Medium   | Medium |
+| M3  | `account:setProxy` is ungated relative to its blast radius          | Medium   | Medium |
+| L1  | ~~`inputs.tag` interpolated into shell~~ **fixed**                  | Low\*    | Small  |
 
 \* Low because it requires repository write access, which is already game over.
 Listed because it is one line to fix.
@@ -187,7 +187,29 @@ by passing preferences that do not match the adopted contents.
 
 ---
 
-## 2. H2 — the verification instructions we publish check only the organisation
+## 2. H2 — the verification instructions we publish check only the organisation — **FIXED**
+
+> **Done**, along with M1, M2 and L1 in the same change — they share a file and
+> a review.
+>
+> The internal check is now an **exact** `--certificate-identity` built from the
+> tag, which closes M2 as a side effect: a dispatch carrying `ref: v0.0.1` with
+> `inputs.tag: v9.9.9` published under v9.9.9 while the certificate said
+> v0.0.1, and a prefix accepted that. The old comment's reasoning was inverted —
+> Fulcio derives the SAN from the run's **workflow ref**, not from what the job
+> checked out, so the exactness it called impossible costs nothing on every path
+> meant to work.
+>
+> Both published copies now name repository, workflow file and tag, derived from
+> `s.repo` rather than written out again. `osv-scanner` joined the release
+> verify job, SHA-pinned like everything else in that file (SHA resolved from
+> the real tag, not guessed). `inputs.tag` reaches the shell through the
+> environment.
+>
+> And the checklist gained the step that would have caught this: **run the
+> published command against a real asset.** The workflow verifying its own
+> signature with an identity it builds itself proves nothing about the command
+> strangers are handed, which is exactly how the two drifted.
 
 The workflow's internal check is tight. The instructions handed to users are
 not, and they are the ones that matter: a user verifying a download is the

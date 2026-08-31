@@ -356,7 +356,16 @@ export const verify = {
 				work: a hash file proves nothing about itself. Anyone who could swap a binary on
 				a page could usually swap the list beside it. That list is now signed.
 			</p>
-			<pre><code>cosign verify-blob SHA256SUMS.txt   --signature SHA256SUMS.txt.sig   --certificate SHA256SUMS.txt.pem   --certificate-identity-regexp '^https://github.com/${s.githubOrg}/'   --certificate-oidc-issuer https://token.actions.githubusercontent.com</code></pre>
+			<pre><code>cosign verify-blob SHA256SUMS.txt   --signature SHA256SUMS.txt.sig   --certificate SHA256SUMS.txt.pem   --certificate-identity '${s.repo}/.github/workflows/release.yml@refs/tags/vX.Y.Z'   --certificate-oidc-issuer https://token.actions.githubusercontent.com</code></pre>
+			<p>
+				Replace <code>vX.Y.Z</code> with the version you downloaded — the identity names
+				the exact tag, so it will not match any other release. That is deliberate.
+				This command used to check only that the signer was somewhere under our GitHub
+				organisation, which would have accepted a signature minted by any workflow in
+				any repository we own, run from any branch. Checking the whole identity is the
+				difference between &ldquo;someone we know signed something&rdquo; and
+				&ldquo;this release was built by this workflow from this tag&rdquo;.
+			</p>
 			<p>
 				Both files are on the release beside the list itself. The signature is keyless —
 				there is no long-lived private key anywhere, because the certificate is minted

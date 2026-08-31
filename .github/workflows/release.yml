@@ -70,6 +70,24 @@ jobs:
       - name: npm audit (production)
         run: npm audit --audit-level=high --omit=dev
 
+      # **The other half of CI's gate, and it was left behind.**
+      #
+      # The job header above says "the same gate CI runs, re-run against the
+      # tag". Whoever wrote it deliberately pulled the production audit across
+      # from CI's separate `security` job — and took one of that job's three
+      # steps. This is the other gating one. `osv-scanner` exists precisely to
+      # cover advisories npm's own database misses, so without it an advisory
+      # present in OSV and absent from npm blocked every pull request and could
+      # not block a release.
+      #
+      # Pinned to a SHA like everything else in this file; `ci.yml` may use a
+      # mutable tag because that job holds no secrets, and this one signs.
+      - name: osv-scanner (shipping dependencies)
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+        with:
+          scan-args: |-
+            --lockfile=package-lock.json
+
   # ---------------------------------------------------------------------------
   # The tag says one thing; package.json must say the same.
   #
@@ -89,8 +107,14 @@ jobs:
 
       - name: Compare
         shell: bash
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
         run: |
-          tag="${{ inputs.tag || github.ref_name }}"
+          # Through the environment, not interpolated into the script. GitHub
+          # substitutes `${{ }}` before the shell parses, so a crafted dispatch
+          # input is a command-injection sink. It takes repository write access,
+          # which is already a total compromise — and it is one line.
+          tag="${TAG_INPUT:-$GITHUB_REF_NAME}"
           manifest="v$(node -p "require('./package.json').version")"
           echo "tag=$tag manifest=$manifest"
           # The dispatched ref must BE a pushed tag, not merely equal a version
@@ -437,26 +461,33 @@ jobs:
       - name: Verify the signature we just made
         shell: bash
         working-directory: staging
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          # **Matched by pattern, not by `$GITHUB_REF`.** An exact identity built
-          # from that variable is correct only for a tag push: this workflow also
-          # runs from `workflow_dispatch` with an `inputs.tag`, and there
-          # `GITHUB_REF` is the branch the dispatch came from while the
-          # certificate names the tag. The check would then look for an identity
-          # that was never issued and fail the release — on the dispatched path
-          # the version job exists specifically to support.
+          # **An exact identity, bound to the tag being built.**
           #
-          # The pattern is still tight: this repository, this workflow file, and
-          # `refs/tags/` only. That last part is an assertion worth making rather
-          # than a wildcard for convenience — a signature minted by a run from a
-          # branch must not satisfy it.
-          repo_escaped=$(printf '%s' "$GITHUB_REPOSITORY" | sed 's/[.[\*^$()+?{}|]/\\&/g')
-          identity="^https://github\.com/${repo_escaped}/\.github/workflows/release\.yml@refs/tags/"
-          echo "expecting identity matching: $identity"
+          # This was a regexp ending at `@refs/tags/`, on the reasoning that a
+          # dispatch run could not know the tag. That reasoning was inverted:
+          # Fulcio derives the certificate SAN from the run's **workflow ref**,
+          # not from what the job checked out. On a tag push that is
+          # `refs/tags/<tag>`; on a dispatch with a tag as the ref it is also
+          # `refs/tags/<tag>`; on a dispatch from a branch it is
+          # `refs/heads/<branch>`, which the old prefix already rejected. So the
+          # exactness the comment said was impossible costs nothing on every path
+          # that is supposed to work.
+          #
+          # What the prefix did allow, and this forbids: a dispatch carrying
+          # `ref: v0.0.1` with `inputs.tag: v9.9.9`. Every checkout uses the
+          # input, the version job compares HEAD against v9.9.9 and passes, and
+          # `gh release create` publishes under v9.9.9 — while the certificate
+          # says `@refs/tags/v0.0.1`. A prefix accepts that. Signature and
+          # release would then name different tags with nothing comparing them.
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          echo "expecting identity: $identity"
           cosign verify-blob SHA256SUMS.txt \
             --signature SHA256SUMS.txt.sig \
             --certificate SHA256SUMS.txt.pem \
-            --certificate-identity-regexp "$identity" \
+            --certificate-identity "$identity" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 
       # Proof of *where* the bytes came from: which workflow, which commit,
@@ -510,8 +541,9 @@ jobs:
           cosign verify-blob SHA256SUMS.txt \\
             --signature SHA256SUMS.txt.sig \\
             --certificate SHA256SUMS.txt.pem \\
-            --certificate-identity-regexp '^https://github.com/opendesktopauthenticator/' \\
+            --certificate-identity 'https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/$TAG' \\
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
-          \`\`\`" \
+          \`\`\`
+          That identity is exact on purpose. An earlier version of this command checked only that the signer was somewhere under our GitHub organisation, which would have accepted a signature minted by any workflow in any repository we own, run from any branch. It names this repository, this workflow file, and this tag." \
             staging/*
           echo "Draft created. Nothing is public until a human publishes it."
