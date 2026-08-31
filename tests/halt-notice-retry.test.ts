@@ -135,3 +135,84 @@ describe('a halt notice the notification service refused', () => {
 		expect(h.toasts, 'a halt notice survived the lock that should have cleared it').toEqual([]);
 	});
 });
+
+/**
+ * **A halt that outlived the account it was about.**
+ *
+ * The retry is driven by the scheduler's beat, so an undelivered halt sits in
+ * the notifier for as long as it takes. `forgetAccount` cleared the poll state
+ * and not that record, and the failure path put the record back whoever it
+ * belonged to — so removing an account and giving its SteamID to another one, by
+ * a re-enrolment or a re-import, produced an alert naming the account that had
+ * been deleted. The name in that toast is the whole of what a user reads.
+ */
+describe('a halt notice for an account that is gone', () => {
+	it('is dropped when the account is removed', () => {
+		const h = harness();
+		h.notifier.halted(ID, 'old name', 'confirm');
+		h.notifier.forgetAccount(ID);
+		h.recover();
+
+		h.notifier.stillHalted(ID);
+		expect(h.toasts, 'a halt for a removed account was still waiting to be delivered').toHaveLength(
+			0
+		);
+	});
+
+	it('does not come back under the next account to hold that SteamID', () => {
+		const h = harness();
+		h.notifier.halted(ID, 'old name', 'confirm');
+		h.notifier.forgetAccount(ID);
+
+		// The SteamID is re-enrolled and halts on its own account.
+		h.recover();
+		h.notifier.halted(ID, 'new name', 'confirm');
+
+		expect(h.toasts).toHaveLength(1);
+		expect(
+			h.toasts[0]?.title,
+			'the toast named the account that had been removed, not the one that halted'
+		).toBe('new name');
+	});
+
+	/**
+	 * And the delivery that is still in flight when the account goes.
+	 *
+	 * `stillHalted` removes the record before attempting, and the failure path
+	 * puts it back. Doing that unconditionally revived a halt that had been
+	 * discarded in between — the removal happened, and the record reappeared
+	 * behind it.
+	 */
+	it('is not revived by a delivery that fails after the account is removed', async () => {
+		let onFailure: (() => void) | undefined;
+		const toasts: { title: string; body: string }[] = [];
+		const host: ToastHost = {
+			show: (options) => {
+				toasts.push(options);
+				// Delivery is asynchronous; this one has not settled yet.
+				return new Promise<boolean>((resolve) => {
+					onFailure = () => resolve(false);
+				});
+			}
+		};
+		const notifier = new ConfirmationNotifier({ host });
+
+		notifier.halted(ID, 'old name', 'confirm');
+		expect(toasts).toHaveLength(1);
+
+		notifier.forgetAccount(ID);
+		// The OS reports the failure only now, after the account has gone. The
+		// notifier settles it on a microtask, so the assertions have to wait for
+		// one — checking synchronously passes whatever the code does.
+		onFailure?.();
+		await Promise.resolve();
+		await Promise.resolve();
+
+		notifier.stillHalted(ID);
+		expect(
+			toasts,
+			'the failure put back a halt for an account that had already been removed, and the retry ' +
+				'delivered it'
+		).toHaveLength(1);
+	});
+});

@@ -78,8 +78,31 @@ interface AccountNotifyState {
 	 * -on-unlock problem, reached by the one path that looked unrelated to it.
 	 */
 	seeded: boolean;
-	/** Ids already announced, so the same confirmation is not re-announced. */
-	seen: Set<string>;
+	/**
+	 * Ids already announced, each against the delivery attempt that announced it.
+	 *
+	 * A Set until a failed toast was found undoing a *later* toast's work. The
+	 * callback that runs when a notification fails deletes the ids its own poll
+	 * added, and it used to delete them whoever had put them there — so a poll
+	 * whose toast failed slowly, after a subsequent poll had re-announced the same
+	 * confirmation successfully, un-marked a confirmation the user had already been
+	 * shown. The next poll announced it a second time.
+	 *
+	 * The attempt number is what makes "still mine" answerable. See `attempts`.
+	 */
+	seen: Map<string, number>;
+
+	/**
+	 * How many toasts this account has attempted, ever.
+	 *
+	 * Delivery is asynchronous and the poller is not paused for it, so a failure
+	 * callback can arrive after any number of later polls have run and rewritten
+	 * everything it is about to undo. Each attempt takes the next number and every
+	 * rollback checks it before touching anything: state a later attempt owns is
+	 * that attempt's to correct, and a stale callback silently corrupting it is
+	 * worse than a toast that is simply lost.
+	 */
+	attempts: number;
 	/**
 	 * Whether this account's expired session has already been reported.
 	 *
@@ -213,7 +236,23 @@ export class ConfirmationNotifier {
 	 * Retried from `stillHalted`, which the scheduler calls on the beat for the
 	 * accounts it is skipping — the only recurring event a halted account has.
 	 */
-	private readonly undeliveredHalts = new Map<string, { accountName: string; body: string }>();
+	private readonly undeliveredHalts = new Map<
+		string,
+		{ accountName: string; body: string; generation: number }
+	>();
+
+	/**
+	 * A number every recorded halt carries, so a slow delivery failure can tell
+	 * whether the halt it is putting back is still the current one.
+	 *
+	 * Global and monotonic rather than per account: a per-account counter reset by
+	 * `forget` hands the same number out twice, and the second one matches a stale
+	 * callback still holding the first.
+	 */
+	private halts = 0;
+
+	/** The newest halt issued per account. Gone when the account is. */
+	private readonly latestHalt = new Map<string, number>();
 
 	constructor(options: ConfirmationNotifierOptions) {
 		this.host = options.host;
@@ -328,21 +367,30 @@ export class ConfirmationNotifier {
 		//    account takeover would show nothing at all.
 		if (!existing?.seeded) {
 			const critical = awaiting.filter((entry) => entry.securityCritical);
-			this.state.set(steamId64, {
+			const seedState = {
 				seeded: true,
-				seen: ids,
+				seen: new Map<string, number>([...ids].map((id) => [id, 0])),
+				attempts: 0,
 				toldSignInNeeded: false,
 				// What was already there is the baseline, not news — the same
 				// reasoning as seeding `seen`. Recording 0 here instead would make
 				// the very next poll re-announce what this one just said.
 				lastUnreadable: unreadable
-			});
+			};
+			this.state.set(steamId64, seedState);
 			// **One toast, not two — on the first poll as well.** An earlier version
 			// returned after the critical toast, so an account whose first poll
 			// carried both a takeover attempt and an unparseable entry was told
 			// about the takeover and not about the entry that could not be read —
 			// which might have been a second one.
 			if (critical.length > 0 || unreadable > 0) {
+				// Attributed to this attempt so the rollback below can tell whether it
+				// is still undoing its own work.
+				const attempt = ++seedState.attempts;
+				for (const entry of critical) {
+					seedState.seen.set(entry.id, attempt);
+				}
+				const seededUnreadable = unreadable;
 				this.toast(steamId64, accountName, composeBody(detail, critical, unreadable), () => {
 					/*
 					 * **The seed stands; the announcement does not.**
@@ -355,10 +403,24 @@ export class ConfirmationNotifier {
 					 * takeover attempt, silently swallowed by a failed toast.
 					 */
 					const seeded = this.stateFor(steamId64);
-					if (seeded) {
-						for (const entry of critical) {
+					if (!seeded) {
+						return;
+					}
+					for (const entry of critical) {
+						// Only if this attempt is still the one that marked it. A later
+						// poll re-announcing the same confirmation successfully owns it
+						// now, and deleting it here would show it to the user twice.
+						if (seeded.seen.get(entry.id) === attempt) {
 							seeded.seen.delete(entry.id);
 						}
+					}
+					/*
+					 * And the count only if nothing has moved it since. Setting 0
+					 * unconditionally overwrote whatever a later poll had recorded,
+					 * which is how a rise this poll knew nothing about stopped being a
+					 * rise and was never announced.
+					 */
+					if (seeded.lastUnreadable === seededUnreadable) {
 						seeded.lastUnreadable = 0;
 					}
 				});
@@ -373,7 +435,7 @@ export class ConfirmationNotifier {
 		// 3. Prune **before** deciding anything, and on every poll including the
 		//    quiet ones. This is what bounds the set, and what lets a confirmation
 		//    that was resolved and then reappears announce itself again.
-		for (const id of existing.seen) {
+		for (const id of [...existing.seen.keys()]) {
 			if (!ids.has(id)) {
 				existing.seen.delete(id);
 			}
@@ -381,8 +443,9 @@ export class ConfirmationNotifier {
 
 		// 4. What is actually new.
 		const fresh = awaiting.filter((entry) => !existing.seen.has(entry.id));
+		const attempt = ++existing.attempts;
 		for (const entry of fresh) {
-			existing.seen.add(entry.id);
+			existing.seen.set(entry.id, attempt);
 		}
 
 		// 5. **A rise, not a presence.** `unreadable > 0` describes a state that
@@ -415,9 +478,26 @@ export class ConfirmationNotifier {
 			 * only useful response to an OS notification failing.
 			 */
 			for (const entry of fresh) {
-				existing.seen.delete(entry.id);
+				/*
+				 * Only what this attempt marked, and only while it is still marked by
+				 * this attempt. Deleting unconditionally undid a *later* poll's
+				 * successful announcement of the same confirmation, and the poll after
+				 * that showed it to the user a second time.
+				 */
+				if (existing.seen.get(entry.id) === attempt) {
+					existing.seen.delete(entry.id);
+				}
 			}
-			existing.lastUnreadable = previouslyUnreadable;
+			/*
+			 * The high-water mark likewise, and only if this attempt's value is
+			 * still the one standing. Restoring it blind put back a number from
+			 * before a later poll had run, so a rise that poll had already announced
+			 * looked new again — or one it recorded looked already-said and was
+			 * swallowed.
+			 */
+			if (existing.lastUnreadable === unreadable) {
+				existing.lastUnreadable = previouslyUnreadable;
+			}
 		});
 	}
 
@@ -460,7 +540,8 @@ export class ConfirmationNotifier {
 			// that does is still this account's first and must seed silently.
 			this.state.set(steamId64, {
 				seeded: false,
-				seen: new Set(),
+				seen: new Map(),
+				attempts: 0,
 				toldSignInNeeded: true,
 				lastUnreadable: 0
 			});
@@ -493,6 +574,8 @@ export class ConfirmationNotifier {
 				: // An account that was only ever watching never had automatic
 					// confirmation to stop.
 					'Stopped checking after 10 failures.';
+		const generation = ++this.halts;
+		this.latestHalt.set(steamId64, generation);
 		this.toast(steamId64, accountName, body, () => {
 			/*
 			 * **Kept, because nothing will call this again.**
@@ -506,8 +589,18 @@ export class ConfirmationNotifier {
 			 *
 			 * Retried from `stillHalted`, which the scheduler calls on the beat for
 			 * exactly the accounts it is skipping.
+			 *
+			 * **But only while this is still the account's halt.** Delivery is
+			 * asynchronous and nothing waits for it, so this can arrive after the
+			 * account has been removed — and recording it then revived a halt for an
+			 * account that no longer exists. Give that SteamID to another one, by a
+			 * re-enrolment or a re-import, and the retry delivers an alert carrying
+			 * the deleted account's name, which is the whole of what a user reads.
 			 */
-			this.undeliveredHalts.set(steamId64, { accountName, body });
+			if (this.latestHalt.get(steamId64) !== generation) {
+				return;
+			}
+			this.undeliveredHalts.set(steamId64, { accountName, body, generation });
 		});
 	}
 
@@ -527,18 +620,41 @@ export class ConfirmationNotifier {
 		// failures re-attempts once per beat rather than accumulating.
 		this.undeliveredHalts.delete(steamId64);
 		this.toast(steamId64, pending.accountName, pending.body, () => {
-			this.undeliveredHalts.set(steamId64, pending);
+			/*
+			 * **Only if this halt is still the account's halt.**
+			 *
+			 * Delivery is asynchronous and nothing waits for it. Putting the record
+			 * back unconditionally revived a halt for an account that had since been
+			 * removed — and a SteamID that is reused, by a re-enrolment or a
+			 * re-import, then received an alert naming the *previous* account. The
+			 * name in that toast is the whole of what the user reads.
+			 */
+			if (this.latestHalt.get(steamId64) === pending.generation) {
+				this.undeliveredHalts.set(steamId64, pending);
+			}
 		});
 	}
 
 	/** On lock. Everything is re-seeded on the next unlock. */
 	forget(): void {
 		this.undeliveredHalts.clear();
+		this.latestHalt.clear();
 		this.state.clear();
 	}
 
-	/** When an account is removed, beside the other per-account `forget`s. */
+	/**
+	 * When an account is removed, beside the other per-account `forget`s.
+	 *
+	 * **The undelivered halt goes with it.** It did not, and a halt whose toast
+	 * had failed outlived the account entirely: the retry fires on the scheduler's
+	 * beat, so removing the account and giving the SteamID to another one — a
+	 * re-enrolment, a re-import — produced an alert carrying the name of the
+	 * account that was deleted.
+	 */
 	forgetAccount(steamId64: string): void {
 		this.state.delete(steamId64);
+		this.undeliveredHalts.delete(steamId64);
+		// And the generation, so a delivery still in flight cannot put it back.
+		this.latestHalt.delete(steamId64);
 	}
 }
