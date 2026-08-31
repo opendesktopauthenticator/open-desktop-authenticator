@@ -3,7 +3,7 @@ import { EnrollmentError, finalizeEnrollment, startEnrollment } from '../src/mai
 import { toMaFile, maFileName } from '../src/main/import/export';
 import { parseMaFile } from '../src/main/import/mafile';
 import type { SteamRequest, SteamResponse } from '../src/main/confirmations/client';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * Attaching a new authenticator (§12 F3).
@@ -258,7 +258,7 @@ describe('exporting a maFile', () => {
 		refreshToken: 'a-live-credential',
 		status: 'active',
 		addedAt: '2026-08-01T00:00:00.000Z',
-		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		autoConfirm: newAutoConfirm()
 	};
 
 	it('does not demote a freshly activated account to "never activated"', () => {

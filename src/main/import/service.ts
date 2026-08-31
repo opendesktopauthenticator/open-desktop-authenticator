@@ -10,7 +10,7 @@ import {
 import { isUsableSharedSecret } from '../codes/totp';
 import { VaultLockedError, type VaultService } from '../vault/service';
 import type { Account } from '../../shared/vault-schema';
-import { AUTO_CONFIRM_DEFAULTS } from '../../shared/vault-schema';
+import { newAutoConfirm } from '../../shared/vault-schema';
 import type {
 	ImportCandidate,
 	ImportOutcome,
@@ -884,7 +884,7 @@ function newAccount(
 		sharedSecret: parsed.sharedSecret,
 		identitySecret: parsed.identitySecret,
 		status: statusFor(parsed.revocationCode, undefined, parsed.fullyEnrolled),
-		autoConfirm: { ...AUTO_CONFIRM_DEFAULTS },
+		autoConfirm: newAutoConfirm(),
 		addedAt: iso
 	};
 	if (parsed.revocationCode !== undefined) account.revocationCode = parsed.revocationCode;

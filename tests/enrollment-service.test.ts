@@ -3,7 +3,7 @@ import { EnrollmentService } from '../src/main/steam/enrollment';
 import type { LoginSessionLike } from '../src/main/steam/login';
 import type { StartedEnrollment } from '../src/main/steam/enroll';
 import type { SteamTransportFactory } from '../src/main/net/transport';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * Enrolling a brand-new account (§12 F3).
@@ -226,7 +226,7 @@ describe('resuming an activation', () => {
 			refreshToken: MOBILE,
 			status: 'pendingActivation',
 			addedAt: '2026-08-01T00:00:00.000Z',
-			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+			autoConfirm: newAutoConfirm()
 		});
 
 		const minted = jwt({ aud: ['mobile'], exp: Math.floor(NOW / 1000) + 3600 });
@@ -260,7 +260,7 @@ describe('resuming an activation', () => {
 			revocationCode: 'R12345',
 			status: 'pendingActivation',
 			addedAt: '2026-08-01T00:00:00.000Z',
-			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+			autoConfirm: newAutoConfirm()
 		});
 
 		const transports = {
@@ -303,7 +303,7 @@ describe('deactivating an authenticator', () => {
 				refreshToken: MOBILE,
 				status: 'active',
 				addedAt: '2026-08-01T00:00:00.000Z',
-				autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
+				autoConfirm: newAutoConfirm(),
 				...overrides
 			}
 		];
@@ -1139,7 +1139,7 @@ describe('deactivating twice at once', () => {
 			refreshToken: MOBILE,
 			status: 'active',
 			addedAt: '2026-08-08T00:00:00.000Z',
-			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+			autoConfirm: newAutoConfirm()
 		});
 		(vault as { verifyPassphrase?: unknown }).verifyPassphrase = () =>
 			new Promise((resolve) => setTimeout(resolve, 10));
@@ -1214,7 +1214,7 @@ describe('an account inserted while Steam is enrolling it', () => {
 			identitySecret: IDENTITY,
 			status: 'active',
 			addedAt: '2026-08-01T00:00:00.000Z',
-			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+			autoConfirm: newAutoConfirm()
 		});
 		releaseStart?.();
 		await enrolling;
@@ -1243,7 +1243,7 @@ describe('activation with the row removed mid-flight', () => {
 			refreshToken: MOBILE,
 			status: 'pendingActivation',
 			addedAt: '2026-08-01T00:00:00.000Z',
-			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+			autoConfirm: newAutoConfirm()
 		});
 		let releaseFinalize: (() => void) | undefined;
 		const finalizeGate = new Promise<void>((resolve) => {
@@ -1299,7 +1299,7 @@ describe('a row replaced while Steam is answering', () => {
 			refreshToken: MOBILE,
 			status: kind === 'activate' ? 'pendingActivation' : 'active',
 			addedAt: '2026-08-01T00:00:00.000Z',
-			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+			autoConfirm: newAutoConfirm()
 		});
 		(vault as { verifyPassphrase?: unknown }).verifyPassphrase = () => Promise.resolve();
 		const transports = {

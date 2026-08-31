@@ -4,7 +4,7 @@ import { SteamLoginError } from '../src/main/steam/login';
 import type { SteamRequest, SteamResponse } from '../src/main/confirmations/client';
 import type { SteamTransportFactory } from '../src/main/net/transport';
 import type { VaultService } from '../src/main/vault/service';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * Confirmations, joined up to the vault and the network.
@@ -39,7 +39,7 @@ function account(overrides: Partial<Account> = {}): Account {
 		refreshToken: REFRESH,
 		status: 'active',
 		addedAt: '2026-08-01T00:00:00.000Z',
-		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
+		autoConfirm: newAutoConfirm(),
 		...overrides
 	};
 }
@@ -593,7 +593,7 @@ describe('the account queue map drains', () => {
  */
 describe('what an automatic pass reports about entries it could not read', () => {
 	const enabled = (): Account =>
-		account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } });
+		account({ autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true } });
 
 	it('carries the count out of the pass', async () => {
 		const { transports } = fakeNetwork([TRADE, { id: '77', nonce: 'n', type: '6' }]);
@@ -640,7 +640,7 @@ describe('what an automatic pass reports about entries it could not read', () =>
  */
 describe('a permission disabled while the list is in flight', () => {
 	const enabled = (): Account =>
-		account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } });
+		account({ autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true } });
 
 	it('holds the trade instead of approving it from the stale copy', async () => {
 		const accounts = [enabled()];
@@ -682,11 +682,7 @@ describe('a permission disabled while the list is in flight', () => {
 
 		// Saved while the list request is provably in the air.
 		await listRequested;
-		(accounts[0] as Account).autoConfirm = {
-			marketListings: false,
-			trades: false,
-			pollIntervalSeconds: 15
-		};
+		(accounts[0] as Account).autoConfirm = newAutoConfirm();
 		releaseList?.();
 
 		const outcome = await pass;
@@ -754,7 +750,7 @@ describe('a routing change during another account’s pass', () => {
 		account({
 			steamId64: '76561198000000002',
 			accountName: 'other',
-			autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 }
+			autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true }
 		});
 
 	function gatedNetwork(): {
@@ -831,7 +827,7 @@ describe('a routing change during another account’s pass', () => {
  */
 describe('consent withdrawn during route verification', () => {
 	const enabled = (): Account =>
-		account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } });
+		account({ autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true } });
 
 	it('sends no approval when the setting went off during the routing await', async () => {
 		const accounts = [enabled()];
@@ -868,11 +864,7 @@ describe('consent withdrawn during route verification', () => {
 		await atRouting;
 
 		// Saved while the approval request is verifying its route.
-		(accounts[0] as Account).autoConfirm = {
-			marketListings: false,
-			trades: false,
-			pollIntervalSeconds: 15
-		};
+		(accounts[0] as Account).autoConfirm = newAutoConfirm();
 		releaseRouting?.();
 
 		await expect(pass).rejects.toThrow(/switched off/i);
@@ -921,7 +913,7 @@ describe('consent withdrawn during route verification', () => {
 describe('the account removed while the approval is being prepared', () => {
 	it('sends nothing', async () => {
 		const accounts = [
-			account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } })
+			account({ autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true } })
 		];
 		let releaseRouting: (() => void) | undefined;
 		const routingGate = new Promise<void>((resolve) => {

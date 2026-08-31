@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ImportError, ImportService, type StagedFile } from '../src/main/import/service';
 import { VaultLockedError, VaultService } from '../src/main/vault/service';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * Import staging and commit (§12 F2).
@@ -634,7 +634,7 @@ describe('replacing an existing account', () => {
 		await vault.mutate((draft) => {
 			draft.accounts.push({
 				...existingAccount(),
-				autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 30 },
+				autoConfirm: { ...newAutoConfirm(), marketListings: true, pollIntervalSeconds: 30 },
 				proxyUrl: 'http://kept:secret@127.0.0.1:1080'
 			});
 		});
@@ -643,10 +643,16 @@ describe('replacing an existing account', () => {
 		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
 
 		const stored = vault.read().accounts[0];
+		// `notify` is here because the schema materialises its default on write,
+		// not because import chose it. Asserted in full rather than with
+		// `objectContaining`: this test exists to prove import does not quietly
+		// replace what the user set, and a partial match would stop noticing if a
+		// later field started arriving with a value nobody asked for.
 		expect(stored?.autoConfirm).toEqual({
 			marketListings: true,
 			trades: false,
-			pollIntervalSeconds: 30
+			pollIntervalSeconds: 30,
+			notify: { enabled: false, detail: 'full' }
 		});
 		expect(stored?.proxyUrl).toBe('http://kept:secret@127.0.0.1:1080');
 		// The account was added when it was added; re-importing is not adding it.
@@ -800,7 +806,7 @@ function existingAccount(): Account {
 		revocationCode: 'R99999',
 		status: 'active',
 		addedAt: '2026-08-01T00:00:00.000Z',
-		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		autoConfirm: newAutoConfirm()
 	};
 }
 

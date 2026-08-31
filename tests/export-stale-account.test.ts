@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CHANNELS } from '../src/shared/channels';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /*
  * Exporting an account that vanished while the save dialog was open.
@@ -111,7 +111,7 @@ const account: Account = {
 	identitySecret: 'aWRlbnRpdHk=',
 	status: 'active',
 	addedAt: '2026-08-08T00:00:00.000Z',
-	autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+	autoConfirm: newAutoConfirm()
 };
 
 let dir: string;

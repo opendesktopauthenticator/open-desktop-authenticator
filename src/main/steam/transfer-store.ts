@@ -1,5 +1,6 @@
 import { deviceIdFor } from '../confirmations/key';
 import type { Account } from '../../shared/vault-schema';
+import { newAutoConfirm } from '../../shared/vault-schema';
 import type { ReplacementToken } from './transfer-proto';
 
 /**
@@ -140,7 +141,7 @@ export function accountFromReplacement(
 		 */
 		status: 'pendingRevocationBackup',
 		addedAt: addedAtIso,
-		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 30 }
+		autoConfirm: { ...newAutoConfirm(), pollIntervalSeconds: 30 }
 	};
 
 	if (token.serialNumber !== undefined) account.serialNumber = token.serialNumber;

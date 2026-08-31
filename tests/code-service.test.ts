@@ -6,7 +6,7 @@ import { CodeService } from '../src/main/codes/service';
 import { ClipboardCourier, type Clipboard } from '../src/main/codes/clipboard';
 import { generateGuardCode } from '../src/main/codes/totp';
 import { VaultLockedError, VaultService } from '../src/main/vault/service';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * Codes as the application serves them, and the clipboard rules around them.
@@ -54,7 +54,7 @@ function account(overrides: Partial<Account> = {}): Account {
 		identitySecret: 'aWRlbnRpdHk=',
 		status: 'active',
 		addedAt: '2026-08-01T00:00:00.000Z',
-		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
+		autoConfirm: newAutoConfirm(),
 		...overrides
 	};
 }

@@ -44,8 +44,28 @@ export const accountStatusSchema = z.enum([
 export const AUTO_CONFIRM_DEFAULTS = {
 	marketListings: false,
 	trades: false,
-	pollIntervalSeconds: 15
+	pollIntervalSeconds: 15,
+	notify: { enabled: false, detail: 'full' }
 } as const;
+
+/**
+ * How much a confirmation notification says.
+ *
+ * A toast is not a private surface: Windows shows it on the lock screen and
+ * keeps it in notification history. `full` names the trade partner and the
+ * items — which is what makes it useful and what makes it a disclosure.
+ *
+ * It is the default anyway, and the reason is that notifications are **off** by
+ * default: nothing reaches a toast until somebody opens this account's screen
+ * and switches them on, which is where the disclosure sits. `count` and `type`
+ * are there for a shared or unattended machine.
+ *
+ * The strings `full` prints are Steam's, not ours — the only place text this
+ * application did not author reaches an OS surface. They are length-capped and
+ * stripped of control characters on the way.
+ */
+export const notifyDetailSchema = z.enum(['count', 'type', 'full']);
+export type NotifyDetail = z.infer<typeof notifyDetailSchema>;
 
 // `.passthrough()` on every persisted object, not just accounts. The promise at
 // the top of this file — a vault written by a newer build survives an older one
@@ -59,9 +79,53 @@ export const autoConfirmSchema = z
 		/** Trades. Off by default, sterner consent (§12 F6). */
 		trades: z.boolean().default(AUTO_CONFIRM_DEFAULTS.trades),
 		/** Seconds. Minimum 10 enforced by the engine, not here. */
-		pollIntervalSeconds: z.number().int().min(10).default(AUTO_CONFIRM_DEFAULTS.pollIntervalSeconds)
+		pollIntervalSeconds: z
+			.number()
+			.int()
+			.min(10)
+			.default(AUTO_CONFIRM_DEFAULTS.pollIntervalSeconds),
+		/**
+		 * Desktop notifications for confirmations that need a person. Independent
+		 * of the two auto-confirm switches above: an account may watch without
+		 * ever approving anything, which is the point of the feature.
+		 */
+		notify: z
+			.object({
+				enabled: z.boolean().default(AUTO_CONFIRM_DEFAULTS.notify.enabled),
+				detail: notifyDetailSchema.default(AUTO_CONFIRM_DEFAULTS.notify.detail)
+			})
+			// **The nested object needs its own `.passthrough()`.** The outer
+			// `autoConfirmSchema` has one, which protects a sibling key called
+			// `notify` — it does not protect keys *inside* it. Without this, a
+			// future build adding `notify.sound` would have it stripped by the next
+			// `mutate()` in an older build, which is exactly the promise the top of
+			// this file makes.
+			.passthrough()
+			.default({ ...AUTO_CONFIRM_DEFAULTS.notify })
 	})
 	.passthrough();
+
+export type AutoConfirm = z.infer<typeof autoConfirmSchema>;
+
+/**
+ * A fresh `autoConfirm` for a newly added account.
+ *
+ * A function rather than `{ ...AUTO_CONFIRM_DEFAULTS }` at each call site,
+ * because `notify` is a nested object and a shallow spread copies the
+ * *reference*. Every account added in one session would then share one `notify`,
+ * and `vault/ipc.ts` mutates `account.autoConfirm` in place — so switching
+ * notifications on for one account would switch them on for all of them, and
+ * the vault would be written that way.
+ *
+ * The flat defaults tolerated a spread. This one does not, which is exactly the
+ * kind of change that looks like it needs no follow-up and does.
+ */
+export function newAutoConfirm(): AutoConfirm {
+	return {
+		...AUTO_CONFIRM_DEFAULTS,
+		notify: { ...AUTO_CONFIRM_DEFAULTS.notify }
+	};
+}
 
 export const accountSchema = z
 	.object({

@@ -3,7 +3,7 @@ import { CHANNELS, TRADES_ACK } from '../src/shared/ipc';
 import { __resetRouterForTests, setTrustedSender } from '../src/main/ipc/router';
 import { registerVaultHandlers } from '../src/main/vault/ipc';
 import type { VaultService } from '../src/main/vault/service';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * The gate on automatic trade confirmation (§12 F6).
@@ -42,7 +42,7 @@ function account(trades: boolean): Account {
 		identitySecret: 'ASNFZ4mrze8BI0VniavN7wEjRWc=',
 		status: 'active',
 		addedAt: '2026-08-01T00:00:00.000Z',
-		autoConfirm: { marketListings: false, trades, pollIntervalSeconds: 15 }
+		autoConfirm: { ...newAutoConfirm(), trades }
 	};
 }
 

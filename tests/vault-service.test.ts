@@ -10,7 +10,7 @@ import {
 	type LockReason
 } from '../src/main/vault/service';
 import { readEnvelope } from '../src/main/vault/storage';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * Lifecycle rules for the vault session.
@@ -101,7 +101,7 @@ const account: Account = {
 	identitySecret: 'aWRlbnRpdHk=',
 	status: 'active',
 	addedAt: '2026-08-08T00:00:00.000Z',
-	autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+	autoConfirm: newAutoConfirm()
 };
 
 describe('creation', () => {

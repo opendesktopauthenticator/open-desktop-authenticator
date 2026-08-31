@@ -17,6 +17,7 @@ import { planProxy, redactCredentials } from '../net/egress';
 import type { SteamTransportFactory } from '../net/transport';
 import type { VaultService } from '../vault/service';
 import type { Account } from '../../shared/vault-schema';
+import { newAutoConfirm } from '../../shared/vault-schema';
 
 /**
  * Adding a brand-new account to the vault, authenticator and all (§12 F3).
@@ -831,7 +832,7 @@ export class EnrollmentService {
 			...(started.tokenGid !== undefined ? { tokenGid: started.tokenGid } : {}),
 			...(started.uri !== undefined ? { uri: started.uri } : {}),
 			status: 'pendingActivation',
-			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
+			autoConfirm: newAutoConfirm(),
 			addedAt: iso
 		};
 

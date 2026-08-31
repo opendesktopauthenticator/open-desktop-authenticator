@@ -15,7 +15,7 @@ import {
 	writeRecoveryFile
 } from '../src/main/vault/recovery';
 import { VaultService } from '../src/main/vault/service';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * The per-account recovery file (§12 F2).
@@ -54,7 +54,7 @@ function account(overrides: Partial<Account> = {}): Account {
 		refreshToken: 'a-live-credential',
 		status: 'active',
 		addedAt: NOW_ISO,
-		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
+		autoConfirm: newAutoConfirm(),
 		...overrides
 	};
 }
