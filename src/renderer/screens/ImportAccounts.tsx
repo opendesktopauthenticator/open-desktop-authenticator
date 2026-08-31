@@ -479,7 +479,14 @@ function CandidateRow({
 			    being imported at all. Off unless asked for: a proxy inside a maFile is
 			    frequently one the user stopped paying for years ago, and routing fails
 			    closed — so adopting a dead one silently means the account cannot reach
-			    Steam at all, with nothing on screen to connect the two. */}
+			    Steam at all, with nothing on screen to connect the two.
+
+			    The address itself is deliberately not here. A proxy URL usually embeds
+			    a username and password, so `ImportCandidate` carries `hasProxy` and
+			    never the URL — this screen genuinely cannot show what is about to be
+			    adopted. Which is why importing now names it in a dialog the main
+			    process draws, and why this hint says so: ticking the box is a request
+			    to be asked, not the last word. */}
 			{candidate.hasProxy && checked && !blocked && (
 				<label className="checkbox nested">
 					<input type="checkbox" checked={adoptProxy} onChange={onToggleProxy} />
@@ -489,6 +496,11 @@ function CandidateRow({
 							Leave this off unless you know the proxy still works. If it does not, this account
 							will not connect to Steam at all — it will not fall back to your own connection. You
 							can add or change routing later.
+						</p>
+						<p className="hint">
+							The address is inside the file and is not shown here, because it usually contains a
+							password. Importing will show you the address it is about to use and ask you to
+							approve it — say no there if you do not recognise it, and nothing is imported.
 						</p>
 					</span>
 				</label>

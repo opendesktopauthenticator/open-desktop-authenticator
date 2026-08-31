@@ -66,6 +66,16 @@ export const appInfoResponse = z.object({
 	 * is worse than one that is absent.
 	 */
 	installedFromStore: z.boolean(),
+	/**
+	 * Whether this machine can show a desktop notification at all.
+	 *
+	 * **Because a notify-only account has no other surface.** A successful
+	 * notify-only poll writes no activity entry — only the confirm arm does — so
+	 * on a machine with no notification service a security-critical confirmation
+	 * produced no toast, no record and no retry. The setting is still allowed;
+	 * the screen beside it has to be able to say what it will actually do.
+	 */
+	notificationsAvailable: z.boolean(),
 	/** §8 attribution strings, rendered verbatim by the renderer. */
 	attribution: z.object({
 		mckay: z.string(),

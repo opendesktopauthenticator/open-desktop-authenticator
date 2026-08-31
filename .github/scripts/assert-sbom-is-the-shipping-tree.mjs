@@ -37,11 +37,28 @@
 // and this one's are all missing. One comparison, and none of the three
 // escapes had to be predicted by name.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { basename, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const sbomPath = process.env.SBOM || process.argv[2];
 const manifestPath = process.env.MANIFEST || 'package.json';
 const lockfilePath = process.env.LOCKFILE || 'package-lock.json';
+const builderConfigPath = process.env.BUILDER_CONFIG || 'electron-builder.config.mjs';
+// Where to leave proof that this ran and approved the file it was given. See
+// the note over the receipt at the bottom; in short, it is what stops
+// `continue-on-error: true` on the step that invokes this script from turning a
+// release gate into a suggestion.
+const receiptPath = process.env.RECEIPT || '';
+
+// Removed before anything else, and unconditionally. A receipt left behind by
+// an earlier attempt in the same job would otherwise vouch for an SBOM that
+// this run never looked at — a check that passes because it passed once is the
+// same class of defect as a check that describes what must not be present.
+if (receiptPath) {
+	rmSync(receiptPath, { force: true });
+}
 
 function fail(message) {
 	console.log(`::error::${message}`);
@@ -211,6 +228,77 @@ if (required.size < 10) {
 }
 
 // ---------------------------------------------------------------------------
+// How the closure reaches the user, which is not one way for all of it.
+//
+// This script used to say the SBOM "omits N packages the installer contains",
+// and for three of them that sentence was false. `electron-builder.config.mjs`
+// carries `!node_modules/{react,react-dom,scheduler}/**` in its `files` list,
+// so those three package directories are not in the asar at all: Vite compiles
+// the renderer into a single file that already holds them, and shipping the
+// packages as well duplicated about half the archive.
+//
+// Their code still ships — that is why they stay in the SBOM and stay required
+// here. What was wrong was only the claim about the shape it ships in, and a
+// guard whose stated reason is false is a guard nobody can check. So the
+// exclusions are read out of the packaging configuration rather than assumed,
+// and the two groups are named separately in every message below.
+//
+// Read as a property of the imported configuration object, not by matching text
+// in the file: the `files` array is what electron-builder acts on, and a
+// comment or a reordering must not be able to change what this believes.
+// ---------------------------------------------------------------------------
+
+let builderConfig;
+try {
+	builderConfig = (await import(pathToFileURL(resolve(builderConfigPath)).href)).default;
+} catch (error) {
+	fail(
+		`${builderConfigPath} could not be loaded (${error.message}), so this check cannot tell which packages the installer carries as directories and which are compiled into the renderer bundle, and it must not guess`
+	);
+}
+
+const builderFiles = Array.isArray(builderConfig?.files) ? builderConfig.files : null;
+if (!builderFiles) {
+	fail(
+		`${builderConfigPath} exports no "files" array, so the packaging rules this check reports on are not there to read`
+	);
+}
+
+// Only whole-package exclusions count. `!node_modules/**/*.d.{ts,cts,mts}` and
+// the test-directory pattern trim files out of packages that still ship as
+// directories, and folding those in here would claim react's fate for every
+// dependency in the tree.
+const excludedPackages = new Set();
+for (const pattern of builderFiles) {
+	const match = /^!node_modules\/(?:\{([^}]+)\}|([^/*{}]+))\/\*\*$/.exec(String(pattern));
+	if (!match) {
+		continue;
+	}
+	for (const name of (match[1] ?? match[2]).split(',')) {
+		excludedPackages.add(name.trim());
+	}
+}
+
+const bundled = [...required].filter((id) =>
+	excludedPackages.has(id.slice(0, id.lastIndexOf('@')))
+);
+const asDirectories = required.size - bundled.length;
+// An exclusion naming something outside the production closure is not a
+// failure — a dev-only package can be excluded harmlessly — but it is also not
+// something this check should quietly absorb, because the next reader will want
+// to know why the two lists disagree.
+const excludedButNotShipping = [...excludedPackages]
+	.filter((name) => ![...required].some((id) => id.slice(0, id.lastIndexOf('@')) === name))
+	.sort();
+
+function shape() {
+	if (bundled.length === 0) {
+		return `all ${required.size} as package directories inside the asar`;
+	}
+	return `${asDirectories} as package directories inside the asar and ${bundled.length} compiled into the renderer bundle, which is where ${builderConfigPath} sends ${bundled.sort().join(', ')}`;
+}
+
+// ---------------------------------------------------------------------------
 // What the SBOM says.
 // ---------------------------------------------------------------------------
 
@@ -287,7 +375,7 @@ if (extra.length > 0) {
 }
 if (missing.length > 0) {
 	problems.push(
-		`the SBOM omits ${missing.length} package(s) the installer contains: ${missing.join(', ')}`
+		`the SBOM omits ${missing.length} package(s) whose code the installer ships: ${missing.join(', ')}`
 	);
 }
 if (foreign.size > 0) {
@@ -301,7 +389,7 @@ if (problems.length > 0) {
 		console.log(`::error::${problem}`);
 	}
 	console.log(
-		`This SBOM is not a description of what ships. Expected exactly the ${required.size} packages in the production closure of ${manifestPath} plus electron ${version(pinned)}; the document catalogues ${catalogued.size} npm entries.`
+		`This SBOM is not a description of what ships. Expected exactly the ${required.size} packages in the production closure of ${manifestPath} plus electron ${version(pinned)} — ${shape()} — and the document catalogues ${catalogued.size} npm entries.`
 	);
 	console.log(
 		'If the difference is legitimate then the lockfile is what changed, and this check follows the lockfile. Do not widen the check.'
@@ -312,3 +400,35 @@ if (problems.length > 0) {
 console.log(
 	`SBOM matches the shipping tree exactly: ${catalogued.size} npm entries, every one of the ${required.size} packages in the production closure of ${manifestPath}, electron ${version(pinned)} among them, and nothing else.`
 );
+console.log(`How that reaches the user: ${shape()}.`);
+if (excludedButNotShipping.length > 0) {
+	console.log(
+		`${builderConfigPath} also excludes ${excludedButNotShipping.join(', ')}, which the production closure does not contain — harmless, and worth knowing when the two lists are compared.`
+	);
+}
+
+// ---------------------------------------------------------------------------
+// The receipt.
+//
+// Everything above is a check, and a check is only a gate if the job stops when
+// it fails. `continue-on-error: true` turns any step into a suggestion, the
+// release workflow uses that idiom three times for genuinely optional things
+// (the Store package and its upload), and it is one line away from the step
+// that runs this script. Nothing in this file could notice.
+//
+// So success is recorded as a `sha256sum`-format line naming the exact bytes
+// that were approved, written outside the staging directory, and the step that
+// generates SHA256SUMS.txt refuses to run without it. That step cannot itself
+// be made advisory: cosign signs its output and the verify step checks that
+// signature, so a release that skips it produces no signed checksum list and
+// dies later anyway.
+//
+// Naming the digest rather than just touching a file buys the other half — an
+// SBOM rewritten between this check and publication no longer matches the
+// receipt, so what ships is the document that was actually inspected.
+// ---------------------------------------------------------------------------
+if (receiptPath) {
+	const digest = createHash('sha256').update(readFileSync(sbomPath)).digest('hex');
+	writeFileSync(receiptPath, `${digest}  ${basename(sbomPath)}\n`);
+	console.log(`Receipt written to ${receiptPath}: ${digest}`);
+}

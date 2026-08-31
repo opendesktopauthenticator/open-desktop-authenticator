@@ -153,3 +153,62 @@ describe('the auto-confirm screen for a stranded account', () => {
 		expect(render({ requireProxies: false, hasProxy: false })).not.toContain('Paused');
 	});
 });
+
+/**
+ * **A machine that cannot show a notification, and a switch that says nothing.**
+ *
+ * A notify-only account — notifications on, both approve switches off — is
+ * reported by a toast and by nothing else: a successful poll of that kind
+ * writes no activity entry, only the confirm arm does. So on a machine with no
+ * notification service, a held account-recovery confirmation produced no toast,
+ * no record and no retry. It vanished, and the screen offering the switch said
+ * nothing about it.
+ *
+ * The switch is still offered — the machine may gain a service, and the account
+ * may later approve as well — but not silently.
+ */
+describe('the auto-confirm screen where notifications cannot be shown', () => {
+	const render = (notificationsAvailable: boolean | undefined): string =>
+		renderToStaticMarkup(
+			<AutoConfirm
+				account={account({
+					autoConfirm: {
+						marketListings: false,
+						trades: false,
+						pollIntervalSeconds: 15,
+						notify: { enabled: true, detail: 'full' }
+					}
+				})}
+				accounts={[]}
+				requireProxies={false}
+				notificationsAvailable={notificationsAvailable}
+				onSave={() => Promise.resolve()}
+				onClose={() => undefined}
+			/>
+		);
+
+	it('says so, rather than offering the switch silently', () => {
+		const html = render(false);
+		expect(
+			html,
+			'the screen offers notifications on a machine that cannot show one, and says nothing'
+		).toMatch(/cannot show desktop notifications/i);
+	});
+
+	/* And names the way out, because a warning with no remedy reads as breakage. */
+	it('says what to switch on instead', () => {
+		expect(render(false)).toMatch(/Activity/);
+	});
+
+	it('says nothing where notifications work', () => {
+		expect(render(true)).not.toMatch(/cannot show desktop notifications/i);
+	});
+
+	/*
+	 * And nothing before app info has answered: `undefined` is "not asked yet",
+	 * and warning about a machine nobody has enquired about is worse than silence.
+	 */
+	it('says nothing before it has been told', () => {
+		expect(render(undefined)).not.toMatch(/cannot show desktop notifications/i);
+	});
+});

@@ -30,6 +30,7 @@ const INFO: AppInfo = {
 	brandingUnresolved: false,
 	platform: 'win32',
 	installedFromStore: false,
+	notificationsAvailable: true,
 	attribution: { mckay: attribution.mckay, valve: attribution.valve },
 	security: { sandbox: true, contextIsolation: true, nodeIntegration: false }
 };

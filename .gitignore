@@ -67,3 +67,17 @@ tickets/attachments/
 
 # Scratch: generated PDFs and other working files. Never part of a release.
 tmp/
+
+# SBOM documents and the self-test fixtures the release workflow writes beside
+# them. Generated per run and never reviewed as source; committing one would
+# make a stale inventory look like an authoritative one.
+*.spdx.json
+
+# The tree those documents describe, and the scanner configuration that decides
+# what is catalogued in it, both written by
+# .github/scripts/assemble-shipping-tree.mjs. Anyone can now run that script
+# locally — `sbom.yml` runs it on every pull request and reproducing a failure
+# by hand is the point — so its output has to be ignorable rather than a
+# surprise in `git status`.
+sbom-root/
+sbom-syft.yaml

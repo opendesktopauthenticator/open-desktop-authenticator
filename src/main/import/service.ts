@@ -87,6 +87,23 @@ interface LockedFile {
 	lastError?: string;
 }
 
+/**
+ * A proxy destination an import is about to adopt, on its way to a consent
+ * dialog.
+ *
+ * This type is the one place a proxy URL from a maFile leaves this module, and
+ * it goes to the **main** process — `import/ipc.ts`, which hands it straight to
+ * `ProxyConsent.require`. It is not, and must never become, part of anything the
+ * renderer receives: `ImportCandidate` deliberately carries `hasProxy` and not
+ * the address, because a proxy URL routinely embeds a username and password.
+ */
+export interface ProxyAdoption {
+	/** The whole address, credentials included. `planProxy` has already accepted it. */
+	proxyUrl: string;
+	/** Whose traffic this would be, so the dialog can name somebody. */
+	accountName: string;
+}
+
 export interface ImportServiceOptions {
 	/** Injected for testability. Defaults to the wall clock. */
 	now?: () => number;
@@ -420,9 +437,9 @@ export class ImportService {
 	): ImportReport {
 		const existing = new Set(this.vault.read().accounts.map((account) => account.steamId64));
 
-		// Pass two: for an account described by more than one chosen file, the most
-		// complete one is the candidate — not whichever the OS happened to list
-		// first. See `completeness`.
+		// Pass two: for an account described by more than one chosen file, the best
+		// one is the candidate — not whichever the OS happened to list first. See
+		// `outranks`.
 		const bestForAccount = new Map<string, string>();
 		for (const entry of parsedFiles) {
 			const steamId64 = entry.parsed.steamId64;
@@ -431,7 +448,7 @@ export class ImportService {
 			}
 			const incumbentId = bestForAccount.get(steamId64);
 			const incumbent = parsedFiles.find((candidate) => candidate.id === incumbentId);
-			if (!incumbent || completeness(entry.parsed) > completeness(incumbent.parsed)) {
+			if (!incumbent || outranks(entry.parsed, incumbent.parsed)) {
 				bestForAccount.set(steamId64, entry.id);
 			}
 		}
@@ -519,7 +536,7 @@ export class ImportService {
 		// size. No shared secret means the account is inert; no identity secret means
 		// codes still work and confirmations do not, which is worth importing and
 		// worth saying out loud.
-		if (!isUsableSharedSecret(parsed.identitySecret)) {
+		if (!hasUsableIdentitySecret(parsed)) {
 			parsed.warnings.push(
 				'The identity secret in this file is not usable. Steam Guard codes will work, but ' +
 					'confirmations — approving trades and market listings — will not, until this account ' +
@@ -531,13 +548,22 @@ export class ImportService {
 	}
 
 	/**
-	 * Write the chosen candidates into the vault.
+	 * The staged entries these selections name, or a refusal.
 	 *
-	 * Every selection is applied in a **single** vault mutation, so a vault that
-	 * rejects one account does not end up holding a partial import that the user
-	 * believes succeeded. Staging is cleared afterwards either way.
+	 * Pulled out of `commit` because the commit path now has two moments that must
+	 * both be sure the staging is still real: once before the proxy dialogs are
+	 * raised, and again after they have been answered. Anything asked between
+	 * those two points can take arbitrarily long — the question is on screen, in
+	 * front of a person — so the second check is not a formality.
+	 *
+	 * An unknown id means the renderer is working from a stale report: the vault
+	 * locked and re-unlocked, or another scan replaced this one. Ids are random
+	 * per parse, so "every id is still known" is also what says the entries behind
+	 * them are the same files the user reviewed. Applying only the selections we
+	 * recognise would import a subset nobody agreed to, so the whole thing is
+	 * refused.
 	 */
-	async commit(selections: ImportSelection[]): Promise<ImportOutcome[]> {
+	private requireStaging(selections: ImportSelection[]): Map<string, StagedEntry> {
 		if (this.tookTooLong || this.expired()) {
 			this.discard();
 			throw new ImportError(
@@ -545,10 +571,6 @@ export class ImportService {
 			);
 		}
 
-		// An unknown id means the renderer is working from a stale report — the
-		// vault locked and re-unlocked, or another scan replaced this one. Applying
-		// the selections we do recognise would import a subset the user never
-		// reviewed, so the whole commit is refused.
 		const byId = new Map(this.staged.map((entry) => [entry.id, entry]));
 		for (const selection of selections) {
 			if (!byId.has(selection.stagingId)) {
@@ -557,6 +579,128 @@ export class ImportService {
 				);
 			}
 		}
+		return byId;
+	}
+
+	/**
+	 * For each account these selections name, the one staged file that a commit
+	 * would actually write — keyed by SteamID, valued by staging id.
+	 *
+	 * Files that a commit would refuse outright are left out, so they cannot win a
+	 * ranking and thereby suppress a file that *would* have been written: a
+	 * damaged shared secret is skipped by name a few lines into the mutation, and
+	 * a file with no SteamID has nothing to be stored under.
+	 */
+	private preferredIds(
+		selections: ImportSelection[],
+		byId: Map<string, StagedEntry>
+	): Map<string, string> {
+		const best = new Map<string, StagedEntry>();
+		for (const selection of selections) {
+			const entry = byId.get(selection.stagingId);
+			if (!entry) {
+				continue;
+			}
+			const { parsed } = entry;
+			if (parsed.steamId64 === undefined || !isUsableSharedSecret(parsed.sharedSecret)) {
+				continue;
+			}
+			const incumbent = best.get(parsed.steamId64);
+			if (!incumbent || outranks(parsed, incumbent.parsed)) {
+				best.set(parsed.steamId64, entry);
+			}
+		}
+		return new Map([...best].map(([steamId64, entry]) => [steamId64, entry.id] as const));
+	}
+
+	/**
+	 * Every proxy destination this commit would newly adopt, deduplicated by
+	 * address — so the IPC layer can put each one to the user **before** anything
+	 * is written.
+	 *
+	 * **Import was the fourth way a proxy destination reached the vault, and the
+	 * one nobody guarded.** `accountSetProxy`, `enrollmentBegin` and
+	 * `transferAuthenticate` all go through `ProxyConsent`, whose whole reason for
+	 * existing is that an endpoint adopted unseen becomes the route for every
+	 * later Steam request — passwords, Guard codes, session cookies — and the
+	 * renderer is not allowed to open one on its own say-so. Ticking "also route
+	 * this account through the proxy saved in the file" opened exactly that
+	 * channel, and the screen could not even show the address: the candidate
+	 * carries `hasProxy`, a boolean, because the URL usually embeds credentials.
+	 * So the user adopted a destination they were never shown, chosen by whoever
+	 * wrote the maFile.
+	 *
+	 * Deduplicated by the whole address rather than asked once per file. An SDA
+	 * folder is routinely twenty accounts behind one proxy, and twenty identical
+	 * dialogs is not twenty decisions — it is one decision and nineteen lessons in
+	 * clicking Allow. Skipping the address an account already routes through is
+	 * the same argument: there is no decision in a question whose answer changes
+	 * nothing.
+	 *
+	 * Nothing is asked about a file the commit would skip anyway, because a
+	 * destination that is never stored was never introduced.
+	 */
+	proxiesToAdopt(selections: ImportSelection[]): ProxyAdoption[] {
+		// The vault has to be open before it can be read for what is already
+		// stored, and a locked vault means the person who ticked these boxes is
+		// gone — which is not somebody to raise a consent dialog in front of.
+		this.assertUnlocked();
+		const byId = this.requireStaging(selections);
+		const preferred = this.preferredIds(selections, byId);
+
+		const storedProxy = new Map(
+			this.vault.read().accounts.map((account) => [account.steamId64, account.proxyUrl] as const)
+		);
+
+		const adoptions: ProxyAdoption[] = [];
+		const seen = new Set<string>();
+		for (const selection of selections) {
+			const entry = byId.get(selection.stagingId);
+			if (!entry || !selection.adoptProxy) {
+				continue;
+			}
+			const { proxyUrl, steamId64 } = entry.parsed;
+			if (proxyUrl === undefined || steamId64 === undefined) {
+				continue;
+			}
+			// Every reason the mutation would skip this file, applied here so the
+			// dialog is never raised for a destination that would not be written.
+			if (preferred.get(steamId64) !== entry.id) {
+				continue;
+			}
+			if (storedProxy.has(steamId64) && !selection.replaceExisting) {
+				continue;
+			}
+			// Already this account's route, so adopting it introduces nothing.
+			if (storedProxy.get(steamId64) === proxyUrl) {
+				continue;
+			}
+			if (seen.has(proxyUrl)) {
+				continue;
+			}
+			seen.add(proxyUrl);
+			adoptions.push({ proxyUrl, accountName: entry.parsed.accountName });
+		}
+		return adoptions;
+	}
+
+	/**
+	 * Write the chosen candidates into the vault.
+	 *
+	 * Every selection is applied in a **single** vault mutation, so a vault that
+	 * rejects one account does not end up holding a partial import that the user
+	 * believes succeeded. Staging is cleared afterwards either way.
+	 */
+	async commit(selections: ImportSelection[]): Promise<ImportOutcome[]> {
+		// **Re-checked here even though `proxiesToAdopt` just checked it.**
+		//
+		// Between the two calls the IPC layer puts an OS dialog on screen for every
+		// proxy this commit would adopt, and a person can leave one of those sitting
+		// for as long as they like. The TTL can lapse under it, the vault can lock,
+		// another scan can replace the staging — and a commit that trusted the
+		// check it made before the dialog would then write files nobody validated.
+		// See `requireStaging`.
+		const byId = this.requireStaging(selections);
 
 		// Nothing selected means nothing to write. Falling through would still call
 		// `mutate`, which bumps the sequence, re-seals the whole vault and rotates
@@ -618,12 +762,26 @@ export class ImportService {
 		 */
 		const secretsChanged = new Set<string>();
 
+		/*
+		 * **Which selected file wins, when the selection names one account twice.**
+		 *
+		 * This loop used to take whichever selection arrived first and skip the
+		 * rest, which is `buildReport`'s old file-order bug reached through the
+		 * other door: the renderer disables the losing row, but "the renderer
+		 * disabled it" is not a reason for the vault to accept whatever order it
+		 * was sent. Everything else here is re-derived rather than trusted from the
+		 * report — the shared-secret check a few lines down says so in as many
+		 * words — and the choice between two copies of an account is exactly the
+		 * decision worth re-deriving, because getting it wrong stores a damaged
+		 * identity secret and breaks confirmations silently.
+		 *
+		 * The same `outranks` the report used, so the screen and the write can
+		 * never name different winners.
+		 */
+		const preferred = this.preferredIds(selections, byId);
+
 		try {
 			await this.vault.mutate((draft) => {
-				// Rebuilt inside the mutation so the decisions are made against the
-				// draft being written, not a snapshot taken before it.
-				const committed = new Set<string>();
-
 				for (const selection of selections) {
 					const entry = byId.get(selection.stagingId);
 					if (!entry) {
@@ -657,7 +815,7 @@ export class ImportService {
 						continue;
 					}
 
-					if (committed.has(steamId64)) {
+					if (preferred.get(steamId64) !== entry.id) {
 						outcomes.push({
 							stagingId: entry.id,
 							accountName: parsed.accountName,
@@ -698,7 +856,6 @@ export class ImportService {
 							result: 'imported'
 						});
 					}
-					committed.add(steamId64);
 					touched.add(steamId64);
 					if (index < 0) {
 						freshlyStored.add(steamId64);
@@ -879,6 +1036,61 @@ function completeness(parsed: ParsedMaFile): number {
 		(parsed.refreshToken !== undefined ? 2 : 0) +
 		(parsed.deviceId !== undefined ? 1 : 0)
 	);
+}
+
+/**
+ * Whether this file's identity secret can actually approve a confirmation.
+ *
+ * The same decoder the shared secret goes through, because it is the same kind
+ * of key: twenty bytes, base64 or forty hex characters, and anything else is a
+ * string that will HMAC to a signature Steam rejects.
+ *
+ * Named and exported to one place on purpose. `toEntry` uses it to raise the
+ * warning the user reads, and `outranks` uses it to decide which of two files
+ * wins — and those two must never be able to disagree about what "damaged"
+ * means, because a warning on a row that was silently discarded anyway is worse
+ * than no warning at all.
+ */
+function hasUsableIdentitySecret(parsed: ParsedMaFile): boolean {
+	return isUsableSharedSecret(parsed.identitySecret);
+}
+
+/**
+ * Which of two files describing the same account should be the one imported.
+ *
+ * **File order used to be the tie-break, and it lost accounts their
+ * confirmations.** Ranking was `completeness` alone, compared with a strict
+ * `>`, so two files for one account that carried the same fields left the first
+ * one the OS happened to list as the candidate and disabled the other as a
+ * duplicate. Give the user a damaged copy and a good copy of the same account —
+ * exactly what a folder of backups looks like — and if the damaged one sorted
+ * first, its unusable identity secret went into the vault. Guard codes still
+ * appeared, so nothing looked wrong; every trade and market confirmation failed,
+ * days later, on the one feature this product exists for.
+ *
+ * So usability of the identity secret is the **first** key and file order is not
+ * a key at all: a usable secret beats an unusable one whichever way round the
+ * two files were listed. `completeness` only decides between two files that
+ * agree on that, and its own reason for existing — a backup copy often still
+ * carries the revocation code the working copy has had stripped — is unchanged.
+ *
+ * Ranking a good identity secret above a revocation code is a deliberate trade
+ * and the only one available, since the candidate is a whole file rather than a
+ * merge of two. An account whose confirmations do not work is broken now; a
+ * revocation code is lost only if the account also has to be recovered later,
+ * and the losing file is still on disk to be imported afterwards. The warning on
+ * the damaged row says which one it is.
+ *
+ * Strict comparisons throughout, so two files that rank identically leave the
+ * incumbent in place and the report keeps naming the same candidate across a
+ * re-scan.
+ */
+function outranks(challenger: ParsedMaFile, incumbent: ParsedMaFile): boolean {
+	const challengerIdentity = hasUsableIdentitySecret(challenger);
+	if (challengerIdentity !== hasUsableIdentitySecret(incumbent)) {
+		return challengerIdentity;
+	}
+	return completeness(challenger) > completeness(incumbent);
 }
 
 /**

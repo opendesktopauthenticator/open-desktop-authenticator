@@ -342,6 +342,42 @@ describe('changing the passphrase', () => {
 		expect(reopened.read().accounts).toHaveLength(1);
 	});
 
+	/**
+	 * **The backup as well, or the retired passphrase still opens everything.**
+	 *
+	 * `writeEnvelope` copies the file it is about to overwrite into `.bak` first,
+	 * which is exactly right for an ordinary save — the backup is the previous
+	 * good state. During a rotation the file being copied is still sealed under
+	 * the **old** key, so the passphrase the user had just retired went on
+	 * opening `vault.json.bak` and handing back every account in it.
+	 *
+	 * Measured before the fix, and this is the reproduction: create a vault, add
+	 * an account, change the passphrase. The new passphrase could not restore the
+	 * backup; the old one could. The Settings screen promises the opposite in as
+	 * many words, which makes it worse than an unfixed hole — it is a hole the
+	 * product tells people is closed.
+	 */
+	it('leaves the backup readable only with the new passphrase', async () => {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+
+		await v.changePassphrase(PASS, 'a brand new long passphrase');
+
+		const withOld = service();
+		await expect(
+			withOld.restoreFromBackup(PASS),
+			'the retired passphrase still opened the backup, and every account in it'
+		).rejects.toThrow();
+
+		const withNew = service();
+		await withNew.restoreFromBackup('a brand new long passphrase');
+		expect(
+			withNew.read().accounts,
+			'the backup is unreadable with either passphrase, so the safety net is gone'
+		).toHaveLength(1);
+	});
+
 	it('rotates the salt', async () => {
 		const v = service();
 		await v.create(PASS);

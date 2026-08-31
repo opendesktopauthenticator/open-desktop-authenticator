@@ -669,15 +669,25 @@ function start(): void {
 					liveToasts.add(toast);
 
 					/*
-					 * A machine with no notification service shows nothing and fires
-					 * nothing. Reported as delivered on purpose: retrying every fifteen
-					 * seconds cannot help, and the activity log still carries it. What
-					 * this must not do is silently retry for ever on a machine where
-					 * success is impossible.
+					 * **A machine with no notification service reports NOT delivered.**
+					 *
+					 * This used to resolve `true` and say so in a comment: retrying could
+					 * not help, and the activity log carried it anyway. The second half
+					 * was wrong. A notify-only account writes no activity entry on a
+					 * successful poll — only the confirm arm does — so a security-critical
+					 * recovery confirmation on such a machine produced no notification, no
+					 * activity record, and, because it had been marked announced, no
+					 * second attempt. It vanished.
+					 *
+					 * Saying `false` is the honest answer and it costs a construction that
+					 * no-ops. Nothing is marked announced that was never shown, so the
+					 * moment notifications do work the user is told — and until then the
+					 * settings screen says this machine cannot show them, which is the
+					 * only thing that actually helps.
 					 */
 					if (!Notification.isSupported()) {
 						liveToasts.delete(toast);
-						resolve(true);
+						resolve(false);
 						return;
 					}
 
@@ -734,6 +744,9 @@ function start(): void {
 			activity.notePollSucceeded(steamId64);
 			notifier.pending(steamId64, accountName, awaiting, unreadable, detail);
 		},
+		// The only recurring event a halted account has. Does nothing unless that
+		// account's halt notice failed to reach the screen.
+		onStillHalted: (steamId64) => notifier.stillHalted(steamId64),
 		onSignInNeeded: (steamId64, accountName) => {
 			// Both, and they answer different questions. The toast interrupts once;
 			// the log entry is what a person finds when they come back to a machine
@@ -887,7 +900,10 @@ function start(): void {
 			},
 			proxyConsent
 		);
-		registerImportHandlers(imports);
+		// The same gate the vault, enrolment and transfer handlers use. A maFile
+		// can carry a proxy, and adopting one is adopting a destination the user
+		// has never been shown — the very thing this gate exists to put to them.
+		registerImportHandlers(imports, proxyConsent);
 		// The same ceremony the vault handlers use, not a second one: a transfer
 		// shows the recovery code, and `revocation:confirmBackup` refuses to mark a
 		// code as written down unless it was shown. Two instances would mean the
@@ -1109,6 +1125,21 @@ function start(): void {
 		autoLockPoll.unref();
 
 		app.on('before-quit', () => {
+			/*
+			 * **Every quit, not only the tray's.**
+			 *
+			 * `quitting` was set in one place — the tray's Quit item — and the close
+			 * handler below refuses to close unless it is set. So every other
+			 * legitimate way to quit (Cmd-Q, `app.quit()` from anywhere, a taskbar
+			 * Close All, the installer asking the app to exit) reached the window
+			 * close with the flag still false, was cancelled, and left the
+			 * application running and hidden. The user pressed Quit and nothing
+			 * happened, twice over: no exit, and no window either.
+			 *
+			 * `before-quit` fires before Electron closes any window, so setting it
+			 * here covers every source rather than every source having to remember.
+			 */
+			quitting = true;
 			clearInterval(autoLockPoll);
 			autoConfirm.stop();
 			// The log outlives a lock on purpose — it is what someone returning
@@ -1119,6 +1150,27 @@ function start(): void {
 			// may not give a scheduled timer the chance to fire at all.
 			clipboard.clearIfOurs();
 			vault.lock('shutdown');
+		});
+
+		/*
+		 * **Windows shutdown, restart and sign-out never reach `before-quit`.**
+		 *
+		 * Every piece of shutdown cleanup lived in that handler, and Electron does
+		 * not emit it during a Windows session end — the process is terminated
+		 * instead. So a shutdown skipped the clipboard clear, the tray teardown and
+		 * the deliberate `vault.lock('shutdown')`: the machine went down with a
+		 * live Steam Guard code still on the clipboard, which the next session
+		 * pastes.
+		 *
+		 * `powerMonitor` reports the session ending in time to do something about
+		 * it. The same work runs, and it is idempotent — if `before-quit` does fire
+		 * afterwards, clearing an already-cleared clipboard and locking an already
+		 * locked vault costs nothing.
+		 */
+		powerMonitor.on('shutdown', () => {
+			clipboard.clearIfOurs();
+			vault.lock('shutdown');
+			tray?.destroy();
 		});
 
 		// Lock on suspend and on the OS lock screen (§10.3). Leaving a vault
@@ -1241,9 +1293,15 @@ function start(): void {
 		});
 
 		app.on('activate', () => {
-			if (BrowserWindow.getAllWindows().length === 0) {
-				createMainWindow();
-			}
+			/*
+			 * **A hidden window still exists, so counting windows answered the wrong
+			 * question.** Closing hides rather than quits, so clicking the Dock icon
+			 * on macOS found a window, decided there was nothing to do, and left the
+			 * user looking at a Dock bounce and no application. `showMainWindow`
+			 * already handles all three cases — minimised, hidden, destroyed — which
+			 * is exactly why it exists.
+			 */
+			showMainWindow();
 		});
 	});
 

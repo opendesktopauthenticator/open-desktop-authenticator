@@ -158,7 +158,14 @@ describe('the engine callbacks in index.ts', () => {
 		['onPending', 'notifier.pending('],
 		['onFailure', 'notifier.halted('],
 		['onSignInNeeded', 'activity.recordSignInRequired(steamId64)'],
-		['onSignInNeeded', 'notifier.signInNeeded(steamId64, accountName)']
+		['onSignInNeeded', 'notifier.signInNeeded(steamId64, accountName)'],
+		/*
+		 * The halt toast is sent once — `nextDueAt` goes to infinity — so a
+		 * delivery the OS refused was lost outright. This beat is the only
+		 * recurring event a halted account has, and the notifier does nothing on it
+		 * unless that happened.
+		 */
+		['onStillHalted', 'notifier.stillHalted(steamId64)']
 	])('%s calls %s', (name, call) => {
 		expect(arm(name), `${call} is not in ${name}, so it fires under the wrong condition`).toContain(
 			call

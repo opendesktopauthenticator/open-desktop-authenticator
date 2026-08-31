@@ -2349,3 +2349,74 @@ describe('a session expiry among ordinary failures', () => {
 		).toBe(false);
 	});
 });
+
+/**
+ * **The only recurring event a halted account has left.**
+ *
+ * `halted()` is called once — `nextDueAt` goes to infinity, so there is no
+ * second poll — which is why a halt toast the OS refused was lost outright.
+ * The notifier can retry it, but only if something tells it the account is
+ * still halted, and the beat that skips it is the only candidate.
+ */
+describe('an account the scheduler is skipping because it halted', () => {
+	it('is reported on the beat, so a lost halt notice can be retried', async () => {
+		const stillHalted: string[] = [];
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () => Promise.reject(new Error('steam said no'))
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onStillHalted: (steamId64) => stillHalted.push(steamId64),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		// Ten failures reach the halt. The first tick seeds rather than polls.
+		for (let i = 0; i < 11; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		expect(stillHalted, 'the account never halted, so this tests nothing').not.toHaveLength(0);
+
+		const before = stillHalted.length;
+		await engine.tick();
+		expect(
+			stillHalted.length,
+			'a halted account is skipped in silence, so a halt notice the OS refused can never be ' +
+				'retried — there is no other recurring event for that account'
+		).toBeGreaterThan(before);
+	});
+
+	/* And an account that is merely backing off is not reported as halted. */
+	it('is not reported for an account that is only backing off', async () => {
+		const stillHalted: string[] = [];
+		const accounts = [account({ trades: true })];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () => Promise.reject(new Error('steam said no'))
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onStillHalted: (steamId64) => stillHalted.push(steamId64),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		// Seed, then one failure. Far short of the ten that halt.
+		await engine.tick();
+		await engine.tick();
+
+		expect(stillHalted, 'a backing-off account was reported as halted').toEqual([]);
+	});
+});

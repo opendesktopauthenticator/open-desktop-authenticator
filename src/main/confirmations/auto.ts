@@ -140,6 +140,14 @@ export interface AutoConfirmEngineOptions {
 	/** A poll that found the saved session needs a password again. */
 	onSignInNeeded?: (steamId64: string, accountName: string) => void;
 	/**
+	 * This account is still halted, and the beat has come round.
+	 *
+	 * Only the notifier cares, and only when its halt notice failed to reach the
+	 * screen — a halted account is never polled again, so this beat is the sole
+	 * recurring event it has left to hang a retry on.
+	 */
+	onStillHalted?: (steamId64: string) => void;
+	/**
 	 * Whether the vault refuses to talk to Steam without a proxy.
 	 *
 	 * Wired to the **existing** reader the transports already use, not a second
@@ -211,6 +219,17 @@ export class AutoConfirmEngine {
 		detail: NotifyDetail
 	) => void;
 	private readonly onSignInNeeded: (steamId64: string, accountName: string) => void;
+	/** See the option of the same name: only a failed halt notice uses this. */
+	private readonly onStillHalted: (steamId64: string) => void;
+
+	/**
+	 * Accounts that have given up, so the beat can still say so.
+	 *
+	 * Kept beside `state` rather than derived from it because `state` is behind
+	 * the `earliestDueAt` early-out — a halt pins that at infinity, so the map is
+	 * never walked again and anything read from it would be unreachable.
+	 */
+	private readonly halted = new Set<string>();
 	private readonly requireProxies: () => boolean;
 	private readonly ensureClock: () => Promise<void>;
 	private readonly now: () => number;
@@ -328,6 +347,7 @@ export class AutoConfirmEngine {
 		this.onFailure = guarded(options.onFailure);
 		this.onPending = guarded(options.onPending);
 		this.onSignInNeeded = guarded(options.onSignInNeeded);
+		this.onStillHalted = guarded(options.onStillHalted);
 		this.requireProxies = options.requireProxies ?? ((): boolean => false);
 		this.ensureClock = options.ensureClock ?? ((): Promise<void> => Promise.resolve());
 		this.now = options.now ?? ((): number => Date.now());
@@ -365,6 +385,7 @@ export class AutoConfirmEngine {
 		// cannot reach because its timer has already fired.
 		this.chain += 1;
 		this.state.clear();
+		this.halted.clear();
 		this.earliestDueAt = 0;
 		// **`inFlight` is deliberately not cleared.** Those requests are still in
 		// the air; each removes itself when it settles. Clearing here would let the
@@ -413,6 +434,22 @@ export class AutoConfirmEngine {
 		// a single dead proxy suppress every beat for its whole timeout. Overlap
 		// is prevented per account instead, where it means something.
 		//
+		/*
+		 * **Before the early-out, because a halted account is behind it.**
+		 *
+		 * A halt writes `nextDueAt: Infinity`, so `earliestDueAt` becomes infinity
+		 * and every later beat returns on the line below without reading anything.
+		 * That is the whole point of the cache — and it means the halted account is
+		 * never looked at again, which is exactly why its one toast had to arrive
+		 * first time.
+		 *
+		 * The notifier does nothing here unless that toast failed, so on every
+		 * ordinary beat this is a walk over an empty set.
+		 */
+		for (const steamId64 of this.halted) {
+			this.onStillHalted(steamId64);
+		}
+
 		// Cheap early-out, before the vault is read. See `earliestDueAt`.
 		if (this.earliestDueAt > this.now()) {
 			return;
@@ -522,6 +559,8 @@ export class AutoConfirmEngine {
 	forgetAccount(steamId64: string): void {
 		this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
 		this.state.delete(steamId64);
+		// Whatever this account was, it is being reconsidered from the vault.
+		this.halted.delete(steamId64);
 		this.scheduleDirty = true;
 		// A removed account never appears in the projection again, so nothing else
 		// could ever clear its entry — and a halted one left behind pins
@@ -815,6 +854,7 @@ export class AutoConfirmEngine {
 				// failing forever at fifteen-minute intervals while the user believes
 				// this is working.
 				this.state.set(steamId64, { nextDueAt: Number.POSITIVE_INFINITY, failures, halted: true });
+				this.halted.add(steamId64);
 				// **The cheap early-out depends on this.** Without it `earliestDueAt`
 				// stayed at the halted account's old due time, so every one-second beat
 				// went on deep-cloning the whole secret-bearing vault to rediscover

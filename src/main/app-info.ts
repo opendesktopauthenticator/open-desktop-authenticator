@@ -1,4 +1,4 @@
-import { app } from 'electron';
+import { app, Notification } from 'electron';
 import { attribution, branding, hasUnresolvedBranding } from '../shared/branding';
 import { CHANNELS } from '../shared/channels';
 import { registerHandler } from './ipc/router';
@@ -25,6 +25,17 @@ export function registerAppInfoHandler(): void {
 		repository: branding.repository,
 		brandingUnresolved: hasUnresolvedBranding(),
 		platform: process.platform,
+		/*
+		 * **Whether this machine can show a desktop notification at all.**
+		 *
+		 * Surfaced because the answer is invisible otherwise and decides whether a
+		 * whole feature works: an account with notifications on and both auto types
+		 * off is *only* reported by a toast — a successful notify-only poll writes
+		 * no activity entry — so on a machine with no notification service, a
+		 * security-critical confirmation produced nothing anywhere at all. The
+		 * switch is still allowed; the screen beside it says what it will do.
+		 */
+		notificationsAvailable: Notification.isSupported(),
 		installedFromStore: installedFromStore(),
 		attribution: {
 			mckay: attribution.mckay,

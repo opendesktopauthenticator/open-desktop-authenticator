@@ -2980,6 +2980,50 @@ describe('Require proxies while a window is still being built', () => {
 	});
 
 	/**
+	 * **A removal or a proxy change landing inside the teardown's own wipe.**
+	 *
+	 * The route switch bumps the epoch itself and then awaits the storage wipe,
+	 * and this used to *re-read* `epochOf` afterwards — which cannot tell the
+	 * teardown's own bump apart from a later one. So an account removal or a
+	 * proxy replacement arriving during that wipe was absorbed by the re-read and
+	 * vanished. Reproduced by the auditor: open through a proxy, hold the wipe,
+	 * remove the account, release. The route request completed and a signed-in
+	 * browser reappeared for an account that was gone, on routing captured before
+	 * it went.
+	 *
+	 * The exact value the teardown produced is required afterwards instead, so
+	 * any additional increment — from any source — cancels the open.
+	 */
+	it('cancels a route switch when the account is removed during the teardown', async () => {
+		const h = harness({ gateWipes: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		await browsers.open(PROXIED);
+		expect(browsers.isOpen(PROXIED.steamId64)).toBe(true);
+
+		// Switching routes: the old window's wipe is held, so this parks inside the
+		// teardown with the account in no map.
+		const switching = settled(browsers.open({ ...ACCOUNT, route: 'direct' }));
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+
+		// The account is removed while that wipe is held. `dropAccountRouting`
+		// fires `closeAccount`, which bumps the epoch again.
+		void browsers.closeAccount(ACCOUNT.steamId64);
+		h.releaseWipe();
+
+		expect(
+			why(await switching),
+			'the switch completed after the account it belonged to was removed'
+		).toMatch(/routing changed|not opened/i);
+		expect(
+			browsers.isOpen(ACCOUNT.steamId64),
+			'a signed-in browser reappeared for an account the vault no longer holds'
+		).toBe(false);
+	});
+
+	/**
 	 * **And the record of the attempt, not only its window.**
 	 *
 	 * Every sweep closed the half-built window and left `opening` alone, and the
@@ -3085,6 +3129,30 @@ describe('a wipe that failed on a path other than closeAccount', () => {
  * signed-in Steam session established by an attempt that had failed.
  */
 describe('a sign-in cookie that only partly landed', () => {
+	/**
+	 * **And when that wipe fails too, the partition is remembered as dirty.**
+	 *
+	 * The rollback discarded whether it worked. So with the second cookie write
+	 * failing *and* the wipe failing, the open threw with the first cookie still
+	 * live in the partition and nothing anywhere recording it — and an immediate
+	 * retry reused a session a failed attempt had established. That is precisely
+	 * what the dirty-partition tracking exists to refuse, denied the one fact it
+	 * needed.
+	 */
+	it('marks the partition when the rollback wipe fails too', async () => {
+		const h = harness({ failSecondCookie: true, wipeFails: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		await expect(browsers.open(ACCOUNT)).rejects.toBeInstanceOf(Error);
+
+		// The observable: a retry is refused rather than reusing the jar the failed
+		// attempt signed into.
+		await expect(
+			browsers.open(ACCOUNT),
+			'a partly authenticated session survived a failed open and was handed to the retry'
+		).rejects.toBeInstanceOf(BrowserSessionError);
+	});
+
 	it('empties the partition rather than leaving one behind', async () => {
 		const h = harness({ failSecondCookie: true });
 		const browsers = new AccountBrowsers(h.host);

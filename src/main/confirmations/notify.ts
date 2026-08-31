@@ -200,6 +200,21 @@ export class ConfirmationNotifier {
 	private readonly onActivate: (steamId64: string) => void;
 	private readonly state = new Map<string, AccountNotifyState>();
 
+	/**
+	 * Halt notices the OS refused, kept so they can be tried again.
+	 *
+	 * **This is the one toast with no natural second chance.** The engine sets
+	 * `nextDueAt` to infinity on a halt, so `halted()` is called exactly once and
+	 * never again — which is why it needed no "already said this" flag, and
+	 * equally why a delivery failure simply lost it. The activity log still
+	 * records the halt, so the badge is right; what went was the interruption
+	 * telling somebody an account had stopped being checked at all.
+	 *
+	 * Retried from `stillHalted`, which the scheduler calls on the beat for the
+	 * accounts it is skipping — the only recurring event a halted account has.
+	 */
+	private readonly undeliveredHalts = new Map<string, { accountName: string; body: string }>();
+
 	constructor(options: ConfirmationNotifierOptions) {
 		this.host = options.host;
 		this.onActivate = options.onActivate ?? ((): void => undefined);
@@ -472,19 +487,53 @@ export class ConfirmationNotifier {
 	 *
 	 */
 	halted(steamId64: string, accountName: string, mode: PollMode): void {
-		this.toast(
-			steamId64,
-			accountName,
+		const body =
 			mode === 'confirm'
 				? 'Automatic confirmation stopped after 10 failures.'
 				: // An account that was only ever watching never had automatic
 					// confirmation to stop.
-					'Stopped checking after 10 failures.'
-		);
+					'Stopped checking after 10 failures.';
+		this.toast(steamId64, accountName, body, () => {
+			/*
+			 * **Kept, because nothing will call this again.**
+			 *
+			 * The engine sets `nextDueAt` to infinity on a halt, so there is no
+			 * second poll and no second call — which is why this needed no dedup
+			 * flag, and equally why a failed delivery was simply lost. The activity
+			 * log still carries the halt, so the badge is right and the information
+			 * survives; what went was the one interruption telling somebody their
+			 * account had stopped being checked at all.
+			 *
+			 * Retried from `stillHalted`, which the scheduler calls on the beat for
+			 * exactly the accounts it is skipping.
+			 */
+			this.undeliveredHalts.set(steamId64, { accountName, body });
+		});
+	}
+
+	/**
+	 * This account is still halted, and the beat has come round again.
+	 *
+	 * Does nothing at all unless its halt notice failed to reach the screen — the
+	 * ordinary case is a map lookup that misses. Called per skipped account per
+	 * beat, so it must stay that cheap.
+	 */
+	stillHalted(steamId64: string): void {
+		const pending = this.undeliveredHalts.get(steamId64);
+		if (!pending) {
+			return;
+		}
+		// Removed before the attempt, and put back by the failure path, so a run of
+		// failures re-attempts once per beat rather than accumulating.
+		this.undeliveredHalts.delete(steamId64);
+		this.toast(steamId64, pending.accountName, pending.body, () => {
+			this.undeliveredHalts.set(steamId64, pending);
+		});
 	}
 
 	/** On lock. Everything is re-seeded on the next unlock. */
 	forget(): void {
+		this.undeliveredHalts.clear();
 		this.state.clear();
 	}
 

@@ -437,6 +437,27 @@ jobs:
       # The scan therefore runs over a tree assembled to hold what the
       # installer contains, and the step after it checks the result says so.
       # `path: .` is one word and it reintroduces both halves at once.
+      #
+      # **And then the assembly broke, and no test could see it.** The step that
+      # fixed the two faults above ended by deleting the lockfile from the
+      # assembled tree, to stop the scanner honouring npm's `dev` flags and
+      # dropping the electron entry it had just added. The flags are real and
+      # the scanner does honour them. What the reasoning missed is that on a
+      # *directory* scan the lockfile is the only npm inventory there is: Syft's
+      # `javascript-package-cataloger`, the one that reads `node_modules`, is
+      # tagged `installed` and `image` and carries no `directory` tag, so it
+      # never ran. Deleting the lockfile deleted everything. An audit against
+      # the scanner version this pinned action ships got three document entries
+      # and no package URLs at all, and the guard below then reported forty
+      # missing packages and two foreign entries and failed. Every release, from
+      # the moment that line was written.
+      #
+      # Nothing caught it because nothing but a real release ever walked this
+      # path. That is the more important half of the repair:
+      # `.github/workflows/sbom.yml` now runs this same assembly, the same
+      # scanner and the same guard on every push and pull request, against the
+      # same scripts, so the next time this breaks it breaks in front of
+      # somebody rather than on release day.
       # ---------------------------------------------------------------------
       - name: Node, to assemble the shipping tree
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -444,63 +465,38 @@ jobs:
           node-version-file: '.nvmrc'
           cache: npm
 
+      # Installs production dependencies into `sbom-root`, writes the manifest
+      # and lockfile the scanner reads, adds electron, and writes the scanner's
+      # configuration. All of that lives in the script rather than here, and
+      # deliberately: `sbom.yml` runs the identical line on every pull request,
+      # and two copies of this in two files would drift until a release found
+      # the difference.
       - name: Assemble the tree the SBOM describes
         shell: bash
-        env:
-          # Beside `--ignore-scripts`, not instead of it. Electron's postinstall
-          # fetches a ~100 MB runtime this tree has no use for — only the
-          # package metadata is wanted here — and a release should not wait on
-          # a download to describe a file it already built.
-          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-        run: |
-          rm -rf sbom-root
-          mkdir sbom-root
-          cp package.json package-lock.json sbom-root/
-          cd sbom-root
+        run: node .github/scripts/assemble-shipping-tree.mjs
 
-          # Production dependencies only, resolved from the lockfile, which is
-          # the same tree `npm ci` gave the packaging job. eslint, vitest and
-          # electron-builder are on no user's disk; listing them invites
-          # somebody to chase an advisory in a package that never shipped.
-          npm ci --omit=dev --ignore-scripts
+      - name: Show what the scanner was told
+        shell: bash
+        run: cat sbom-syft.yaml
 
-          # Electron is the exception, and the reason the default is wrong
-          # here: it lives in `devDependencies` and it is the runtime the
-          # installer embeds. Taken from the manifest so the SBOM cannot name a
-          # version other than the packaged one without this step failing.
-          electron="$(node -p "require('./package.json').devDependencies.electron")"
-          if [ -z "$electron" ] || [ "$electron" = 'undefined' ]; then
-            echo "::error::package.json no longer pins electron, so the SBOM cannot name the runtime"
-            exit 1
-          fi
-
-          # Installed elsewhere and copied in as metadata. `npm install
-          # electron` in this directory would also add `@electron/get` and
-          # `extract-zip`, which run when the package is installed and are not
-          # in the application — an SBOM that invents three packages is a
-          # smaller version of the mistake this step exists to fix.
-          meta="$RUNNER_TEMP/electron-meta"
-          rm -rf "$meta"
-          mkdir -p "$meta"
-          printf '{"name":"electron-meta","private":true}\n' > "$meta/package.json"
-          (cd "$meta" && npm install --ignore-scripts --no-audit --no-fund "electron@$electron")
-          mkdir -p node_modules/electron
-          cp "$meta/node_modules/electron/package.json" node_modules/electron/package.json
-
-          # The lockfile goes before the scan. It flags every entry as
-          # production or development and the scanner honours that flag, so
-          # leaving it here drops the electron just added — the original defect
-          # returning by a quieter route. What is left is `node_modules`: the
-          # packages themselves, which is what ships.
-          rm -f package-lock.json
-
-          echo "--- packages the SBOM will describe ---"
-          ls -1 node_modules
-
+      # `config:` restricts this to the JavaScript catalogers. Without it the
+      # scanner brings its whole directory set to a tree that holds nothing but
+      # package metadata, and anything they find arrives without an npm package
+      # URL — which is both noise in a published document and the shape
+      # contamination takes when it wants to slip past a comparison made on
+      # package URLs. The guard below rejects such entries outright, so this is
+      # what keeps that rejection from being a permanent red.
+      #
+      # The scanner version is fixed by the action's pinned SHA, not named
+      # separately here: pinning it twice would let a Dependabot bump of the
+      # action move one and not the other, and `sbom.yml` runs this same SHA on
+      # every pull request, so a bump that changes cataloguing behaviour is
+      # caught on the pull request that makes it.
       - name: Generate SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           path: sbom-root
+          config: sbom-syft.yaml
           format: spdx-json
           output-file: staging/sbom.spdx.json
           upload-artifact: false
@@ -527,18 +523,55 @@ jobs:
       # SBOM has to be that set exactly: nothing outside it, nothing missing
       # from it. All three escapes are outside it, and so is the next one
       # nobody has thought of yet.
+      #
+      # `BUILDER_CONFIG` is new and it is not optional. The script used to
+      # report the closure as "packages the installer contains", and for three
+      # of them that was false: `electron-builder.config.mjs` excludes
+      # `react`, `react-dom` and `scheduler` from the asar because Vite has
+      # already compiled them into the renderer. Their code ships, so they
+      # belong in the SBOM and the check still demands them — but it now reads
+      # the exclusions out of the packaging configuration and says which of the
+      # two shapes each package ships in, rather than asserting something a
+      # reader could check and find untrue.
+      #
+      # **`continue-on-error: true` must never appear on this step.** It would
+      # turn the one gate standing between a wrong SBOM and the release page
+      # into a suggestion, and that idiom is used three times elsewhere in this
+      # file for genuinely optional things, so it is a plausible edit. Rather
+      # than trusting a comment to prevent it, the script writes a receipt
+      # naming the digest of the document it approved, and `Generate
+      # SHA256SUMS.txt` refuses to run without one that matches. That step
+      # cannot be made advisory in turn: cosign signs its output and the step
+      # after that verifies the signature, so a release which skips it has no
+      # signed checksum list and dies anyway.
       - name: The SBOM must list the shipping tree, exactly
         shell: bash
         env:
           SBOM: staging/sbom.spdx.json
           MANIFEST: package.json
           LOCKFILE: package-lock.json
-        run: node .github/scripts/assert-sbom-is-the-shipping-tree.mjs
+          BUILDER_CONFIG: electron-builder.config.mjs
+        run: |
+          RECEIPT="$RUNNER_TEMP/sbom-verified.sha256" \
+            node .github/scripts/assert-sbom-is-the-shipping-tree.mjs
 
       - name: Generate SHA256SUMS.txt
         shell: bash
         working-directory: staging
         run: |
+          # The receipt the step above leaves behind, checked before anything is
+          # hashed. Absent, it means the guard did not run or did not pass —
+          # skipped, or made advisory — and this release has no statement about
+          # what its SBOM contains. Present but not matching, it means something
+          # rewrote the document after it was inspected, so what would ship is
+          # not what was checked.
+          receipt="$RUNNER_TEMP/sbom-verified.sha256"
+          if [ ! -f "$receipt" ]; then
+            echo "::error::the SBOM guard left no receipt, so it did not run or did not pass. Nothing here can vouch for sbom.spdx.json, and this release will not publish an SBOM nobody checked."
+            exit 1
+          fi
+          sha256sum --check --strict "$receipt"
+
           # Removed first. On a re-run the file is already there, the glob picks
           # it up, and the list gains an entry for its own earlier contents —
           # which can never verify, on a file whose whole job is verifying.

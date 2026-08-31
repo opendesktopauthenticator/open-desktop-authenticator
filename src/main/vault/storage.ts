@@ -199,6 +199,98 @@ function syncDirectory(dir: string): void {
  * `%APPDATA%`. Failing a vault write over a permission bit we cannot set on the
  * platform most users are on would trade a real guarantee for a theoretical one.
  */
+/**
+ * Replace the backup, and nothing else.
+ *
+ * **Because a passphrase rotation left the backup readable with the retired
+ * passphrase.** `writeEnvelope` copies the file it is about to overwrite into
+ * `.bak` first, which is exactly right for an ordinary save — the backup is the
+ * previous good state. During a rotation it is a hole: the file being copied is
+ * still sealed under the *old* key, so the passphrase the user had just retired
+ * went on opening `vault.json.bak` and every account in it. The Settings screen
+ * promises the opposite in as many words.
+ *
+ * Written through a temp file and a rename like the main vault, and verified by
+ * reading it back, because a half-written backup is worse than a stale one: the
+ * stale one at least opens.
+ */
+export function writeBackupEnvelope(file: string, envelope: Envelope): void {
+	const paths = vaultPaths(file);
+	const serialised = `${JSON.stringify(envelope, null, 2)}\n`;
+	const temp = `${paths.backup}.tmp`;
+
+	try {
+		// The read-only attribute travels on Windows, exactly as it does for the
+		// copy in `writeEnvelope`.
+		if (existsSync(paths.backup)) {
+			try {
+				chmodSync(paths.backup, 0o600);
+			} catch {
+				/* not supported here, or already writable */
+			}
+		}
+		const fd = openSync(temp, 'w', 0o600);
+		try {
+			writeSync(fd, serialised, 0, 'utf8');
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(temp, paths.backup);
+		tighten(paths.backup);
+		syncDirectory(dirname(file));
+
+		const readBack = readFileSync(paths.backup, 'utf8');
+		if (readBack !== serialised) {
+			throw new Error('the backup on disk does not match what was written');
+		}
+		envelopeSchema.parse(JSON.parse(readBack));
+	} catch (err) {
+		try {
+			if (existsSync(temp)) {
+				unlinkSync(temp);
+			}
+		} catch {
+			/* best effort */
+		}
+		throw new VaultStorageError('the vault backup could not be rewritten', err);
+	}
+}
+
+/**
+ * Put an envelope back as the main vault without disturbing the backup.
+ *
+ * The undo half of a rotation. `writeEnvelope` would copy the *rotated* file
+ * into `.bak` on its way past, which is the one thing a rollback must not do —
+ * it would leave the backup holding the very contents the rollback exists to
+ * discard, under a key the user does not have.
+ */
+export function restoreEnvelopeInPlace(file: string, envelope: Envelope): void {
+	const paths = vaultPaths(file);
+	const serialised = `${JSON.stringify(envelope, null, 2)}\n`;
+	try {
+		const fd = openSync(paths.temp, 'w', 0o600);
+		try {
+			writeSync(fd, serialised, 0, 'utf8');
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(paths.temp, file);
+		tighten(file);
+		syncDirectory(dirname(file));
+	} catch (err) {
+		try {
+			if (existsSync(paths.temp)) {
+				unlinkSync(paths.temp);
+			}
+		} catch {
+			/* best effort */
+		}
+		throw new VaultStorageError('the vault could not be put back after a failed rotation', err);
+	}
+}
+
 function tighten(file: string): void {
 	try {
 		chmodSync(file, 0o600);

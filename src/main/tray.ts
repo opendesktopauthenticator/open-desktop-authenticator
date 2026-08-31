@@ -10,7 +10,7 @@ import { branding } from '../shared/branding';
  * answering confirmations after that — so closing the window hides it rather
  * than quitting, and the tray is the only thing that says so.
  *
- * Two rules it must not break:
+ * Three rules it must not break:
  *
  *  - **Hiding is not unlocking.** The vault's idle timer keeps running while the
  *    window is hidden, and locking still reloads the renderer. A hidden window
@@ -18,6 +18,32 @@ import { branding } from '../shared/branding';
  *  - **Quit must be reachable and unambiguous.** An app that traps itself in the
  *    tray with no way out is one people kill from Task Manager, which skips
  *    every shutdown path — including clearing a copied code off the clipboard.
+ *  - **The menu must never lie about the state it describes.** Every label and
+ *    every greyed-out item here is a claim about something that changes without
+ *    the tray being told: the window is hidden by its own close button, and the
+ *    vault is unlocked and re-locked from the renderer.
+ *
+ * ## What "build the menu once, at startup" actually did
+ *
+ * Two reproduced faults, one cause. The menu was built while the window was
+ * visible, so its first item read "Hide ODA"; closing the window hid it without
+ * rebuilding anything, and the item still labelled "Hide ODA" then *showed* the
+ * window — a control performing the opposite of its own label. Note which half
+ * was wrong: the click handler re-read `isVisible()` and did the right thing, so
+ * only the label lied, which is exactly the sort of fault nobody files a bug
+ * about and everybody stops trusting.
+ *
+ * The worse one: "Lock now" is built disabled while the vault is locked, which
+ * is the state the app starts in. Unlocking happens in the renderer and never
+ * reached this file, so the item stayed greyed for the whole session unless some
+ * unrelated tray action happened to rebuild the menu. The one control whose
+ * entire purpose is locking an unlocked vault in a hurry was dead in precisely
+ * the case it exists for.
+ *
+ * The fix is not more places that remember to rebuild — that is the same bug
+ * with a longer list of exceptions, and the next state to arrive is the one
+ * nobody adds a call for. The menu is built from the host's state at the moment
+ * it is asked for, and nothing here holds on to one.
  */
 
 export interface TrayHost {
@@ -61,48 +87,92 @@ export function createTray(host: TrayHost): Tray {
 	const tray = new Tray(trayIcon());
 	tray.setToolTip(branding.productName);
 
-	const render = (): void => {
-		tray.setContextMenu(
-			Menu.buildFromTemplate([
-				{
-					label: host.isVisible() ? `Hide ${branding.shortName}` : `Show ${branding.shortName}`,
-					click: () => {
-						if (host.isVisible()) {
-							host.hide();
-						} else {
-							host.show();
-						}
-						render();
+	/*
+	 * Whether this platform will let the tray be handed a menu at the instant of
+	 * the click.
+	 *
+	 * Windows and macOS will: `right-click` fires and `popUpContextMenu(menu)`
+	 * shows whatever it is given, so the menu can be built from live state and
+	 * thrown away again. Linux will not — Electron documents both that event and
+	 * `popUpContextMenu` as `darwin,win32` — so there the assigned menu is the
+	 * only menu a user can ever open, and reassigning a fresh one after every
+	 * signal this file does receive is as close as that platform gets.
+	 *
+	 * Decided once, here, because the two halves of it have to agree: a platform
+	 * that both keeps a menu and pops one up shows the stale copy with the fresh
+	 * one opening underneath it, and a platform that does neither shows nothing.
+	 */
+	const buildsOnDemand = process.platform === 'darwin' || process.platform === 'win32';
+
+	/**
+	 * The menu as it should read *right now*.
+	 *
+	 * Every label and every `enabled` below is a question put to the host as the
+	 * menu is being built. Nothing caches the answers, and nothing caches the
+	 * menu: what this returns is a snapshot of one moment, and the only moment
+	 * worth showing is the one the user is opening it in.
+	 */
+	const menu = (): Menu =>
+		Menu.buildFromTemplate([
+			{
+				label: host.isVisible() ? `Hide ${branding.shortName}` : `Show ${branding.shortName}`,
+				click: () => {
+					if (host.isVisible()) {
+						host.hide();
+					} else {
+						host.show();
 					}
-				},
-				{ type: 'separator' },
-				{
-					label: 'Lock now',
-					// Greyed rather than hidden: a control that appears and disappears
-					// makes people hunt for it, and "already locked" is worth seeing.
-					enabled: host.isUnlocked(),
-					click: () => {
-						host.lock();
-						render();
-					}
-				},
-				{ type: 'separator' },
-				{
-					// Spelled out. "Close" hides; this is the one that ends the process,
-					// and the difference has to be obvious from the menu alone.
-					label: `Quit ${branding.shortName}`,
-					click: () => host.quit()
+					reassign();
 				}
-			])
-		);
+			},
+			{ type: 'separator' },
+			{
+				label: 'Lock now',
+				// Greyed rather than hidden: a control that appears and disappears
+				// makes people hunt for it, and "already locked" is worth seeing.
+				enabled: host.isUnlocked(),
+				click: () => {
+					host.lock();
+					reassign();
+				}
+			},
+			{ type: 'separator' },
+			{
+				// Spelled out. "Close" hides; this is the one that ends the process,
+				// and the difference has to be obvious from the menu alone.
+				label: `Quit ${branding.shortName}`,
+				click: () => host.quit()
+			}
+		]);
+
+	/**
+	 * Hand the icon a menu to keep, on the platform that has no other option.
+	 *
+	 * A no-op on Windows and macOS, and deliberately so: an assigned menu is the
+	 * one Windows pops up by itself on right-click, before this file gets a say,
+	 * so keeping one there would put the stale copy back on screen — the exact
+	 * behaviour this module exists to stop — and open the freshly built menu
+	 * underneath it.
+	 */
+	const reassign = (): void => {
+		if (!buildsOnDemand) {
+			tray.setContextMenu(menu());
+		}
 	};
 
-	render();
+	if (buildsOnDemand) {
+		tray.on('right-click', () => tray.popUpContextMenu(menu()));
+	} else {
+		reassign();
+	}
+
 	// Clicking the icon is the fastest path back to the window, which is what
-	// most people will try first.
+	// most people will try first. The reassign matters on Linux alone, where the
+	// window having just become visible changes what the first menu item should
+	// say and this is the one moment the tray hears about it.
 	tray.on('click', () => {
 		host.show();
-		render();
+		reassign();
 	});
 
 	return tray;

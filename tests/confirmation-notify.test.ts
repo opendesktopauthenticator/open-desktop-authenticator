@@ -308,18 +308,38 @@ describe('what the body says', () => {
 		expect(body).toContain('…');
 	});
 
+	/**
+	 * The characters under test are escapes, not the bytes themselves, and must stay that way.
+	 *
+	 * Typed literally every one of them is invisible in an editor and in a review: the four
+	 * assertions below read as `not.toContain('')` with nothing between the quotes, so nobody
+	 * could tell which character each one guarded, or notice one being quietly changed. The NUL
+	 * also made `grep` answer `Binary file ... matches` for the whole file instead of the line,
+	 * and it sits at byte 10802 only by luck: git sniffs the first 8000 bytes, so a couple of
+	 * screens of new text above here would have flipped the file to `Binary files differ` and
+	 * ended review of it entirely. The escapes evaluate to exactly the same string.
+	 *
+	 * \x00   NUL
+	 * \u202E RIGHT-TO-LEFT OVERRIDE — reverses the display of everything after it
+	 * \u200B ZERO WIDTH SPACE       — splits a word with nothing visible
+	 * \u2066 LEFT-TO-RIGHT ISOLATE  — unterminated, it reflows the rest of the toast
+	 */
 	it('strips control characters, including the bidirectional overrides', () => {
-		const nasty = 'Trade  with‮ evil​ one⁦';
+		const nasty = 'Trade\x00 with\u202E evil\u200B one\u2066';
 		const body = composeBody('full', [summary({ headline: nasty })], 0);
-		expect(body).not.toContain(' ');
-		expect(body, 'a bidi override survived into a toast').not.toContain('‮');
-		expect(body).not.toContain('​');
-		expect(body).not.toContain('⁦');
+		expect(body, 'a NUL survived into a toast').not.toContain('\x00');
+		expect(body, 'a bidi override survived into a toast').not.toContain('\u202E');
+		expect(body, 'a zero width space survived into a toast').not.toContain('\u200B');
+		expect(body, 'a directional isolate survived into a toast').not.toContain('\u2066');
 	});
 
 	it('strips them from the summary line too, not only the headline', () => {
-		const body = composeBody('full', [summary({ headline: 'Trade', summary: ['gives‮ you'] })], 0);
-		expect(body).not.toContain('‮');
+		const body = composeBody(
+			'full',
+			[summary({ headline: 'Trade', summary: ['gives\u202E you'] })],
+			0
+		);
+		expect(body, 'a bidi override survived into the summary line').not.toContain('\u202E');
 	});
 
 	/**
@@ -625,8 +645,8 @@ describe('the toast title', () => {
 
 	it('strips control characters from an account name', () => {
 		const h = harness();
-		h.notifier.halted(ID, 'tra‮der', 'confirm');
-		expect(h.toasts[0]?.title, 'a bidi override reached a toast title').not.toContain('‮');
+		h.notifier.halted(ID, 'tra\u202Eder', 'confirm');
+		expect(h.toasts[0]?.title, 'a bidi override reached a toast title').not.toContain('\u202E');
 	});
 
 	it('leaves an ordinary name alone', () => {

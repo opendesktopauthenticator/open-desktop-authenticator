@@ -3,6 +3,7 @@ import type {
 	AccountSummary,
 	BrowserRoute,
 	CodesList,
+	OpenBrowserResult,
 	RendererApi,
 	UpdateCheckResult,
 	VaultStatus
@@ -84,6 +85,70 @@ export function confirmationsTargetFor(
 	return accounts.find((entry) => entry.steamId64 === steamId64);
 }
 
+/** The account and route a sign-in screen is asking about. */
+export interface BrowserSignInPrompt {
+	account: AccountSummary;
+	route: BrowserRoute;
+	reason?: string;
+}
+
+/**
+ * Which screen takeover is newest.
+ *
+ * Module-level rather than a `useRef`, on purpose and for two reasons. There is
+ * one renderer document and one `App` inside it, so "the newest thing the user
+ * asked for" is a property of the window and not of a component instance. And a
+ * ref cannot be exported, so the ordering rule below could only have been
+ * checked by reading the source — while this project has no DOM runner to drive
+ * two overlapping opens through a rendered component.
+ */
+let uiGeneration = 0;
+
+/**
+ * Claim the screen for an open that is starting, and get back the only function
+ * allowed to say what its answer may do.
+ *
+ * **Different account rows open concurrently, and the answers come back in
+ * whatever order Steam and the proxies decide.** Every response used to write
+ * the single `browserSignIn` state, so whichever settled last won. Opening
+ * account A and then account B, typing a password into the sign-in screen B
+ * asked for, and then letting A's older response land, replaced the screen and
+ * **erased what had been typed** — a password half-entered for one Steam
+ * account swapped for a prompt about another, with nothing on screen saying it
+ * had happened.
+ *
+ * So the generation is claimed when the open *begins*, which is the moment that
+ * corresponds to what the user was looking at, rather than when it settles,
+ * which corresponds to nothing. An answer from a superseded generation returns
+ * `undefined` and the caller installs nothing.
+ *
+ * **Silently, and that is a deliberate trade.** A superseded open that needed a
+ * sign-in now reports nothing at all: the user pressed something newer, and
+ * interrupting them to describe a request they have moved on from is how the
+ * erasure above felt in the first place. The row's own error path is unaffected
+ * — a sign-in is not an error and never travelled that way.
+ */
+export function claimSignInScreen(): (
+	account: AccountSummary,
+	route: BrowserRoute,
+	result: OpenBrowserResult
+) => BrowserSignInPrompt | undefined {
+	const mine = (uiGeneration += 1);
+	return (account, route, result) => {
+		if (uiGeneration !== mine || !result.signInRequired) {
+			return undefined;
+		}
+		return {
+			account,
+			route,
+			// Spread rather than `reason: result.reason`, so an absent reason stays
+			// absent instead of becoming a present `undefined` the screen would have
+			// to re-check.
+			...(result.reason === undefined ? {} : { reason: result.reason })
+		};
+	};
+}
+
 export function App(): React.JSX.Element {
 	const api = window.api;
 
@@ -135,9 +200,7 @@ export function App(): React.JSX.Element {
 	 * password field — and the row has nowhere to put one. `Confirmations` does
 	 * the same thing for the same reason.
 	 */
-	const [browserSignIn, setBrowserSignIn] = useState<
-		{ account: AccountSummary; route: BrowserRoute; reason?: string } | undefined
-	>();
+	const [browserSignIn, setBrowserSignIn] = useState<BrowserSignInPrompt | undefined>();
 	/**
 	 * Unrecoverable, and only ever one thing: the bridge to the main process does
 	 * not exist, so no screen in this app can function.
@@ -162,6 +225,13 @@ export function App(): React.JSX.Element {
 	/** Set from app info once the bridge answers. False until then, which is the
 	 * safe default: it shows the toggle rather than hiding a real control. */
 	const [installedFromStore, setInstalledFromStore] = useState(false);
+	/**
+	 * Whether this machine can show a desktop notification.
+	 *
+	 * `undefined` until app info answers, so the auto-confirm screen says nothing
+	 * rather than warning about a machine it has not asked about yet.
+	 */
+	const [notificationsAvailable, setNotificationsAvailable] = useState<boolean | undefined>();
 
 	/** Latest answer from the update check. Only `updateAvailable` is ever shown. */
 	const [update, setUpdate] = useState<UpdateCheckResult | undefined>();
@@ -403,6 +473,9 @@ export function App(): React.JSX.Element {
 				// cannot do anything is the thing this screen already refuses to do
 				// for the unimplemented vault options.
 				setInstalledFromStore(info.installedFromStore);
+				// So the auto-confirm screen can say that a notify-only account has no
+				// surface on this machine, rather than offering the switch silently.
+				setNotificationsAvailable(info.notificationsAvailable);
 			})
 			.catch(() => {
 				// Status polling below surfaces a broken bridge properly; a failed
@@ -698,6 +771,7 @@ export function App(): React.JSX.Element {
 					account={current}
 					accounts={accounts}
 					requireProxies={status?.requireProxies === true}
+					notificationsAvailable={notificationsAvailable}
 					onSave={(settings) => api.setAccountAutoConfirm(current.steamId64, settings)}
 					onClose={() => {
 						setAutoConfirmFor(undefined);
@@ -1025,16 +1099,28 @@ export function App(): React.JSX.Element {
 				onShowConfirmations={setConfirmingFor}
 				requireProxies={status.requireProxies}
 				onOpenBrowser={async (account, route) => {
+					/*
+					 * **Claimed before the request goes out, never after it comes back.**
+					 *
+					 * The claim is what says "this is the screen the user is currently
+					 * asking for", and that is only true at the moment they pressed.
+					 * Claiming after the `await` would hand every response the newest
+					 * generation there is — including one that has been overtaken while it
+					 * was in the air — which is the defect itself, spelled differently.
+					 */
+					const settle = claimSignInScreen();
 					const result = await api.openAccountBrowser(account.steamId64, route);
 					// Taking over the screen here rather than in `VaultHome`: the row has
 					// nowhere to put a password field, and this is the component that owns
 					// which screen is showing.
-					if (result.signInRequired) {
-						setBrowserSignIn({
-							account,
-							route,
-							...(result.reason === undefined ? {} : { reason: result.reason })
-						});
+					const prompt = settle(account, route, result);
+					// Guarded, rather than setting whatever comes back. A superseded
+					// answer must install nothing *and clear nothing* — passing its
+					// `undefined` straight through would take down the sign-in screen a
+					// newer open put up, and the password already typed into it, which is
+					// the erasure this whole mechanism exists to stop.
+					if (prompt) {
+						setBrowserSignIn(prompt);
 					}
 					return result;
 				}}

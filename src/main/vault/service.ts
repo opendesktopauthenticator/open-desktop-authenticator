@@ -5,8 +5,10 @@ import {
 	putBack,
 	readBackupEnvelope,
 	readEnvelope,
+	restoreEnvelopeInPlace,
 	setAside,
 	vaultExists,
+	writeBackupEnvelope,
 	writeEnvelope
 } from './storage';
 import { SALT_BYTES, SCRYPT_DEFAULTS, type Envelope, type Kdf } from '../../shared/vault-format';
@@ -574,6 +576,13 @@ export class VaultService {
 		if (!verification) {
 			throw new VaultServiceError('the current passphrase is not correct');
 		}
+		/*
+		 * Kept, because the backup has to be rewritten under the new key too and
+		 * the honest thing to put in it is what was there before — the previous
+		 * good state, which is the whole point of a backup. Re-sealed rather than
+		 * copied: a copy is still readable with the passphrase being retired.
+		 */
+		const previousPlaintext = verification.plaintext;
 		wipe(verification.key);
 
 		const salt = randomBytes(SALT_BYTES);
@@ -609,14 +618,68 @@ export class VaultService {
 		const contents = { ...state.contents, seq: state.contents.seq + 1 };
 		contents.updatedAt = new Date(this.now()).toISOString();
 
+		/*
+		 * **Both sealed before either is written**, so a sealing failure costs
+		 * nothing and the only failures left to handle are on the disk.
+		 */
+		const rotatedVault = sealWithKey(JSON.stringify(contents), newKey, kdf);
+		const rotatedBackup = sealWithKey(previousPlaintext, newKey, kdf);
+
 		try {
-			writeEnvelope(this.file, sealWithKey(JSON.stringify(contents), newKey, kdf));
+			writeEnvelope(this.file, rotatedVault);
 			// A rotation rewrites the file under a new key, which is the case a
 			// restore most needs to notice: the backup it holds cannot open it.
 			this.fileGeneration += 1;
 		} catch (err) {
 			wipe(newKey);
 			throw err;
+		}
+
+		/*
+		 * **And the backup, in the same breath — or none of it happened.**
+		 *
+		 * `writeEnvelope` above copied the pre-rotation file into `.bak` on its way
+		 * past, which is right for a save and a hole for a rotation: that copy is
+		 * sealed under the key the user has just retired. Measured before this:
+		 * create a vault, add an account, change the passphrase — the new
+		 * passphrase could not restore `vault.json.bak` and **the old one could**,
+		 * handing back every account in it. Settings promises the opposite in as
+		 * many words.
+		 *
+		 * The contents are the previous state, re-sealed, so the backup keeps
+		 * being what a backup is for while losing the old key entirely.
+		 *
+		 * If it cannot be written, the rotation is undone rather than left half
+		 * done. A vault whose passphrase changed and whose backup did not is the
+		 * shape this whole method exists to avoid, and "we changed it but could not
+		 * finish" is not something a user can act on.
+		 */
+		try {
+			writeBackupEnvelope(this.file, rotatedBackup);
+		} catch (err) {
+			try {
+				restoreEnvelopeInPlace(this.file, envelope);
+			} catch {
+				// Both halves failed. Say so rather than implying the vault is back
+				// as it was — the file on disk is now under the new passphrase and
+				// the user needs to know that, because it is the one they must use.
+				wipe(newKey);
+				throw new VaultServiceError(
+					'the passphrase was changed but the backup could not be rewritten, and the vault ' +
+						'could not be put back. Your vault now opens with the NEW passphrase; the backup ' +
+						'file still opens with the old one and should be deleted.'
+				);
+			}
+			this.fileGeneration += 1;
+			wipe(newKey);
+			// Logged rather than folded into the message: the user needs the plain
+			// sentence, and an EPERM from a backup file is for whoever reads the log.
+			console.error('the vault backup could not be rewritten during a rotation', err);
+			throw new VaultServiceError(
+				'the passphrase was not changed: the backup could not be rewritten, and leaving it ' +
+					'readable with the old passphrase would have defeated the change. Nothing was ' +
+					'altered — try again.'
+			);
 		}
 
 		// Same reasoning as `mutate`: an unlock that began before this rotation

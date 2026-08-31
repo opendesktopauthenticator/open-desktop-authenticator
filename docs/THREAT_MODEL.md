@@ -174,13 +174,24 @@ becomes an adversary in your model.**
   application used different stacks. They no longer disagree:
   `src/main/net/egress.ts` normalises the Node side to `socks5h` and translates
   the spelling Chromium needs, so both resolve at the proxy.
-- **`socks4://` is the exception, and resolves on your machine.** The protocol
-  carries an address rather than a hostname, so it cannot do otherwise. It is
-  still accepted, because refusing it would strand people whose only proxy speaks
-  it — but your resolver sees every Steam hostname, which is most of what routing
-  was meant to avoid. Prefer `socks5://`. (`socks4a`, which _can_ carry a
-  hostname, is refused outright: Chromium has no rule for it and would silently
-  fall back to local resolution while Node resolved remotely.)
+- **`socks4://` is refused, and not for want of implementing it.** The protocol
+  carries an IP address where SOCKS5 carries a hostname, so the client has to
+  look the name up itself before it can connect. Every Steam host this
+  application contacts would be resolved by this machine, in the clear, on
+  whatever resolver the network handed out — so the party you were routing
+  around still learns every destination you visit, which is most of what routing
+  was meant to prevent. A route that announces where it is going is not the
+  thing that was asked for, so the address is turned away where it is typed,
+  with that reason on screen, rather than accepted and quietly leaking. This
+  document said the opposite until recently — that the scheme was accepted
+  anyway, because refusing it would strand somebody whose only proxy speaks it.
+  It does strand them, and that is the smaller harm: being stopped is visible
+  and a leak is not. Use `socks5://` instead; the same proxy almost certainly
+  speaks it. (`socks4a`, which _can_ carry a hostname, is refused as well and
+  for a different reason: Chromium has no rule for it and would fall back to
+  `socks4` and resolve locally while Node's client resolved at the proxy, so the
+  two halves of this application would disagree about where the lookup
+  happened.)
 - **A SOCKS proxy needing a username and password is refused, deliberately.**
   Chromium cannot authenticate to one, so accepting it would mean traffic
   silently taking a different route than the one you configured. Use an

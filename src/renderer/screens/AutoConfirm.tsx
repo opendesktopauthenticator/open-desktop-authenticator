@@ -88,6 +88,7 @@ export function AutoConfirm({
 	account,
 	accounts,
 	requireProxies,
+	notificationsAvailable,
 	onSave,
 	onClose
 }: {
@@ -99,6 +100,13 @@ export function AutoConfirm({
 	 * all, and every switch on this screen is about polling.
 	 */
 	requireProxies: boolean;
+	/**
+	 * Whether this machine can show a desktop notification.
+	 *
+	 * Optional so a caller that has not asked yet renders exactly as before —
+	 * `undefined` is "not known", and only a definite `false` says anything.
+	 */
+	notificationsAvailable?: boolean;
 	/**
 	 * Every account, so the rate warning can count the ones actually polled.
 	 *
@@ -277,6 +285,27 @@ export function AutoConfirm({
 							Choose <strong>Count only</strong> or <strong>Type only</strong> below to leave the
 							details out.
 						</p>
+						{/*
+							**And whether this machine can show one at all.**
+
+							A notify-only account — notifications on, both approve switches
+							off — is reported by a toast and by nothing else: a successful
+							poll of that kind writes no activity entry. So on a machine with
+							no notification service, a held account-recovery confirmation
+							produced no toast, no record and no retry. It vanished.
+
+							The switch is still offered, because the machine may gain a
+							notification service and because the same account may later
+							approve as well. What must not happen is offering it silently.
+						*/}
+						{notificationsAvailable === false && (
+							<p className="warn">
+								<strong>This machine cannot show desktop notifications.</strong> Nothing is
+								delivered while that is true, and an account that only watches has no other way to
+								tell you — switch on <strong>Trades</strong> or <strong>Market listings</strong> as
+								well if you need a record on the Activity screen.
+							</p>
+						)}
 					</span>
 				</label>
 

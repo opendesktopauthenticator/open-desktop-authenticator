@@ -79,6 +79,7 @@ describe('response validation', () => {
 		brandingUnresolved: true,
 		platform: 'win32' as const,
 		installedFromStore: false,
+		notificationsAvailable: true,
 		attribution: { mckay: 'a', valve: 'b' },
 		security: { sandbox: true, contextIsolation: true, nodeIntegration: false }
 	};
@@ -391,6 +392,7 @@ function sampleResponse(channel: string): Record<string, unknown> {
 				brandingUnresolved: true,
 				platform: 'win32',
 				installedFromStore: false,
+				notificationsAvailable: true,
 				attribution: { mckay: 'a', valve: 'b' },
 				security: { sandbox: true, contextIsolation: true, nodeIntegration: false }
 			};

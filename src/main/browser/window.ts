@@ -479,7 +479,7 @@ export async function openAccountBrowser(
 	 */
 	options.stillWanted?.();
 
-	await signIn(session, options.steamId64, options.accessToken);
+	await signIn(session, options.steamId64, options.accessToken, options.onWipe);
 
 	/*
 	 * **And again, because the cookie is the point of no return.**
@@ -1076,7 +1076,6 @@ export class AccountBrowsers {
 		sinceEpoch = this.epochOf(options.steamId64)
 	): Promise<void> {
 		const wanted = routeKey(options);
-
 		/*
 		 * **Declared before anything is torn down, because there is a gap there.**
 		 *
@@ -1110,6 +1109,13 @@ export class AccountBrowsers {
 		sinceEpoch: number,
 		wanted: string
 	): Promise<void> {
+		/**
+		 * The epoch produced by this open's *own* route-switch teardown, if it did
+		 * one. See where it is set: it is what makes an external bump during the
+		 * teardown's wipe distinguishable from the teardown's own.
+		 */
+		let ownTeardownEpoch: number | undefined;
+
 		/*
 		 * **Captured before the first await, not after the last one.**
 		 *
@@ -1174,7 +1180,37 @@ export class AccountBrowsers {
 			 * user pressed a button to leave. A fresh window has one answer for
 			 * "where does this leave from", which is the only answer worth giving.
 			 */
-			await this.closeAccount(options.steamId64);
+			/*
+			 * **The epoch this teardown produces, captured before yielding to it.**
+			 *
+			 * `closeAccount` bumps the epoch synchronously and *then* awaits the
+			 * storage wipe, so starting it without awaiting gives us the exact value
+			 * its own bump made. Re-reading `epochOf` after the wipe — which is what
+			 * this did — cannot tell that value apart from a *later* one, so an
+			 * account removal or a proxy change landing inside the wipe was absorbed
+			 * by the re-read and vanished. Measured: open through a proxy, hold the
+			 * old session's wipe, remove the account, release. The route request
+			 * completed and a signed-in browser reappeared after the account was
+			 * gone, on routing captured before it went.
+			 *
+			 * Requiring the exact value makes any additional increment — from any
+			 * source, not just the ones this method knows about — cancel the open.
+			 */
+			const teardown = this.closeAccount(options.steamId64);
+			ownTeardownEpoch = this.epochOf(options.steamId64);
+			await teardown;
+			/*
+			 * The rule first, because it has something specific to say. A strict-mode
+			 * sweep bumps the epoch too, so without this the check below would catch
+			 * it and report "your routing changed" to somebody who had just turned on
+			 * a setting and deserves to be told which one.
+			 */
+			this.refuseIfStrictForbids(wanted);
+			if (this.epochOf(options.steamId64) !== ownTeardownEpoch) {
+				throw new BrowserSessionError(
+					"this account's routing changed while the browser was opening, so it was closed"
+				);
+			}
 		}
 
 		// A press while one is already opening joins it rather than starting a
@@ -1206,10 +1242,17 @@ export class AccountBrowsers {
 			return this.open(options, generation, sinceEpoch);
 		}
 
-		// The epoch, unlike the generation, is read *here* — a route switch bumps it
-		// deliberately a few lines above, and capturing it at the door would make
-		// this open cancel itself over its own teardown.
-		const epoch = this.epochOf(options.steamId64);
+		/*
+		 * The epoch, unlike the generation, is read *here* — a route switch bumps it
+		 * deliberately a few lines above, and capturing it at the door would make
+		 * this open cancel itself over its own teardown.
+		 *
+		 * Where there *was* a teardown, its own value is used rather than a fresh
+		 * read: the two differ exactly when something else bumped the epoch during
+		 * the wipe, and that case has already thrown above. Reading again here
+		 * would quietly adopt whatever the interloper left.
+		 */
+		const epoch = ownTeardownEpoch ?? this.epochOf(options.steamId64);
 
 		/*
 		 * **And the rule itself, re-asked now the teardown is over.**
@@ -1225,12 +1268,7 @@ export class AccountBrowsers {
 		 * Asking the rule directly has no such gap, and it is the same reader
 		 * `ipc.ts` uses rather than a second source of truth.
 		 */
-		if (this.requireProxies() && !wanted.startsWith('proxy:')) {
-			throw new BrowserSessionError(
-				'this vault now requires every account to browse through its proxy, so the window ' +
-					'was not opened. Choose “Through the proxy”, or turn the setting off in Settings.'
-			);
-		}
+		this.refuseIfStrictForbids(wanted);
 
 		const attempt = (async () => {
 			/*
@@ -1428,6 +1466,24 @@ export class AccountBrowsers {
 			if (this.opening.get(options.steamId64) === entry) {
 				this.opening.delete(options.steamId64);
 			}
+		}
+	}
+
+	/**
+	 * Refuse an unrouted window while the vault forbids one.
+	 *
+	 * Asked twice, and both times after an await: once when a route switch has
+	 * finished tearing the old window down, and once before the attempt begins.
+	 * `ipc.ts` asks it a third time at the door, which answers for the moment the
+	 * button was pressed — and the teardown awaits a storage wipe the setting can
+	 * be turned on inside.
+	 */
+	private refuseIfStrictForbids(wanted: string): void {
+		if (this.requireProxies() && !wanted.startsWith('proxy:')) {
+			throw new BrowserSessionError(
+				'this vault now requires every account to browse through its proxy, so the window ' +
+					'was not opened. Choose “Through the proxy”, or turn the setting off in Settings.'
+			);
 		}
 	}
 
@@ -1935,7 +1991,9 @@ export function browserPartitionFor(steamId64: string): string {
 async function signIn(
 	session: BrowserSessionHandle,
 	steamId64: string,
-	accessToken: string
+	accessToken: string,
+	/** Told whether a rollback wipe actually emptied the partition. */
+	onWipe?: (cleared: boolean) => void
 ): Promise<void> {
 	const value = `${steamId64}%7C%7C${accessToken}`;
 	/*
@@ -1963,7 +2021,17 @@ async function signIn(
 			});
 		}
 	} catch (cause) {
-		await clearSession(session);
+		/*
+		 * **And whether that wipe worked is reported, not discarded.**
+		 *
+		 * When the second cookie write fails *and* the wipe fails too, this used
+		 * to throw with the first cookie still live in the partition and nothing
+		 * anywhere recording it. An immediate retry then reused a partially
+		 * authenticated session that a failed attempt had established — which is
+		 * exactly what the manager's dirty-partition tracking exists to refuse,
+		 * denied the one fact it needed.
+		 */
+		onWipe?.(await clearSession(session));
 		throw cause;
 	}
 }

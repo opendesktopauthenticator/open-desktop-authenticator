@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, rename, rm, writeFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { maFileName, toMaFile } from '../import/export';
@@ -49,6 +50,70 @@ function fingerprint(account: {
 		account.identitySecret,
 		account.revocationCode ?? ''
 	].join('|');
+}
+
+/**
+ * `rm`, answering whether the file is **gone** — not whether the call was made.
+ *
+ * `force: true` already treats an absent file as success, so `false` here means
+ * one thing only: the file is still on disk. Every rollback in the export below
+ * used to write `.catch(() => undefined)` and carry on regardless, which is how
+ * a refusal reading "nothing was written" came to be thrown while the plaintext
+ * maFile it was talking about sat at the destination.
+ */
+async function removed(path: string): Promise<boolean> {
+	return rm(path, { force: true }).then(
+		() => true,
+		() => false
+	);
+}
+
+/**
+ * The sentence appended to any refusal whose cleanup did not finish.
+ *
+ * A maFile is `shared_secret` and `identity_secret` in the clear — the asset
+ * this application exists to protect — so a rollback that leaves one behind and
+ * still says "nothing was written" is the worst pair available: a real exposure
+ * plus a message that stops the user looking for it. Naming the file is the
+ * whole remedy, because a file nobody can find is a file nobody deletes.
+ *
+ * Names, never paths: the rule at the top of this module. "The folder you
+ * chose" is as precise as the *where* can honestly get from here — the OS
+ * dialog is the only thing that knows the rest — and the name is what the user
+ * needs to spot the file once they are looking in it. The set-aside copy in
+ * particular carries a random suffix nobody would recognise otherwise.
+ */
+function stillOnDisk(names: readonly string[]): string {
+	if (names.length === 0) {
+		return '';
+	}
+	const listed = names.map((name) => `"${name}"`).join(' and ');
+	return names.length === 1
+		? ` The plaintext file ${listed} could not be removed and is still in the folder you chose: it holds this account's shared_secret and identity_secret unencrypted, so delete it yourself.`
+		: ` The plaintext files ${listed} could not be removed and are still in the folder you chose: they hold this account's shared_secret and identity_secret unencrypted, so delete them yourself.`;
+}
+
+/**
+ * The refusal for an export overtaken by a change to the account it copies.
+ *
+ * The check before the publish and the check after it say the same sentences,
+ * so a user who hits the later one is not told something different about the
+ * same situation. Neither may claim "nothing was written" once cleanup has left
+ * a plaintext file behind: that clause is the one that sends somebody away
+ * satisfied, and it was a lie at exactly the moment it mattered.
+ */
+function raceLost(wasRemoved: boolean, left: readonly string[]): Error {
+	const overtaken = wasRemoved
+		? 'that account was removed while it was being exported'
+		: "that account's authenticator was replaced while it was being exported";
+	if (left.length > 0) {
+		return new Error(`${overtaken}, so the export was cancelled.${stillOnDisk(left)}`);
+	}
+	return new Error(
+		wasRemoved
+			? `${overtaken}, so nothing was written.`
+			: `${overtaken}, so nothing was written. Export it again to get the current one.`
+	);
 }
 
 export function registerEnrollmentHandlers(
@@ -311,9 +376,20 @@ export function registerEnrollmentHandlers(
 		 * renderer the user's folder layout through the back door, to satisfy a
 		 * lint rule about diagnostics.
 		 */
-		const giveUp = async (): Promise<never> => {
-			await rm(temp, { force: true }).catch(() => undefined);
-			throw new Error(`${suggested} could not be written to that location.`);
+		const giveUp = async (alsoLeft: readonly string[] = []): Promise<never> => {
+			// Verified, not merely attempted. The staged file holds the same plaintext
+			// the destination would have, so a removal that failed and was swallowed
+			// left a maFile in the user's folder under a message telling them the
+			// export had not been written at all.
+			const staged = (await removed(temp)) ? [] : [basename(temp)];
+			// Concatenated rather than interpolated so the sentence the user is given
+			// for a failed write stays one literal in this file: `transfer-screen-wiring`
+			// reads it from the source to prove the refusal names the file that was
+			// asked for and never the path the OS dialog chose.
+			throw new Error(
+				`${suggested} could not be written to that location.` +
+					stillOnDisk([...alsoLeft, ...staged])
+			);
 		};
 
 		try {
@@ -344,8 +420,12 @@ export function registerEnrollmentHandlers(
 			// locked sends them to fix the wrong thing — so this is thrown from
 			// outside the write's own catch, where it cannot be mistaken for one.
 			if (!vault.isUnlocked()) {
-				await rm(temp, { force: true }).catch(() => undefined);
-				throw new VaultLockedError();
+				// And if the staged plaintext cannot be taken back, the lock is not the
+				// only thing the user needs to hear about.
+				const staged = (await removed(temp)) ? [] : [basename(temp)];
+				throw staged.length === 0
+					? new VaultLockedError()
+					: new VaultLockedError(`the vault is locked.${stillOnDisk(staged)}`);
 			}
 
 			/*
@@ -370,13 +450,8 @@ export function registerEnrollmentHandlers(
 			 */
 			const stillThere = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
 			if (!stillThere || fingerprint(stillThere) !== exported) {
-				await rm(temp, { force: true }).catch(() => undefined);
-				throw new Error(
-					!stillThere
-						? 'that account was removed while it was being exported, so nothing was written.'
-						: "that account's authenticator was replaced while it was being exported, so " +
-								'nothing was written. Export it again to get the current one.'
-				);
+				const staged = (await removed(temp)) ? [] : [basename(temp)];
+				throw raceLost(!stillThere, staged);
 			}
 		}
 
@@ -414,11 +489,17 @@ export function registerEnrollmentHandlers(
 		try {
 			await rename(temp, destination);
 		} catch {
-			// Put back whatever was there before saying the export failed.
-			if (replacing) {
-				await rename(kept, destination).catch(() => undefined);
-			}
-			await giveUp();
+			// Put back whatever was there before saying the export failed — and when
+			// it cannot go back, name it. It is the user's own previous export,
+			// stranded under a random suffix they never chose, while the message about
+			// to be thrown talks only about the file that was not written.
+			const stranded = replacing
+				? await rename(kept, destination).then(
+						() => [],
+						() => [basename(kept)]
+					)
+				: [];
+			await giveUp(stranded);
 		}
 
 		/*
@@ -461,24 +542,56 @@ export function registerEnrollmentHandlers(
 			? vault.read().accounts.find((entry) => entry.steamId64 === steamId64)
 			: undefined;
 		if (!vault.isUnlocked() || !stillOurs || fingerprint(stillOurs) !== exported) {
-			// Undone completely: the export this cancelled leaves the directory
-			// exactly as it found it, whether or not something was already there.
-			await rm(destination, { force: true }).catch(() => undefined);
-			if (replacing) {
-				await rename(kept, destination).catch(() => undefined);
+			/*
+			 * **Undone completely — and where it cannot be undone, said out loud.**
+			 *
+			 * Both halves of this rollback used to be fired and forgotten:
+			 * `rm(destination).catch(() => undefined)` and
+			 * `rename(kept, destination).catch(() => undefined)`, followed by a refusal
+			 * saying nothing was written no matter which of them had actually worked.
+			 * Hold the destination open — a scanner, a network share dropping, a
+			 * removable drive pulled — and the freshly published maFile stayed exactly
+			 * where it was, `shared_secret` and `identity_secret` in the clear, under a
+			 * message that told the user to stop looking. A silent exposure is worse
+			 * than a loud one, because only the loud one gets deleted.
+			 *
+			 * So each half is verified on its own, and what survives is named.
+			 */
+			const tookItBack = await removed(destination);
+			/*
+			 * Attempted even when the removal failed, because the restore lands *on
+			 * top* of the published file: a rename that succeeds replaces the fresh
+			 * plaintext with the copy that was there before, which is this rollback's
+			 * goal reached by the other door. Only when neither worked is the export
+			 * still sitting at the destination.
+			 */
+			const putBack = replacing
+				? await rename(kept, destination).then(
+						() => true,
+						() => false
+					)
+				: false;
+
+			const left: string[] = [];
+			if (!tookItBack && !putBack) {
+				left.push(basename(destination));
 			}
+			if (replacing && !putBack) {
+				// The set-aside copy could not go home. It is the user's own earlier
+				// export — the same secrets, no encryption — now sitting under a random
+				// suffix in a folder where they have been told nothing happened.
+				left.push(basename(kept));
+			}
+
 			if (!vault.isUnlocked()) {
-				throw new VaultLockedError();
+				throw left.length === 0
+					? new VaultLockedError()
+					: new VaultLockedError(`the vault is locked.${stillOnDisk(left)}`);
 			}
 			// The same sentences the pre-rename check gives, so the two read alike —
 			// and so a user who hits the later one is not told something different
 			// about the same situation.
-			throw new Error(
-				!stillOurs
-					? 'that account was removed while it was being exported, so nothing was written.'
-					: "that account's authenticator was replaced while it was being exported, so " +
-							'nothing was written. Export it again to get the current one.'
-			);
+			throw raceLost(!stillOurs, left);
 		}
 
 		/*
@@ -495,10 +608,7 @@ export function registerEnrollmentHandlers(
 		 */
 		let staleCopy = false;
 		if (replacing) {
-			staleCopy = await rm(kept, { force: true }).then(
-				() => false,
-				() => true
-			);
+			staleCopy = !(await removed(kept));
 		}
 		// **`mode` alone was not enough.** POSIX applies it only when the file is
 		// created, so exporting over a file that already existed — a second export to
