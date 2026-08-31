@@ -96,14 +96,29 @@ export const CHROME_HTML = `<!doctype html>
 	var strip = document.getElementById('tabs');
 	var newtab = document.getElementById('newtab');
 	var typing = false;
+	// The address of the page actually loaded, kept even while somebody is typing
+	// over it, so blur has something true to restore.
+	var shownUrl = '';
 
 	back.onclick = function () { window.odaBrowser.back(); };
 	forward.onclick = function () { window.odaBrowser.forward(); };
 	reload.onclick = function () { window.odaBrowser.reload(); };
 
 	address.onfocus = function () { typing = true; address.select(); };
-	address.onblur = function () { typing = false; };
+	// **Blur re-syncs, always.** The bar is the only thing in this window that
+	// says which page is loaded, so the one state it must never be left in is
+	// showing an address that is not the current one. Two ways it could be:
+	// Escape abandoned an edit and nothing put the real address back, and a page
+	// that navigated while the bar had focus was skipped by the state handler
+	// below and never re-applied. The second needs no user action at all — a page
+	// can redirect itself while somebody is halfway through typing — and left the
+	// previous, trusted address on screen for the page that replaced it.
+	address.onblur = function () { typing = false; address.value = shownUrl; };
 	address.onkeydown = function (event) {
+		// Enter deliberately does NOT paint what was typed. The navigation may be
+		// refused, may redirect, may land somewhere else entirely; the address that
+		// appears is the one the state handler reports once something has actually
+		// loaded. No backticks in here: this whole script is a template literal.
 		if (event.key === 'Enter') { typing = false; window.odaBrowser.go(address.value); address.blur(); }
 		if (event.key === 'Escape') { address.blur(); }
 	};
@@ -167,8 +182,11 @@ export const CHROME_HTML = `<!doctype html>
 	});
 
 	window.odaBrowser.onState(function (state) {
-		// Never overwrite what somebody is halfway through typing.
-		if (!typing) { address.value = state.url; }
+		// Never overwrite what somebody is halfway through typing — but record it
+		// regardless, or blur has nothing to restore and the bar keeps the address
+		// of a page that is no longer loaded.
+		shownUrl = state.url;
+		if (!typing) { address.value = shownUrl; }
 		back.disabled = !state.canGoBack;
 		forward.disabled = !state.canGoForward;
 		reload.textContent = state.loading ? '\\u00d7' : '\\u21bb';

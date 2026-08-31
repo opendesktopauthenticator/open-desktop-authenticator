@@ -13,9 +13,19 @@
 * text=auto eol=lf
 
 # Binary assets, never normalised. Icons live in build/ per §10.2.
+#
+# `.bmp` was missing while `build/installerHeader.bmp` and
+# `build/installerSidebar.bmp` were both tracked — the NSIS installer's header
+# and sidebar images. Nothing corrupted them, because `text=auto` detects a file
+# full of NULs as binary whatever this list says, but the list is what
+# tests/no-binary-sources.test.ts reads to decide which files are allowed to
+# contain control characters, and an asset missing from it is reported as an
+# unreadable source file. Extensions listed here are the exemption, so anything
+# genuinely binary belongs in it.
 *.png binary
 *.ico binary
 *.icns binary
+*.bmp binary
 *.jpg binary
 *.webp binary
 *.woff binary
