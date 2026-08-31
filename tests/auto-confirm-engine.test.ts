@@ -477,14 +477,14 @@ describe('the scheduler chain', () => {
 	/** A harness that records every timer and whether it was ever cleared. */
 	function chainHarness(): {
 		engine: AutoConfirmEngine;
-		timers: { id: number; cleared: boolean; fire: () => void }[];
+		timers: { id: number; cleared: boolean; fired: boolean; fire: () => void }[];
 		release: () => void;
 	} {
 		let release: (() => void) | undefined;
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		const timers: { id: number; cleared: boolean; fire: () => void }[] = [];
+		const timers: { id: number; cleared: boolean; fired: boolean; fire: () => void }[] = [];
 		let nextId = 0;
 
 		const engine = new AutoConfirmEngine({
@@ -501,7 +501,19 @@ describe('the scheduler chain', () => {
 			} as unknown as ConfirmationsService,
 			now: () => NOW,
 			setTimer: (callback: () => void) => {
-				const entry = { id: nextId++, cleared: false, fire: callback };
+				const entry = {
+					id: nextId++,
+					cleared: false,
+					// **A one-shot timer that has fired is no longer armed**, and
+					// `clearTimeout` on it is a no-op. Tracked separately because the
+					// question this harness exists to ask — "is anything still going to
+					// fire that `stop` cannot reach" — is about armed timers only.
+					fired: false,
+					fire: (): void => {
+						entry.fired = true;
+						callback();
+					}
+				};
 				timers.push(entry);
 				return entry as unknown as NodeJS.Timeout;
 			},
@@ -532,7 +544,10 @@ describe('the scheduler chain', () => {
 
 		engine.stop();
 
-		expect(timers.filter((timer) => !timer.cleared)).toHaveLength(0);
+		expect(
+			timers.filter((timer) => !timer.cleared && !timer.fired),
+			'a timer is still armed that stop() did not reach — a forked chain'
+		).toHaveLength(0);
 	});
 
 	it('does not run a sweep for a chain that has been disowned', async () => {
@@ -904,6 +919,180 @@ describe('scheduling two accounts on the same interval', () => {
 			'two accounts shared a beat'
 		).toBe(true);
 		expect(beats.length).toBeGreaterThan(4);
+	});
+
+	/**
+	 * **And they stay separated when a poll takes longer than a beat.**
+	 *
+	 * The test above never exercised that, because its fake returns instantly —
+	 * so the spacing it measured held only while every round trip fitted inside
+	 * one second. It does not: a proxy round trip is seconds, and the timeout is
+	 * thirty.
+	 *
+	 * A single `running` flag used to make the heartbeat serial, so no beat
+	 * happened while a sweep was in flight. Every slot that elapsed during a slow
+	 * poll therefore passed unobserved, and the next sweep found all of them due
+	 * at once and started them in one microtask — twelve accounts polling in
+	 * lockstep over twelve proxies, which is the correlation the stagger and
+	 * THREAT_MODEL both say is prevented. Measured before the fix at a 2.5s round
+	 * trip: three accounts collapsed to two simultaneous starts on the first
+	 * sweep after unlock.
+	 */
+	it('keeps them separated when a poll outlasts a beat', async () => {
+		let at = 0;
+		/** When each poll was started, by account. */
+		const startedAt: { steamId64: string; at: number }[] = [];
+		const accounts = ['76561198000000001', '76561198000000002', '76561198000000003'].map(
+			(steamId64) => account({ marketListings: true }, { steamId64 })
+		);
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+
+		// The first account's poll never returns during the window under test —
+		// the dead-proxy case, and the one the serial heartbeat turned into a
+		// suppressed second and third account.
+		let releaseFirst: (() => void) | undefined;
+		const confirmations = {
+			runAutoConfirm: async (steamId64: string): Promise<AutoConfirmOutcome> => {
+				startedAt.push({ steamId64, at });
+				if (steamId64 === accounts[0]?.steamId64) {
+					await new Promise<void>((resolve) => {
+						releaseFirst = resolve;
+					});
+				}
+				return { approved: [], held: [], unreadable: 0 };
+			}
+		} as unknown as ConfirmationsService;
+
+		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => at });
+
+		// Not awaited: this sweep parks on the first account and, before the fix,
+		// took the whole heartbeat down with it.
+		const stuck = engine.tick();
+		await Promise.resolve();
+
+		for (let second = 1; second <= 4; second += 1) {
+			at = second * 1000;
+			await engine.tick();
+		}
+
+		releaseFirst?.();
+		await stuck;
+
+		expect(
+			startedAt.map((start) => start.steamId64),
+			'an account whose slot elapsed during the slow poll was never reached'
+		).toHaveLength(3);
+		expect(
+			new Set(startedAt.map((start) => start.at)).size,
+			`two accounts started at the same instant: ${JSON.stringify(startedAt)}`
+		).toBe(3);
+	});
+
+	/*
+	 * And the same slow poll is not started again on every beat while it runs.
+	 * Without a per-account claim, an account behind a slow proxy reads as due on
+	 * every beat — its `nextDueAt` is not rewritten until the poll returns — so
+	 * removing the serial flag would have replaced one dead proxy stalling
+	 * everything with one dead proxy being hammered once a second.
+	 */
+	it('does not re-poll an account whose request is still in the air', async () => {
+		let at = 0;
+		let started = 0;
+		const accounts = [account({ marketListings: true })];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+
+		let release: (() => void) | undefined;
+		const confirmations = {
+			runAutoConfirm: async (): Promise<AutoConfirmOutcome> => {
+				started += 1;
+				await new Promise<void>((resolve) => {
+					release = resolve;
+				});
+				return { approved: [], held: [], unreadable: 0 };
+			}
+		} as unknown as ConfirmationsService;
+
+		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => at });
+		const stuck = engine.tick();
+		await Promise.resolve();
+
+		for (let second = 1; second <= 20; second += 1) {
+			at = second * 1000;
+			await engine.tick();
+		}
+
+		expect(started, 'the account in flight was polled again on later beats').toBe(1);
+		release?.();
+		await stuck;
+	});
+
+	/**
+	 * **The heartbeat itself, not `tick` driven by hand.**
+	 *
+	 * The two tests above call `tick` directly, so they see the re-entrance rule
+	 * and nothing else. The other half of the serialisation lived in `schedule`,
+	 * which armed the next beat from the sweep's own `finally` — so a sweep that
+	 * never settled never armed one, and one dead proxy stopped the clock for
+	 * every account until its thirty-second timeout expired.
+	 *
+	 * Driven through the injected timer because that is the only place the defect
+	 * is visible: with the fix reverted, these assertions are the only thing in
+	 * the suite that goes red.
+	 */
+	it('arms the next beat while a sweep is still in the air', async () => {
+		const armed: (() => void)[] = [];
+		const accounts = [account({ marketListings: true })];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+
+		let release: (() => void) | undefined;
+		const confirmations = {
+			runAutoConfirm: async (): Promise<AutoConfirmOutcome> => {
+				await new Promise<void>((resolve) => {
+					release = resolve;
+				});
+				return { approved: [], held: [], unreadable: 0 };
+			}
+		} as unknown as ConfirmationsService;
+
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations,
+			now: () => NOW,
+			setTimer: (callback: () => void) => {
+				armed.push(callback);
+				return { unref: () => undefined } as unknown as NodeJS.Timeout;
+			},
+			clearTimer: () => undefined
+		});
+
+		engine.start();
+		expect(armed, 'start() armed no beat at all').toHaveLength(1);
+
+		// The first beat fires and its sweep parks on a poll that does not return.
+		armed[0]?.();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+
+		expect(
+			armed,
+			'no further beat was armed while a sweep was in flight, so one slow account stops the clock for all of them'
+		).toHaveLength(2);
+
+		release?.();
+		engine.stop();
 	});
 });
 
@@ -1816,6 +2005,11 @@ describe('a schedule invalidated while another account is mid-poll', () => {
 		return {
 			engine,
 			reads: () => reads,
+			/** The vault stops offering it, which is what a removal actually is. */
+			removeAccount: (steamId64: string) => {
+				const at = accounts.findIndex((entry) => entry.steamId64 === steamId64);
+				accounts.splice(at, 1);
+			},
 			advance: (ms: number) => {
 				clock += ms;
 			}
@@ -1843,8 +2037,18 @@ describe('a schedule invalidated while another account is mid-poll', () => {
 			return { approved: [], held: [], unreadable: 0 };
 		});
 
-		// Nine failures: one short of the halt, so the tenth lands while parked.
-		for (let i = 0; i < 9; i += 1) {
+		/*
+		 * **Ten iterations, not nine — because the first one does not poll ...002.**
+		 *
+		 * It seeds that account at offset 1000 instead, so nine iterations produced
+		 * only eight failures and the parked sweep was the ninth: one short of
+		 * `HALT_AFTER_FAILURES`. The test still discriminated, but on a finite maxed
+		 * backoff rather than on the `Infinity` this whole mechanism is written for,
+		 * so the scenario in its own title had no coverage. Instrumented before the
+		 * change: `{ nextDueAt: <finite>, backoffMs: 900000, failures: 9 }`, `halted`
+		 * never true, `onFailure` never called with `halted === true`.
+		 */
+		for (let i = 0; i < 10; i += 1) {
 			await h.engine.tick();
 			h.advance(20 * 60_000);
 		}
@@ -1862,6 +2066,21 @@ describe('a schedule invalidated while another account is mid-poll', () => {
 		release?.();
 		await sweep;
 
+		/*
+		 * **Asserted, not assumed.** The `Infinity` is the whole premise: without it
+		 * this passes on a maxed finite backoff and says nothing about the case in
+		 * its title.
+		 */
+		const state = (
+			h.engine as unknown as {
+				state: Map<string, { nextDueAt: number; halted?: boolean }>;
+			}
+		).state;
+		expect(
+			state.get('76561198000000002'),
+			'the sibling never actually halted, so nothing pinned the cache'
+		).toMatchObject({ nextDueAt: Number.POSITIVE_INFINITY, halted: true });
+
 		const before = h.reads();
 		await h.engine.tick();
 
@@ -1869,6 +2088,73 @@ describe('a schedule invalidated while another account is mid-poll', () => {
 			h.reads(),
 			'a halted sibling pinned the cache at infinity and the engine went silent'
 		).toBeGreaterThan(before);
+	});
+
+	/**
+	 * **And the opposite pin: a halt written while the flag was up.**
+	 *
+	 * `rememberEarliest` returns 0 while `scheduleDirty` is set, and the halt path
+	 * calls it immediately after writing `Infinity`. So a halt that landed while a
+	 * sibling's `forgetAccount` had the flag up left `earliestDueAt` at 0 for the
+	 * life of the process: `tick` cleared the flag, but nothing recomputed —
+	 * a halted account is skipped by `dueAccounts` without seeding, so no later
+	 * `rememberEarliest` ever ran. Every one-second beat then re-read the vault to
+	 * rediscover there was nothing to do, silently undoing the property the test
+	 * above pins.
+	 */
+	it('stops re-reading once the halt is the only thing left', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let park = false;
+		const h = twoAccounts(async (steamId64) => {
+			if (steamId64 === '76561198000000002') {
+				if (park) {
+					await gate;
+				}
+				throw new Error('steam said no');
+			}
+			return { approved: [], held: [], unreadable: 0 };
+		});
+
+		for (let i = 0; i < 10; i += 1) {
+			await h.engine.tick();
+			h.advance(20 * 60_000);
+		}
+
+		park = true;
+		const sweep = h.engine.tick();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		/*
+		 * The other account is **removed**, not merely re-routed, so that after
+		 * this the halted one is genuinely all that is left. A re-routed sibling
+		 * comes straight back from the vault on the next beat and schedules itself
+		 * normally, which pins the cache at a sane finite value and hides the
+		 * defect entirely — verified: with `forgetAccount` alone this test passes
+		 * whether or not the recompute is there.
+		 */
+		h.removeAccount('76561198000000001');
+		h.engine.forgetAccount('76561198000000001');
+		release?.();
+		await sweep;
+
+		// One beat to rebuild the schedule from the vault, which now offers only
+		// the halted account.
+		await h.engine.tick();
+
+		const before = h.reads();
+		for (let beat = 0; beat < 5; beat += 1) {
+			h.advance(1000);
+			await h.engine.tick();
+		}
+
+		expect(
+			h.reads() - before,
+			'idle beats went on reading the vault, so the halt left the cache pinned at zero'
+		).toBe(0);
 	});
 
 	it('still re-reads the vault when a sibling reschedules normally', async () => {
@@ -1956,6 +2242,64 @@ describe('a session expiry among ordinary failures', () => {
 			failures.some((entry) => entry.halted),
 			'an account alternating expiries with real failures never halted'
 		).toBe(true);
+	});
+
+	/**
+	 * **And the accumulated backoff, which the test above cannot see.**
+	 *
+	 * It advances the clock twenty minutes a tick, so backoff never decides
+	 * whether a poll is due and deleting the `backoffMs` carry leaves it green —
+	 * verified. Yet the carry is half of what the branch comment claims: without
+	 * it every expiry erases the accumulated delay, so the next ordinary failure
+	 * restarts at `BACKOFF_START_MS` instead of doubling toward the maximum. An
+	 * account behind a flaky proxy alternating 403s with ordinary errors then
+	 * keeps hammering Steam at thirty-second intervals *during a rate limit* —
+	 * the "turned a failure into a speed-up" the comment says this prevents.
+	 */
+	it('does not reset the accumulated backoff either', async () => {
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		/** What the next poll should be: an ordinary failure, or an expiry. */
+		const script: ('fail' | 'expired')[] = ['fail', 'fail', 'expired', 'fail'];
+		let call = 0;
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () => {
+					const step = script[call];
+					call += 1;
+					return step === 'expired'
+						? Promise.reject(new ConfirmationsError('the saved session expired.', true))
+						: Promise.reject(new Error('steam said no'));
+				}
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		const backoff = (): number | undefined =>
+			(engine as unknown as { state: Map<string, { backoffMs?: number }> }).state.get(
+				'76561198000000001'
+			)?.backoffMs;
+
+		for (const step of script) {
+			await engine.tick();
+			// Past any backoff this could have written, so the schedule never
+			// decides the outcome — only the carry does.
+			clock += 20 * 60_000;
+			void step;
+		}
+
+		expect(call, 'the script did not run to the end').toBe(script.length);
+		expect(
+			backoff(),
+			'the expiry erased the accumulated backoff, so the next failure restarted at thirty seconds'
+		).toBe(120_000);
 	});
 
 	/*

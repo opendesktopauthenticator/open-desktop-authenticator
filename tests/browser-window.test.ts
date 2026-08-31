@@ -2718,6 +2718,83 @@ describe('Require proxies while a window is still being built', () => {
 			'an unrouted signed-in window survived the rule that forbids it'
 		).toBe(1);
 	});
+
+	/**
+	 * **And the partition it signed into is marked.**
+	 *
+	 * Asserted apart from the close, because the close alone satisfied the old
+	 * assertion: deleting `this.dirty.add(steamId64)` from that branch left it
+	 * green. Nothing else can wipe that partition — the window was never in
+	 * `windows` or `routes`, and `open`'s cancel branch is never reached because
+	 * the load never settles — so pressing 'Through the proxy' next would open on
+	 * a jar still holding the direct route's `steamLoginSecure`, which is the two
+	 * routes sharing one cookie jar.
+	 *
+	 * The failing wipe is what makes the mark observable: with a wipe that works,
+	 * the retry inside `open` clears the partition and the open rightly proceeds,
+	 * so nothing distinguishes "marked and cleaned" from "never marked".
+	 */
+	it('marks the partition it could not empty, so the next route refuses', async () => {
+		const h = harness({ loadHangs: true, wipeFails: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		void browsers.open({ ...ACCOUNT, route: 'direct' }).catch(() => undefined);
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		await browsers.closeNotFullyRouted();
+
+		await expect(
+			browsers.open({ ...PROXIED }),
+			'the abandoned direct-route jar was handed to the proxied open'
+		).rejects.toBeInstanceOf(BrowserSessionError);
+	});
+
+	/**
+	 * **And the record of the attempt, not only its window.**
+	 *
+	 * Every sweep closed the half-built window and left `opening` alone, and the
+	 * two describe the same attempt. `open` clears its own entry in a `finally`,
+	 * which needs the attempt to settle — and the case these sweeps exist for is
+	 * exactly the one where it never does. So the entry outlived the window for
+	 * the life of the process, and every later press for that account joined the
+	 * dead attempt and waited for ever: a browser that could not be opened again
+	 * until a restart, with no error and nothing on screen.
+	 */
+	describe.each([
+		['closeAll', (browsers: AccountBrowsers) => browsers.closeAll()],
+		['closeAccount', (browsers: AccountBrowsers) => browsers.closeAccount(ACCOUNT.steamId64)],
+		['closeNotFullyRouted', (browsers: AccountBrowsers) => browsers.closeNotFullyRouted()]
+	])('after %s reaches an open whose load never settles', (_name, sweep) => {
+		it('lets the next press build a window instead of joining the dead one', async () => {
+			const h = harness({ loadHangs: true });
+			const browsers = new AccountBrowsers(h.host);
+
+			void browsers.open({ ...ACCOUNT, route: 'direct' }).catch(() => undefined);
+			for (let i = 0; i < 10; i += 1) {
+				await Promise.resolve();
+			}
+			expect(h.recorded.windows, 'the window should exist by now').toHaveLength(1);
+
+			await sweep(browsers);
+
+			/*
+			 * **A window, not a settled promise.** Every load hangs in this harness,
+			 * so no open here can ever resolve and asserting on one would only hang
+			 * the suite. Building a second window is the thing that distinguishes
+			 * "started a fresh attempt" from "parked on the dead entry for ever",
+			 * and it is exactly what the user sees or does not see.
+			 */
+			void browsers.open({ ...ACCOUNT, route: 'direct' }).catch(() => undefined);
+			for (let i = 0; i < 50; i += 1) {
+				await Promise.resolve();
+			}
+			expect(
+				h.recorded.windows,
+				'the second press joined an attempt that can never settle, so no window was built'
+			).toHaveLength(2);
+		});
+	});
 });
 
 /**

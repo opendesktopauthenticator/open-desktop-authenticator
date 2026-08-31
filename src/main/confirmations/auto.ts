@@ -265,7 +265,37 @@ export class AutoConfirmEngine {
 	private earliestDueAt = 0;
 	private ticker: NodeJS.Timeout | undefined;
 	/** Guards against a slow pass overlapping the next tick. */
-	private running = false;
+	/**
+	 * Accounts with a poll in the air.
+	 *
+	 * **This replaced a single `running` flag, and the flag was the reason the
+	 * stagger did not hold.** A sweep that took longer than one beat suppressed
+	 * every beat inside it, so the slots of every account seeded into that
+	 * window elapsed unobserved and the next sweep found them all due at once —
+	 * `Promise.all` then started them in a single microtask. Twelve accounts on
+	 * twelve proxies, polling in lockstep: exactly the timing correlation the
+	 * seeding block and THREAT_MODEL say is prevented. Measured before the fix at
+	 * a 2.5s round trip: three accounts collapsed to two simultaneous starts on
+	 * the first sweep after unlock, and twelve produced more than one start on 26
+	 * of 40 beats.
+	 *
+	 * The flag also made one dead proxy's thirty-second timeout suppress every
+	 * beat for thirty seconds — the same stall `Promise.all` was introduced to
+	 * prevent, reintroduced one level up.
+	 *
+	 * Per account, so the property that actually matters is the one enforced: no
+	 * account is polled twice at once, and beats go on sampling while any number
+	 * of them are in flight.
+	 */
+	private readonly inFlight = new Set<string>();
+
+	/**
+	 * The clock sync shared by every sweep overlapping it.
+	 *
+	 * `running` used to make this impossible, and now that beats overlap, one
+	 * `ensureClock` per beat would be a Steam round trip per second.
+	 */
+	private clockSync: Promise<void> | undefined;
 
 	/**
 	 * Bumped by `stop`, so work started before a lock cannot write state after it.
@@ -333,6 +363,11 @@ export class AutoConfirmEngine {
 		this.chain += 1;
 		this.state.clear();
 		this.earliestDueAt = 0;
+		// **`inFlight` is deliberately not cleared.** Those requests are still in
+		// the air; each removes itself when it settles. Clearing here would let the
+		// next unlock start a second request for an account whose first is still
+		// running — the exact overlap the set exists to prevent — and the disowning
+		// the generation bump above provides is what makes the stale one harmless.
 	}
 
 	/**
@@ -370,9 +405,11 @@ export class AutoConfirmEngine {
 	 * timer, and so nothing here depends on real time passing.
 	 */
 	async tick(): Promise<void> {
-		if (this.running) {
-			return;
-		}
+		// **No global re-entrance gate.** See `inFlight`: one flag here made the
+		// heartbeat serial, which collapsed the stagger it exists to keep and let
+		// a single dead proxy suppress every beat for its whole timeout. Overlap
+		// is prevented per account instead, where it means something.
+		//
 		// Cheap early-out, before the vault is read. See `earliestDueAt`.
 		if (this.earliestDueAt > this.now()) {
 			return;
@@ -385,47 +422,85 @@ export class AutoConfirmEngine {
 			return;
 		}
 
-		this.running = true;
-		try {
-			// Before the first request of the pass, not after it. A confirmation is
-			// signed with an HMAC over Steam-corrected time, so a pass that runs
-			// before the offset is known signs with zero — and on a skewed machine
-			// every one of those is refused, counted as a failure, and backed off
-			// from. Awaited inside `running`, so the heartbeat cannot stack passes
-			// behind a slow sync.
-			await this.ensureClock();
+		// Before the first request of the pass, not after it. A confirmation is
+		// signed with an HMAC over Steam-corrected time, so a pass that runs
+		// before the offset is known signs with zero — and on a skewed machine
+		// every one of those is refused, counted as a failure, and backed off
+		// from. Shared across overlapping beats, so a slow sync costs one round
+		// trip rather than one per second.
+		await this.syncClock();
 
-			// Re-checked: the sync above is network I/O, and the vault can lock while
-			// it is in flight.
-			if (this.generation !== generation || !this.vault.isUnlocked()) {
-				return;
-			}
-
-			// In parallel, not in sequence. Accounts are independent — the service
-			// serialises per account precisely because of that — and awaiting each
-			// in turn meant one dead proxy's thirty-second timeout stalled every
-			// account behind it in the list, every sweep. A lock partway through is
-			// still caught: `runOne` checks the generation around its own await, and
-			// the service refuses work for a locked vault.
-			const due = this.dueAccounts();
-			// The vault has now been re-read and the schedule rebuilt from it, so
-			// the invalidation has been honoured and a later `rememberEarliest` may
-			// trust the map again.
-			//
-			// **Clearing it one line earlier is an equivalent mutant, not an
-			// untested one.** Nothing between the two positions reads the flag
-			// except the seeded-accounts `rememberEarliest` inside `dueAccounts`,
-			// and recomputing there is correct: those slots were just assigned from
-			// the vault this call read. Recorded so the next person to notice does
-			// not go looking for the missing test.
-			this.scheduleDirty = false;
-			if (this.generation !== generation || !this.vault.isUnlocked()) {
-				return;
-			}
-			await Promise.all(due.map((account, index) => this.runOne(account, generation, index)));
-		} finally {
-			this.running = false;
+		// Re-checked: the sync above is network I/O, and the vault can lock while
+		// it is in flight.
+		if (this.generation !== generation || !this.vault.isUnlocked()) {
+			return;
 		}
+
+		// In parallel, not in sequence. Accounts are independent — the service
+		// serialises per account precisely because of that — and awaiting each
+		// in turn meant one dead proxy's thirty-second timeout stalled every
+		// account behind it in the list, every sweep. A lock partway through is
+		// still caught: `runOne` checks the generation around its own await, and
+		// the service refuses work for a locked vault.
+		//
+		// **Ordinarily one account**, because the slots are a beat apart and beats
+		// no longer wait for the previous sweep. Where it is more than one, they
+		// share a slot rather than having been bunched by a stall.
+		const due = this.dueAccounts();
+		// The vault has now been re-read and the schedule rebuilt from it, so
+		// the invalidation has been honoured and a later `rememberEarliest` may
+		// trust the map again.
+		//
+		// **Clearing it one line earlier is an equivalent mutant, not an
+		// untested one.** Nothing between the two positions reads the flag
+		// except the seeded-accounts `rememberEarliest` inside `dueAccounts`,
+		// and recomputing there is correct: those slots were just assigned from
+		// the vault this call read. Recorded so the next person to notice does
+		// not go looking for the missing test.
+		this.scheduleDirty = false;
+		/*
+		 * **And recompute now that it may be trusted again.**
+		 *
+		 * `rememberEarliest` returns 0 while the flag is set, and the halt path
+		 * calls it immediately after writing `nextDueAt: Infinity`. So a halt that
+		 * landed while a sibling's `forgetAccount` had the flag up pinned
+		 * `earliestDueAt` at 0 for the life of the process: `tick` cleared the
+		 * flag but nothing recomputed, because a halted account is skipped by
+		 * `dueAccounts` without seeding, so no later `rememberEarliest` ever ran.
+		 * Every beat then re-read the vault to rediscover there was nothing to do
+		 * — the exact property tests/auto-confirm-engine.test.ts:920 pins.
+		 *
+		 * Free here: the accounts about to be polled rewrite their own entries and
+		 * recompute again as they finish.
+		 */
+		this.rememberEarliest();
+		// **No third generation check here.** There was one, and it could never be
+		// true: only synchronous statements separate it from the check above, so
+		// neither value can have changed. Unreachable code that reads as a live
+		// guard is worse than no guard — no test can cover it, and deleting it is
+		// an undetectable mutation.
+		await Promise.all(due.map((account, index) => this.runOne(account, generation, index)));
+	}
+
+	/**
+	 * The Steam clock offset, fetched at most once however many beats want it.
+	 *
+	 * Beats overlap now (see `inFlight`), so an unshared `ensureClock` would put
+	 * a Steam round trip on every beat — one per second — the moment a sync
+	 * became slow enough to outlast one.
+	 */
+	private syncClock(): Promise<void> {
+		if (!this.clockSync) {
+			const sync = Promise.resolve(this.ensureClock()).finally(() => {
+				// Only if it is still ours: a later sweep may already have started
+				// the next one.
+				if (this.clockSync === sync) {
+					this.clockSync = undefined;
+				}
+			});
+			this.clockSync = sync;
+		}
+		return this.clockSync;
 	}
 
 	/** Accounts with something enabled, whose next attempt is due. */
@@ -486,6 +561,15 @@ export class AutoConfirmEngine {
 			// until something unrelated changes.
 			if (this.requireProxies() && !account.hasProxy) {
 				this.state.delete(account.steamId64);
+				continue;
+			}
+
+			// **Already in the air.** Beats no longer wait for the previous sweep,
+			// so a poll that outlasts one is still running when the next beat
+			// samples — and its `nextDueAt` is not rewritten until it finishes, so
+			// it still reads as due. Without this an account behind a slow proxy
+			// would be polled again every second until the first one returned.
+			if (this.inFlight.has(account.steamId64)) {
 				continue;
 			}
 
@@ -614,6 +698,11 @@ export class AutoConfirmEngine {
 		const current = (): boolean =>
 			this.generation === generation && this.epochOf(steamId64) === epoch;
 
+		// **Claimed before the first await**, so a beat that lands while this one
+		// is talking to Steam sees the account as busy rather than as due. There
+		// is no await between `dueAccounts` deciding and this line, so no beat can
+		// slip between the decision and the claim.
+		this.inFlight.add(steamId64);
 		try {
 			if (mode === 'confirm') {
 				const outcome = await this.confirmations.runAutoConfirm(steamId64);
@@ -752,6 +841,10 @@ export class AutoConfirmEngine {
 			this.rememberEarliest();
 
 			this.onFailure(steamId64, reason, false, { accountName, mode });
+		} finally {
+			// Released whatever happened, including a disowned poll: leaving the
+			// claim behind would make the account permanently unpollable.
+			this.inFlight.delete(steamId64);
 		}
 	}
 
@@ -788,11 +881,25 @@ export class AutoConfirmEngine {
 			if (chain !== this.chain) {
 				return;
 			}
-			void this.tick().finally(() => {
-				if (chain === this.chain) {
-					this.schedule(chain);
-				}
-			});
+			/*
+			 * **The next beat is armed before the sweep, not after it.**
+			 *
+			 * Chaining from the sweep's own `finally` is what made the heartbeat
+			 * serial: no beat happened while a sweep was in flight, so a poll that
+			 * outlasted a beat swallowed every slot that elapsed during it and the
+			 * next sweep found them all due together. The stagger the seeding block
+			 * assigns only survives if something is there to observe each slot.
+			 *
+			 * Re-entrance is not a worry: `tick` polls only accounts that are due
+			 * and not already in flight, so a beat during a slow poll does nothing
+			 * for that account and everything for the others.
+			 */
+			this.schedule(chain);
+			// Swallowed rather than left to reject: this is a fired timer with no
+			// caller, and an unhandled rejection in the main process is a crash on
+			// some builds. Every failure a sweep can report has already gone
+			// through `onFailure` by the time it gets here.
+			void this.tick().catch(() => undefined);
 		}, SCHEDULER_TICK_MS);
 		handle.unref?.();
 		this.ticker = handle;

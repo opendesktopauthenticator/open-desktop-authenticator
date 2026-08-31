@@ -239,20 +239,40 @@ export class ActivityLog {
 	}
 
 	/**
-	 * Drop everything held for one account. Called when it is removed.
+	 * Drop the open runs, and keep the history.
 	 *
-	 * **An open run outlived the account it belonged to.** Nothing cleared
-	 * `signInOpen` per account, so removing an account and adding it back — which
-	 * arrives with no saved session, and therefore expires on its first poll —
-	 * found the run still open and wrote no entry and lit no badge. Silence on
-	 * exactly the condition this class exists to stop being silent about.
+	 * **An open run outlived the route it belonged to.** Nothing cleared
+	 * `signInOpen` per account, so an account that arrives with no usable session
+	 * — and therefore expires on its first poll — found the run still open and
+	 * wrote no entry and lit no badge. Silence on exactly the condition this
+	 * class exists to stop being silent about. `reported` goes for the same
+	 * reason: a hold or an unreadable entry seen over the old route is news again
+	 * over the new one.
 	 *
-	 * The entries go too. They described an account the vault no longer holds,
-	 * and the Activity screen went on listing its trades.
+	 * The entries stay. What was recorded still happened, and the account is
+	 * still here.
 	 */
-	forgetAccount(steamId64: string): void {
+	forgetRuns(steamId64: string): void {
 		this.signInOpen.delete(steamId64);
 		this.reported.delete(steamId64);
+	}
+
+	/**
+	 * Drop everything held for one account, history included. **Removal only.**
+	 *
+	 * Split from {@link forgetRuns} because it was reached on every routing
+	 * change: one callback served both, so pasting a replacement proxy — the
+	 * ordinary repair for the dead proxy that caused the trouble — deleted the
+	 * account's entire activity history, including an unacknowledged held
+	 * account-recovery confirmation. The badge went dark, the screen listed
+	 * nothing, and nothing said anything had been discarded. Destroying the
+	 * loudest warning this application can raise is a thing to do when the
+	 * account is gone, and not otherwise.
+	 */
+	forgetAccount(steamId64: string): void {
+		this.forgetRuns(steamId64);
+		// They described an account the vault no longer holds, and the Activity
+		// screen went on listing its trades.
 		this.entries.delete(steamId64);
 	}
 

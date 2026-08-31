@@ -172,11 +172,30 @@ describe('bounds and ordering', () => {
 		expect(activity.hasUrgent()).toBe(false);
 	});
 
-	it('never carries a nonce, because it only ever holds summaries', () => {
+	/*
+	 * **Asserted against a summary carrying one, or it asserts nothing.**
+	 *
+	 * This used to hand `recordPass` the local `confirmation()` fixture, which
+	 * has no `nonce` key — so it was a statement about the fixture, not about
+	 * `ActivityLog`, and no change to activity.ts could turn it red. The log
+	 * stores what it is given, by reference, and filters nothing; the stripping
+	 * genuinely happens in `toSummary` in service.ts, and that is where it is
+	 * covered (tests/confirmation-service.test.ts).
+	 *
+	 * Kept, but pointed at the true statement: **whatever reaches this class is
+	 * what leaves it**, so nothing may hand it anything but a summary. Feed it a
+	 * leaky object and it comes straight back out — which is the thing a reader
+	 * needs to know before adding a caller.
+	 */
+	it('stores what it is handed, so only summaries may be handed to it', () => {
 		const activity = log();
-		activity.recordPass('76561198000000001', [confirmation()], []);
+		const leaky = { ...confirmation(), nonce: 'a-secret-nonce' } as ConfirmationSummary;
+		activity.recordPass('76561198000000001', [leaky], []);
 
-		expect(JSON.stringify(activity.all())).not.toContain('nonce');
+		expect(
+			JSON.stringify(activity.all()),
+			'the log now filters its input, so this test should assert what it filters'
+		).toContain('a-secret-nonce');
 	});
 });
 
@@ -568,6 +587,66 @@ describe('an account that is removed and added back', () => {
 
 		log.forgetAccount(ID);
 		expect(log.for(other), "removing one account cleared another's history").toHaveLength(1);
+	});
+});
+
+/**
+ * **An account that is re-routed has not left.**
+ *
+ * One call served both, and the seam that calls it — `dropAccountRouting` —
+ * runs on a proxy save and on re-import as well as on removal. So the ordinary
+ * repair for a dead proxy, pasting a replacement, deleted the account's entire
+ * activity history: an unacknowledged held account-recovery confirmation gone,
+ * the badge dark, the screen empty, and nothing anywhere saying that something
+ * had been discarded. The strongest warning this application can raise,
+ * destroyed by a settings save.
+ */
+describe('an account whose routing changed', () => {
+	const ID = '76561198000000001';
+
+	it('keeps the history, because the account is still here', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordPass(ID, [], [{ confirmation: recovery, reason: 'needs a person' }], 0);
+		expect(log.hasUrgent()).toBe(true);
+
+		log.forgetRuns(ID);
+
+		expect(log.for(ID), 'a routing change threw away the account history').toHaveLength(1);
+		expect(log.hasUrgent(), 'a routing change discharged an unread urgent warning').toBe(true);
+	});
+
+	/*
+	 * The runs still go: a session held open over the old proxy says nothing
+	 * about the new one, so the first expiry after the change must be reported.
+	 */
+	it('still reports an expiry after it as a new run', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		log.acknowledge();
+
+		log.forgetRuns(ID);
+
+		log.recordSignInRequired(ID);
+		expect(log.for(ID), 'the re-routed account inherited the old open run').toHaveLength(2);
+		expect(log.hasUrgent(), 'the badge stayed dark on a live expired session').toBe(true);
+	});
+
+	/*
+	 * And the per-run dedup, for the same reason. A confirmation held over the
+	 * old route is news again over the new one — the route is the likeliest
+	 * cause of the hold.
+	 */
+	it('says a still-held confirmation again after it', () => {
+		const log = new ActivityLog(() => NOW);
+		const held = [{ confirmation: recovery, reason: 'needs a person' }];
+		log.recordPass(ID, [], held, 0);
+		log.recordPass(ID, [], held, 0);
+		expect(log.for(ID), 'the dedup is not working at all').toHaveLength(1);
+
+		log.forgetRuns(ID);
+		log.recordPass(ID, [], held, 0);
+
+		expect(log.for(ID), 'the hold was not re-reported after the route changed').toHaveLength(2);
 	});
 });
 

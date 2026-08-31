@@ -752,6 +752,20 @@ async function abandon(
  * same session object next time it is asked, so the cookie outlives the window
  * that used it unless the storage is cleared too.
  */
+/**
+ * One open in flight, and the means to give up on it.
+ *
+ * `done` is the attempt as a joiner sees it: it settles when the attempt does,
+ * **or** when a sweep calls `abandon` because it has closed the window out from
+ * under it. Without that second door a joiner parked on a load that never
+ * settles waits for the life of the process.
+ */
+interface OpeningAttempt {
+	readonly route: string;
+	readonly done: Promise<void>;
+	readonly abandon: (reason: Error) => void;
+}
+
 export class AccountBrowsers {
 	private readonly windows = new Map<string, BrowserWindowHandle>();
 
@@ -769,6 +783,11 @@ export class AccountBrowsers {
 	 * Keyed by account like the rest. A second open for the same account replaces
 	 * the entry, and the first is closed by the `stillWanted` check that already
 	 * governs concurrent opens.
+	 *
+	 * **A sweep that empties this map must empty `opening` too** — see
+	 * {@link abandonOpening}. They describe the same attempt, and closing the
+	 * window without releasing the record left the account unopenable for the
+	 * life of the process.
 	 */
 	private readonly building = new Map<string, BrowserWindowHandle>();
 
@@ -782,7 +801,7 @@ export class AccountBrowsers {
 	 * later of the two was ever tracked; the earlier stayed on screen, signed in,
 	 * invisible to the lock.
 	 */
-	private readonly opening = new Map<string, { route: string; done: Promise<void> }>();
+	private readonly opening = new Map<string, OpeningAttempt>();
 
 	/**
 	 * The route each open window is actually on.
@@ -1161,9 +1180,47 @@ export class AccountBrowsers {
 			});
 		})();
 
-		const entry = { route: wanted, done: attempt };
+		/*
+		 * **A second way for `done` to settle, because the first one can hang.**
+		 *
+		 * `attempt` ends with a page load, and a load has no bound — that is the
+		 * premise the whole `building` map is written around. A sweep closes the
+		 * half-built window, but closing it does not settle the promise a joiner
+		 * is parked on, and nothing else ever will.
+		 */
+		// Named for what it does to the record, and **not** `abandon`: that is a
+		// module function this method calls, and shadowing it here silently turned
+		// the close-and-wipe on the cancelled-open path into a no-op.
+		let giveUp: (reason: Error) => void = () => undefined;
+		const abandoned = new Promise<never>((_, reject) => {
+			giveUp = reject;
+		});
+		// Nobody awaits these two directly, and an unhandled rejection in the main
+		// process is a crash on some Node builds. The joiners await `done`, which
+		// rejects for them regardless of this handler.
+		abandoned.catch(() => undefined);
+		const done = Promise.race([attempt, abandoned]);
+		done.catch(() => undefined);
+
+		const entry: OpeningAttempt = { route: wanted, done, abandon: giveUp };
 		this.opening.set(options.steamId64, entry);
 		try {
+			/*
+			 * **`attempt`, not `done`** — this caller owns the attempt, and its
+			 * promise means "everything I started has finished, cleanup included".
+			 * Several callers and tests depend on that ordering.
+			 *
+			 * `done` is for the *joiners*, who own nothing and need only to be told
+			 * when to stop waiting. Releasing this caller early instead would return
+			 * from `open` before the window it built had been closed and its
+			 * partition wiped.
+			 *
+			 * A load that never settles therefore still parks this caller. In
+			 * Electron it does settle: closing the window destroys the contents and
+			 * `loadURL` rejects with ERR_ABORTED, which is why teardown never waits
+			 * for it — and tools/smoke-browser-window.mjs measures that rather than
+			 * assuming it.
+			 */
 			await attempt;
 		} finally {
 			if (this.opening.get(options.steamId64) === entry) {
@@ -1174,6 +1231,34 @@ export class AccountBrowsers {
 
 	private epochOf(steamId64: string): number {
 		return this.epochs.get(steamId64) ?? 0;
+	}
+
+	/**
+	 * Give up on an open in flight: forget the record, and release the joiners.
+	 *
+	 * **Every sweep closed the half-built window and left this map alone**, and
+	 * the two describe the same attempt. `open` deletes its own entry in a
+	 * `finally`, which needs the attempt to settle — and the case the sweeps
+	 * exist for is precisely the one where it does not, because the load hangs.
+	 * So the entry outlived the window by the life of the process, and every
+	 * later press for that account found it, joined it, and waited for ever: an
+	 * account whose browser could not be opened again until a restart, with no
+	 * error and nothing on screen.
+	 *
+	 * Measured before the fix, against a host whose `loadURL` never settles:
+	 * `closeAll` closed the window and wiped the partition, and the next `open`
+	 * was still pending 800ms later — as were `closeAccount`'s and
+	 * `closeNotFullyRouted`'s.
+	 */
+	private abandonOpening(steamId64: string, message: string): void {
+		const entry = this.opening.get(steamId64);
+		if (!entry) {
+			return;
+		}
+		this.opening.delete(steamId64);
+		// The same sentence the attempt itself would have thrown at its next
+		// `stillWanted`, which is the check it can no longer reach.
+		entry.abandon(new BrowserSessionError(message));
 	}
 
 	/**
@@ -1292,6 +1377,11 @@ export class AccountBrowsers {
 				// Already gone. Nothing left to close.
 			}
 		}
+		// And the record of it, which the attempt can only clear by settling.
+		this.abandonOpening(
+			steamId64,
+			"this account's routing changed while the browser was opening, so it was closed"
+		);
 
 		await this.wipe(steamId64, window);
 	}
@@ -1326,7 +1416,8 @@ export class AccountBrowsers {
 		 * Before any await, for the reason `closeAll` gives about its own counter:
 		 * anything that runs later races the sweep, and wins.
 		 */
-		for (const [steamId64, entry] of this.opening) {
+		// Snapshotted, because `abandonOpening` deletes from this map.
+		for (const [steamId64, entry] of [...this.opening]) {
 			if (!entry.route.startsWith('proxy:')) {
 				this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
 
@@ -1351,6 +1442,20 @@ export class AccountBrowsers {
 					}
 					this.dirty.add(steamId64);
 				}
+
+				/*
+				 * **And the record, whether or not a window had been built yet.**
+				 *
+				 * Outside the `halfBuilt` guard on purpose: an attempt disowned
+				 * before it reached the window is still an attempt whose `finally`
+				 * may never run, and leaving the entry behind makes 'Through the
+				 * proxy' — the compliant route this sweep is asking the user to
+				 * take — park for ever.
+				 */
+				this.abandonOpening(
+					steamId64,
+					"this account's routing changed while the browser was opening, so it was closed"
+				);
 			}
 		}
 
@@ -1432,6 +1537,21 @@ export class AccountBrowsers {
 		 */
 		const halfBuilt = [...this.building.values()];
 		this.building.clear();
+
+		/*
+		 * **And every record of an open in flight**, built or not.
+		 *
+		 * `open` clears its own entry when the attempt settles, and a hung load
+		 * never settles — so before this, a lock during an open left the account
+		 * unopenable after the next unlock, for the life of the process: every
+		 * press joined the dead attempt and waited.
+		 */
+		for (const steamId64 of [...this.opening.keys()]) {
+			this.abandonOpening(
+				steamId64,
+				'the vault locked while the browser was opening, so it was closed'
+			);
+		}
 
 		/*
 		 * Every partition seeded this unlock, not only the ones still on screen.

@@ -458,7 +458,14 @@ function start(): void {
 	});
 	const clock = new SteamClock({ codes, vault, transports });
 
-	const dropAccountRouting = (steamId64: string): void => {
+	/**
+	 * @param gone the account has been removed from the vault, not merely
+	 * re-routed. **Everything else here is safe to do on both**, because it drops
+	 * caches that rebuild themselves; the activity history is not a cache, and
+	 * deleting it on an ordinary settings save destroyed evidence the user had
+	 * not read yet.
+	 */
+	const dropAccountRouting = (steamId64: string, gone = false): void => {
 		// Routing changed, so everything tied to the old route goes: the cookie
 		// jar, and the cached access token. The stored refresh token is discarded
 		// inside the same vault write (settings path) or left alone (import only
@@ -487,11 +494,20 @@ function start(): void {
 		// account left it resident until the vault locked.
 		enrollment.forgetAccount(steamId64);
 		// **And the activity log's open runs.** An expired-session run outlived
-		// the account, so removing one and adding it back — which arrives with no
-		// saved session and expires on its first poll — wrote no entry and lit no
-		// badge. Its old entries went with it: they described an account the vault
-		// no longer holds.
-		activity.forgetAccount(steamId64);
+		// the route, so an account that arrives with no saved session and expires
+		// on its first poll wrote no entry and lit no badge.
+		//
+		// **The entries themselves only go when the account does.** This function
+		// runs on a proxy save and on re-import as well as on removal, and it used
+		// to call `forgetAccount` on all three — so replacing a dead proxy, which
+		// is the ordinary repair for the failures that dead proxy caused, deleted
+		// the account's held account-recovery confirmation, darkened the badge and
+		// emptied the screen, with nothing saying anything had been thrown away.
+		if (gone) {
+			activity.forgetAccount(steamId64);
+		} else {
+			activity.forgetRuns(steamId64);
+		}
 
 		// **And the browser window, which is the newest thing tied to a route.**
 		// The two calls above drop what this process holds; a window opened for

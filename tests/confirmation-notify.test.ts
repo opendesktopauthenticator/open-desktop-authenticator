@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
 	composeBody,
 	ConfirmationNotifier,
@@ -281,18 +283,58 @@ describe('what the body says', () => {
 	});
 
 	/**
-	 * **The body is a pure function of its three arguments.**
+	 * **`full` means full, in every condition.**
 	 *
-	 * This is what a lock-aware branch would have to break. A degrade that
-	 * composed at `count` while Windows was locked needs an input this signature
-	 * does not have, so the same arguments producing the same string is the thing
-	 * that pins its absence — see the plan at §2.1, where `full` staying `full`
-	 * in every condition is a recorded decision rather than an oversight.
+	 * A recorded decision, not an oversight: the plan at §2.1 says a lock-aware
+	 * degrade — composing at `count` while Windows is locked — is *not* wanted,
+	 * because a user who chose `full` chose it knowing where toasts appear.
+	 *
+	 * This used to be `composeBody(...) === composeBody(...)` with identical
+	 * arguments, which is a tautology: any degrade evaluated the same way twice
+	 * running satisfies it. Built and measured over the real function, a mutant
+	 * reading `globalThis.__windowsLocked` passed while `composeBody('full', …)`
+	 * had silently become '2 confirmations need you · 1 more could not be read'.
+	 *
+	 * So it is pinned twice: the exact string for a known input, and a static
+	 * check that the function reaches for nothing outside its own arguments —
+	 * which is the half a conditional degrade would have to defeat.
 	 */
-	it('depends on nothing but detail, awaiting and unreadable', () => {
-		const first = composeBody('full', [trade, listing], 1);
-		const second = composeBody('full', [trade, listing], 1);
-		expect(second).toBe(first);
+	it('composes the whole sentence for full, unreadable included', () => {
+		expect(composeBody('full', [trade, listing], 1)).toBe(
+			'Trade with SomeTrader — You give: AK-47 Redline · +1 more · 1 more could not be read'
+		);
+	});
+
+	it('reads nothing outside its own arguments', () => {
+		const source = readFileSync(
+			join(__dirname, '..', 'src', 'main', 'confirmations', 'notify.ts'),
+			'utf8'
+		);
+		const start = source.indexOf('export function composeBody(');
+		expect(start, 'composeBody is gone or renamed').toBeGreaterThan(-1);
+		const body = source.slice(start, source.indexOf('\n}', start));
+
+		/*
+		 * The ambient signals a degrade would have to consult. None of them is a
+		 * parameter of this function, so naming one at all is the change this
+		 * forbids — and unlike an equality check it fails whether or not the
+		 * branch happens to be taken while the tests run.
+		 */
+		for (const ambient of [
+			'globalThis',
+			'process.',
+			'powerMonitor',
+			'screen',
+			'Locked',
+			'locked',
+			'idle',
+			'Date.now'
+		]) {
+			expect(
+				body,
+				`composeBody consults ${ambient}, so its output is not just its arguments`
+			).not.toContain(ambient);
+		}
 	});
 });
 

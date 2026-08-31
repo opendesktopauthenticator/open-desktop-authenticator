@@ -3,6 +3,19 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
+ * Source with its comments removed.
+ *
+ * These describes assert that a call appears in a block of source, and a
+ * commented-out call is still text. Every call they look for is also quoted in
+ * the prose explaining why it is there — so without this, the prose alone keeps
+ * the test green while the code it describes is gone. Verified: commenting out
+ * `activity.forgetAccount` in `index.ts` left every row below passing.
+ */
+function stripComments(source: string): string {
+	return source.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+}
+
+/**
  * **Everything an account's route touches is dropped when that route changes.**
  *
  * `dropAccountRouting` is the single seam for a proxy change, an account
@@ -24,15 +37,17 @@ import { join } from 'node:path';
 describe('the shared routing teardown', () => {
 	const source = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
 
-	/** The body of `dropAccountRouting`. */
+	/** The body of `dropAccountRouting`, **with its comments taken out.** */
 	const body = (() => {
-		const start = source.indexOf('const dropAccountRouting = (steamId64: string): void => {');
+		const start = source.indexOf(
+			'const dropAccountRouting = (steamId64: string, gone = false): void => {'
+		);
 		expect(start, 'dropAccountRouting no longer exists under that name').toBeGreaterThan(-1);
 		const end = source.indexOf('\n\t};', start);
 		expect(end, 'dropAccountRouting changed shape; this test needs rewriting').toBeGreaterThan(
 			start
 		);
-		return source.slice(start, end);
+		return stripComments(source.slice(start, end));
 	})();
 
 	it.each([
@@ -42,7 +57,12 @@ describe('the shared routing teardown', () => {
 		['the notifier state', 'notifier.forgetAccount(steamId64)'],
 		['the poller schedule and epoch', 'autoConfirm.forgetAccount(steamId64)'],
 		['the enrolment access token', 'enrollment.forgetAccount(steamId64)'],
-		['the activity log entries and open runs', 'activity.forgetAccount(steamId64)']
+		// **Runs, not entries.** This was `forgetAccount`, which deletes the
+		// history too — and because this seam is reached by a proxy save and a
+		// re-import as well as by a removal, pasting a replacement proxy destroyed
+		// the account's activity log, held account-recovery confirmations included.
+		// The removal half is asserted separately below.
+		['the activity log open runs', 'activity.forgetRuns(steamId64)']
 	])('drops %s', (_what, call) => {
 		expect(body, `${call} is missing, so that cache outlives the route it belongs to`).toContain(
 			call
@@ -55,6 +75,41 @@ describe('the shared routing teardown', () => {
 	 */
 	it('closes the account browser', () => {
 		expect(body).toContain('browsers.closeAccount(steamId64)');
+	});
+
+	/*
+	 * **The history is destroyed only when the account is.**
+	 *
+	 * Asserted apart from the list above because the bug was that one call served
+	 * both directions: an ordinary settings save took the removal path and threw
+	 * away evidence nobody had read yet.
+	 */
+	it('deletes the activity history only for a removed account', () => {
+		expect(body, 'the removal case is gone, so a removed account keeps its entries').toContain(
+			'activity.forgetAccount(steamId64)'
+		);
+		const guard = body.indexOf('if (gone) {');
+		expect(guard, 'the removed-account guard is gone').toBeGreaterThan(-1);
+		expect(guard, 'the history delete is no longer behind the removed-account guard').toBeLessThan(
+			body.indexOf('activity.forgetAccount(steamId64)')
+		);
+	});
+
+	/*
+	 * And only one caller may ask for it. `onProxyChanged` is one callback for
+	 * three events, and a second call site passing the flag would be a second way
+	 * to lose a log to a routine save.
+	 */
+	it('is told an account is gone only by the removal handler', () => {
+		const ipc = stripComments(
+			readFileSync(join(__dirname, '..', 'src', 'main', 'vault', 'ipc.ts'), 'utf8')
+		);
+		const calls = [...ipc.matchAll(/onProxyChanged\((.*?)\)/g)].map((match) => match[1] ?? '');
+		expect(calls, 'onProxyChanged is no longer called from ipc.ts').not.toHaveLength(0);
+		expect(
+			calls.filter((args) => args.includes('true')),
+			'exactly one call site may claim the account was removed'
+		).toHaveLength(1);
 	});
 });
 

@@ -36,14 +36,16 @@ export { RevocationCeremony };
 /**
  * @param onProxyChanged told when an account's routing changed, so the network
  * layer can drop the session that still holds the old one. Injected rather than
- * imported: the vault has no business knowing what a socket is.
+ * imported: the vault has no business knowing what a socket is. Its second
+ * argument says the account was **removed** rather than re-routed, which is the
+ * difference between dropping a cache and destroying a record.
  * @param ceremony tracks which revocation codes have been shown this unlock.
  * @param onUnlocked fired after a successful create/unlock so the Steam clock
  * can be checked before the user is staring at codes.
  */
 export function registerVaultHandlers(
 	vault: VaultService,
-	onProxyChanged: (steamId64: string) => void = () => undefined,
+	onProxyChanged: (steamId64: string, removed?: boolean) => void = () => undefined,
 	ceremony: RevocationCeremony = new RevocationCeremony(),
 	onUnlocked: () => Promise<void> | void = () => undefined,
 	onAutoConfirmChanged: (steamId64: string) => void = () => undefined,
@@ -207,7 +209,12 @@ export function registerVaultHandlers(
 		// Everything that account had in memory goes with it — its cookie jar, its
 		// cached Steam session, its pending confirmations. Leaving those behind
 		// would mean a removed account could still reach Steam until the next lock.
-		onProxyChanged(steamId64);
+		//
+		// **`removed` distinguishes this from the routing saves below**, which
+		// reach the same callback. Only here is it right to destroy the account's
+		// activity history: everywhere else the account is still present, and the
+		// entries still describe it.
+		onProxyChanged(steamId64, true);
 
 		vault.touch();
 		return { ok: true as const };
