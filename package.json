@@ -39,18 +39,18 @@
     "@eslint/js": "10.0.1",
     "@types/node": "24.13.3",
     "@types/react": "19.2.18",
-    "@types/react-dom": "19.2.4",
+    "@types/react-dom": "19.2.5",
     "@vitejs/plugin-react": "5.2.0",
     "electron": "43.3.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "5.0.0",
-    "eslint": "10.8.1",
+    "eslint": "10.9.1",
     "eslint-config-prettier": "10.1.8",
     "eslint-plugin-react-hooks": "7.1.1",
     "globals": "17.9.0",
     "prettier": "3.9.6",
     "typescript": "5.7.3",
-    "typescript-eslint": "8.66.0",
-    "vitest": "4.1.10"
+    "typescript-eslint": "8.68.0",
+    "vitest": "4.1.11"
   }
 }
