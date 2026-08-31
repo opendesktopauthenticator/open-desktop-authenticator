@@ -481,6 +481,11 @@ function start(): void {
 		// left behind pins `earliestDueAt` at infinity, which stops the engine
 		// reading the vault at all.
 		autoConfirm.forgetAccount(steamId64);
+		// **And the enrolment token minted over the route being replaced.** It was
+		// the one cache this teardown did not reach, so the next enrolment step
+		// reused a credential established through the old proxy — and a removed
+		// account left it resident until the vault locked.
+		enrollment.forgetAccount(steamId64);
 
 		// **And the browser window, which is the newest thing tied to a route.**
 		// The two calls above drop what this process holds; a window opened for

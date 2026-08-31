@@ -728,6 +728,28 @@ export class EnrollmentService {
 		}
 	}
 
+	/**
+	 * Drop what this service holds for one account. Called when its route changes.
+	 *
+	 * **The shared teardown reached every other cache and not this one.** A proxy
+	 * change drops the transports, the confirmation session, the notifier state,
+	 * the poller's schedule and the browser window — and left the access token
+	 * minted over the *old* route sitting here, so the next enrollment step
+	 * reused it rather than minting through the new one. Removing an account left
+	 * the same credential, and the SMS marker with it, resident until the vault
+	 * locked.
+	 *
+	 * Narrower than `forget()` on purpose: another account's half-finished
+	 * enrolment is nothing to do with this one's routing.
+	 */
+	forgetAccount(steamId64: string): void {
+		this.tokens.delete(steamId64);
+		// The "we already texted them a code" marker belongs to the same attempt as
+		// the token. Keeping it would make a retry over the new route skip the step
+		// that sends one.
+		this.textedTheCode.delete(steamId64);
+	}
+
 	/** Drop any half-finished sign-in. Called when the vault locks. */
 	forget(): void {
 		this.discardPending();

@@ -1674,3 +1674,103 @@ describe('an account whose route changes mid-poll', () => {
 		expect(calls, 'replacing the proxy did not lift the halt').toBeGreaterThan(before);
 	});
 });
+
+/**
+ * **A poll carries the settings it started with, and they can be replaced
+ * underneath it.**
+ *
+ * `runOne` reads `notify` and the disclosure detail before its request and uses
+ * them after. Clearing only the schedule on a settings change left the request
+ * in flight holding what the user had just replaced — so switching
+ * notifications off, or `full` down to `count`, still produced one last `full`
+ * toast naming the trade partner and the headline. Precisely the toast somebody
+ * switched the feature off to stop.
+ */
+describe('notification settings changed while a poll was in the air', () => {
+	function parked() {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const accounts = [account({ notify: { enabled: true, detail: 'full' } })];
+		const pending: { detail: string }[] = [];
+		const outcomes: string[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				list: async () => {
+					await gate;
+					return { confirmations: [{ id: '1' } as unknown as ConfirmationSummary], unreadable: 0 };
+				}
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onPending: (_id, _name, _awaiting, _unreadable, detail) => pending.push({ detail }),
+			onOutcome: (id) => outcomes.push(id),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return { engine, pending, outcomes, release: () => release?.() };
+	}
+
+	it('raises no toast under the policy the user just replaced', async () => {
+		const h = parked();
+		const sweep = h.engine.tick();
+		for (let i = 0; i < 5; i += 1) {
+			await Promise.resolve();
+		}
+
+		// The user switches notifications off, or down to `count`.
+		h.engine.reset('76561198000000001');
+		h.release();
+		await sweep;
+
+		expect(h.pending, 'a toast was composed from settings the user had already replaced').toEqual(
+			[]
+		);
+	});
+
+	/*
+	 * A confirm-mode poll that actually approved something still reports it.
+	 * Approving a trade is a fact about the world whatever the settings now say,
+	 * and the activity log is the only record of it.
+	 */
+	it('still reports an outcome it really achieved', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const accounts = [account({ trades: true })];
+		const outcomes: string[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: async () => {
+					await gate;
+					return { approved: [], held: [], unreadable: 0 };
+				}
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onOutcome: (id) => outcomes.push(id),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		const sweep = engine.tick();
+		for (let i = 0; i < 5; i += 1) {
+			await Promise.resolve();
+		}
+		engine.reset('76561198000000001');
+		release?.();
+		await sweep;
+
+		expect(outcomes, 'a real approval went unrecorded').toHaveLength(1);
+	});
+});

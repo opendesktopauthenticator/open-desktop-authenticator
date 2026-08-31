@@ -730,14 +730,29 @@ describe('replacing an existing account', () => {
 			expect(vault.read().accounts[0]?.proxyUrl).toBe('http://user:secret@127.0.0.1:1080');
 		});
 
-		it('does not fire the routing hook when it was declined', async () => {
-			const onRoutingChanged = vi.fn();
-			imports = new ImportService(vault, { now: () => clock, onRoutingChanged });
-
+		/*
+		 * **A first import, so there is nothing to tear down.** This used to import
+		 * over an existing account and still expect silence, which was only true
+		 * because the check compared the proxy alone — while the import replaced
+		 * the account's shared and identity secrets. See the credentials test
+		 * below for what that missed.
+		 */
+		/*
+		 * **Rewritten around what it was actually for.** It asserted that the
+		 * teardown hook stayed silent, which held only because the check compared
+		 * the proxy alone — this same import replaces the account's shared and
+		 * identity secrets, so the teardown is now correct and firing. The
+		 * property the test exists to protect is that declining the file's proxy
+		 * leaves the stored one alone, and that is asserted directly.
+		 */
+		it('leaves the stored proxy alone when the file proxy was declined', async () => {
 			const id = stageOne(file({ Session: { proxy: 'http://user:secret@127.0.0.1:1080' } }));
-			await imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }]);
+			await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
 
-			expect(onRoutingChanged).not.toHaveBeenCalled();
+			const stored = vault.read().accounts[0];
+			expect(stored?.proxyUrl, "the file's proxy was adopted without being asked for").not.toBe(
+				'http://user:secret@127.0.0.1:1080'
+			);
 		});
 
 		it('declining does not clear routing the user set in the app', async () => {
@@ -779,7 +794,17 @@ describe('replacing an existing account', () => {
 		expect(vault.read().accounts[0]?.proxyUrl).toBe('http://new:secret@10.0.0.1:1080');
 	});
 
-	it('does not notify when the stored proxy URL is unchanged', async () => {
+	/**
+	 * **The teardown follows the account, not only the route.**
+	 *
+	 * This asserted silence when the proxy was unchanged — while the very same
+	 * import replaced the account's shared and identity secrets. So a live access
+	 * token, its pending nonces, its failure count and its ten-strike halt stayed
+	 * attached to secrets the vault no longer held. A halted account remained
+	 * halted after the replacement, which is the repair somebody performs to fix
+	 * it.
+	 */
+	it('notifies when the authenticator was replaced, even on the same proxy', async () => {
 		const onRoutingChanged = vi.fn();
 		imports = new ImportService(vault, { now: () => clock, onRoutingChanged });
 
@@ -790,10 +815,37 @@ describe('replacing an existing account', () => {
 			});
 		});
 
+		// The staged file carries different secrets from `existingAccount`.
 		const id = stageOne(file());
 		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
 
-		expect(onRoutingChanged).not.toHaveBeenCalled();
+		expect(
+			onRoutingChanged,
+			'the session and schedule stayed attached to secrets the vault no longer holds'
+		).toHaveBeenCalledWith('76561198000000001');
+	});
+
+	/*
+	 * And the case the original test was reaching for: a replacement that changes
+	 * nothing must not drop a session that is still correct on both counts.
+	 */
+	it('does not notify when neither the route nor the secrets changed', async () => {
+		const onRoutingChanged = vi.fn();
+		imports = new ImportService(vault, { now: () => clock, onRoutingChanged });
+
+		const same = file();
+		const first = stageOne(same);
+		await imports.commit([{ stagingId: first, replaceExisting: false, adoptProxy: false }]);
+		onRoutingChanged.mockClear();
+
+		// The identical file again, over the account it just created.
+		const again = stageOne(same);
+		await imports.commit([{ stagingId: again, replaceExisting: true, adoptProxy: false }]);
+
+		expect(
+			onRoutingChanged,
+			'a re-import that changed nothing dropped a live session'
+		).not.toHaveBeenCalled();
 	});
 });
 

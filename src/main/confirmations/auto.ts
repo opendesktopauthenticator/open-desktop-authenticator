@@ -320,6 +320,23 @@ export class AutoConfirmEngine {
 	 * should not wait out a backoff earned before they did.
 	 */
 	reset(steamId64: string): void {
+		/*
+		 * **The epoch too, not only the schedule.**
+		 *
+		 * A poll captures `notify` and the disclosure detail before its request
+		 * and uses them after it. Clearing the schedule alone left a request in
+		 * flight holding the settings the user had just replaced — so switching
+		 * notifications to Off, or `full` down to `count`, still produced one last
+		 * `full` toast naming the trade partner and the headline. The one toast
+		 * somebody switched the feature off to stop.
+		 *
+		 * Disowning it costs nothing that matters: `runOne` still reports an
+		 * outcome it really achieved, because approving a trade is a fact about
+		 * the world whatever the settings now say. What it stops is a schedule
+		 * written from replaced settings, and a notification composed under a
+		 * policy that no longer holds.
+		 */
+		this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
 		this.state.delete(steamId64);
 		// The schedule just changed; the cached soonest time may no longer be it.
 		this.earliestDueAt = 0;

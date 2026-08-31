@@ -574,6 +574,31 @@ export class ImportService {
 		const proxyBefore = new Map(
 			this.vault.read().accounts.map((account) => [account.steamId64, account.proxyUrl] as const)
 		);
+		/*
+		 * **And the credentials, because a replacement can keep the same proxy.**
+		 *
+		 * The teardown below was fired only when the proxy URL changed, on the
+		 * reasoning that a live session on the right proxy should be left alone.
+		 * True as far as it goes — and it misses the case where the *account*
+		 * changed underneath a session that is still on the right proxy.
+		 *
+		 * Re-importing an account whose authenticator was replaced keeps its
+		 * cached access token, its pending nonces, its failure count and its
+		 * ten-strike halt, all attached to secrets the vault no longer holds. A
+		 * halted account stays halted after a successful replacement, which is
+		 * exactly the repair somebody performs to fix it.
+		 */
+		const credentialsBefore = new Map(
+			this.vault
+				.read()
+				.accounts.map(
+					(account) =>
+						[
+							account.steamId64,
+							`${account.sharedSecret}|${account.identitySecret}|${account.refreshToken ?? ''}`
+						] as const
+				)
+		);
 		const touched = new Set<string>();
 		/** Accounts that did not exist before this commit. See `onAccountStored`. */
 		const freshlyStored = new Set<string>();
@@ -693,7 +718,14 @@ export class ImportService {
 			if (!after) {
 				continue;
 			}
-			if (proxyBefore.get(steamId64) !== after.proxyUrl) {
+			// Either reason, one teardown. What has to be dropped is the same set
+			// in both cases — the session, the nonces, the schedule — and keeping
+			// two callbacks in step would be one more thing to get wrong.
+			const credentialsAfter = `${after.sharedSecret}|${after.identitySecret}|${after.refreshToken ?? ''}`;
+			if (
+				proxyBefore.get(steamId64) !== after.proxyUrl ||
+				credentialsBefore.get(steamId64) !== credentialsAfter
+			) {
 				this.onRoutingChanged(steamId64);
 			}
 
