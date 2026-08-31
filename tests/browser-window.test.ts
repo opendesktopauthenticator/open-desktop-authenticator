@@ -65,6 +65,8 @@ function harness(
 		loadFails?: boolean;
 		/** The load never settles — neither resolves nor rejects. */
 		loadHangs?: boolean;
+		/** `clearStorageData` rejects, so the partition keeps its cookies. */
+		wipeFails?: boolean;
 		/**
 		 * A redirect the main frame passes through *during* the first load.
 		 *
@@ -155,6 +157,12 @@ function harness(
 		setUserAgent: (ua) => recorded.userAgents.push(ua),
 		clearStorageData: () => {
 			recorded.wiped.push(partitionName);
+			// A wipe that rejects is the case the manager used to swallow: the
+			// partition name is derived from the account, so the next open lands on
+			// the same jar with whatever Steam set still in it.
+			if (wipeFails) {
+				return Promise.reject(new Error('session gone'));
+			}
 			return Promise.resolve();
 		},
 		cookies: {
@@ -164,6 +172,10 @@ function harness(
 			}
 		}
 	};
+
+	// Mutable, so a test can let the retry succeed — which is the difference
+	// between "refuses for ever" and "asks again once".
+	let wipeFails = overrides.wipeFails === true;
 
 	const window: BrowserWindowHandle = {
 		loadURL: (url) => {
@@ -241,6 +253,10 @@ function harness(
 		host,
 		recorded,
 		go: (url: string) => navigate(url),
+		/** Let a wipe that was failing start working. */
+		letWipeSucceed: () => {
+			wipeFails = false;
+		},
 		/** Fire the window's own `closed`, as Electron would. */
 		endWindow: () => {
 			for (const listener of [...closedListeners]) {
@@ -2573,5 +2589,98 @@ describe('after an open that did not finish', () => {
 
 		await browsers.closeAll();
 		expect(h.recorded.closed, 'the lock closed a window that was already gone').toBe(afterOpen);
+	});
+});
+
+/**
+ * **A partition that could not be emptied must not be reused.**
+ *
+ * `clearStorageData` rejecting was swallowed, and the marker saying "there is
+ * something in here" was dropped in the same breath. The partition name is
+ * derived from the account id, so the next open landed on that exact jar —
+ * still holding the previous `steamLoginSecure`.
+ *
+ * Two of the things this module exists to prevent, from one swallowed error: a
+ * Steam session outliving the lock that ended it, and an account's old route
+ * and its new one sharing a cookie jar, which links them.
+ */
+describe('a partition the app could not clear', () => {
+	it('refuses the next open rather than reusing it', async () => {
+		const h = harness({ wipeFails: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		await browsers.open(ACCOUNT);
+		await browsers.closeAccount(ACCOUNT.steamId64);
+
+		await expect(
+			browsers.open(ACCOUNT),
+			'a window opened onto a jar that still held the old session'
+		).rejects.toBeInstanceOf(BrowserSessionError);
+	});
+
+	it('says why, and what would clear it', async () => {
+		const h = harness({ wipeFails: true });
+		const browsers = new AccountBrowsers(h.host);
+		await browsers.open(ACCOUNT);
+		await browsers.closeAccount(ACCOUNT.steamId64);
+
+		const outcome = await settled(browsers.open(ACCOUNT));
+		expect(why(outcome)).toMatch(/could not be cleared/i);
+		expect(why(outcome), 'the refusal did not say how to recover').toMatch(/lock|restart/i);
+	});
+
+	/*
+	 * One retry before refusing: the usual cause is a session that was
+	 * momentarily unreachable, and refusing something the user just asked for
+	 * without asking again is worse than the failure.
+	 */
+	it('retries once, and opens when the retry succeeds', async () => {
+		const h = harness({ wipeFails: true });
+		const browsers = new AccountBrowsers(h.host);
+		await browsers.open(ACCOUNT);
+		await browsers.closeAccount(ACCOUNT.steamId64);
+
+		// Whatever was wrong has passed.
+		h.letWipeSucceed();
+		await expect(browsers.open(ACCOUNT)).resolves.toBeUndefined();
+	});
+
+	it('does not refuse when the wipe worked', async () => {
+		const h = harness();
+		const browsers = new AccountBrowsers(h.host);
+		await browsers.open(ACCOUNT);
+		await browsers.closeAccount(ACCOUNT.steamId64);
+		await expect(browsers.open(ACCOUNT)).resolves.toBeUndefined();
+	});
+});
+
+/*
+ * The other wipe path. `closeAccount` hands the window to `abandon`; a lock
+ * sweep wipes partitions it has no window for — a window the user closed
+ * themselves is the common case — and that branch clears storage directly.
+ * Both have to record the outcome, and only one of them did.
+ */
+describe('a partition a lock could not clear', () => {
+	it('refuses the next open rather than reusing it', async () => {
+		const h = harness({ wipeFails: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		await browsers.open(ACCOUNT);
+		h.endWindow(); // the user closed it, so the lock has no handle
+		await browsers.closeAll();
+
+		await expect(
+			browsers.open(ACCOUNT),
+			'a lock that could not empty the jar let the next window reuse it'
+		).rejects.toBeInstanceOf(BrowserSessionError);
+	});
+
+	it('opens normally when the lock did clear it', async () => {
+		const h = harness();
+		const browsers = new AccountBrowsers(h.host);
+		await browsers.open(ACCOUNT);
+		h.endWindow();
+		await browsers.closeAll();
+		await expect(browsers.open(ACCOUNT)).resolves.toBeUndefined();
 	});
 });

@@ -478,8 +478,7 @@ describe('proxy options for steam-session', () => {
 			'http://1.2.3.4:8080',
 			'https://1.2.3.4:8443',
 			'socks5://1.2.3.4:1080',
-			'socks5h://1.2.3.4:1080',
-			'socks4://1.2.3.4:1080'
+			'socks5h://1.2.3.4:1080'
 		]) {
 			const keys = Object.keys(steamSessionProxy(url));
 			expect(keys, url).toHaveLength(1);
@@ -517,9 +516,6 @@ describe('a portless SOCKS proxy', () => {
 	it('carries the port steam-session needs', () => {
 		expect(steamSessionProxy('socks5://proxy.example')).toEqual({
 			socksProxy: 'socks5h://proxy.example:1080'
-		});
-		expect(steamSessionProxy('socks4://proxy.example')).toEqual({
-			socksProxy: 'socks4://proxy.example:1080'
 		});
 	});
 

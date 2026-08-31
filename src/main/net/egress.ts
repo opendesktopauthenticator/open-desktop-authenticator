@@ -29,7 +29,43 @@
  * split this application spent a release closing. `socks5` is supported
  * everywhere, does remote DNS on both stacks, and is the answer.
  */
-const SUPPORTED = new Set(['http:', 'https:', 'socks5:', 'socks5h:', 'socks4:']);
+const SUPPORTED = new Set(['http:', 'https:', 'socks5:', 'socks5h:']);
+
+/**
+ * Refused, with a reason rather than a shrug.
+ *
+ * **SOCKS4 cannot carry a hostname.** The protocol takes an IP address, so the
+ * client resolves first and the lookup happens on the machine — every Steam
+ * host this application contacts, in the clear, to whatever resolver the
+ * network hands out. The proxy sees the connection; the ISP sees the question.
+ *
+ * That is not a corner case for this feature, it is the feature failing. The
+ * routing screen's promise is that an account's traffic leaves by the address
+ * the user chose, and the whole reason `Require proxies` exists is to make that
+ * absolute rather than best-effort. A scheme that leaks which accounts are being
+ * contacted, on every poll, cannot satisfy it.
+ *
+ * It was accepted before, with a comment noting the local resolution as a known
+ * limitation. A known limitation that defeats the guarantee is not a limitation,
+ * and the rest of this module already fails closed for far less — a window
+ * refuses to open rather than fall back to the real address.
+ *
+ * Named separately from the unknown-scheme case so the error can say what to
+ * use instead. Somebody with a working SOCKS4 endpoint almost always has SOCKS5
+ * on the same host.
+ */
+const REFUSED_SCHEMES = new Map([
+	[
+		'socks4:',
+		'SOCKS4 cannot look up hostnames through the proxy, so every Steam address would be ' +
+			'resolved by this machine and visible to your network. Use socks5:// instead — the same ' +
+			'proxy almost certainly speaks it.'
+	],
+	[
+		'socks4a:',
+		'SOCKS4a is not supported. Use socks5:// instead — the same proxy almost certainly speaks it.'
+	]
+]);
 
 /**
  * How each maps onto Chromium's proxy-rule vocabulary.
@@ -523,6 +559,12 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 		throw new EgressError('that is not a usable proxy address');
 	}
 
+	// Named refusals first, so the message can say what to use instead rather
+	// than only what will not work.
+	const refused = REFUSED_SCHEMES.get(url.protocol);
+	if (refused !== undefined) {
+		throw new EgressError(refused);
+	}
 	if (!SUPPORTED.has(url.protocol)) {
 		throw new EgressError(
 			`${url.protocol.replace(':', '')} proxies are not supported — use http, https or socks5`

@@ -690,7 +690,19 @@ function withoutLocale(pathname: string): string {
  * the caller needs to see, and a secondary error here would replace it with a
  * less useful one.
  */
-async function abandon(window: BrowserWindowHandle, session: BrowserSessionHandle): Promise<void> {
+/**
+ * Close the window and empty its partition.
+ *
+ * **Returns whether the storage was actually cleared**, which it did not used
+ * to. The window closing and the session emptying are different promises: the
+ * first is cosmetic, the second is what stops a Steam login cookie outliving
+ * the lock that was supposed to end it. Swallowing the second failure silently
+ * made them look like one thing.
+ */
+async function abandon(
+	window: BrowserWindowHandle,
+	session: BrowserSessionHandle
+): Promise<boolean> {
 	try {
 		if (!window.isDestroyed()) {
 			window.close();
@@ -700,9 +712,11 @@ async function abandon(window: BrowserWindowHandle, session: BrowserSessionHandl
 	}
 	try {
 		await session.clearStorageData?.();
+		return true;
 	} catch {
-		// The window is closed either way; an unreachable session is the lesser
-		// problem and still worth having tried to remove.
+		// The window is closed either way, so this is the lesser problem — but it
+		// is not nothing, and the caller has to know rather than assume.
+		return false;
 	}
 }
 
@@ -817,6 +831,22 @@ export class AccountBrowsers {
 	 * and it includes the ones whose window never finished being built.
 	 */
 	private readonly seeded = new Set<string>();
+
+	/**
+	 * Partitions this process tried to empty and could not.
+	 *
+	 * **`clearStorageData` failing used to be swallowed and forgotten.** The
+	 * marker that said "there is something here" was dropped in the same breath,
+	 * so the next open reused the same deterministic partition — still holding
+	 * the previous `steamLoginSecure` — without retrying and without refusing.
+	 *
+	 * That turns a transient failure into two of the things this module exists to
+	 * prevent: a Steam session outliving the lock that ended it, and an account's
+	 * old route and its new one sharing a cookie jar, which links them.
+	 *
+	 * An entry here is cleared only by a wipe that actually succeeds.
+	 */
+	private readonly dirty = new Set<string>();
 
 	constructor(private readonly host: BrowserHost) {}
 
@@ -1018,6 +1048,35 @@ export class AccountBrowsers {
 			 * `abandon` cleans up the paths it knows about, and this is the backstop
 			 * for the ones it does not.
 			 */
+			/*
+			 * **A partition that could not be emptied is not reused.**
+			 *
+			 * Its name is derived from the account id, so this open lands on the
+			 * exact jar the last teardown failed to clear — still holding whatever
+			 * Steam set. Reusing it would put the previous session back on screen,
+			 * or link an old route to a new one through a shared cookie.
+			 *
+			 * One retry first: the usual cause is a session that was momentarily
+			 * unreachable, and it costs nothing to ask again before refusing
+			 * something the user just asked for.
+			 */
+			if (this.dirty.has(options.steamId64)) {
+				try {
+					await this.sessionFor(options.steamId64).clearStorageData?.();
+					this.mark(options.steamId64, true);
+				} catch {
+					this.mark(options.steamId64, false);
+				}
+				this.stillWanted(options.steamId64, generation, epoch);
+				if (this.dirty.has(options.steamId64)) {
+					throw new BrowserSessionError(
+						'the previous browser session for this account could not be cleared, so a new ' +
+							'window would reuse it. Lock and unlock the vault, or restart the app, before ' +
+							'opening it again.'
+					);
+				}
+			}
+
 			this.seeded.add(options.steamId64);
 			let window: BrowserWindowHandle;
 			try {
@@ -1127,19 +1186,32 @@ export class AccountBrowsers {
 	 * finish first and have its brand-new cookie erased by the previous
 	 * account's cleanup.
 	 */
+	/** Record whether a wipe actually emptied the partition. */
+	private mark(steamId64: string, cleared: boolean): void {
+		if (cleared) {
+			this.dirty.delete(steamId64);
+		} else {
+			this.dirty.add(steamId64);
+		}
+	}
+
 	private async wipe(steamId64: string, window?: BrowserWindowHandle): Promise<void> {
 		const done = (async () => {
 			// Anything already wiping for this account finishes first, so two
 			// overlapping teardowns cannot interleave with an open between them.
 			await this.clearing.get(steamId64)?.catch(() => undefined);
 			if (window) {
-				await abandon(window, this.sessionFor(steamId64));
+				this.mark(steamId64, await abandon(window, this.sessionFor(steamId64)));
 				return;
 			}
 			try {
 				await this.sessionFor(steamId64).clearStorageData?.();
+				this.mark(steamId64, true);
 			} catch {
-				// Unreachable session; still worth having tried.
+				// **Remembered, not shrugged at.** The partition name is derived from
+				// the account id, so the next open lands on this same jar — and it
+				// still holds whatever Steam set.
+				this.mark(steamId64, false);
 			}
 		})();
 		this.clearing.set(steamId64, done);

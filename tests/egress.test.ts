@@ -59,7 +59,6 @@ describe('planning a proxy', () => {
 		expect(planProxy('http://proxy.example').proxyRules).toBe('http://proxy.example:80');
 		expect(planProxy('https://proxy.example').proxyRules).toBe('https://proxy.example:443');
 		expect(planProxy('socks5://proxy.example').proxyRules).toBe('socks5://proxy.example:1080');
-		expect(planProxy('socks4://proxy.example').proxyRules).toBe('socks4://proxy.example:1080');
 		expect(planProxy('socks5h://proxy.example').proxyRules).toBe('socks5://proxy.example:1080');
 	});
 
@@ -70,7 +69,6 @@ describe('planning a proxy', () => {
 		// broke when the endpoint comparison stopped being a substring test.
 		const measured: ReadonlyArray<readonly [string, string]> = [
 			['socks5://proxy.example', 'SOCKS5 proxy.example:1080'],
-			['socks4://proxy.example', 'SOCKS proxy.example:1080'],
 			['http://proxy.example', 'PROXY proxy.example:80'],
 			['https://proxy.example', 'HTTPS proxy.example:443'],
 			['socks5://[::1]:1080', 'SOCKS5 [::1]:1080']
@@ -1601,7 +1599,6 @@ describe('proxies the two network stacks would route differently', () => {
 		for (const url of [
 			'socks5://user:pass@10.0.0.1:1080',
 			'socks5h://user:pass@10.0.0.1:1080',
-			'socks4://user@10.0.0.1:1080',
 			'socks5://:pass@10.0.0.1:1080'
 		]) {
 			expect(() => planProxy(url)).toThrow(/cannot authenticate/i);
@@ -2113,5 +2110,51 @@ describe('a session cached with the wrong proxy', () => {
 		await factory.forAccount(routed);
 
 		expect(sessions[0]?.proxyCalls ?? 0, 'the proxy was re-applied for no reason').toBe(applied);
+	});
+});
+
+/**
+ * **SOCKS4 cannot keep the promise the routing screen makes.**
+ *
+ * The protocol takes an IP address, not a hostname, so the client resolves
+ * first: every Steam host this application contacts is looked up on the machine,
+ * in the clear, by whatever resolver the network hands out. The proxy sees the
+ * connection and the ISP sees the question.
+ *
+ * It was accepted before, with a comment noting local resolution as a known
+ * limitation. A known limitation that defeats the guarantee is not a limitation
+ * — and `Require proxies` exists precisely to make "this account's traffic
+ * leaves by the address I chose" absolute rather than best-effort. The rest of
+ * this module already fails closed for far less: a browser window refuses to
+ * open rather than quietly use the real address.
+ */
+describe('SOCKS4', () => {
+	it('is refused', () => {
+		expect(() => planProxy('socks4://proxy.example:1080')).toThrow();
+	});
+
+	it('is refused in the strict-mode spelling too', () => {
+		expect(() => planProxy('socks4a://proxy.example:1080')).toThrow();
+	});
+
+	/*
+	 * The message has to name the replacement. Somebody with a working SOCKS4
+	 * endpoint almost always has SOCKS5 on the same host, and an error that only
+	 * says "no" sends them to look for a different proxy.
+	 */
+	it('says why, and what to use instead', () => {
+		let message = '';
+		try {
+			planProxy('socks4://proxy.example:1080');
+		} catch (err) {
+			message = err instanceof Error ? err.message : String(err);
+		}
+		expect(message, 'the refusal did not explain the leak').toMatch(/hostname|resolve/i);
+		expect(message, 'the refusal did not name a working alternative').toContain('socks5');
+	});
+
+	it('leaves the schemes that do resolve remotely working', () => {
+		expect(planProxy('socks5://proxy.example').proxyRules).toBe('socks5://proxy.example:1080');
+		expect(planProxy('socks5h://proxy.example').proxyRules).toBe('socks5://proxy.example:1080');
 	});
 });
