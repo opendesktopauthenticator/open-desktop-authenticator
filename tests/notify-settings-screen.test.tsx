@@ -16,9 +16,17 @@ import type { AccountSummary } from '../src/shared/ipc';
  * noticing by looking.
  */
 
-function account(overrides: Partial<AccountSummary['autoConfirm']> = {}): AccountSummary {
+function account(
+	overrides: Partial<AccountSummary['autoConfirm']> = {},
+	/**
+	 * Distinct ids matter now: `pollLoad` identifies the account being edited by
+	 * id, and a list where every account shares one is a list of one as far as it
+	 * is concerned.
+	 */
+	steamId64 = '76561198000000001'
+): AccountSummary {
 	return {
-		steamId64: '76561198000000001',
+		steamId64,
 		accountName: 'trader',
 		status: 'active',
 		hasRevocationCode: true,
@@ -63,17 +71,62 @@ describe('which accounts count toward the rate warning', () => {
  * either number.
  */
 describe('what the rate warning says', () => {
+	const ID = '76561198000000001';
+	/** The account under edit, with the values on screen for it. */
+	const editing = (pollIntervalSeconds: number, polled = true) => ({
+		steamId64: ID,
+		polled,
+		pollIntervalSeconds
+	});
+
 	it('is requests per minute, not seconds times accounts', () => {
-		const accounts = [account({ trades: true }), account({ trades: true })];
+		const accounts = [account({ trades: true }), account({ trades: true }, 'other')];
 		// 60 / 15 = 4 polls a minute, twice = 8. Not 15 × 2 = 30.
-		expect(pollLoad(15, accounts)).toEqual({ requestsPerMinute: 8, polled: 2 });
+		expect(pollLoad(accounts, editing(15))).toEqual({ requestsPerMinute: 8, polled: 2 });
 	});
 
 	it('falls as the interval grows', () => {
 		const accounts = [account({ trades: true })];
-		expect(pollLoad(60, accounts).requestsPerMinute).toBe(1);
-		expect(pollLoad(30, accounts).requestsPerMinute).toBe(2);
-		expect(pollLoad(10, accounts).requestsPerMinute).toBe(6);
+		expect(pollLoad(accounts, editing(60)).requestsPerMinute).toBe(1);
+		expect(pollLoad(accounts, editing(30)).requestsPerMinute).toBe(2);
+		expect(pollLoad(accounts, editing(10)).requestsPerMinute).toBe(6);
+	});
+
+	/**
+	 * **Each account contributes its own interval, not the edited one's.**
+	 *
+	 * This scaled the edited account's pending interval by the number of polled
+	 * accounts, which is right only when they all share it — and every fixture
+	 * here did, at 15 seconds, so both formulas agreed and the tests could not
+	 * see the difference. The screen printed "About 24 requests a minute" for an
+	 * account edited to 10s beside three sitting at an hour, against a true 6.
+	 */
+	it('sums each account at its own interval', () => {
+		const accounts = [
+			account({ trades: true }),
+			account({ trades: true, pollIntervalSeconds: 3600 }, 'b'),
+			account({ trades: true, pollIntervalSeconds: 3600 }, 'c'),
+			account({ trades: true, pollIntervalSeconds: 3600 }, 'd')
+		];
+		// 6 for the edited account at 10s, plus 3 × 0.0166 for the hourly ones.
+		expect(
+			pollLoad(accounts, editing(10)),
+			'the edited interval was applied to accounts that do not use it'
+		).toEqual({ requestsPerMinute: 6, polled: 4 });
+	});
+
+	/* And the understating direction, which is the one that hides real load. */
+	it('does not understate three fast accounts beside one slow edit', () => {
+		const accounts = [
+			account({ trades: true }),
+			account({ trades: true, pollIntervalSeconds: 10 }, 'b'),
+			account({ trades: true, pollIntervalSeconds: 10 }, 'c'),
+			account({ trades: true, pollIntervalSeconds: 10 }, 'd')
+		];
+		expect(
+			pollLoad(accounts, editing(3600)).requestsPerMinute,
+			'editing one account to an hour reported the whole vault as idle'
+		).toBe(18);
 	});
 
 	/*
@@ -82,8 +135,8 @@ describe('what the rate warning says', () => {
 	 * people learn to dismiss.
 	 */
 	it('counts only the accounts actually polled', () => {
-		const accounts = [account({ trades: true }), account(), account(), account()];
-		expect(pollLoad(15, accounts), 'idle accounts were counted as load').toEqual({
+		const accounts = [account({ trades: true }), account({}, 'b'), account({}, 'c')];
+		expect(pollLoad(accounts, editing(15)), 'idle accounts were counted as load').toEqual({
 			requestsPerMinute: 4,
 			polled: 1
 		});
@@ -92,13 +145,36 @@ describe('what the rate warning says', () => {
 	it('counts a watching account alongside a confirming one', () => {
 		const accounts = [
 			account({ trades: true }),
-			account({ notify: { enabled: true, detail: 'count' } })
+			account({ notify: { enabled: true, detail: 'count' } }, 'other')
 		];
-		expect(pollLoad(15, accounts).polled).toBe(2);
+		expect(pollLoad(accounts, editing(15)).polled).toBe(2);
 	});
 
 	it('says nothing about a vault with nothing switched on', () => {
-		expect(pollLoad(15, [account(), account()])).toEqual({ requestsPerMinute: 0, polled: 0 });
+		expect(pollLoad([account(), account({}, 'other')], editing(15, false))).toEqual({
+			requestsPerMinute: 0,
+			polled: 0
+		});
+	});
+
+	/**
+	 * **The switches on screen, not the ones last saved.**
+	 *
+	 * `isPolled` reads the stored settings, so switching notifications on for an
+	 * idle account left it out of the count until Save — and the moment somebody
+	 * wants to know what the rate will be is *before* they commit to it.
+	 */
+	it('counts the account being edited by what the form says', () => {
+		const accounts = [account(), account({ trades: true }, 'other')];
+		expect(
+			pollLoad(accounts, editing(15)),
+			'a switch turned on in the form did not count until it was saved'
+		).toEqual({ requestsPerMinute: 8, polled: 2 });
+	});
+
+	it('stops counting it when the form turns everything off', () => {
+		const accounts = [account({ trades: true }), account({ trades: true }, 'other')];
+		expect(pollLoad(accounts, editing(15, false))).toEqual({ requestsPerMinute: 4, polled: 1 });
 	});
 
 	/*

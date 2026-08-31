@@ -198,15 +198,39 @@ export class ConfirmationNotifier {
 	 * three places to remember and one to forget, and the one forgotten would be
 	 * a toast that looks identical and does nothing when clicked.
 	 */
-	private toast(steamId64: string, title: string, body: string): void {
+	/**
+	 * @returns whether the toast was actually delivered.
+	 *
+	 * **Because every caller records "we have said this" before calling here.**
+	 * `seen`, `lastUnreadable` and `toldSignInNeeded` all exist to stop the same
+	 * thing being announced on every poll, and they were written first — so a
+	 * `host.show` that threw left the entry marked as announced and it was never
+	 * announced again for the life of the session. Silently, and worst for
+	 * exactly the confirmation that matters most: a security-critical one is
+	 * added to `seen` by the seeding branch whether or not its toast survived.
+	 *
+	 * `guarded()` in the engine stops such a throw from being scored as a Steam
+	 * failure. It cannot un-suppress the notification, because by then the
+	 * bookkeeping has already happened.
+	 *
+	 * Caught rather than propagated: `Notification` is an OS surface, and the
+	 * useful response to it failing is to try again on the next poll, not to
+	 * abandon the pass that found something.
+	 */
+	private toast(steamId64: string, title: string, body: string): boolean {
 		// The title is sanitised here rather than at each call site, for the same
 		// reason the click is attached here: four call sites is three chances to
 		// forget, and the one forgotten looks identical.
-		this.host.show({
-			title: safeSteamText(title),
-			body,
-			onClick: () => this.onActivate(steamId64)
-		});
+		try {
+			this.host.show({
+				title: safeSteamText(title),
+				body,
+				onClick: () => this.onActivate(steamId64)
+			});
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	private stateFor(steamId64: string): AccountNotifyState | undefined {
@@ -255,7 +279,26 @@ export class ConfirmationNotifier {
 			// about the takeover and not about the entry that could not be read —
 			// which might have been a second one.
 			if (critical.length > 0 || unreadable > 0) {
-				this.toast(steamId64, accountName, composeBody(detail, critical, unreadable));
+				const said = this.toast(steamId64, accountName, composeBody(detail, critical, unreadable));
+				if (!said) {
+					/*
+					 * **The seed stands; the announcement does not.**
+					 *
+					 * Staying seeded is right — the baseline was established, and
+					 * re-seeding would announce the whole backlog next time. But a
+					 * critical confirmation only reached `seen` as part of that
+					 * baseline, and it was supposed to be announced *despite* the
+					 * seeding. Left in, it would never be mentioned again: an account
+					 * takeover attempt, silently swallowed by a failed toast.
+					 */
+					const seeded = this.stateFor(steamId64);
+					if (seeded) {
+						for (const entry of critical) {
+							seeded.seen.delete(entry.id);
+						}
+						seeded.lastUnreadable = 0;
+					}
+				}
 			}
 			return;
 		}
@@ -289,6 +332,8 @@ export class ConfirmationNotifier {
 		//    reappearance would compare against the old high-water mark and be
 		//    swallowed for good.
 		const newlyUnreadable = unreadable > existing.lastUnreadable;
+		/** What was announced before this poll, so a failed toast can restore it. */
+		const previouslyUnreadable = existing.lastUnreadable;
 		existing.lastUnreadable = unreadable;
 
 		// 6. One toast, not two. A poll bringing both a new confirmation and an
@@ -296,7 +341,21 @@ export class ConfirmationNotifier {
 		if (fresh.length === 0 && !newlyUnreadable) {
 			return;
 		}
-		this.toast(steamId64, accountName, composeBody(detail, fresh, unreadable));
+		if (!this.toast(steamId64, accountName, composeBody(detail, fresh, unreadable))) {
+			/*
+			 * **Nothing was said, so nothing may be marked as said.**
+			 *
+			 * Step 4 put these ids in `seen` and step 5 raised the unreadable
+			 * high-water mark, both meaning "announced". Leaving them after a toast
+			 * that never appeared suppresses those confirmations for the rest of
+			 * the session; undoing them makes the next poll try again, which is the
+			 * only useful response to an OS notification failing.
+			 */
+			for (const entry of fresh) {
+				existing.seen.delete(entry.id);
+			}
+			existing.lastUnreadable = previouslyUnreadable;
+		}
 	}
 
 	/**
@@ -343,7 +402,14 @@ export class ConfirmationNotifier {
 				lastUnreadable: 0
 			});
 		}
-		this.toast(steamId64, accountName, 'Sign in again to keep checking this account.');
+		if (!this.toast(steamId64, accountName, 'Sign in again to keep checking this account.')) {
+			// Same rule: the flag means "we told them", and we did not. Cleared so
+			// the next poll — which will find the same expired session — says it.
+			const current = this.stateFor(steamId64);
+			if (current) {
+				current.toldSignInNeeded = false;
+			}
+		}
 	}
 
 	/**

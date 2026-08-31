@@ -273,9 +273,23 @@ export function Activity({
 			) : entries.length === 0 ? (
 				<div className="empty">
 					<h2>Nothing yet</h2>
+					{/*
+						**It said "it never will", and that was wrong twice over.**
+
+						This log is not only about approving. An account with notifications
+						on and both auto types off is polled just as hard, and the failure
+						and halt paths write entries for it — "Checking stopped for this
+						account" among them. So a user who switched on notifications only
+						was told the screen would stay empty for ever, about the one screen
+						that would tell them their account had stopped being checked.
+
+						What is true of the default is that nothing is switched on, and
+						nothing switched on means nothing polled. That is worth saying; the
+						promise about the future is not.
+					*/}
 					<p>
-						Automatic confirmation has not done anything. If you have not switched it on for an
-						account, it never will — that is the default.
+						Nothing has been checked or approved yet. This screen fills in once an account has
+						automatic confirmation or notifications switched on — both are off by default.
 					</p>
 				</div>
 			) : (

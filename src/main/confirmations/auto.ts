@@ -16,8 +16,11 @@ import type { NotifyDetail } from '../../shared/vault-schema';
  * Four rules shape it:
  *
  *  - **It does nothing until a user switches something on.** An account with
- *    neither type enabled is never polled at all, so the default costs no
- *    requests and takes no risk.
+ *    nothing enabled is never polled at all, so the default costs no requests
+ *    and takes no risk. There are three switches, not two: notifications alone
+ *    are enough to poll an account, and that arm issues a real request to Steam
+ *    — this bullet said "neither type" while `dueAccounts` was already reading
+ *    `notify.enabled` beside them.
  *  - **It stops dead when the vault locks.** A locked vault means the user is
  *    not present, and approving trades on behalf of somebody who is not there is
  *    exactly what this must not do unattended.
@@ -649,9 +652,14 @@ export class AutoConfirmEngine {
 	 * a signal that one operator is behind them, and it is one the routing feature
 	 * cannot touch.
 	 *
-	 * Derived from the SteamID rather than random so it survives a restart. An
-	 * offset that reshuffles on every launch would produce a *different* kind of
-	 * correlation — a whole set of accounts changing phase at the same moment.
+	 * **Derived from the position in the sweep, not from the SteamID.** This said
+	 * "derived from the SteamID" for a long time after it had stopped being true —
+	 * contradicted eight lines below by its own inline comment and by a body that
+	 * mentions no account id at all. The rationale it gave still holds under the
+	 * real mechanism, which is why nobody noticed: index order is stable across a
+	 * restart, so the offsets do not reshuffle on every launch, and a whole set of
+	 * accounts changing phase at once is the correlation that would replace the
+	 * one this prevents.
 	 *
 	 * Cheap and non-cryptographic on purpose: this decides when to poll, not
 	 * anything a secret depends on.

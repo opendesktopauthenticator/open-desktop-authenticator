@@ -32,14 +32,38 @@ export function isPolled(account: AccountSummary): boolean {
  * `polled` counts accounts that are **actually** polled, not `accounts.length`.
  * Counting every account inflates the number for a vault where most are idle,
  * and a warning that overstates its case is one people learn to dismiss.
+ *
+ * **Summed per account, because each one has its own interval.** This used to
+ * scale the *edited* account's pending interval by the number of polled
+ * accounts, which is only right when every account shares that interval — and
+ * the fixtures did, so both formulas agreed and the tests could not see it.
+ * Editing one account to 10s beside three sitting at an hour printed "About 24
+ * requests a minute" against a true 6; the reverse understated, printing 0 while
+ * three accounts polled every ten seconds.
+ *
+ * @param editing the account being edited and the values on screen for it.
+ * Required, and not merely an interval, because the interval only ever applied
+ * to that one account — passing a bare number invited the reading that produced
+ * the bug. Its saved settings are stale by definition: the form holds newer
+ * ones, and without them turning notifications on for an idle account left it
+ * uncounted until Save, which is the wrong moment to learn what the rate will
+ * be.
  */
 export function pollLoad(
-	intervalSeconds: number,
-	accounts: readonly AccountSummary[]
+	accounts: readonly AccountSummary[],
+	editing: { steamId64: string; polled: boolean; pollIntervalSeconds: number }
 ): { requestsPerMinute: number; polled: number } {
-	const polled = accounts.filter(isPolled).length;
-	const safeInterval = Math.max(1, intervalSeconds);
-	return { requestsPerMinute: Math.round((60 / safeInterval) * polled), polled };
+	const isEdited = (account: AccountSummary): boolean => account.steamId64 === editing.steamId64;
+	const counted = accounts.filter((account) =>
+		isEdited(account) ? editing.polled : isPolled(account)
+	);
+	const perMinute = counted.reduce((total, account) => {
+		const seconds = isEdited(account)
+			? editing.pollIntervalSeconds
+			: account.autoConfirm.pollIntervalSeconds;
+		return total + 60 / Math.max(1, seconds);
+	}, 0);
+	return { requestsPerMinute: Math.round(perMinute), polled: counted.length };
 }
 
 /**
@@ -312,7 +336,12 @@ export function AutoConfirm({
 						 * requests, and a warning that hides at the one value most people
 						 * never change is a warning that never appears.
 						 */
-						const { requestsPerMinute, polled } = pollLoad(pollIntervalSeconds, accounts);
+						const { requestsPerMinute, polled } = pollLoad(accounts, {
+							steamId64: account.steamId64,
+							// The switches on screen, not the ones last saved.
+							polled: marketListings || trades || notifyEnabled,
+							pollIntervalSeconds
+						});
 						return (
 							<p className="hint bad">
 								About <strong>{requestsPerMinute}</strong> requests a minute across{' '}

@@ -45,6 +45,42 @@ function harness(): {
 	return { notifier: new ConfirmationNotifier({ host }), toasts };
 }
 
+/**
+ * A notifier whose OS surface is refusing, and can be persuaded to stop.
+ *
+ * `Notification` is an OS surface: it can fail for reasons that have nothing to
+ * do with this application, and the useful response is to say it again next
+ * poll rather than to mark it said.
+ */
+function refusingHarness(): {
+	notifier: ConfirmationNotifier;
+	toasts: { title: string; body: string }[];
+	/** Attempts, including the ones that threw. */
+	attempts: () => number;
+	recover: () => void;
+} {
+	const toasts: { title: string; body: string }[] = [];
+	let attempts = 0;
+	let failing = true;
+	const host: ToastHost = {
+		show: (options) => {
+			attempts += 1;
+			if (failing) {
+				throw new Error('no notification service on this machine');
+			}
+			toasts.push(options);
+		}
+	};
+	return {
+		notifier: new ConfirmationNotifier({ host }),
+		toasts,
+		attempts: () => attempts,
+		recover: () => {
+			failing = false;
+		}
+	};
+}
+
 describe('the first poll for an account', () => {
 	let h: ReturnType<typeof harness>;
 	beforeEach(() => {
@@ -635,5 +671,108 @@ describe('an account that confirms without notifying', () => {
 		h.notifier.pollSucceeded(ID);
 		h.notifier.signInNeeded(other, 'second');
 		expect(h.toasts).toHaveLength(2);
+	});
+});
+
+/**
+ * **A toast that never appeared must not count as having been said.**
+ *
+ * Every "already told them" record — `seen`, `lastUnreadable`,
+ * `toldSignInNeeded` — was written *before* `host.show` was called. So a throw
+ * out of the OS notification surface left the entry marked as announced and it
+ * was never announced again for the life of the session.
+ *
+ * `guarded()` in the engine stops such a throw being scored as a Steam failure,
+ * which is a different problem: by the time it catches, the bookkeeping has
+ * already happened. Nothing here covered a throwing host at all.
+ */
+describe('a notification surface that is refusing', () => {
+	it('says a confirmation again on the next poll', () => {
+		const h = refusingHarness();
+		h.notifier.pending(ID, 'trader', [], 0, 'full');
+		h.notifier.pending(ID, 'trader', [summary()], 0, 'count');
+		expect(h.attempts(), 'nothing was even attempted').toBe(1);
+
+		h.recover();
+		h.notifier.pending(ID, 'trader', [summary()], 0, 'count');
+
+		expect(
+			h.toasts,
+			'the confirmation was marked as announced by a toast that never appeared, so it was ' +
+				'never mentioned again'
+		).toHaveLength(1);
+	});
+
+	it('says an unreadable entry again on the next poll', () => {
+		const h = refusingHarness();
+		h.notifier.pending(ID, 'trader', [], 0, 'full');
+		h.notifier.pending(ID, 'trader', [], 2, 'count');
+
+		h.recover();
+		h.notifier.pending(ID, 'trader', [], 2, 'count');
+
+		expect(h.toasts, 'the unreadable high-water mark rose on a toast nobody saw').toHaveLength(1);
+		expect(h.toasts[0]?.body).toContain('could not be read');
+	});
+
+	/*
+	 * The worst case, and the reason this is not merely tidiness. A
+	 * security-critical confirmation reaches `seen` as part of the silent seed —
+	 * it is announced *despite* the seeding — so a failed toast there buried an
+	 * account takeover attempt with nothing else able to raise it.
+	 */
+	it('says a security-critical confirmation again after a failed first poll', () => {
+		const h = refusingHarness();
+		const critical = summary({
+			id: '9',
+			type: 6,
+			typeName: 'Account recovery',
+			securityCritical: true
+		});
+		h.notifier.pending(ID, 'trader', [critical], 0, 'type');
+		expect(h.attempts()).toBe(1);
+
+		h.recover();
+		h.notifier.pending(ID, 'trader', [critical], 0, 'type');
+
+		expect(h.toasts, 'an account takeover attempt was swallowed by a failed toast').toHaveLength(1);
+		expect(h.toasts[0]?.body).toContain('account recovery');
+	});
+
+	/*
+	 * And the seed itself stands. Re-seeding would announce the whole backlog,
+	 * which is what the silent seed exists to prevent.
+	 */
+	it('does not re-announce the ordinary backlog it seeded', () => {
+		const h = refusingHarness();
+		h.notifier.pending(ID, 'trader', [summary(), summary({ id: '2' })], 1, 'full');
+
+		h.recover();
+		h.notifier.pending(ID, 'trader', [summary(), summary({ id: '2' })], 0, 'full');
+
+		expect(h.toasts, 'the silent seed was undone, so the backlog was announced').toEqual([]);
+	});
+
+	it('says sign in again on the next expiry', () => {
+		const h = refusingHarness();
+		h.notifier.signInNeeded(ID, 'trader');
+		expect(h.attempts()).toBe(1);
+
+		h.recover();
+		h.notifier.signInNeeded(ID, 'trader');
+
+		expect(h.toasts, 'an expired session was reported once, to nobody').toHaveLength(1);
+	});
+
+	/*
+	 * And the throw does not escape. The engine's `guarded()` would catch it, but
+	 * relying on that makes every future caller of this class responsible for a
+	 * failure mode it cannot see.
+	 */
+	it('does not throw at its caller', () => {
+		const h = refusingHarness();
+		expect(() => h.notifier.pending(ID, 'trader', [summary()], 0, 'full')).not.toThrow();
+		expect(() => h.notifier.signInNeeded(ID, 'trader')).not.toThrow();
+		expect(() => h.notifier.halted(ID, 'trader', 'confirm')).not.toThrow();
 	});
 });
