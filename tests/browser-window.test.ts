@@ -63,6 +63,8 @@ function harness(
 		setProxy?: () => Promise<void>;
 		landsOn?: string;
 		loadFails?: boolean;
+		/** The load never settles — neither resolves nor rejects. */
+		loadHangs?: boolean;
 		/**
 		 * A redirect the main frame passes through *during* the first load.
 		 *
@@ -176,6 +178,15 @@ function harness(
 			}
 			if (overrides.loadFails === true) {
 				return Promise.reject(new Error('ERR_TUNNEL_CONNECTION_FAILED'));
+			}
+			/*
+			 * **A load that never settles**, which is the case neither a resolve nor
+			 * a reject can stand in for. A window whose load hangs is on screen and
+			 * signed in, and the code that would disown it runs after the await that
+			 * is not coming.
+			 */
+			if (overrides.loadHangs === true) {
+				return new Promise<void>(() => undefined);
 			}
 			/*
 			 * **A load into a window that was closed underneath it does not
@@ -2460,5 +2471,107 @@ describe('closing the windows a new policy forbids', () => {
 		expect(closed, 'the second window waited on the first wipe').toEqual([first, second]);
 		releaseWipe();
 		await sweeping;
+	});
+});
+
+/**
+ * **A window whose load never settles is still a signed-in window.**
+ *
+ * `openAccountBrowser` creates the window, then loads a page into it. The
+ * manager records what that function *returns*, so for the whole duration of
+ * the load there is a signed-in `WebContents` on screen that no map knows
+ * about. Every failure path was covered — both of them close the window and
+ * wipe the session before rethrowing — and a load that simply hangs reaches
+ * neither, because it never returns at all.
+ *
+ * A lock in that window used to complete, report success, and begin wiping
+ * storage while the window stayed open and logged in, for as long as the hang
+ * lasted. Nothing bounds that.
+ *
+ * These hold `loadURL` unresolved on purpose. The assertion that matters is
+ * that the real handle is closed **before** the load is ever released.
+ */
+describe('a browser whose first load never settles', () => {
+	it('is closed by a vault lock, without waiting for the load', async () => {
+		const h = harness({ loadHangs: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		// Never awaited: it cannot settle. The catch keeps the rejection this
+		// eventually produces from failing the run.
+		void browsers.open(ACCOUNT).catch(() => undefined);
+		// Let the open reach `createWindow` and park on the load.
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+
+		expect(h.recorded.windows, 'the window should exist by now').toHaveLength(1);
+		expect(h.recorded.closed, 'it should still be open before the lock').toBe(0);
+
+		await browsers.closeAll();
+
+		expect(
+			h.recorded.closed,
+			'the lock finished while a signed-in window was still on screen'
+		).toBe(1);
+	});
+
+	it('is closed when the account routing changes', async () => {
+		const h = harness({ loadHangs: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		void browsers.open(ACCOUNT).catch(() => undefined);
+		// Let the open reach `createWindow` and park on the load.
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		expect(h.recorded.closed).toBe(0);
+
+		await browsers.closeAccount(ACCOUNT.steamId64);
+
+		expect(
+			h.recorded.closed,
+			'the window went on browsing over the route the user just replaced'
+		).toBe(1);
+	});
+
+	/*
+	 * And the partition is wiped, which is the other half of what a lock owes:
+	 * the Steam cookie was written before the load began.
+	 */
+	it('has its partition wiped by the lock as well', async () => {
+		const h = harness({ loadHangs: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		void browsers.open(ACCOUNT).catch(() => undefined);
+		// Let the open reach `createWindow` and park on the load.
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		await browsers.closeAll();
+
+		expect(h.recorded.wiped.length, 'a signed-in partition survived the lock').toBeGreaterThan(0);
+	});
+});
+
+/**
+ * **An open that ended must leave nothing behind to close again.**
+ *
+ * `openAccountBrowser` closes the window itself before rethrowing, so the entry
+ * recorded while it was building is stale the moment the throw happens. Left
+ * there, a later lock closes an already-closed window — harmless in isolation,
+ * but it means the map grows one dead handle per failed open and a sweep can no
+ * longer tell what it actually closed.
+ */
+describe('after an open that did not finish', () => {
+	it('leaves nothing half-built for a later lock to close twice', async () => {
+		const h = harness({ loadFails: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		await expect(browsers.open(ACCOUNT)).rejects.toBeInstanceOf(BrowserSessionError);
+		const afterOpen = h.recorded.closed;
+		expect(afterOpen, 'the failed open should have closed its own window').toBe(1);
+
+		await browsers.closeAll();
+		expect(h.recorded.closed, 'the lock closed a window that was already gone').toBe(afterOpen);
 	});
 });

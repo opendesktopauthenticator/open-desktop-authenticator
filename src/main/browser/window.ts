@@ -250,6 +250,15 @@ export interface OpenBrowserOptions {
 	 * account-scoped — the smallest credential that does the job.
 	 */
 	accessToken: string;
+	/**
+	 * Told the moment the window exists, before anything is loaded into it.
+	 *
+	 * **This is what makes a lock able to reach a window whose load hangs.** The
+	 * caller records what this function *returns*, and a load that never settles
+	 * never returns — so without this the physical window is on screen, signed
+	 * in, in no map, for as long as the hang lasts.
+	 */
+	onCreated?: (window: BrowserWindowHandle) => void;
 }
 
 /**
@@ -417,6 +426,21 @@ export async function openAccountBrowser(
 	});
 
 	/*
+	 * **Handed over before it is loaded, not after it settles.**
+	 *
+	 * The note below says nothing past this point may leave a window behind, and
+	 * covers every path that *throws*. A load that never settles throws nothing:
+	 * it simply does not return, so the caller's post-await disown never runs and
+	 * the window it would have closed is not in any map. A lock then completes,
+	 * reports success and starts wiping storage while a signed-in `WebContents`
+	 * is still on screen — for as long as the load hangs, which has no bound.
+	 *
+	 * So the manager is told about the physical window the instant it exists.
+	 * From here a sweep can close it synchronously without waiting for anything.
+	 */
+	options.onCreated?.(window);
+
+	/*
 	 * A proxy carries HTTP; WebRTC opens its own UDP and hands a page the
 	 * machine's real local and public addresses. Turned off whenever this window
 	 * is routed — it is the one leak that survives a correctly applied proxy, and
@@ -492,11 +516,13 @@ export async function openAccountBrowser(
 	/*
 	 * **Nothing below here may leave a window behind.**
 	 *
-	 * From this point there is a window on screen holding a signed-in session,
-	 * and `AccountBrowsers` has not recorded it — it records what this function
-	 * returns. So anything that throws from here leaves a signed-in Steam window
-	 * that the vault lock cannot reach and the user cannot see the origin of.
-	 * Both exits below close it and wipe the session before rethrowing.
+	 * From this point there is a window on screen holding a signed-in session.
+	 * `AccountBrowsers` knows about it — `onCreated` above handed it over — but
+	 * only as one still being built, so anything that throws from here must still
+	 * close it and wipe the session. Both exits below do.
+	 *
+	 * The hand-over is what covers the exit this list cannot: a load that hangs
+	 * for ever reaches neither branch.
 	 */
 	try {
 		await window.loadURL(START_URL);
@@ -696,6 +722,23 @@ async function abandon(window: BrowserWindowHandle, session: BrowserSessionHandl
  */
 export class AccountBrowsers {
 	private readonly windows = new Map<string, BrowserWindowHandle>();
+
+	/**
+	 * Windows that exist but have not finished opening.
+	 *
+	 * **Separate from `windows` because they are not usable yet** — nothing may
+	 * hand one to a caller as this account's browser — but they are absolutely
+	 * closable, and that is the whole point. `openAccountBrowser` creates the
+	 * window and then loads a page into it; the load can hang with no bound, and
+	 * until it settles the caller has nothing to record. A lock during that
+	 * window used to complete, report success, and begin wiping storage while a
+	 * signed-in `WebContents` stayed on screen.
+	 *
+	 * Keyed by account like the rest. A second open for the same account replaces
+	 * the entry, and the first is closed by the `stillWanted` check that already
+	 * governs concurrent opens.
+	 */
+	private readonly building = new Map<string, BrowserWindowHandle>();
 
 	/**
 	 * Opens that have started and not yet produced a window.
@@ -976,7 +1019,22 @@ export class AccountBrowsers {
 			 * for the ones it does not.
 			 */
 			this.seeded.add(options.steamId64);
-			const window = await openAccountBrowser(this.host, options);
+			let window: BrowserWindowHandle;
+			try {
+				window = await openAccountBrowser(this.host, {
+					...options,
+					// Recorded while it is still being built, so a lock or a routing
+					// change can close it without waiting for a load that may never
+					// finish.
+					onCreated: (created) => this.building.set(options.steamId64, created)
+				});
+			} finally {
+				// **In a `finally`, because the throwing paths matter as much.**
+				// `openAccountBrowser` closes the window itself before rethrowing;
+				// leaving the entry behind would hand a later sweep a destroyed
+				// handle and, worse, make a retry look like it was still building.
+				this.building.delete(options.steamId64);
+			}
 			if (generation !== this.generation || epoch !== this.epochOf(options.steamId64)) {
 				// The vault locked, or this account's routing changed, while the
 				// window was being built. Either way what just opened is signed in
@@ -1121,6 +1179,25 @@ export class AccountBrowsers {
 		const window = this.windows.get(steamId64);
 		this.windows.delete(steamId64);
 		this.routes.delete(steamId64);
+
+		/*
+		 * **And one still being built.** The epoch bump above disowns an open in
+		 * flight, but only where it checks — after its last await. A load that
+		 * hangs never reaches that check, so the window it would have closed goes
+		 * on browsing over the route the user just replaced.
+		 */
+		const halfBuilt = this.building.get(steamId64);
+		this.building.delete(steamId64);
+		if (halfBuilt) {
+			try {
+				if (!halfBuilt.isDestroyed()) {
+					halfBuilt.close();
+				}
+			} catch {
+				// Already gone. Nothing left to close.
+			}
+		}
+
 		await this.wipe(steamId64, window);
 	}
 
@@ -1219,6 +1296,27 @@ export class AccountBrowsers {
 		this.routes.clear();
 
 		/*
+		 * **And the ones still being built**, which is the case this sweep used to
+		 * miss entirely.
+		 *
+		 * Bumping `generation` above disowns an open in flight, but only where it
+		 * checks — after its last await. A load that never settles never gets
+		 * there, so the disown never runs and the window it would have closed
+		 * stays on screen, signed in, while this method reports the vault locked
+		 * and goes on to wipe its storage.
+		 *
+		 * Closing them here needs no await: the handle exists, and that is the
+		 * whole reason it was recorded before the load rather than after it.
+		 *
+		 * Kept out of `closing`, whose keys become the partitions to wipe below.
+		 * These accounts are already in `seeded` — added before the attempt, for
+		 * exactly this reason — so their partitions are covered without inventing
+		 * a key that is not an account id.
+		 */
+		const halfBuilt = [...this.building.values()];
+		this.building.clear();
+
+		/*
 		 * Every partition seeded this unlock, not only the ones still on screen.
 		 * A window the user closed themselves is exactly the case the map cannot
 		 * answer for, and it is the common one.
@@ -1226,7 +1324,7 @@ export class AccountBrowsers {
 		const partitions = new Set([...closing.keys(), ...this.seeded]);
 		this.seeded.clear();
 
-		for (const window of closing.values()) {
+		for (const window of [...closing.values(), ...halfBuilt]) {
 			try {
 				if (!window.isDestroyed()) {
 					window.close();
