@@ -1215,8 +1215,12 @@ export interface RendererApi {
 	 * The id is matched against the account list the renderer already holds and
 	 * ignored if absent: this navigates to an account the user has, never to
 	 * whatever arrives on the wire.
+	 *
+	 * **Returns an unsubscribe.** It returned `void`, so "called once" was a
+	 * hope rather than a contract — no caller could clean up even when React
+	 * re-ran the effect, and one did, once a second.
 	 */
-	onOpenConfirmations(listener: (steamId64: string) => void): void;
+	onOpenConfirmations(listener: (steamId64: string) => void): () => void;
 	/**
 	 * Take a notification click that arrived while nothing was listening.
 	 *

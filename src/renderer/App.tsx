@@ -277,13 +277,66 @@ export function App(): React.JSX.Element {
 		[accounts]
 	);
 
+	/**
+	 * The newest `openConfirmationsFor`, reachable from a subscription that is
+	 * not rebuilt when it changes.
+	 *
+	 * That callback closes over `accounts`, so it is a new function on every
+	 * status poll — once a second. Depending on it directly meant the effect
+	 * below re-ran at the same rate, and `onOpenConfirmations` had no way to
+	 * unsubscribe, so each run added a listener that stayed. Thousands an hour,
+	 * each pinning its own `accounts` snapshot.
+	 *
+	 * It was a correctness bug as well as a leak: a click ran every listener,
+	 * oldest first, and `openConfirmationsFor` returns early for an account it
+	 * cannot find **without clearing `confirmingFor`**. So a stale listener
+	 * holding a since-removed account set it, and the newest listener bailed
+	 * without undoing that — the confirmations screen opened for an account the
+	 * vault no longer had. One listener that always reads the current callback
+	 * cannot do that.
+	 */
+	const openConfirmationsRef = useRef(openConfirmationsFor);
+	// In an effect, not during render: writing a ref while rendering is a
+	// side-effect in a function React may call speculatively, and `react-hooks/refs`
+	// refuses it. This one runs whenever the callback changes and does nothing but
+	// a local assignment — no IPC, no subscription.
+	useEffect(() => {
+		openConfirmationsRef.current = openConfirmationsFor;
+	}, [openConfirmationsFor]);
+
 	// The fast path: a click while this document is alive and listening.
 	useEffect(() => {
 		if (!api) {
 			return;
 		}
-		api.onOpenConfirmations((steamId64) => openConfirmationsFor(steamId64));
-	}, [api, openConfirmationsFor]);
+		// Depends on `api` alone, so this is established once and torn down once —
+		// which is what the preload's comment always claimed and could not deliver.
+		return api.onOpenConfirmations((steamId64) => {
+			/*
+			 * **A navigation that worked consumes the remembered copy.**
+			 *
+			 * `activate` retains *and* pushes, always — deliberately, because a
+			 * lock reloads this window and the retained copy is the only thing
+			 * that survives it. Nothing marked the push as having landed, so the
+			 * slow path below collected the same intent a second later and
+			 * navigated again.
+			 *
+			 * Usually invisible; destructive inside that one second. The second
+			 * navigation is a *rollback*: whatever the user did after clicking the
+			 * toast — closing the screen, opening Settings, starting a removal —
+			 * is undone by `setView('accounts')` and the four clears above.
+			 *
+			 * **The boolean is load-bearing.** `openConfirmationsFor` returns false
+			 * when the id is not in the account list yet, and that is exactly the
+			 * case the slow path exists for — a click landing after unlock but
+			 * before `listAccounts` has answered. Clearing there would delete the
+			 * intent rather than double-use it.
+			 */
+			if (openConfirmationsRef.current(steamId64)) {
+				void api.takePendingConfirmations().catch(() => undefined);
+			}
+		});
+	}, [api]);
 
 	/**
 	 * The slow path, and the one that makes a lock survivable.
@@ -306,7 +359,7 @@ export function App(): React.JSX.Element {
 			.takePendingConfirmations()
 			.then((pending) => {
 				if (!cancelled && pending.steamId64) {
-					openConfirmationsFor(pending.steamId64);
+					openConfirmationsRef.current(pending.steamId64);
 				}
 			})
 			.catch(() => {
@@ -316,7 +369,23 @@ export function App(): React.JSX.Element {
 		return () => {
 			cancelled = true;
 		};
-	}, [api, status?.unlocked, accounts.length, openConfirmationsFor]);
+		/*
+		 * **`accounts.length`, and not `openConfirmationsFor`.**
+		 *
+		 * That callback closes over `accounts`, which `listAccounts` replaces with
+		 * a fresh array every second — so this effect tore down and re-ran once a
+		 * second for the life of an unlocked session, asking main for a pending
+		 * click each time.
+		 *
+		 * The churn lost clicks. `takePendingConfirmations` is read-and-clear, so
+		 * a call whose round trip straddled a poll tick had already emptied the
+		 * slot in main when its cleanup set `cancelled` — and the result was then
+		 * dropped here, with nothing anywhere reporting it. The click was gone.
+		 *
+		 * A count is a number: it changes when the account list actually changes,
+		 * which is the only thing this effect is waiting for.
+		 */
+	}, [api, status?.unlocked, accounts.length]);
 
 	// The window title comes from branding, never from HTML — one source of truth
 	// while Q1 is unresolved. It doubles as the end-to-end IPC signal: if the
@@ -628,6 +697,7 @@ export function App(): React.JSX.Element {
 					key={current.steamId64}
 					account={current}
 					accounts={accounts}
+					requireProxies={status?.requireProxies === true}
 					onSave={(settings) => api.setAccountAutoConfirm(current.steamId64, settings)}
 					onClose={() => {
 						setAutoConfirmFor(undefined);

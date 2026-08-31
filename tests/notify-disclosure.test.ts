@@ -133,24 +133,52 @@ describe('opening confirmations from a notification', () => {
 	 * Still read from the source rather than rendered: effects do not run under
 	 * `renderToStaticMarkup`, which is the only rendering this suite has.
 	 */
+	/**
+	 * The **slow-path** effect, found by structure rather than by index.
+	 *
+	 * Two effects mention `takePendingConfirmations` now: the fast path calls it
+	 * to consume the intent a successful push already handled, and this one
+	 * collects an intent nobody was listening for. An `indexOf` picked whichever
+	 * happened to be written first in the file, so adding the ack silently
+	 * repointed this whole describe at the wrong effect — the assertions kept
+	 * passing while they had stopped being about the thing they name.
+	 *
+	 * The discriminator is what the effect does with the result: this is the one
+	 * that navigates from a collected `pending`.
+	 */
+	const takeEffect = (() => {
+		const file = ts.createSourceFile(
+			'App.tsx',
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TSX
+		);
+		const found: ts.CallExpression[] = [];
+		const visit = (node: ts.Node): void => {
+			if (
+				ts.isCallExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === 'useEffect' &&
+				node.getText().includes('takePendingConfirmations') &&
+				node.getText().includes('pending.steamId64')
+			) {
+				found.push(node);
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(file);
+		expect(
+			found,
+			'no effect collects a pending notification click and navigates to it'
+		).toHaveLength(1);
+		return found[0] as ts.CallExpression;
+	})();
+
 	const collection = (() => {
-		const call = source.indexOf('.takePendingConfirmations()');
-		expect(call, 'nothing collects a pending notification click any more').toBeGreaterThan(-1);
-		const start = source.lastIndexOf('useEffect(() => {', call);
-		expect(
-			start,
-			'the collection no longer sits in an effect; this test needs rewriting'
-		).toBeGreaterThan(-1);
-		/*
-		 * Every hook in this component is one tab in, so this effect ends at the
-		 * first `}, [` at that depth after the call — its own dependency array, and
-		 * nothing further down the file.
-		 */
-		const deps = source.indexOf('\n\t}, [', call);
-		expect(
-			deps,
-			'the effect does not close where this test expects it to; rewrite the bounds'
-		).toBeGreaterThan(start);
+		const body = (takeEffect.arguments[0] as ts.ArrowFunction).body;
+		const deps = takeEffect.arguments[1];
+		expect(deps, 'the effect has no dependency array').toBeDefined();
 		/*
 		 * **Comments stripped, because a substring search cannot tell code from
 		 * prose.** Remove the guard and leave a sentence behind — "previously gated
@@ -160,8 +188,8 @@ describe('opening confirmations from a notification', () => {
 		const strip = (text: string): string =>
 			text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
 		return {
-			body: strip(source.slice(start, deps)),
-			deps: source.slice(deps, source.indexOf(']', deps))
+			body: strip(body.getText()),
+			deps: (deps as ts.Node).getText()
 		};
 	})();
 
@@ -183,31 +211,9 @@ describe('opening confirmations from a notification', () => {
 	 * holds whatever the intermediate value gets named.
 	 */
 	const collectionCallback = (() => {
-		const file = ts.createSourceFile(
-			'App.tsx',
-			source,
-			ts.ScriptTarget.Latest,
-			true,
-			ts.ScriptKind.TSX
-		);
-
-		let effect: ts.ArrowFunction | undefined;
-		const findEffect = (node: ts.Node): void => {
-			if (
-				ts.isCallExpression(node) &&
-				ts.isIdentifier(node.expression) &&
-				node.expression.text === 'useEffect' &&
-				node.getText().includes('.takePendingConfirmations()')
-			) {
-				const first = node.arguments[0];
-				if (first && ts.isArrowFunction(first)) {
-					effect = first;
-				}
-			}
-			ts.forEachChild(node, findEffect);
-		};
-		findEffect(file);
-		expect(effect, 'no useEffect collects a pending notification click').toBeDefined();
+		// The same slow-path effect the bounds above found, not whichever mentions
+		// the channel first: the fast path calls it too, to acknowledge a push.
+		const effect = takeEffect.arguments[0] as ts.ArrowFunction;
 
 		let callback: ts.Node | undefined;
 		const findThen = (node: ts.Node): void => {
@@ -221,12 +227,12 @@ describe('opening confirmations from a notification', () => {
 			}
 			ts.forEachChild(node, findThen);
 		};
-		findThen(effect as unknown as ts.Node);
+		findThen(effect);
 		expect(callback, 'the collected click is no longer handled in a .then').toBeDefined();
 
 		/** Every name the effect binds before it asks main for the click. */
 		const declaredInEffect = new Set<string>();
-		const body = (effect as unknown as ts.ArrowFunction).body;
+		const body = effect.body;
 		if (ts.isBlock(body)) {
 			for (const statement of body.statements) {
 				if (!ts.isVariableStatement(statement)) {
@@ -295,6 +301,29 @@ describe('opening confirmations from a notification', () => {
 			`the handler reads ${leaked.join(', ')}, computed before the click was taken — a guard ` +
 				'hoisted out of the early return still runs too late, whatever it is called'
 		).toEqual([]);
+	});
+
+	/**
+	 * **And not on every status poll.**
+	 *
+	 * `openConfirmationsFor` closes over `accounts`, which `listAccounts`
+	 * replaces with a fresh array every second — so depending on it re-ran this
+	 * effect once a second for the life of an unlocked session, asking main for a
+	 * pending click each time.
+	 *
+	 * That churn *lost* clicks. `takePendingConfirmations` is read-and-clear, so
+	 * a call whose round trip straddled a poll tick had already emptied the slot
+	 * in main by the time the teardown set `cancelled` — and the result was then
+	 * dropped, with nothing anywhere reporting it. A count is a number: it
+	 * changes when the account list changes, which is the only thing this effect
+	 * waits for.
+	 */
+	it('does not re-run on every status poll', () => {
+		expect(
+			collection.deps,
+			'the effect depends on a callback rebuilt every second, so it asks main for a pending ' +
+				'click once a second — and loses one whose round trip straddles a tick'
+		).not.toContain('openConfirmationsFor');
 	});
 
 	it('runs again when the account list arrives', () => {

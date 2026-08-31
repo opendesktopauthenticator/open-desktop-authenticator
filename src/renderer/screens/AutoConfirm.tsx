@@ -63,10 +63,18 @@ export function pollLoad(
 export function AutoConfirm({
 	account,
 	accounts,
+	requireProxies,
 	onSave,
 	onClose
 }: {
 	account: AccountSummary;
+	/**
+	 * Whether the vault refuses to talk to Steam for an account with no proxy.
+	 *
+	 * Needed here only to say so: an account this rule strands is not polled at
+	 * all, and every switch on this screen is about polling.
+	 */
+	requireProxies: boolean;
 	/**
 	 * Every account, so the rate warning can count the ones actually polled.
 	 *
@@ -141,6 +149,30 @@ export function AutoConfirm({
 			</p>
 
 			{error && <p className="error">{error}</p>}
+
+			{/*
+				**Nothing on this screen said the switches were doing nothing.**
+
+				`Require proxies` is global, and the poller skips an account with no
+				proxy under it — silently and on purpose, because counting a policy
+				refusal as a failure would spend the ten-strike halt on it. So the
+				switch stayed on, the account list went on saying "auto-confirm:
+				trades, notifying", and the account had not been checked since the
+				setting was saved. The global flip is the worse trigger: it strands
+				every unproxied account at once with no screen changing.
+
+				Stated above the switches rather than beside one of them, because it
+				applies to all of them, and it names both ways out — this screen owns
+				neither, so pointing at them is the most it can do.
+			*/}
+			{requireProxies && !account.hasProxy && (
+				<p className="warn">
+					<strong>Paused — this account has no proxy.</strong> Settings requires every account to
+					use one, so nothing below is running for this account: no confirmations are approved and
+					no notifications are raised. Give it a proxy under Routing, or turn off{' '}
+					<em>Require proxies</em> in Settings.
+				</p>
+			)}
 
 			<form onSubmit={submit}>
 				<label className="checkbox">

@@ -782,14 +782,23 @@ export function VaultHome({
 											// account changes nothing without a person, so colouring it
 											// the same as "trades are approved unattended" would spend
 											// the one signal that ought to mean exactly that.
-											account.autoConfirm.trades || account.autoConfirm.marketListings
-												? 'flag warn actionable'
-												: 'flag actionable'
+											//
+											// A paused account earns it too, and for the opposite reason:
+											// the switch is on and nothing is happening, which is the
+											// state most likely to be believed rather than checked.
+											(!requireProxies || account.hasProxy) &&
+											!(account.autoConfirm.trades || account.autoConfirm.marketListings)
+												? 'flag actionable'
+												: 'flag warn actionable'
 										}
 										onClick={() => onChangeAutoConfirm(account)}
-										title="Approve trades or market listings without asking, or just be told about them. Both off by default."
+										title={
+											requireProxies && !account.hasProxy
+												? 'Require proxies is on and this account has no proxy, so it is not being checked. Give it a proxy in Routing, or turn the setting off in Settings.'
+												: 'Approve trades or market listings without asking, or just be told about them. Both off by default.'
+										}
 									>
-										{describeAutoConfirm(account.autoConfirm)}
+										{describeAutoConfirm(account.autoConfirm, requireProxies && !account.hasProxy)}
 									</button>
 								</div>
 							</li>
@@ -897,8 +906,33 @@ function routingExplanation(account: AccountSummary): string {
  * Approving is named first wherever it applies, because it is the part with
  * consequences. Notifications are mentioned but never lead.
  */
-export function describeAutoConfirm(settings: AccountSummary['autoConfirm']): string {
+/**
+ * @param paused this account is enabled but the engine will not poll it.
+ *
+ * **The one state the row could not describe.** `Require proxies` is global, and
+ * `dueAccounts` skips an account with no proxy under it — silently, and
+ * deliberately so: routing the skip through `onFailure` would spend the
+ * ten-strike halt on a policy refusal rather than a fault. So nothing anywhere
+ * said so. The switch stayed on, the row went on reading "auto-confirm: trades,
+ * notifying", and the account had not been polled since the setting was saved.
+ *
+ * The worse trigger is the global flip, not the per-account one: turning the
+ * setting on strands every unproxied account at once, with no screen changing.
+ */
+export function describeAutoConfirm(
+	settings: AccountSummary['autoConfirm'],
+	paused = false
+): string {
 	const watching = settings.notify.enabled;
+
+	/*
+	 * Said first, and instead of the rest, because it is the only part that is
+	 * still true. "auto-confirm: trades, notifying · paused" would be a sentence
+	 * whose first half describes work that is not happening.
+	 */
+	if (paused && (watching || settings.trades || settings.marketListings)) {
+		return 'paused — no proxy';
+	}
 
 	if (settings.trades && settings.marketListings) {
 		return watching ? 'auto-confirm: trades + market, notifying' : 'auto-confirm: trades + market';

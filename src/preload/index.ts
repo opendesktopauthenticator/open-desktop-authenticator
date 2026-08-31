@@ -158,13 +158,25 @@ const api: RendererApi = {
 	/**
 	 * A clicked notification, pushed from main.
 	 *
-	 * Subscribed once. The renderer ignores an id that is not in the account list
-	 * it already has, so this cannot navigate anywhere the user could not.
+	 * The renderer ignores an id that is not in the account list it already has,
+	 * so this cannot navigate anywhere the user could not.
+	 *
+	 * **Returns an unsubscribe, and the comment here used to say "subscribed
+	 * once" while making that impossible.** The handler was an inline arrow
+	 * passed straight to `.on`, so no reference was kept and nothing could have
+	 * removed it; the declared return type was `void`, so no caller could have
+	 * tried. The renderer's effect depends on a callback rebuilt whenever the
+	 * account list changes, and the status poll rebuilds that once a second — so
+	 * a listener was added per second and never removed. Around 3,600 an hour,
+	 * each retaining its own `accounts` snapshot, past `MaxListenersExceededWarning`
+	 * inside the first ten seconds.
 	 */
-	onOpenConfirmations: (listener: (steamId64: string) => void) => {
-		ipcRenderer.on(PUSH_CHANNELS.openConfirmations, (_event, steamId64: string) =>
-			listener(steamId64)
-		);
+	onOpenConfirmations: (listener: (steamId64: string) => void): (() => void) => {
+		const handler = (_event: unknown, steamId64: string): void => listener(steamId64);
+		ipcRenderer.on(PUSH_CHANNELS.openConfirmations, handler);
+		return () => {
+			ipcRenderer.removeListener(PUSH_CHANNELS.openConfirmations, handler);
+		};
 	},
 	/**
 	 * Collect a click the renderer was not there to receive, and clear it.
