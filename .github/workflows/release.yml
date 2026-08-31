@@ -82,7 +82,18 @@ jobs:
       #
       # Pinned to a SHA like everything else in this file; `ci.yml` may use a
       # mutable tag because that job holds no secrets, and this one signs.
+      #
+      # **Linux only, and that is not an optimisation.** This action declares
+      # `runs.using: docker`, and GitHub runs Docker actions on Linux runners
+      # only — so on the Windows leg of this matrix it does not skip, it fails.
+      # `ci.yml` never hit this because its `security` job is single-runner
+      # Linux; this job is a matrix, which is exactly the difference a copied
+      # step does not carry with it.
+      #
+      # The scan is of `package-lock.json`, which is identical on both legs, so
+      # one run answers for both.
       - name: osv-scanner (shipping dependencies)
+        if: runner.os == 'Linux'
         uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
         with:
           scan-args: |-
