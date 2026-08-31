@@ -1350,6 +1350,16 @@ describe('a row replaced while Steam is answering', () => {
 		expect(accounts[0]?.sharedSecret).toBe(SHARED_B);
 	});
 
+	/**
+	 * **Survival was only half of it, and the discarded promise hid the rest.**
+	 *
+	 * This test used to end `.catch(() => undefined)`, so it could see that the
+	 * replacement lived and not that the caller was told the account had been
+	 * removed. Steam had detached the old authenticator, the vault still listed
+	 * the new one, and the screen closed as though both were done — leaving an
+	 * account that is still shown, still generating codes, for an authenticator
+	 * Steam no longer honours.
+	 */
 	it('does not delete a replacement it never detached', async () => {
 		let release: (() => void) | undefined;
 		const gate = new Promise<void>((resolve) => {
@@ -1357,15 +1367,87 @@ describe('a row replaced while Steam is answering', () => {
 		});
 		const { service, accounts } = harnessFor(gate, 'deactivate');
 
-		const removing = service.deactivate(STEAM_ID, 'correct').catch(() => undefined);
+		const removing = service.deactivate(STEAM_ID, 'correct');
+		// The rejection is the point; attach the handler before releasing so the
+		// run does not see an unhandled one.
+		const outcome = removing.then(
+			() => undefined,
+			(err: unknown) => err
+		);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		replace(accounts);
 		release?.();
-		await removing;
+
+		const err = await outcome;
+		expect(
+			err,
+			'the caller was told an account had been removed while it was still listed'
+		).toBeInstanceOf(Error);
+		expect((err as Error).message).toMatch(/different authenticator/i);
 
 		// Steam detached the OLD authenticator. The replacement's secrets survive.
 		expect(accounts).toHaveLength(1);
 		expect(accounts[0]?.sharedSecret).toBe(SHARED_B);
+	});
+
+	/**
+	 * **The branch the revocation-code guard could not see.**
+	 *
+	 * A replacement that carries no revocation code of its own inherits the
+	 * previous one through the import merge. It therefore matched a guard keyed
+	 * on `steamId64 + revocationCode` exactly, and its new shared and identity
+	 * secrets — a working authenticator Steam still honours — were deleted for a
+	 * removal that was never about it.
+	 *
+	 * The secrets are what the detach was about, so they are what the guard has
+	 * to compare.
+	 */
+	it('does not delete a replacement that inherited the old revocation code', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { service, accounts } = harnessFor(gate, 'deactivate');
+		const inheritedCode = accounts[0]?.revocationCode;
+
+		const removing = service.deactivate(STEAM_ID, 'correct');
+		const outcome = removing.then(
+			() => undefined,
+			(err: unknown) => err
+		);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		// A re-import with no code of its own: new secrets, the old code kept.
+		accounts[0] = {
+			...(accounts[0] as Account),
+			sharedSecret: SHARED_B,
+			identitySecret: SHARED_B,
+			...(inheritedCode === undefined ? {} : { revocationCode: inheritedCode })
+		};
+		release?.();
+
+		await outcome;
+
+		expect(
+			accounts,
+			'a working authenticator was deleted by a detach it had no part in'
+		).toHaveLength(1);
+		expect(accounts[0]?.sharedSecret).toBe(SHARED_B);
+	});
+
+	/*
+	 * And the ordinary case still works: nothing replaced it, so it goes.
+	 */
+	it('removes the account it actually detached', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const { service, accounts } = harnessFor(gate, 'deactivate');
+
+		const removing = service.deactivate(STEAM_ID, 'correct');
+		release?.();
+		await expect(removing).resolves.toBeUndefined();
+		expect(accounts).toHaveLength(0);
 	});
 });
 

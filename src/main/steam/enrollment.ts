@@ -672,19 +672,49 @@ export class EnrollmentService {
 		// Only after Steam has confirmed. Everything this account had in memory goes
 		// with the record — its cookie jar, cached session and pending list are
 		// dropped by the routing hook the caller wires to removal.
+		/**
+		 * Whether the row this detach was about was still there to remove.
+		 *
+		 * **A miss is not success.** The guard below can legitimately find
+		 * nothing — an import-replace during the detach puts a different
+		 * authenticator at this SteamID — and the old code returned `void`
+		 * either way, so the screen closed as though the account had been
+		 * removed while it was still listed, still showing codes, for an
+		 * authenticator Steam had just detached.
+		 */
+		let removedLocally = false;
+
 		try {
 			await this.vault.mutate((draft) => {
-				// **The row whose revocation code was actually spent.** Matching on the
-				// SteamID alone deleted whatever held that identity by the time Steam
-				// answered — and an import-replace during the detach puts a *different*
-				// authenticator there, whose secrets are then destroyed for a removal
-				// that was never about it.
+				/*
+				 * **The row whose authenticator was actually detached**, matched on
+				 * the whole secret set rather than on the revocation code.
+				 *
+				 * Matching the SteamID alone deleted whatever held that identity by
+				 * the time Steam answered. Adding the revocation code fixed the
+				 * common case and left two:
+				 *
+				 *  - A replacement that carries no revocation code of its own
+				 *    *inherits* the previous one through the import merge. It then
+				 *    matched this guard, and its new shared and identity secrets —
+				 *    a working authenticator Steam still honours — were deleted for
+				 *    a removal that was never about it.
+				 *  - A replacement with a different code correctly survived, and the
+				 *    caller was told the account had been removed anyway.
+				 *
+				 * The secrets are what the detach was about, so they are what the
+				 * guard compares.
+				 */
 				const index = draft.accounts.findIndex(
 					(entry) =>
-						entry.steamId64 === steamId64 && entry.revocationCode === account.revocationCode
+						entry.steamId64 === steamId64 &&
+						entry.sharedSecret === account.sharedSecret &&
+						entry.identitySecret === account.identitySecret &&
+						entry.revocationCode === account.revocationCode
 				);
 				if (index >= 0) {
 					draft.accounts.splice(index, 1);
+					removedLocally = true;
 				}
 			});
 		} catch {
@@ -703,6 +733,30 @@ export class EnrollmentService {
 
 		this.tokens.delete(steamId64);
 		this.textedTheCode.delete(steamId64);
+
+		/*
+		 * **Steam said yes and the vault did not change, so this did not fully
+		 * happen.**
+		 *
+		 * Reported rather than swallowed. The guard above deliberately declines to
+		 * delete an authenticator this detach was not about — which is right — but
+		 * returning quietly then told the screen the account had been removed
+		 * while it was still listed, still generating codes, for an authenticator
+		 * Steam had just detached. The user closes the dialog believing two things
+		 * that are both false.
+		 *
+		 * Not thrown from the `catch` above: that one is a failed write, and this
+		 * is a write that succeeded and found nothing to do. They need different
+		 * words because they need different actions.
+		 */
+		if (!removedLocally) {
+			throw new EnrollmentError(
+				`Steam Guard has been removed from ${account.accountName} on Steam, but this vault now ` +
+					'holds a different authenticator for that account — so nothing was removed here. ' +
+					'That entry was not the one detached and is still yours. Check the account before ' +
+					'removing anything by hand.'
+			);
+		}
 	}
 
 	/**
