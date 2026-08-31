@@ -167,7 +167,10 @@ export function Activity({
 			// An entry that failed to parse has no type, so it cannot be ruled out as
 			// the account-recovery confirmation. It belongs with the things a person
 			// has to look at, not in the ordinary list below.
-			entry.kind === 'unreadable'
+			entry.kind === 'unreadable' ||
+			// Nothing this application does will fix an expired session, so it is
+			// exactly the case that has to reach a person rather than scroll past.
+			entry.kind === 'signInRequired'
 	);
 	const rest = entries.filter((candidate) => !urgent.includes(candidate));
 
@@ -217,6 +220,21 @@ export function Activity({
 								<strong>Open the account and check by hand.</strong> Nothing here can tell what the
 								skipped {entry.count === 1 ? 'confirmation was' : 'confirmations were'}, which is
 								why it is being shown to you rather than passed over.
+							</p>
+						</>
+					) : entry.kind === 'signInRequired' ? (
+						<>
+							<h2>Sign in again to keep checking this account</h2>
+							<p>
+								{nameOf(steamId64)} · {formatTime(entry.at)}
+							</p>
+							<p>
+								The saved Steam session for this account has expired. Nothing here can renew it, so
+								this account is not being checked until you sign in again.
+							</p>
+							<p>
+								Open the account and sign in. Until then, confirmations may be waiting without
+								anything telling you about them.
 							</p>
 						</>
 					) : (
@@ -299,9 +317,22 @@ function describe(entry: ActivityList['entries'][number]['entry']): string {
 			return entry.count === 1
 				? 'One confirmation could not be read and was skipped'
 				: `${entry.count} confirmations could not be read and were skipped`;
-		default:
+		case 'signInRequired':
+			return 'Sign in again — the saved Steam session expired';
+		case 'halted':
 			return entry.reason;
+		default:
+			// **Exhaustive on purpose.** The `default` here used to return
+			// `entry.reason`, which quietly assumed every kind it had not been told
+			// about carries one. `signInRequired` does not, so adding it printed
+			// `undefined` on screen. Now a new kind is a compile error instead.
+			return assertNever(entry);
 	}
+}
+
+/** A kind nobody handled. Unreachable, and a type error if it becomes reachable. */
+function assertNever(entry: never): string {
+	return String((entry as { kind?: string }).kind ?? 'unknown');
 }
 
 /** Local time, seconds included: "when exactly" is the question being asked. */

@@ -38,7 +38,18 @@ export type ActivityEntry =
 	 * has no type and no summary. That is precisely why it is recorded — the pass
 	 * cannot rule out that what it skipped was an account-recovery confirmation.
 	 */
-	| { kind: 'unreadable'; at: string; count: number };
+	| { kind: 'unreadable'; at: string; count: number }
+	/**
+	 * The saved session expired. Only the user can fix it.
+	 *
+	 * Its own kind rather than a `failed` entry, because `failed` is not urgent
+	 * — so the one condition no amount of retrying resolves was the one the log
+	 * stayed quiet about. It surfaced only after ten strikes, as a `halted` entry
+	 * phrased "failures in a row", which is not what happened.
+	 *
+	 * No reason string: there is one cause and the entry names it.
+	 */
+	| { kind: 'signInRequired'; at: string };
 
 export class ActivityLog {
 	private readonly entries = new Map<string, ActivityEntry[]>();
@@ -120,6 +131,32 @@ export class ActivityLog {
 		this.push(steamId64, { kind: halted ? 'halted' : 'failed', at, reason });
 	}
 
+	/**
+	 * The saved session expired, and only the user can fix it.
+	 *
+	 * **Deduplicated by state, not by transition.** A poll runs every fifteen
+	 * seconds and this condition persists until somebody signs in, so a plain
+	 * append would write hundreds of identical entries and push everything else
+	 * out of a hundred-entry log.
+	 *
+	 * Recording *only* the transition would be worse in a subtler way: `hasUrgent`
+	 * compares against `acknowledgedSeq`, so acknowledging a one-off entry would
+	 * make a still-broken account read as clear until it happened to flip and flip
+	 * back. Appending while the newest entry is not already this kind keeps one
+	 * entry per run, and the next successful poll's own entry ends the run.
+	 *
+	 * Keyed on the **kind**, never on the reason text. Classification by message
+	 * text was removed from `recordFailure` once already, because the wording is
+	 * composed in another file.
+	 */
+	recordSignInRequired(steamId64: string): void {
+		const list = this.entries.get(steamId64);
+		if (list && list[list.length - 1]?.kind === 'signInRequired') {
+			return;
+		}
+		this.push(steamId64, { kind: 'signInRequired', at: new Date(this.now()).toISOString() });
+	}
+
 	/** Newest first, because the newest is what someone returning wants. */
 	for(steamId64: string): ActivityEntry[] {
 		return [...(this.entries.get(steamId64) ?? [])].reverse();
@@ -162,7 +199,10 @@ export class ActivityLog {
 					// the account-recovery confirmation. Treating "we could not read it"
 					// as ordinary would be assuming the best about the one case where
 					// this application's whole purpose is to assume the worst.
-					entry.kind === 'unreadable')
+					entry.kind === 'unreadable' ||
+					// Nothing this application does will fix an expired session, so it
+					// is exactly the case that has to reach a person.
+					entry.kind === 'signInRequired')
 		);
 	}
 

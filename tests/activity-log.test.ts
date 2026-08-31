@@ -337,3 +337,100 @@ describe('acknowledging a snapshot rather than the present', () => {
 		expect(activity.hasUrgent()).toBe(true);
 	});
 });
+
+/**
+ * **"Sign in again" is the one condition no amount of retrying resolves.**
+ *
+ * It used to reach the log as a `failed` entry, and `failed` is not urgent — so
+ * the only condition that genuinely needs a person was the one the badge stayed
+ * quiet about. It surfaced after ten strikes as a `halted` entry phrased
+ * "failures in a row", which is not what happened.
+ */
+describe('a session that needs signing in again', () => {
+	const ID = '76561198000000001';
+
+	it('is its own kind, not a failure', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		expect(log.for(ID)[0]?.kind).toBe('signInRequired');
+	});
+
+	it('is urgent', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		expect(log.hasUrgent(), 'the one condition only the user can fix was not urgent').toBe(true);
+	});
+
+	/*
+	 * A poll runs every fifteen seconds and this condition persists until
+	 * somebody signs in. A plain append would write hundreds of identical entries
+	 * and push everything else out of a hundred-entry log.
+	 */
+	it('writes one entry per run, not one per poll', () => {
+		const log = new ActivityLog(() => NOW);
+		for (let i = 0; i < 50; i += 1) {
+			log.recordSignInRequired(ID);
+		}
+		expect(log.for(ID), 'a persistent condition was appended once per poll').toHaveLength(1);
+	});
+
+	/*
+	 * The run ends when something else happens. A second expiry after a working
+	 * poll is a new event and has to be visible as one.
+	 */
+	it('appends again after a successful poll in between', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		log.recordPass(ID, [confirmation()], [], 0);
+		log.recordSignInRequired(ID);
+		expect(log.for(ID).filter((entry) => entry.kind === 'signInRequired')).toHaveLength(2);
+	});
+
+	it('appends again after a failure in between', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		log.recordFailure(ID, 'steam said no');
+		log.recordSignInRequired(ID);
+		expect(log.for(ID).filter((entry) => entry.kind === 'signInRequired')).toHaveLength(2);
+	});
+
+	it('keeps accounts apart', () => {
+		const log = new ActivityLog(() => NOW);
+		const other = '76561198000000002';
+		log.recordSignInRequired(ID);
+		log.recordSignInRequired(other);
+		log.recordSignInRequired(ID);
+		expect(log.for(ID)).toHaveLength(1);
+		expect(log.for(other)).toHaveLength(1);
+	});
+
+	/*
+	 * **Keyed on the kind, never on the text.** Classification by message text
+	 * was removed from `recordFailure` once already, because the wording is
+	 * composed in another file — reword it and the classification silently
+	 * changes with nothing failing to show it.
+	 */
+	it('carries no reason string to be classified by', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		expect(Object.keys(log.for(ID)[0] ?? {}).sort()).toEqual(['at', 'kind']);
+	});
+
+	/*
+	 * Deduplicating by state rather than by transition. Acknowledging advances a
+	 * high-water mark, so a transition-only entry would make a still-broken
+	 * account read as clear until it flipped and flipped back.
+	 */
+	it('stays acknowledgeable without going silent about a live problem', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		expect(log.hasUrgent()).toBe(true);
+		log.acknowledge();
+		expect(log.hasUrgent()).toBe(false);
+
+		// The condition is still live, and the next distinct event re-raises it.
+		log.recordFailure(ID, 'steam said no');
+		log.recordSignInRequired(ID);
+		expect(log.hasUrgent(), 'a second expiry after an acknowledgement said nothing').toBe(true);
+	});
+});

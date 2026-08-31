@@ -714,7 +714,16 @@ export const activityEntry = z.discriminatedUnion('kind', [
 	 * simply record nothing — and what it skipped might have been the
 	 * account-recovery confirmation.
 	 */
-	z.object({ kind: z.literal('unreadable'), at: z.string(), count: z.number().int().min(1) })
+	z.object({ kind: z.literal('unreadable'), at: z.string(), count: z.number().int().min(1) }),
+	/**
+	 * The saved session expired and only the user can fix it.
+	 *
+	 * Its own kind rather than a `failed` entry, because `failed` is not urgent —
+	 * so the one condition no amount of retrying resolves was the one the log
+	 * stayed quiet about. Carries no reason: there is one cause, and the kind
+	 * names it.
+	 */
+	z.object({ kind: z.literal('signInRequired'), at: z.string() })
 ]);
 
 export const activityListResponse = z.object({

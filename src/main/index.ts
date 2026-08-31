@@ -7,6 +7,7 @@ import {
 	Menu,
 	nativeTheme,
 	net,
+	Notification,
 	powerMonitor,
 	session
 } from 'electron';
@@ -40,6 +41,7 @@ import { ConfirmationsService } from './confirmations/service';
 import { AutoConfirmEngine } from './confirmations/auto';
 import { ActivityLog } from './confirmations/activity';
 import { notificationImage, windowImage } from './logo-image';
+import { ConfirmationNotifier } from './confirmations/notify';
 import { createTray } from './tray';
 import { registerWindowsIdentity } from './windows-identity';
 import { registerConfirmationHandlers } from './confirmations/ipc';
@@ -270,6 +272,11 @@ function start(): void {
 			// unlock that produced it.
 			confirmations.forget();
 
+			// The seen-sets go too. A lock means the person left; on the next unlock
+			// the first poll seeds again, so returning to a vault does not fire a
+			// toast for every confirmation that was already waiting.
+			notifier.forget();
+
 			// And the cookie jars with them. Steam sets cookies on its responses;
 			// Chromium keeps them in the per-account session, and a web session that
 			// survived the lock would make the lock a smaller thing than it claims.
@@ -454,6 +461,7 @@ function start(): void {
 		// wherever the account's does.
 		directTransports.forget(steamId64);
 		confirmations.forgetAccount(steamId64);
+		notifier.forgetAccount(steamId64);
 
 		// **And the browser window, which is the newest thing tied to a route.**
 		// The two calls above drop what this process holds; a window opened for
@@ -514,6 +522,22 @@ function start(): void {
 	});
 
 	const activity = new ActivityLog();
+
+	/**
+	 * Desktop notifications for confirmations that need a person.
+	 *
+	 * `windows-identity.ts` already sets an AppUserModelID, which is what Windows
+	 * requires before a toast will appear at all — so there is no packaging work
+	 * here. The image is `notificationImage()`, drawn from the same geometry as
+	 * every other icon: a single 256px representation, because Windows draws the
+	 * app logo on a toast at around 48px and given nothing would scale the 16px
+	 * tray icon up to it.
+	 */
+	const notifier = new ConfirmationNotifier({
+		host: {
+			show: ({ title, body }) => new Notification({ title, body, icon: notificationImage() }).show()
+		}
+	});
 	// The engine used to report into callbacks nobody supplied, so a held-back
 	// account-recovery confirmation — the loudest warning this app can raise — was
 	// computed and thrown away. These are where it lands.
@@ -528,7 +552,25 @@ function start(): void {
 		ensureClock: () => clock.ensureSynced(),
 		onOutcome: (steamId64, outcome) =>
 			activity.recordPass(steamId64, outcome.approved, outcome.held, outcome.unreadable),
-		onFailure: (steamId64, reason, halted) => activity.recordFailure(steamId64, reason, halted),
+		onFailure: (steamId64, reason, halted, context) => {
+			activity.recordFailure(steamId64, reason, halted);
+			// **The halt is the part worth interrupting somebody for.** An ordinary
+			// failure backs off and retries; a halt means this account has stopped
+			// being checked and will not start again on its own.
+			if (halted && context) {
+				notifier.halted(steamId64, context.accountName, context.mode);
+			}
+		},
+		onPending: (steamId64, accountName, awaiting, unreadable, detail) =>
+			notifier.pending(steamId64, accountName, awaiting, unreadable, detail),
+		onSignInNeeded: (steamId64, accountName) => {
+			// Both, and they answer different questions. The toast interrupts once;
+			// the log entry is what a person finds when they come back to a machine
+			// that has been sitting there — and it is deduplicated by kind, so a
+			// session that stays expired writes one entry rather than one per poll.
+			activity.recordSignInRequired(steamId64);
+			notifier.signInNeeded(steamId64, accountName);
+		},
 		// The **existing** reader the transports already use (line 381), not a
 		// second one — two readers of one rule is how they come to disagree.
 		requireProxies

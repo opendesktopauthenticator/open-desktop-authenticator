@@ -708,10 +708,23 @@ const notifier = new ConfirmationNotifier({
 });
 ```
 
-**[r7] `notificationIcon()` has to be a real step, and the packaging claim was
-wrong.** Revision 6 called a `notificationImage()` that no step defined, under
-a comment demanding a 256px asset no phase produced, and then concluded "there
-is no packaging work". Two of those three cannot all be true.
+> **[r8] The r7 correction below was itself wrong, and is kept for the same
+> reason everything else here is kept.** It said `notificationImage()` was
+> called by no step and that its 256px asset was never produced. Both were true
+> of this _document_ and neither was true of the _tree_:
+> `src/main/logo-image.ts` already exports `notificationImage()`, which returns
+> a single 256px representation drawn from the geometry in `shared/logo.ts` —
+> so there is no asset to add, nothing to omit-or-throw over, and the "no
+> packaging work" claim r7 called impossible was simply correct. Implemented as
+> `icon: notificationImage()`, using what was already there. The lesson is the
+> one r7 was itself about: a claim checked against the plan is not a claim
+> checked against the code.
+
+**[r7, superseded] `notificationIcon()` has to be a real step, and the
+packaging claim was wrong.** Revision 6 called a `notificationImage()` that no
+step defined, under a comment demanding a 256px asset no phase produced, and
+then concluded "there is no packaging work". Two of those three cannot all be
+true.
 
 What is actually true: `windows-identity.ts` already sets an AppUserModelID,
 which is what Windows requires before a toast will show at all. **That** is the
