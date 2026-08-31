@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
@@ -83,6 +83,47 @@ async function removed(path: string): Promise<boolean> {
  * needs to spot the file once they are looking in it. The set-aside copy in
  * particular carries a random suffix nobody would recognise otherwise.
  */
+/**
+ * One export at a time per destination path.
+ *
+ * Every step below — set the old file aside, rename the new one in, check the
+ * account is still ours, undo if it is not — is a read-modify-write on one path,
+ * spread across four awaits. Two exports aimed at the same file interleaved
+ * freely through it, and the outcome was not a lost update but a **deleted**
+ * one: export B renamed its file in and answered `saved`, then export A found
+ * its own account gone, ran its rollback, and removed the destination. B's file
+ * was the one that went, and nothing at either end said so — A reported a
+ * refusal it had earned, B reported a success it no longer had.
+ *
+ * Serialising the whole sequence is the fix rather than a longer chain of
+ * checks, because there is no point in the sequence where "is this still mine"
+ * can be asked once and stay true.
+ *
+ * Keyed on the path as the dialog returned it. Two spellings of one path would
+ * defeat this, which is why the ownership check below exists as well: it is what
+ * catches a writer this map never knew about.
+ */
+const exportsInFlight = new Map<string, Promise<unknown>>();
+
+async function exclusively<T>(path: string, run: () => Promise<T>): Promise<T> {
+	const queued = exportsInFlight.get(path) ?? Promise.resolve();
+	// Settled either way: a failed export must not wedge the path forever.
+	const mine = queued.then(run, run);
+	const settled = mine.then(
+		() => undefined,
+		() => undefined
+	);
+	exportsInFlight.set(path, settled);
+	try {
+		return await mine;
+	} finally {
+		// Only if nobody queued behind us, or the next export clears its own turn.
+		if (exportsInFlight.get(path) === settled) {
+			exportsInFlight.delete(path);
+		}
+	}
+}
+
 function stillOnDisk(names: readonly string[]): string {
 	if (names.length === 0) {
 		return '';
@@ -314,317 +355,368 @@ export function registerEnrollmentHandlers(
 			return { state: 'cancelled' as const };
 		}
 
-		// **Checked again, after the dialog.** A save dialog sits open for as long as
-		// the user takes to pick a folder, and the idle timer, a suspend or an OS
-		// screen lock can all fire in that window. The account was copied out before
-		// the dialog opened, so without this the plaintext secrets are written after
-		// the vault has locked — the one moment the application has been told nobody
-		// is present.
-		requireUnlocked();
+		return exclusively(destination, async () => {
+			// **Checked again, after the dialog.** A save dialog sits open for as long as
+			// the user takes to pick a folder, and the idle timer, a suspend or an OS
+			// screen lock can all fire in that window. The account was copied out before
+			// the dialog opened, so without this the plaintext secrets are written after
+			// the vault has locked — the one moment the application has been told nobody
+			// is present.
+			requireUnlocked();
 
-		// And re-read, for the same reason. The copy taken before the dialog
-		// outlives anything that happened during it — writing it out for an
-		// account since removed would put secrets the user just chose to be rid of
-		// into a fresh plaintext file.
-		const current = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
-		if (!current) {
-			throw new Error('that account is no longer in this vault, so nothing was exported.');
-		}
+			// And re-read, for the same reason. The copy taken before the dialog
+			// outlives anything that happened during it — writing it out for an
+			// account since removed would put secrets the user just chose to be rid of
+			// into a fresh plaintext file.
+			const current = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+			if (!current) {
+				throw new Error('that account is no longer in this vault, so nothing was exported.');
+			}
 
-		// `mode: 0o600` — owner-only. This file contains the same secrets as the
-		// vault and none of its encryption, so the one protection available is that
-		// other users on the machine cannot read it. The user is told as much on
-		// the screen that offers this.
-		//
-		// **Temp beside the destination, then rename — never truncate in place.**
-		// Writing straight to the chosen path opens it for truncation first, so a
-		// write that then failed — disk full, a drive unplugged mid-copy — had
-		// already emptied the previous maFile at that name. Re-exporting over an
-		// existing backup is the ordinary case, and a failed export must leave the
-		// old file exactly as it was; the vault and recovery writers have always
-		// worked this way.
-		//
-		// Wrapped because a failed write throws with the absolute path in its
-		// message, and the rule at the top of this module is that no path crosses
-		// IPC in either direction.
-		// A unique name, and `wx`. A fixed `.tmp` suffix truncated whatever already
-		// sat at that name — a sibling file that was never ours — and two exports
-		// to the same destination shared one temp, so either's failure path could
-		// delete the other's work. The random name makes collisions impossible and
-		// `wx` makes this write constitutionally unable to empty an existing file.
-		const temp = `${destination}.${randomUUID()}.tmp`;
+			// `mode: 0o600` — owner-only. This file contains the same secrets as the
+			// vault and none of its encryption, so the one protection available is that
+			// other users on the machine cannot read it. The user is told as much on
+			// the screen that offers this.
+			//
+			// **Temp beside the destination, then rename — never truncate in place.**
+			// Writing straight to the chosen path opens it for truncation first, so a
+			// write that then failed — disk full, a drive unplugged mid-copy — had
+			// already emptied the previous maFile at that name. Re-exporting over an
+			// existing backup is the ordinary case, and a failed export must leave the
+			// old file exactly as it was; the vault and recovery writers have always
+			// worked this way.
+			//
+			// Wrapped because a failed write throws with the absolute path in its
+			// message, and the rule at the top of this module is that no path crosses
+			// IPC in either direction.
+			// A unique name, and `wx`. A fixed `.tmp` suffix truncated whatever already
+			// sat at that name — a sibling file that was never ours — and two exports
+			// to the same destination shared one temp, so either's failure path could
+			// delete the other's work. The random name makes collisions impossible and
+			// `wx` makes this write constitutionally unable to empty an existing file.
+			const temp = `${destination}.${randomUUID()}.tmp`;
 
-		/*
-		 * What this file is about to contain, captured before the write.
-		 *
-		 * Re-read and compared after it, beside the lock check — see there. The
-		 * revocation code is included because replacing it alone makes an exported
-		 * copy wrong in the way that matters most: it is the one secret whose loss
-		 * cannot be undone, and a backup holding the previous one is worse than no
-		 * backup, because somebody will believe it.
-		 */
-		const exported = fingerprint(current);
+			/*
+			 * What this file is about to contain, captured before the write.
+			 *
+			 * Re-read and compared after it, beside the lock check — see there. The
+			 * revocation code is included because replacing it alone makes an exported
+			 * copy wrong in the way that matters most: it is the one secret whose loss
+			 * cannot be undone, and a backup holding the previous one is worse than no
+			 * backup, because somebody will believe it.
+			 */
+			const exported = fingerprint(current);
 
-		/*
-		 * Cleanup and refusal in one place, so both failure paths below can keep a
-		 * **bare** `catch`.
-		 *
-		 * That is not style. `preserve-caught-error` wants a `cause` on anything
-		 * rethrown from a bound error — and the whole rule of this module is that
-		 * no filesystem path crosses IPC. A failed write throws with the absolute
-		 * destination in its message, so attaching it as a cause would hand the
-		 * renderer the user's folder layout through the back door, to satisfy a
-		 * lint rule about diagnostics.
-		 */
-		const giveUp = async (alsoLeft: readonly string[] = []): Promise<never> => {
-			// Verified, not merely attempted. The staged file holds the same plaintext
-			// the destination would have, so a removal that failed and was swallowed
-			// left a maFile in the user's folder under a message telling them the
-			// export had not been written at all.
-			const staged = (await removed(temp)) ? [] : [basename(temp)];
-			// Concatenated rather than interpolated so the sentence the user is given
-			// for a failed write stays one literal in this file: `transfer-screen-wiring`
-			// reads it from the source to prove the refusal names the file that was
-			// asked for and never the path the OS dialog chose.
-			throw new Error(
-				`${suggested} could not be written to that location.` +
-					stillOnDisk([...alsoLeft, ...staged])
+			/*
+			 * Cleanup and refusal in one place, so both failure paths below can keep a
+			 * **bare** `catch`.
+			 *
+			 * That is not style. `preserve-caught-error` wants a `cause` on anything
+			 * rethrown from a bound error — and the whole rule of this module is that
+			 * no filesystem path crosses IPC. A failed write throws with the absolute
+			 * destination in its message, so attaching it as a cause would hand the
+			 * renderer the user's folder layout through the back door, to satisfy a
+			 * lint rule about diagnostics.
+			 */
+			const giveUp = async (alsoLeft: readonly string[] = []): Promise<never> => {
+				// Verified, not merely attempted. The staged file holds the same plaintext
+				// the destination would have, so a removal that failed and was swallowed
+				// left a maFile in the user's folder under a message telling them the
+				// export had not been written at all.
+				const staged = (await removed(temp)) ? [] : [basename(temp)];
+				// Concatenated rather than interpolated so the sentence the user is given
+				// for a failed write stays one literal in this file: `transfer-screen-wiring`
+				// reads it from the source to prove the refusal names the file that was
+				// asked for and never the path the OS dialog chose.
+				throw new Error(
+					`${suggested} could not be written to that location.` +
+						stillOnDisk([...alsoLeft, ...staged])
+				);
+			};
+
+			try {
+				await writeFile(temp, toMaFile(current), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+			} catch {
+				await giveUp();
+			}
+
+			{
+				/*
+				 * **Checked once more, between writing and publishing.**
+				 *
+				 * The check before this covers the save dialog, which is the long wait —
+				 * but the write is a wait too, and a slow one on the drives people
+				 * actually export to: a USB stick, a network share, an SD card. Lock the
+				 * vault during it — manually, by idling, by shutting the lid — and the
+				 * rename still completed and put a plaintext maFile at the destination,
+				 * carrying the same secrets as the vault and none of its encryption,
+				 * after the application had been told nobody is present.
+				 *
+				 * The rename is the moment the file becomes real, so this is the last
+				 * place the answer can still be no. The temp goes with it: it holds the
+				 * same plaintext, and it exists only because the destination is not
+				 * safe to write directly.
+				 */
+				// A lock is not a disk problem, and telling somebody their drive would
+				// not take the file when what actually happened is that their vault
+				// locked sends them to fix the wrong thing — so this is thrown from
+				// outside the write's own catch, where it cannot be mistaken for one.
+				if (!vault.isUnlocked()) {
+					// And if the staged plaintext cannot be taken back, the lock is not the
+					// only thing the user needs to hear about.
+					const staged = (await removed(temp)) ? [] : [basename(temp)];
+					throw staged.length === 0
+						? new VaultLockedError()
+						: new VaultLockedError(`the vault is locked.${stillOnDisk(staged)}`);
+				}
+
+				/*
+				 * **And that it is still the same account.**
+				 *
+				 * The lock is re-checked here and the account's identity was not, so
+				 * only half the race was closed. The write is the wait — slow on the
+				 * drives people export to — and an account can be removed, or have its
+				 * authenticator replaced, while it runs. The rename then published a
+				 * plaintext maFile holding secrets the vault no longer has, and told the
+				 * user it had saved their account.
+				 *
+				 * Removed is the worse half: it puts the secrets somebody just chose to
+				 * be rid of into a fresh unencrypted file at a path of their choosing.
+				 * Replaced is quieter and lasts longer — a backup that silently holds
+				 * the previous authenticator, which Steam has already stopped accepting,
+				 * discovered at the one moment it is ever used.
+				 *
+				 * Compared on the secrets themselves rather than on presence, because
+				 * "still in the vault" is true of a re-enrolled account that shares
+				 * nothing with the one this file describes.
+				 */
+				const stillThere = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+				if (!stillThere || fingerprint(stillThere) !== exported) {
+					const staged = (await removed(temp)) ? [] : [basename(temp)];
+					throw raceLost(!stillThere, staged);
+				}
+			}
+
+			/*
+			 * Whether the destination was already there, read before the rename.
+			 *
+			 * It decides what a lock *during* the rename is allowed to do about it —
+			 * see below. `access` rather than a stat: only existence matters, and this
+			 * is a question about the path, not about its contents.
+			 */
+			/*
+			 * **The previous file is set aside, not merely noted.**
+			 *
+			 * An earlier version recorded whether the destination existed and, if it
+			 * did, left the replacement in place when a lock landed during the rename —
+			 * on the reasoning that deleting would destroy a backup the user had before
+			 * they pressed anything.
+			 *
+			 * That reasoning had a hole, and it produced the worst available outcome:
+			 * the old backup was gone, freshly exported plaintext was sitting at that
+			 * path, and the user was told the export had failed because the vault
+			 * locked. Every part of that is wrong at once — a destroyed file, a new
+			 * exposure, and a message saying neither happened.
+			 *
+			 * Moving it aside first makes the rename undoable, so the lock can be
+			 * honoured exactly: the new file goes, the old one comes back, and
+			 * "nothing was replaced" is true. The same set-aside-then-restore the vault
+			 * writer has always used, for the same reason.
+			 */
+			const kept = `${destination}.${randomUUID()}.prev`;
+			const replacing = await rename(destination, kept)
+				.then(() => true)
+				.catch(() => false);
+
+			/**
+			 * What this export left at the destination, so the rollback can tell
+			 * whether the file it is about to delete is still that one.
+			 *
+			 * The mutex above stops another *export* getting in, and cannot stop
+			 * anything else: a sync client, a backup tool, the user saving over it.
+			 * The rollback deletes the destination outright, so without this it is one
+			 * unlucky moment from removing a file this export never created, under a
+			 * message saying nothing was written.
+			 *
+			 * Size and modification time rather than an inode, because Windows reports
+			 * `ino` as 0 and a check that is inert on the platform most of these
+			 * installs run on is not a check.
+			 */
+			const staged = await stat(temp).then(
+				(info) => ({ size: info.size, mtimeMs: info.mtimeMs }),
+				() => undefined
 			);
-		};
+			let written: { size: number; mtimeMs: number } | undefined;
 
-		try {
-			await writeFile(temp, toMaFile(current), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-		} catch {
-			await giveUp();
-		}
-
-		{
-			/*
-			 * **Checked once more, between writing and publishing.**
-			 *
-			 * The check before this covers the save dialog, which is the long wait —
-			 * but the write is a wait too, and a slow one on the drives people
-			 * actually export to: a USB stick, a network share, an SD card. Lock the
-			 * vault during it — manually, by idling, by shutting the lid — and the
-			 * rename still completed and put a plaintext maFile at the destination,
-			 * carrying the same secrets as the vault and none of its encryption,
-			 * after the application had been told nobody is present.
-			 *
-			 * The rename is the moment the file becomes real, so this is the last
-			 * place the answer can still be no. The temp goes with it: it holds the
-			 * same plaintext, and it exists only because the destination is not
-			 * safe to write directly.
-			 */
-			// A lock is not a disk problem, and telling somebody their drive would
-			// not take the file when what actually happened is that their vault
-			// locked sends them to fix the wrong thing — so this is thrown from
-			// outside the write's own catch, where it cannot be mistaken for one.
-			if (!vault.isUnlocked()) {
-				// And if the staged plaintext cannot be taken back, the lock is not the
-				// only thing the user needs to hear about.
-				const staged = (await removed(temp)) ? [] : [basename(temp)];
-				throw staged.length === 0
-					? new VaultLockedError()
-					: new VaultLockedError(`the vault is locked.${stillOnDisk(staged)}`);
+			try {
+				await rename(temp, destination);
+				/*
+				 * The staged file's identity, taken **before** the rename rather than
+				 * read back after it. A rename carries size and modification time across
+				 * unchanged, and statting the destination afterwards leaves a window in
+				 * which something else has already replaced the file — the check would
+				 * then record the intruder's identity and go on to delete it as its own.
+				 */
+				written = staged;
+			} catch {
+				// Put back whatever was there before saying the export failed — and when
+				// it cannot go back, name it. It is the user's own previous export,
+				// stranded under a random suffix they never chose, while the message about
+				// to be thrown talks only about the file that was not written.
+				const stranded = replacing
+					? await rename(kept, destination).then(
+							() => [],
+							() => [basename(kept)]
+						)
+					: [];
+				await giveUp(stranded);
 			}
 
 			/*
-			 * **And that it is still the same account.**
+			 * **The rename is the commit, and it is not instant.**
 			 *
-			 * The lock is re-checked here and the account's identity was not, so
-			 * only half the race was closed. The write is the wait — slow on the
-			 * drives people export to — and an account can be removed, or have its
-			 * authenticator replaced, while it runs. The rename then published a
-			 * plaintext maFile holding secrets the vault no longer has, and told the
-			 * user it had saved their account.
+			 * The check above covers everything up to it. The rename itself is a
+			 * filesystem round trip — on the removable and network drives people
+			 * actually export to, a slow one — and a lock landing inside it still
+			 * published the plaintext maFile, then answered `saved`.
 			 *
-			 * Removed is the worse half: it puts the secrets somebody just chose to
-			 * be rid of into a fresh unencrypted file at a path of their choosing.
-			 * Replaced is quieter and lasts longer — a backup that silently holds
-			 * the previous authenticator, which Steam has already stopped accepting,
-			 * discovered at the one moment it is ever used.
+			 * There is no way to make a rename part of the same transaction as a lock,
+			 * so this undoes it instead, and only where undoing is honest:
 			 *
-			 * Compared on the secrets themselves rather than on presence, because
-			 * "still in the vault" is true of a re-enrolled account that shares
-			 * nothing with the one this file describes.
+			 *  - **Nothing was there before.** This export created the file, so
+			 *    removing it restores the directory exactly as it was, and the lock
+			 *    means nobody is present to have wanted it.
+			 *  - **Something was there.** The rename has already replaced it, and
+			 *    deleting now would destroy a backup the user had before they pressed
+			 *    anything — a worse outcome than a plaintext file for the same account
+			 *    that already existed at that path a second ago, which is no new
+			 *    exposure at all. It stays, and the refusal still says the vault
+			 *    locked.
 			 */
-			const stillThere = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
-			if (!stillThere || fingerprint(stillThere) !== exported) {
-				const staged = (await removed(temp)) ? [] : [basename(temp)];
-				throw raceLost(!stillThere, staged);
-			}
-		}
-
-		/*
-		 * Whether the destination was already there, read before the rename.
-		 *
-		 * It decides what a lock *during* the rename is allowed to do about it —
-		 * see below. `access` rather than a stat: only existence matters, and this
-		 * is a question about the path, not about its contents.
-		 */
-		/*
-		 * **The previous file is set aside, not merely noted.**
-		 *
-		 * An earlier version recorded whether the destination existed and, if it
-		 * did, left the replacement in place when a lock landed during the rename —
-		 * on the reasoning that deleting would destroy a backup the user had before
-		 * they pressed anything.
-		 *
-		 * That reasoning had a hole, and it produced the worst available outcome:
-		 * the old backup was gone, freshly exported plaintext was sitting at that
-		 * path, and the user was told the export had failed because the vault
-		 * locked. Every part of that is wrong at once — a destroyed file, a new
-		 * exposure, and a message saying neither happened.
-		 *
-		 * Moving it aside first makes the rename undoable, so the lock can be
-		 * honoured exactly: the new file goes, the old one comes back, and
-		 * "nothing was replaced" is true. The same set-aside-then-restore the vault
-		 * writer has always used, for the same reason.
-		 */
-		const kept = `${destination}.${randomUUID()}.prev`;
-		const replacing = await rename(destination, kept)
-			.then(() => true)
-			.catch(() => false);
-
-		try {
-			await rename(temp, destination);
-		} catch {
-			// Put back whatever was there before saying the export failed — and when
-			// it cannot go back, name it. It is the user's own previous export,
-			// stranded under a random suffix they never chose, while the message about
-			// to be thrown talks only about the file that was not written.
-			const stranded = replacing
-				? await rename(kept, destination).then(
-						() => [],
-						() => [basename(kept)]
-					)
-				: [];
-			await giveUp(stranded);
-		}
-
-		/*
-		 * **The rename is the commit, and it is not instant.**
-		 *
-		 * The check above covers everything up to it. The rename itself is a
-		 * filesystem round trip — on the removable and network drives people
-		 * actually export to, a slow one — and a lock landing inside it still
-		 * published the plaintext maFile, then answered `saved`.
-		 *
-		 * There is no way to make a rename part of the same transaction as a lock,
-		 * so this undoes it instead, and only where undoing is honest:
-		 *
-		 *  - **Nothing was there before.** This export created the file, so
-		 *    removing it restores the directory exactly as it was, and the lock
-		 *    means nobody is present to have wanted it.
-		 *  - **Something was there.** The rename has already replaced it, and
-		 *    deleting now would destroy a backup the user had before they pressed
-		 *    anything — a worse outcome than a plaintext file for the same account
-		 *    that already existed at that path a second ago, which is no new
-		 *    exposure at all. It stays, and the refusal still says the vault
-		 *    locked.
-		 */
-		/*
-		 * **And the account is checked again, not only the lock.**
-		 *
-		 * The fingerprint was taken before this sequence and never re-read, so the
-		 * post-rename check asked one question — is the vault still open — and let
-		 * everything else through. Removing the account during the awaited renames
-		 * therefore answered `{ state: 'saved' }` with the plaintext maFile sitting
-		 * at the destination: secrets published for an authenticator the vault no
-		 * longer holds, by an export the user had already superseded.
-		 *
-		 * The same fingerprint, for the same reason it exists at all — an account
-		 * removed and re-enrolled keeps its SteamID and shares nothing else, so a
-		 * file written from the old secrets is a backup of something Steam has
-		 * already stopped accepting.
-		 */
-		const stillOurs = vault.isUnlocked()
-			? vault.read().accounts.find((entry) => entry.steamId64 === steamId64)
-			: undefined;
-		if (!vault.isUnlocked() || !stillOurs || fingerprint(stillOurs) !== exported) {
 			/*
-			 * **Undone completely — and where it cannot be undone, said out loud.**
+			 * **And the account is checked again, not only the lock.**
 			 *
-			 * Both halves of this rollback used to be fired and forgotten:
-			 * `rm(destination).catch(() => undefined)` and
-			 * `rename(kept, destination).catch(() => undefined)`, followed by a refusal
-			 * saying nothing was written no matter which of them had actually worked.
-			 * Hold the destination open — a scanner, a network share dropping, a
-			 * removable drive pulled — and the freshly published maFile stayed exactly
-			 * where it was, `shared_secret` and `identity_secret` in the clear, under a
-			 * message that told the user to stop looking. A silent exposure is worse
-			 * than a loud one, because only the loud one gets deleted.
+			 * The fingerprint was taken before this sequence and never re-read, so the
+			 * post-rename check asked one question — is the vault still open — and let
+			 * everything else through. Removing the account during the awaited renames
+			 * therefore answered `{ state: 'saved' }` with the plaintext maFile sitting
+			 * at the destination: secrets published for an authenticator the vault no
+			 * longer holds, by an export the user had already superseded.
 			 *
-			 * So each half is verified on its own, and what survives is named.
+			 * The same fingerprint, for the same reason it exists at all — an account
+			 * removed and re-enrolled keeps its SteamID and shares nothing else, so a
+			 * file written from the old secrets is a backup of something Steam has
+			 * already stopped accepting.
 			 */
-			const tookItBack = await removed(destination);
+			const stillOurs = vault.isUnlocked()
+				? vault.read().accounts.find((entry) => entry.steamId64 === steamId64)
+				: undefined;
+			if (!vault.isUnlocked() || !stillOurs || fingerprint(stillOurs) !== exported) {
+				/*
+				 * **Undone completely — and where it cannot be undone, said out loud.**
+				 *
+				 * Both halves of this rollback used to be fired and forgotten:
+				 * `rm(destination).catch(() => undefined)` and
+				 * `rename(kept, destination).catch(() => undefined)`, followed by a refusal
+				 * saying nothing was written no matter which of them had actually worked.
+				 * Hold the destination open — a scanner, a network share dropping, a
+				 * removable drive pulled — and the freshly published maFile stayed exactly
+				 * where it was, `shared_secret` and `identity_secret` in the clear, under a
+				 * message that told the user to stop looking. A silent exposure is worse
+				 * than a loud one, because only the loud one gets deleted.
+				 *
+				 * So each half is verified on its own, and what survives is named.
+				 */
+				/*
+				 * Only if it is still the file this export wrote. If something replaced
+				 * it in the meantime, deleting is not a rollback — it destroys a file
+				 * this export never created, under a message saying nothing was
+				 * written. Unknown counts as not ours: `written` is undefined only when
+				 * the stat failed, and guessing from there is what this avoids.
+				 */
+				const atDestination = await stat(destination).then(
+					(info) => ({ size: info.size, mtimeMs: info.mtimeMs }),
+					() => undefined
+				);
+				const stillOurFile =
+					written !== undefined &&
+					atDestination !== undefined &&
+					atDestination.size === written.size &&
+					atDestination.mtimeMs === written.mtimeMs;
+
+				const tookItBack = stillOurFile ? await removed(destination) : false;
+				/*
+				 * Attempted even when the removal failed, because the restore lands *on
+				 * top* of the published file: a rename that succeeds replaces the fresh
+				 * plaintext with the copy that was there before, which is this rollback's
+				 * goal reached by the other door. Only when neither worked is the export
+				 * still sitting at the destination.
+				 */
+				const putBack = replacing
+					? await rename(kept, destination).then(
+							() => true,
+							() => false
+						)
+					: false;
+
+				const left: string[] = [];
+				if (!tookItBack && !putBack) {
+					left.push(basename(destination));
+				}
+				if (replacing && !putBack) {
+					// The set-aside copy could not go home. It is the user's own earlier
+					// export — the same secrets, no encryption — now sitting under a random
+					// suffix in a folder where they have been told nothing happened.
+					left.push(basename(kept));
+				}
+
+				if (!vault.isUnlocked()) {
+					throw left.length === 0
+						? new VaultLockedError()
+						: new VaultLockedError(`the vault is locked.${stillOnDisk(left)}`);
+				}
+				// The same sentences the pre-rename check gives, so the two read alike —
+				// and so a user who hits the later one is not told something different
+				// about the same situation.
+				throw raceLost(!stillOurs, left);
+			}
+
 			/*
-			 * Attempted even when the removal failed, because the restore lands *on
-			 * top* of the published file: a rename that succeeds replaces the fresh
-			 * plaintext with the copy that was there before, which is this rollback's
-			 * goal reached by the other door. Only when neither worked is the export
-			 * still sitting at the destination.
+			 * The export stands, so the copy it replaced is no longer needed. Removed
+			 * rather than left beside it: a stray `.prev` full of the same secrets is
+			 * a second plaintext file nobody asked for.
+			 *
+			 * **And when it cannot be removed, the caller is told.** A swallowed
+			 * failure here answered `saved` while a second plaintext file sat in the
+			 * user's folder — the previous authenticator's secrets, at a path only the
+			 * OS dialog knows, with nothing anywhere mentioning it. A scanner holding
+			 * the file, a network share dropping, a removable drive pulled: all
+			 * ordinary, all silent.
 			 */
-			const putBack = replacing
-				? await rename(kept, destination).then(
-						() => true,
-						() => false
-					)
-				: false;
-
-			const left: string[] = [];
-			if (!tookItBack && !putBack) {
-				left.push(basename(destination));
+			let staleCopy = false;
+			if (replacing) {
+				staleCopy = !(await removed(kept));
 			}
-			if (replacing && !putBack) {
-				// The set-aside copy could not go home. It is the user's own earlier
-				// export — the same secrets, no encryption — now sitting under a random
-				// suffix in a folder where they have been told nothing happened.
-				left.push(basename(kept));
+			// **`mode` alone was not enough.** POSIX applies it only when the file is
+			// created, so exporting over a file that already existed — a second export to
+			// the same name, which is the ordinary case — kept whatever permissions it
+			// had, commonly `0644`, while replacing its contents with an unencrypted
+			// shared_secret and identity_secret.
+			//
+			// Best effort: Windows has no POSIX mode, and failing an export that has
+			// already written its bytes would leave the user worse off than a permission
+			// bit that could not be set.
+			try {
+				await chmod(destination, 0o600);
+			} catch {
+				/* not supported here; the directory's own permissions still apply */
 			}
 
-			if (!vault.isUnlocked()) {
-				throw left.length === 0
-					? new VaultLockedError()
-					: new VaultLockedError(`the vault is locked.${stillOnDisk(left)}`);
-			}
-			// The same sentences the pre-rename check gives, so the two read alike —
-			// and so a user who hits the later one is not told something different
-			// about the same situation.
-			throw raceLost(!stillOurs, left);
-		}
-
-		/*
-		 * The export stands, so the copy it replaced is no longer needed. Removed
-		 * rather than left beside it: a stray `.prev` full of the same secrets is
-		 * a second plaintext file nobody asked for.
-		 *
-		 * **And when it cannot be removed, the caller is told.** A swallowed
-		 * failure here answered `saved` while a second plaintext file sat in the
-		 * user's folder — the previous authenticator's secrets, at a path only the
-		 * OS dialog knows, with nothing anywhere mentioning it. A scanner holding
-		 * the file, a network share dropping, a removable drive pulled: all
-		 * ordinary, all silent.
-		 */
-		let staleCopy = false;
-		if (replacing) {
-			staleCopy = !(await removed(kept));
-		}
-		// **`mode` alone was not enough.** POSIX applies it only when the file is
-		// created, so exporting over a file that already existed — a second export to
-		// the same name, which is the ordinary case — kept whatever permissions it
-		// had, commonly `0644`, while replacing its contents with an unencrypted
-		// shared_secret and identity_secret.
-		//
-		// Best effort: Windows has no POSIX mode, and failing an export that has
-		// already written its bytes would leave the user worse off than a permission
-		// bit that could not be set.
-		try {
-			await chmod(destination, 0o600);
-		} catch {
-			/* not supported here; the directory's own permissions still apply */
-		}
-
-		return { state: 'saved' as const, fileName: suggested, ...(staleCopy ? { staleCopy } : {}) };
+			return {
+				state: 'saved' as const,
+				fileName: suggested,
+				...(staleCopy ? { staleCopy } : {})
+			};
+		});
 	});
 }

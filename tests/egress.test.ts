@@ -2456,3 +2456,82 @@ describe('SOCKS4', () => {
 		expect(planProxy('socks5h://proxy.example').proxyRules).toBe('socks5://proxy.example:1080');
 	});
 });
+
+/**
+ * **Credentials that `redactCredentials` cannot see, refused before they exist.**
+ *
+ * That function decides from text alone whether a space after a scheme continues
+ * the URL or ends it — `http://alice:hunter 2@proxy` against `could not reach
+ * http://proxy:8080 for alice@example.net`. It crosses exactly one word, and its
+ * own comment names what escapes: a multi-word tail.
+ *
+ * Measured before this: `http://alice:1234 5 6@proxy.example:8080` was accepted
+ * by `planProxy` and returned **unchanged** by `redactCredentials`, so the
+ * password reached every message an error is displayed or logged in. One space
+ * was redacted; two were not.
+ *
+ * Widening the scan is the fix that looks obvious and has already been tried —
+ * it rewrote whole sentences, inventing credentials and destroying the real
+ * host. The ambiguity is not resolvable from text, so the text is not produced:
+ * RFC 3986 has no way to carry a raw space in userinfo anyway, and `%20` arrives
+ * encoded, survives redaction, and is decoded before it reaches the proxy.
+ */
+/** A proxy URL whose password carries one byte, named by its codepoint. */
+const withByte = (code: number): string =>
+	`http://alice:hunter${String.fromCharCode(code)}2@proxy.example:8080`;
+
+describe('proxy credentials that could survive redaction', () => {
+	it.each([
+		['a space in the password', 'http://alice:hunter 2@proxy.example:8080'],
+		['two spaces in the password', 'http://alice:1234 5 6@proxy.example:8080'],
+		['a space in the username', 'http://ali ce:hunter2@proxy.example:8080'],
+		/*
+		 * Built from codepoints rather than written as escapes, for the reason
+		 * `tests/no-binary-sources.test.ts` gives: spelling a control character in a
+		 * source file means typing one, and every tool between here and the file has
+		 * a chance to hand over the byte instead of the escape. It did, twice, and
+		 * that guard caught it both times. A carriage return cannot appear in a
+		 * string literal at all, so there is no spelling of this line that works.
+		 */
+		['a tab in the password', withByte(9)],
+		['a form feed in the password', withByte(12)],
+		['a carriage return in the password', withByte(13)],
+		['a null in the password', withByte(0)],
+		['a delete character in the password', withByte(127)]
+	])('are refused: %s', (_what, url) => {
+		expect(
+			() => planProxy(url),
+			`${url} was accepted, and redactCredentials cannot reliably strip it from a message`
+		).toThrow(EgressError);
+	});
+
+	it('says how to write one instead', () => {
+		expect(() => planProxy('http://alice:hunter 2@proxy.example:8080')).toThrow(/%20/);
+	});
+
+	/*
+	 * The point of refusing rather than mangling: the password is still usable,
+	 * just spelled the way a URL can carry it.
+	 */
+	it('accepts the percent-encoded spelling and decodes it for the proxy', () => {
+		const plan = planProxy('http://alice:hunter%202@proxy.example:8080');
+		expect(plan.credentials).toEqual({ username: 'alice', password: 'hunter 2' });
+		expect(plan.redacted).toBe('http://***:***@proxy.example:8080');
+	});
+
+	/*
+	 * And the property the refusal exists to protect, asserted directly: whatever
+	 * `planProxy` accepts, `redactCredentials` can strip.
+	 */
+	it('leaves nothing accepted that redaction cannot strip', () => {
+		for (const password of ['hunter2', 'hunter%202', 'p@ssword', 'a%3Ab', '%09tab']) {
+			const url = `http://alice:${password}@proxy.example:8080`;
+			const plan = planProxy(url);
+			const redacted = redactCredentials(`could not connect: ${url}`);
+			expect(redacted, `${url} survived redaction`).toBe(
+				'could not connect: http://***:***@proxy.example:8080'
+			);
+			expect(plan.redacted).not.toContain('alice');
+		}
+	});
+});

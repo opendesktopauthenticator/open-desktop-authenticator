@@ -1171,3 +1171,120 @@ describe('an export that gives up but cannot delete what it staged', () => {
 		).toMatch(/\.tmp/);
 	});
 });
+
+/**
+ * **Two accounts exported to the same file.**
+ *
+ * Every step of a publish is a read-modify-write on one path — set the old file
+ * aside, rename the new one in, re-check the account, undo if it went — spread
+ * across four awaits, and nothing serialised them. Two exports aimed at the same
+ * destination interleaved freely, and what came out was not a lost update but a
+ * deleted one: B renamed its file in and answered `saved`, then A found its own
+ * account gone, ran its rollback, and removed the destination. B's file was the
+ * one that went. A reported a refusal it had earned; B reported a success it no
+ * longer had; the user had neither file.
+ *
+ * The exports are now serialised per destination, so A finishes — and fails —
+ * before B is allowed to touch the path at all.
+ */
+describe('two exports aimed at the same file', () => {
+	const other: Account = {
+		...account,
+		steamId64: '76561198000000002',
+		accountName: 'second'
+	};
+
+	it('does not let the first one delete the second one on its way out', async () => {
+		const destination = join(dir, 'shared.maFile');
+		const accounts: Account[] = [account, other];
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		/*
+		 * The first export loses its account the moment its rename commits, which
+		 * is what sends it into the rollback. Only the first: the mock fires this
+		 * on every successful rename, and the restore is one too.
+		 */
+		let renames = 0;
+		lockDuringRename = () => {
+			renames += 1;
+			if (renames === 1) {
+				const index = accounts.findIndex((entry) => entry.steamId64 === account.steamId64);
+				if (index !== -1) {
+					accounts.splice(index, 1);
+				}
+			}
+		};
+
+		/*
+		 * Both started before either is awaited, which is the whole point — they
+		 * run the same sequence of awaits one step apart. Starting the second one
+		 * from inside the first one's rename hook, as this test first did, made the
+		 * runtime serialise them by accident and the test passed with the mutex
+		 * deleted.
+		 */
+		const first = handler(EVENT, { steamId64: account.steamId64 });
+		const second = handler(EVENT, { steamId64: other.steamId64 });
+
+		await expect(first).rejects.toThrow();
+		const result = (await second) as { state: string };
+
+		expect(result.state, 'the second export did not finish').toBe('saved');
+		expect(
+			existsSync(destination),
+			'the second export reported success and its file is not there — the first export deleted ' +
+				'it while rolling back its own'
+		).toBe(true);
+		expect(
+			JSON.parse(readFileSync(destination, 'utf8')).account_name,
+			'the file at the destination is not the one the successful export wrote'
+		).toBe(other.accountName);
+	});
+
+	/**
+	 * And the half the mutex cannot reach: something that is not an export
+	 * replacing the file. The rollback deletes the destination outright, so
+	 * without an ownership check it removes a file this export never created,
+	 * under a message saying nothing was written.
+	 */
+	it('leaves a file it did not write alone when it rolls back', async () => {
+		const destination = join(dir, 'out.maFile');
+		const accounts: Account[] = [account];
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		lockDuringRename = () => {
+			// Somebody else's file lands on the path, and the account goes, so the
+			// export rolls back onto something that is no longer its own.
+			accounts.length = 0;
+			writeFileSync(destination, 'a file this export did not write');
+		};
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow();
+
+		expect(
+			existsSync(destination) && readFileSync(destination, 'utf8'),
+			'the rollback deleted a file the export had not written'
+		).toBe('a file this export did not write');
+	});
+});

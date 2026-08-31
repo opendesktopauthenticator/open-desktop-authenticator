@@ -739,6 +739,61 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 	}
 
 	/*
+	 * **Whitespace in the credentials, refused here so `redactCredentials` never
+	 * meets it.**
+	 *
+	 * That function has to decide, from text alone, whether a space after a
+	 * scheme continues the URL or ends it — `http://alice:hunter 2@proxy` against
+	 * `could not reach http://proxy:8080 for alice@example.net`. It resolves the
+	 * ambiguity by crossing exactly one word, and its own comment names what
+	 * escapes: a multi-word tail. `http://alice:1234 5 6@proxy.example:8080` was
+	 * accepted by this function and returned **unchanged** by the one whose whole
+	 * job is keeping credentials out of messages, so the password reached
+	 * anywhere an error is displayed or logged.
+	 *
+	 * Widening the scan is the fix that looks obvious and is wrong: an earlier
+	 * attempt at it rewrote whole sentences, inventing credentials and destroying
+	 * the real host in a message whose job is to say what failed. The ambiguity
+	 * cannot be resolved from text, so the answer is to stop producing the text.
+	 *
+	 * No standard is being bent to do it. RFC 3986 does not permit a raw space in
+	 * userinfo at all; a password containing one is written `%20`, which arrives
+	 * here percent-encoded, survives redaction, and is decoded below before it
+	 * goes to the proxy. A user with a space in their password loses nothing but
+	 * the spelling.
+	 *
+	 * Control characters are refused with them: the URL parser silently strips a
+	 * tab, so `url.password` would read back clean while the raw text everybody
+	 * logs still carried it.
+	 */
+	/*
+	 * Codepoint arithmetic rather than a character class, for the same reason
+	 * `tests/no-binary-sources.test.ts` is written that way: spelling this as a
+	 * regex means typing the control characters, and typing them is how two of
+	 * them got into source files as literal bytes in the first place.
+	 */
+	const unsafeInUserinfo = (part: string): boolean =>
+		[...part].some((character) => {
+			const code = character.codePointAt(0) ?? 0;
+			return code <= 0x20 || code === 0x7f;
+		});
+
+	/*
+	 * Checked against the **raw** string, not `url.username` / `url.password`.
+	 * `new URL` percent-encodes a raw space on the way in, so the parsed halves
+	 * come back clean — `hunter%202` — while the text that is stored on the
+	 * account and pasted into every error message still has the space in it. A
+	 * check on the parsed values passes every case it exists to catch.
+	 */
+	if (unsafeInUserinfo(proxyUrl)) {
+		throw new EgressError(
+			'a proxy username or password cannot contain a space or a control character. Web ' +
+				'addresses have no way to carry one, and it would survive into error messages that ' +
+				'are otherwise stripped of credentials. Write it percent-encoded — a space is %20.'
+		);
+	}
+
+	/*
 	 * **Credentials on a SOCKS proxy are refused, because only half of this
 	 * application can send them.**
 	 *
