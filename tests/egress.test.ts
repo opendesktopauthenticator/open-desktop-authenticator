@@ -1040,6 +1040,54 @@ describe('reading a resolveProxy answer', () => {
  * close — a request Steam has already received cannot be recalled.
  */
 describe('redacting credentials out of messages', () => {
+	/**
+	 * **The scan never crosses a line break, and nothing pinned that.**
+	 *
+	 * A password may contain a space — that is the whole reason the whitespace-
+	 * delimited regex had to go — but it cannot contain a newline and still have
+	 * arrived as one line of a quoted URL. Refusing to scan past one bounds how
+	 * much of a multi-line message a single wrong guess can rewrite.
+	 *
+	 * A verifier reported both halves of `CROSSING_END` as unguarded. The
+	 * line-break half is pinned below, and the mutant that removes it now fails
+	 * three of these.
+	 *
+	 * **The other half I could not reproduce, and say so rather than pretend
+	 * otherwise.** Dropping the path, query and fragment terminators — leaving
+	 * only the line breaks — produced byte-identical output on twelve probed
+	 * shapes spanning both scan branches, including the ambiguous one where
+	 * those characters are the only bound. So either that escape needs a shape
+	 * nobody has found, or those terminators are redundant with the `@`-scan and
+	 * the word-boundary rule that already run. Left in place either way: they
+	 * cost nothing and the reasoning for them still reads correctly. Whoever
+	 * finds the shape should add it here.
+	 */
+	it('stops at a newline rather than swallowing the next line', () => {
+		const message =
+			'could not reach http://alice@proxy.example:8080\nnext line mentions bob@example.net';
+		const redacted = redactCredentials(message);
+		expect(redacted, 'the scan crossed a line break and rewrote unrelated prose').toContain(
+			'next line mentions bob@example.net'
+		);
+	});
+
+	it('stops at a carriage return too', () => {
+		const message = 'could not reach http://alice@proxy.example:8080\r\nbob@example.net follows';
+		expect(redactCredentials(message)).toContain('bob@example.net follows');
+	});
+
+	/*
+	 * And the other half of the same constant: a path, query or fragment ends the
+	 * authority, so an `@` beyond one belongs to the path and not to a credential.
+	 */
+	it('does not treat an @ in the path as a credential', () => {
+		const message = 'could not reach http://proxy.example:8080/inbox/alice@example.net';
+		expect(
+			redactCredentials(message),
+			'an @ after the path separator was read as userinfo, so a path was rewritten as a secret'
+		).toContain('/inbox/alice@example.net');
+	});
+
 	it('strips a password from a proxy URL a library quoted back', () => {
 		// Libraries quote what they were given. `steam-session` and Chromium both
 		// embed the URL they failed on, and enrollment, sign-in and routing all
@@ -1420,6 +1468,256 @@ describe('redaction agrees with the parser about where credentials end', () => {
 		// The greedier class must not start eating query strings again.
 		const url = 'https://example.com?to=alice@example.net';
 		expect(redactCredentials(url)).toBe(url);
+	});
+});
+
+/*
+ * A proxy password containing whitespace.
+ *
+ * The pattern was `[^\s/?#]*@`, and the `\s` in it was a hole a real password
+ * fits through. `new URL('http://alice:hunter 2@proxy.example:8080')` parses,
+ * `planProxy` accepts it, and `steamSessionProxy` hands the raw string — space
+ * and all — to the library that quotes it back inside its error message. The
+ * match stopped at the space, so `redactCredentials` returned that URL
+ * completely unchanged and `hunter 2` went to the renderer and into the
+ * activity log through the one function whose entire job is to keep it out of
+ * them.
+ *
+ * A tab is the same hole and worse: the URL parser strips tabs, so
+ * `url.password` reads back as `hunter2` while the raw text everybody logs
+ * still has the tab in it. Nothing downstream normalises this away.
+ *
+ * The table is the point. Each row is a shape somebody can actually store, and
+ * the two halves — what must be scrubbed, what must be left alone — have to
+ * hold at the same time, because widening this pattern is how it last broke.
+ */
+describe('redacting a password that contains whitespace', () => {
+	it.each([
+		[
+			'a space',
+			'connect ECONNREFUSED http://alice:hunter 2@proxy.example:8080',
+			'connect ECONNREFUSED http://***:***@proxy.example:8080'
+		],
+		[
+			'a tab',
+			'connect ECONNREFUSED http://alice:hunter\t2@proxy.example:8080',
+			'connect ECONNREFUSED http://***:***@proxy.example:8080'
+		],
+		[
+			'several spaces',
+			'http://alice:correct horse battery staple@proxy.example:8080',
+			'http://***:***@proxy.example:8080'
+		],
+		[
+			// Ambiguous on its face: a bare `alice` is a valid host, so the fragment
+			// before the space reads as a finished URL as easily as it reads as half
+			// a username.
+			'a space in the username',
+			'http://alice smith:pw@proxy.example:8080',
+			'http://***:***@proxy.example:8080'
+		],
+		[
+			// The same ambiguity from the other side: `alice:1234` is a valid
+			// `host:port`, and a password beginning with digits is not unusual.
+			'a password whose first fragment is digits',
+			'http://alice:1234 5@proxy.example:8080',
+			'http://***:***@proxy.example:8080'
+		],
+		[
+			'percent-encoding instead of a raw space',
+			'connect ECONNREFUSED http://alice:hunter%202@proxy.example:8080',
+			'connect ECONNREFUSED http://***:***@proxy.example:8080'
+		],
+		[
+			'a space and an @ together',
+			'http://alice:se cret@part@proxy.example:8080',
+			'http://***:***@proxy.example:8080'
+		],
+		[
+			'a URL embedded mid-sentence',
+			'Steam refused the sign-in: proxy http://alice:hunter 2@proxy.example:8080 rejected it',
+			'Steam refused the sign-in: proxy http://***:***@proxy.example:8080 rejected it'
+		],
+		[
+			'two URLs in one message',
+			'tried http://alice:hunter 2@one.test:8080 then socks5://bob:pass word@two.test:1080',
+			'tried http://***:***@one.test:8080 then socks5://***:***@two.test:1080'
+		],
+		[
+			'a path after the authority',
+			'GET http://alice:hunter 2@proxy.example:8080/probe failed',
+			'GET http://***:***@proxy.example:8080/probe failed'
+		]
+	])('scrubs %s', (_name, message, expected) => {
+		expect(redactCredentials(message), 'a proxy password survived redaction').toBe(expected);
+	});
+
+	it.each([
+		['a URL with no credentials at all', 'could not reach http://proxy.example:8080'],
+		[
+			'a credential-free URL followed by prose containing an @',
+			'could not reach http://proxy.example:8080 for account alice@example.net'
+		],
+		[
+			'a credential-free URL with a comma stuck to it',
+			'could not reach http://proxy.example:8080, mail ops@example.net'
+		],
+		['a credential-free URL with a path', 'failed on https://steamcommunity.com/mobileconf'],
+		['a Steam URL with an @ in the path', 'https://steamcommunity.com/id/someone@example'],
+		['a query string carrying an address', 'https://example.com?email=alice@example.net'],
+		[
+			'an IPv6 literal beside an address',
+			'could not reach http://[::1]:8080 ask alice@example.net'
+		],
+		['a plain sentence', 'Steam did not accept that username and password.'],
+		['a sentence with an address in it', 'write to security@example.net about this']
+	])('leaves %s alone', (_name, message) => {
+		expect(
+			redactCredentials(message),
+			'redaction rewrote a message that carried no credentials'
+		).toBe(message);
+	});
+
+	/*
+	 * Stated on its own rather than left to the table, because this is the
+	 * property the whole function exists for and it must fail on the reason.
+	 *
+	 * One `not.toMatch` over every fragment at once is deliberate: an exact-match
+	 * table can be satisfied by a function that mangles the message in some new
+	 * way, but any piece of a username or password anywhere in the output is a
+	 * leak however tidy the rest of it looks. The alternation is the assertion —
+	 * a per-fragment `not.toContain` would say the same thing in six lines.
+	 */
+	it('leaves no fragment of a spaced password behind', () => {
+		for (const message of [
+			'http://alice:hunter 2@proxy.example:8080',
+			'http://alice:hunter\t2@proxy.example:8080',
+			'http://alice:correct horse battery staple@proxy.example:8080',
+			'socks5://bob:pass word@10.0.0.1:1080'
+		]) {
+			const redacted = redactCredentials(message);
+			expect(redacted, message).not.toMatch(/hunter|horse|battery|staple|pass\b|alice|bob/);
+			expect(redacted, message).toContain('***:***@');
+		}
+	});
+
+	/*
+	 * The host has to survive. Redaction that eats the address is not a safer
+	 * kind of redaction — it is a failure message that no longer says which
+	 * proxy failed, which is the one thing `describeNetworkError` promises.
+	 */
+	it('keeps the host and port it was scrubbing around', () => {
+		expect(redactCredentials('http://alice:hunter 2@proxy.example:8080')).toBe(
+			'http://***:***@proxy.example:8080'
+		);
+	});
+});
+
+/*
+ * Two edges the redactor is not allowed to fall off. Each of them was deleted
+ * from `egress.ts` with this suite still reporting 144 passed, which is the
+ * only reason these rows exist.
+ *
+ * Both mutants fail in the same direction, and it is the worse direction: not
+ * a password left sitting in the message, but a real host destroyed and a
+ * stranger's email address rewritten as though it were the proxy's
+ * credentials, inside a message whose only job is to say what failed.
+ *
+ *   - Drop `\r` and `\n` from `CROSSING_END` and the whitespace-crossing scan
+ *     runs off the end of the line it started on. `http://bob:hunter` at the
+ *     end of one line and `ops@example.net` on the next collapse into
+ *     `http://***:***@example.net`.
+ *   - Add `]` to `TRAILING_PROSE` and `isBareAuthority` can no longer parse
+ *     `[::1]`, because the bracket it needs has just been trimmed off the end.
+ *     A rejected authority is exactly what sends the scan hunting further
+ *     along the sentence, so `http://[::1] ask alice@example.net` collapses
+ *     the same way — and from the other side, a genuine credential in front of
+ *     a bracketed host stops being redacted at all.
+ *
+ * These rows assert the whole string rather than the absence of a password.
+ * Over-redaction is what is being pinned here, and an assertion that only
+ * looks for a leak cannot see it.
+ */
+describe('redaction stays inside the line and inside the brackets', () => {
+	it.each([
+		[
+			'a line feed between a wrapped proxy URL and a person',
+			'connect ECONNREFUSED http://bob:hunter\nnotify ops@example.net'
+		],
+		[
+			'a CRLF, which is what a log on this platform actually writes',
+			'connect ECONNREFUSED http://bob:hunter\r\nnotify ops@example.net'
+		],
+		[
+			// A bare CR is not exotic — progress output writes them — and pinning
+			// it keeps the guard on the whole character class instead of on
+			// whichever line ending somebody happened to think of.
+			'a bare carriage return',
+			'connect ECONNREFUSED http://bob:hunter\rnotify ops@example.net'
+		],
+		[
+			// The IPv6 row further up carries a port, so nothing is ever trimmed
+			// from its tail and a `]` inside TRAILING_PROSE goes unnoticed there.
+			// Portless is the shape that catches it.
+			'a portless IPv6 literal beside an address',
+			'could not reach http://[::1] ask alice@example.net'
+		]
+	])('leaves %s alone', (_name, message) => {
+		expect(
+			redactCredentials(message),
+			'redaction crossed a boundary it had no business crossing and invented credentials out of unrelated text — the host that actually failed is now missing from the message'
+		).toBe(message);
+	});
+
+	/*
+	 * The same bracket from the side where trimming it leaks rather than
+	 * mangles: `[::1]` has to parse as a host on its own for the `@` in front of
+	 * it to be recognised as the end of a real credential.
+	 */
+	it('still scrubs a spaced password in front of a portless IPv6 host', () => {
+		expect(
+			redactCredentials('proxy http://alice:hunter 2@[::1] refused the connection'),
+			'a proxy password in front of a bracketed IPv6 host survived redaction'
+		).toBe('proxy http://***:***@[::1] refused the connection');
+	});
+});
+
+/*
+ * A leak that is still in here, written down so it cannot change unnoticed.
+ *
+ * `http://alice:1234 5 6@proxy.example:8080` comes back untouched. `new URL`
+ * parses it and `planProxy` accepts it — username `alice`, password `1234 5 6`
+ * — so this is a live leak into the renderer and the activity log, not a
+ * curiosity.
+ *
+ * It is recorded rather than fixed because the shape is undecidable from the
+ * message alone. `alice:1234` is a valid `host:port`, so the text reads just as
+ * well as a finished URL followed by prose — and the row
+ * `could not reach http://proxy.example:8080, mail ops@example.net` in the
+ * table above is that same shape word for word: an authority, a word, then a
+ * word carrying an `@` and a host.
+ *
+ * Letting the crossing reach one word further does close this leak, and it was
+ * tried before this test was written instead. It also rewrote that row, and
+ * both IPv6 rows, into `could not reach http://***:***@example.net` — a
+ * credential-free URL and a stranger's address fused into credentials nobody
+ * ever had. That is the failure this function has already had once, and it is
+ * worse than the leak it would buy off.
+ *
+ * So the boundary is pinned where it is. If this test fails, the behaviour
+ * moved: work out whether whatever moved it also rewrites the leaves-alone
+ * rows above, and rewrite this test to say whichever thing is true then.
+ */
+describe('the residual leak this redactor knowingly keeps', () => {
+	it('returns a multi-word ambiguous tail completely unchanged', () => {
+		const leaking = 'http://alice:1234 5 6@proxy.example:8080';
+		// Anchored to the parser, so this row cannot quietly decay into a string
+		// nobody could have stored in the first place.
+		expect(decodeURIComponent(new URL(leaking).password)).toBe('1234 5 6');
+		expect(
+			redactCredentials(leaking),
+			'the known residual leak behaves differently now — that may be the fix or may be a new way of mangling messages; decide which, prove it against the leaves-alone rows, and rewrite this test to match'
+		).toBe(leaking);
 	});
 });
 

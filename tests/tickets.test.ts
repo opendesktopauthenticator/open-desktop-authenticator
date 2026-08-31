@@ -206,7 +206,30 @@ describe('refusing an oversized body', () => {
 
 	it('stops reading without destroying the request', () => {
 		expect(SOURCE).not.toMatch(/reject\(new Error\('too large'\)\);\s*request\.destroy\(\)/);
-		expect(SOURCE.match(/request\.pause\(\);/g) ?? []).toHaveLength(2);
+		/*
+		 * This counted every `request.pause()` in the file and demanded exactly
+		 * two, one per body reader. That stopped being a statement about this
+		 * property the moment uploads began streaming to disk: the upload reader
+		 * now also pauses for backpressure, which is a third pause and not a
+		 * third oversize path. Counting the *marks* says what was always meant —
+		 * both readers stop an oversized body, and neither gets there by tearing
+		 * down the socket the 413 still has to travel over.
+		 */
+		const marks = SOURCE.split('request.oversized = true;');
+		expect(
+			marks.slice(0, -1),
+			'both body readers must still mark an oversized request'
+		).toHaveLength(2);
+		for (const before of marks.slice(0, -1)) {
+			const paused = before.lastIndexOf('request.pause();');
+			expect(paused, 'an oversized body must be stopped by pausing the request').toBeGreaterThan(
+				-1
+			);
+			expect(
+				before.slice(paused),
+				'the request was destroyed on the way to the oversize answer, so the 413 goes nowhere'
+			).not.toContain('destroy');
+		}
 	});
 
 	it('closes the connection whenever the body was truncated', () => {

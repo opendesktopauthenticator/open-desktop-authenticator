@@ -414,14 +414,126 @@ jobs:
           fi
           echo "Every staged artifact is one the attestation covers."
 
+      # ---------------------------------------------------------------------
+      # An SBOM of the application, not of the checkout.
+      #
+      # This scanned `path: .`, and what that published was worse than
+      # publishing nothing at all.
+      #
+      # Scanning the checkout catalogues `spike/` — the Phase 0 proof of
+      # concept whose own `package.json` describes itself as "Not shipped" — so
+      # the public document advertised `request` and `steamcommunity`, which
+      # between them reach eleven advisories with no fix available. §2.3 of
+      # docs/THREAT_MODEL.md exists to say those are deliberately not in the
+      # product and to show the measurements that got them out; the SBOM sat on
+      # the release page saying the opposite.
+      #
+      # And it left Electron out. The scanner skips `devDependencies` by
+      # default, and `electron` is one — because at development time it is a
+      # build tool, while the thing a user downloads embeds the entire runtime.
+      # So the document named vulnerable packages the product does not ship and
+      # was silent about the largest thing it does.
+      #
+      # The scan therefore runs over a tree assembled to hold what the
+      # installer contains, and the step after it checks the result says so.
+      # `path: .` is one word and it reintroduces both halves at once.
+      # ---------------------------------------------------------------------
+      - name: Node, to assemble the shipping tree
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Assemble the tree the SBOM describes
+        shell: bash
+        env:
+          # Beside `--ignore-scripts`, not instead of it. Electron's postinstall
+          # fetches a ~100 MB runtime this tree has no use for — only the
+          # package metadata is wanted here — and a release should not wait on
+          # a download to describe a file it already built.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: |
+          rm -rf sbom-root
+          mkdir sbom-root
+          cp package.json package-lock.json sbom-root/
+          cd sbom-root
+
+          # Production dependencies only, resolved from the lockfile, which is
+          # the same tree `npm ci` gave the packaging job. eslint, vitest and
+          # electron-builder are on no user's disk; listing them invites
+          # somebody to chase an advisory in a package that never shipped.
+          npm ci --omit=dev --ignore-scripts
+
+          # Electron is the exception, and the reason the default is wrong
+          # here: it lives in `devDependencies` and it is the runtime the
+          # installer embeds. Taken from the manifest so the SBOM cannot name a
+          # version other than the packaged one without this step failing.
+          electron="$(node -p "require('./package.json').devDependencies.electron")"
+          if [ -z "$electron" ] || [ "$electron" = 'undefined' ]; then
+            echo "::error::package.json no longer pins electron, so the SBOM cannot name the runtime"
+            exit 1
+          fi
+
+          # Installed elsewhere and copied in as metadata. `npm install
+          # electron` in this directory would also add `@electron/get` and
+          # `extract-zip`, which run when the package is installed and are not
+          # in the application — an SBOM that invents three packages is a
+          # smaller version of the mistake this step exists to fix.
+          meta="$RUNNER_TEMP/electron-meta"
+          rm -rf "$meta"
+          mkdir -p "$meta"
+          printf '{"name":"electron-meta","private":true}\n' > "$meta/package.json"
+          (cd "$meta" && npm install --ignore-scripts --no-audit --no-fund "electron@$electron")
+          mkdir -p node_modules/electron
+          cp "$meta/node_modules/electron/package.json" node_modules/electron/package.json
+
+          # The lockfile goes before the scan. It flags every entry as
+          # production or development and the scanner honours that flag, so
+          # leaving it here drops the electron just added — the original defect
+          # returning by a quieter route. What is left is `node_modules`: the
+          # packages themselves, which is what ships.
+          rm -f package-lock.json
+
+          echo "--- packages the SBOM will describe ---"
+          ls -1 node_modules
+
       - name: Generate SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          path: .
+          path: sbom-root
           format: spdx-json
           output-file: staging/sbom.spdx.json
           upload-artifact: false
           upload-release-assets: false
+
+      # The step above is a run of shell commands whose failure mode is
+      # silence: a scan that finds nothing still writes a valid SPDX document,
+      # and the release would publish it with a straight face. So the file that
+      # ships is checked here, before the checksum list is written over it.
+      #
+      # The check that used to live here named `request`, `steamcommunity` and
+      # `spike-cli` as forbidden strings and otherwise asked only for ten
+      # packages and an electron entry. An adversarial review defeated it three
+      # ways in an afternoon: delete `--omit=dev` from the assembly above and
+      # the SBOM becomes 495 packages of eslint and vitest and the check prints
+      # success; call the spike package `phase0-spike` and the deny-list of
+      # three never sees a fourth name; hand it an SBOM of a completely
+      # different application with one correct electron entry and it passes
+      # that too.
+      #
+      # So the script states what SHIPS. It walks package.json and
+      # package-lock.json — neither of which the assembly step touches — to
+      # derive the production dependency closure npm would install, and the
+      # SBOM has to be that set exactly: nothing outside it, nothing missing
+      # from it. All three escapes are outside it, and so is the next one
+      # nobody has thought of yet.
+      - name: The SBOM must list the shipping tree, exactly
+        shell: bash
+        env:
+          SBOM: staging/sbom.spdx.json
+          MANIFEST: package.json
+          LOCKFILE: package-lock.json
+        run: node .github/scripts/assert-sbom-is-the-shipping-tree.mjs
 
       - name: Generate SHA256SUMS.txt
         shell: bash

@@ -269,8 +269,14 @@ describe('the bytes and the row that tracks them', () => {
 		// The rollback is asserted through the source, because forcing the insert
 		// to throw needs a lock this in-memory database will not take. What can be
 		// proved here is that the successful path still tracks what it writes.
+		//
+		// The anchor used to be `writeFileSync(fileFor(id), buffer`, the line that
+		// wrote the whole upload out of memory. Uploads now stream to a temporary
+		// file and are claimed with a `rename`, so the line the rollback hangs off
+		// is that rename — same property, same failure it guards against, one
+		// statement along.
 		const source = readFileSync(join(__dirname, '..', 'tickets', 'server.mjs'), 'utf8');
-		const store = source.slice(source.indexOf('writeFileSync(fileFor(id), buffer'));
+		const store = source.slice(source.indexOf('renameSync(path, fileFor(id))'));
 		const body = store.slice(0, store.indexOf('return { attachment:'));
 		expect(body, 'an insert that throws leaves the bytes behind').toMatch(
 			/catch[\s\S]{0,200}rmSync\(fileFor\(id\)/

@@ -52,12 +52,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
 import {
 	createReadStream,
+	createWriteStream,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
-	statSync,
-	writeFileSync
+	statSync
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -297,6 +298,39 @@ const fileFor = (id) => {
 	return join(FILES_DIR, id);
 };
 
+/**
+ * The name an upload wears while it is still arriving.
+ *
+ * It lives in the attachment directory rather than a temporary one so that the
+ * finished file can be claimed with a `rename`, which is atomic only within a
+ * filesystem — across one, Node copies, and a copy of a twenty-megabyte upload
+ * is the memory and the time this whole shape exists to avoid. It also keeps
+ * every byte this service holds under the one directory the systemd unit makes
+ * writable.
+ *
+ * The prefix is deliberately not a 32-character hex id, so `sweepOrphans` walks
+ * straight past an upload that is still being written instead of deleting it out
+ * from under the socket that is filling it.
+ */
+const INCOMING_PREFIX = 'incoming-';
+const incomingPath = () => join(FILES_DIR, `${INCOMING_PREFIX}${randomBytes(16).toString('hex')}`);
+
+/**
+ * How long a part-written upload may sit before a sweep takes it.
+ *
+ * Every failure path below removes its own temp file, so the only way one
+ * survives is the one case no `catch` can reach: the process not being there to
+ * run the cleanup. A kill, an OOM, a power cut. Without this, streaming to disk
+ * would have traded a memory leak for a disk leak, which is a worse deal — the
+ * memory came back on restart and these bytes never would, and nothing else
+ * counts them, since the size accounting reads rows and a part-written upload
+ * has none.
+ *
+ * An hour, because nginx gives a body sixty seconds to arrive: anything
+ * untouched for an hour is not an upload in progress under any timing.
+ */
+const INCOMING_LIFETIME_MS = 60 * 60 * 1000;
+
 /** Drop uploads nobody ever attached to a report, from disk and from the table. */
 /**
  * Send a file, and survive it going away underneath us.
@@ -450,6 +484,24 @@ function sweepOrphans() {
 			.map((r) => r.id)
 	);
 	for (const name of onDisk) {
+		if (name.startsWith(INCOMING_PREFIX)) {
+			/*
+			 * A part-written upload. One that is still arriving is seconds old and
+			 * must survive this loop, so age is the only safe test — and an hour is
+			 * far past the sixty seconds nginx allows a body. What is left is the
+			 * residue of a crash: bytes with no row, which nothing else on this box
+			 * will ever look at again.
+			 */
+			try {
+				const path = join(FILES_DIR, name);
+				if (Date.now() - statSync(path).mtimeMs > INCOMING_LIFETIME_MS) {
+					rmSync(path, { force: true });
+				}
+			} catch {
+				// Best effort: retried next sweep, same as the orphans below.
+			}
+			continue;
+		}
 		if (!isAttachmentId(name) || known.has(name)) {
 			continue;
 		}
@@ -462,16 +514,85 @@ function sweepOrphans() {
 }
 
 /**
- * Read a request body of unknown length, refusing early rather than late.
+ * How much of an upload is held in memory while the rest goes to disk.
  *
- * The cap is enforced as chunks arrive, so an oversized upload is dropped after
- * one chunk over the line instead of after the sender has finished sending it.
+ * `sniff` refuses anything shorter than sixteen bytes and never looks past
+ * offset eleven, so sixty-four is already generous. The number that matters is
+ * the one it replaces: eight concurrent uploads now hold half a kilobyte between
+ * them where they used to hold three hundred and twenty megabytes.
  */
-function readBody(request, limit) {
+const SNIFF_BYTES = 64;
+
+/**
+ * Receive an upload onto disk, keeping only its first bytes in memory.
+ *
+ * **This used to assemble the whole body in memory and then duplicate it.**
+ * Every chunk was pushed onto an array and `Buffer.concat` allocated a second
+ * copy of the lot at the end. Eight uploads are permitted at once — nginx allows
+ * eight connections per address on this path — and each may be twenty megabytes,
+ * so a stranger with eight sockets and no credentials could ask this process for
+ * three hundred and twenty megabytes of memory. Measured, not guessed: eight
+ * successful uploads took RSS from 75 MiB to 398 MiB, against the unit's
+ * `MemoryMax=256M`. systemd kills it, and the whole support service — filing a
+ * report, reading your own report, the admin queue — goes down and comes back
+ * empty-handed. A denial of service costing eight HTTP requests and no account.
+ *
+ * So the bytes go where bytes belong. What stays in memory is the first
+ * `SNIFF_BYTES` of the body, which is everything `sniff` reads, plus a running
+ * count. The file is written under a name that is not an attachment id, so until
+ * `storeUpload` renames it into place it is findable by nothing and served by
+ * nothing.
+ *
+ * **The caller owns that file the moment this resolves** and must remove it on
+ * every path that does not claim it. Otherwise this has traded a memory leak for
+ * a disk leak, which is the worse of the two: memory came back on restart and
+ * these bytes never would.
+ */
+function receiveUpload(request, limit) {
+	mkdirSync(FILES_DIR, { recursive: true });
+	const path = incomingPath();
+	// 0o600 from the instant the file exists rather than tightened afterwards:
+	// these are other people's screenshots, some of them showing more than was
+	// intended, and a file created readable is readable for as long as that gap
+	// lasts. `wx` so a name we just minted can never truncate something already
+	// there.
+	const file = createWriteStream(path, { flags: 'wx', mode: 0o600 });
 	return new Promise((resolve, reject) => {
 		let size = 0;
-		const chunks = [];
+		let head = Buffer.alloc(0);
+		let ended = false;
+		let settled = false;
+
+		/** Give up, and take the part-written file with us. */
+		const discard = (error) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			const unlink = () => {
+				try {
+					rmSync(path, { force: true });
+				} catch {
+					// Left for the hourly sweep, which takes these by age.
+				}
+				reject(error);
+			};
+			// Windows will not unlink a file that still has an open handle, so the
+			// stream has to go first and the delete has to wait for it. `closed`
+			// covers the case where it already went, where `destroy` emits no further
+			// `close` to wait on and the delete would never run.
+			if (file.closed) {
+				unlink();
+			} else {
+				file.once('close', unlink);
+				file.destroy();
+			}
+		};
+
 		request.on('data', (chunk) => {
+			if (settled) {
+				return;
+			}
 			size += chunk.length;
 			if (size > limit) {
 				// **Paused, not destroyed.** Destroying the request tears down the
@@ -486,18 +607,66 @@ function readBody(request, limit) {
 				// sending.
 				request.pause();
 				// Marked so the connection closes whatever status the caller settles
-				// on. Only the 413 path closed it, and several callers catch this
-				// rejection, substitute an empty form and answer 400 or 403 instead —
-				// leaving a paused request with body bytes outstanding on a keep-alive
-				// socket, which the next request on it would be parsed out of.
+				// on, and so the caller can tell "too big" apart from "our disk said
+				// no" — answering 413 to a failed write tells somebody their file was
+				// too large when it was not.
 				request.oversized = true;
-				reject(new Error('too large'));
+				discard(new Error('too large'));
 				return;
 			}
-			chunks.push(chunk);
+			if (head.length < SNIFF_BYTES) {
+				head = Buffer.concat([head, chunk.subarray(0, SNIFF_BYTES - head.length)]);
+			}
+			// **Backpressure, honoured.** Without this the socket is read faster than
+			// the disk accepts and the queue inside the write stream becomes the same
+			// unbounded buffer this function exists to remove — the defect back in a
+			// different object.
+			if (!file.write(chunk)) {
+				request.pause();
+				file.once('drain', () => {
+					if (!settled) {
+						request.resume();
+					}
+				});
+			}
 		});
-		request.on('end', () => resolve(Buffer.concat(chunks)));
-		request.on('error', reject);
+
+		/*
+		 * A client that goes away mid-upload leaves its bytes behind unless
+		 * somebody notices, and nothing else ever looks at them: there is no row,
+		 * so the unclaimed sweep and the size accounting are both blind to them.
+		 *
+		 * Both listeners are here on purpose, and measurement is why. Cutting a
+		 * real socket off mid-body raises `error` *and* `close` on Node 25, so
+		 * either one alone catches the abort — removing just one leaves the guard
+		 * green, and removing both leaks the file. `close` without `end` is the
+		 * more general statement of "this stopped early" and the only signal a
+		 * plain `Readable` gives when it is destroyed without an error, which is
+		 * exactly the shape the tests drive.
+		 */
+		request.on('error', discard);
+		request.on('close', () => {
+			if (!ended) {
+				discard(new Error('the upload stopped early'));
+			}
+		});
+		// A full disk, a revoked permission, an I/O fault. Same answer: no file.
+		file.on('error', discard);
+
+		request.on('end', () => {
+			ended = true;
+			// `close`, not `finish`: the descriptor has to be shut before the caller
+			// renames the file, because Windows refuses to rename one that is still
+			// open — and the tests run there.
+			file.once('close', () => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				resolve({ path, bytes: size, head });
+			});
+			file.end();
+		});
 	});
 }
 
@@ -524,21 +693,42 @@ function storedBytes() {
 	return Number(db.prepare('SELECT COALESCE(SUM(bytes), 0) AS n FROM attachments').get().n);
 }
 
-/** Store an uploaded body, or say why not. Returns { error } or { attachment }. */
-function storeUpload(buffer) {
-	const media = sniff(buffer);
+/**
+ * Claim a received upload, or say why not. Returns { error } or { attachment }.
+ *
+ * Takes what `receiveUpload` produced — a file already on disk, its length, and
+ * the first bytes of it — rather than the body itself, because the body no
+ * longer exists as one object anywhere. Every refusal below deletes that file
+ * before answering: it is nobody's attachment, nothing else knows its name, and
+ * a refusal that left it there would fill the disk with the uploads we declined
+ * rather than the ones we accepted.
+ */
+function storeUpload(received) {
+	const { path, bytes, head } = received;
+	/** Drop the part we were handed. Used on every path that does not claim it. */
+	const drop = () => {
+		try {
+			rmSync(path, { force: true });
+		} catch {
+			// The hourly sweep takes anything left behind, by age.
+		}
+	};
+	const media = sniff(head);
 	if (!media) {
+		drop();
 		return {
 			error:
 				'That file is not a kind we accept. Screenshots as PNG, JPEG, GIF or WebP; video as MP4 or WebM.'
 		};
 	}
-	if (buffer.length > SIZE[media.kind]) {
+	if (bytes > SIZE[media.kind]) {
+		drop();
 		return {
 			error: `That ${media.kind} is over the ${SIZE[media.kind] / (1024 * 1024)} MB limit for ${media.kind}s.`
 		};
 	}
-	if (storedBytes() + buffer.length > TOTAL_STORAGE_LIMIT) {
+	if (storedBytes() + bytes > TOTAL_STORAGE_LIMIT) {
+		drop();
 		return {
 			error:
 				'We are temporarily out of room for attachments. Please send the report without one — the text is the part that matters, and we will ask for a picture if we need it.',
@@ -546,10 +736,21 @@ function storeUpload(buffer) {
 		};
 	}
 	const id = randomBytes(16).toString('hex');
-	mkdirSync(FILES_DIR, { recursive: true });
-	// 0o600: readable by the service account and nothing else. These are other
-	// people's screenshots and some of them will contain more than intended.
-	writeFileSync(fileFor(id), buffer, { mode: 0o600 });
+	/*
+	 * **The rename is the moment the upload becomes an attachment.**
+	 *
+	 * One filesystem operation, inside one directory, so there is no instant at
+	 * which `fileFor(id)` names a half-written file. A reader either finds the
+	 * whole thing or finds nothing — which matters because the id is handed to
+	 * the browser the moment this returns, and a copy-then-truncate would have a
+	 * window where it is served short.
+	 */
+	try {
+		renameSync(path, fileFor(id));
+	} catch (err) {
+		drop();
+		throw err;
+	}
 	/*
 	 * **The row is what makes the file findable, so a failed insert must take the
 	 * file with it.**
@@ -565,7 +766,7 @@ function storeUpload(buffer) {
 	try {
 		db.prepare(
 			'INSERT INTO attachments (id, ticket_id, media_type, bytes, created_at) VALUES (?, NULL, ?, ?, ?)'
-		).run(id, media.type, buffer.length, now());
+		).run(id, media.type, bytes, now());
 	} catch (err) {
 		try {
 			rmSync(fileFor(id), { force: true });
@@ -574,7 +775,7 @@ function storeUpload(buffer) {
 		}
 		throw err;
 	}
-	return { attachment: { id, type: media.type, kind: media.kind, bytes: buffer.length } };
+	return { attachment: { id, type: media.type, kind: media.kind, bytes } };
 }
 
 /**
@@ -1732,12 +1933,25 @@ async function handle(request, response, url) {
 		}
 		sweepUnclaimed();
 
-		// One byte over the largest thing we accept is enough to reject on.
-		const body = await readBody(request, SIZE.video + 1024).catch(() => undefined);
-		if (!body) {
-			return json(413, { error: 'That file is larger than we accept.' });
+		// One byte over the largest thing we accept is enough to reject on. The
+		// body streams to disk as it arrives; only its first bytes are held.
+		const received = await receiveUpload(request, SIZE.video + 1024).catch(() => undefined);
+		if (!received) {
+			/*
+			 * Every rejection used to be answered "larger than we accept", because
+			 * the only one that could happen was the cap. Streaming adds real ones —
+			 * a full disk, a client that hung up halfway — and telling somebody their
+			 * file was too big when it was not sends them off to compress a
+			 * screenshot that was never the problem. `oversized` is set by the reader
+			 * on the one path where the size really is the reason.
+			 */
+			return request.oversized
+				? json(413, { error: 'That file is larger than we accept.' })
+				: json(500, { error: 'That upload could not be saved. Please try it again.' });
 		}
-		const result = storeUpload(body);
+		// `storeUpload` owns the received file from here, including deleting it on
+		// every path that refuses it.
+		const result = storeUpload(received);
 		if (result.error) {
 			return json(415, { error: result.error });
 		}

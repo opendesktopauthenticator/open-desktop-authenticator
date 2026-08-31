@@ -52,6 +52,21 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
 # Bounded, so a runaway cannot take the box down with it.
+#
+# **A cap only bounds the damage if nothing an anonymous caller does scales with
+# memory.** For a while something did: the upload endpoint assembled each body in
+# memory and then duplicated it with `Buffer.concat`, and nginx permits eight
+# concurrent 21m uploads per address on that path. Measured, eight of them took
+# this process from 75 MiB to 398 MiB, so systemd killed it — and killing it
+# takes report submission, reporter access to existing reports and the admin
+# queue with it, for everyone, on eight unauthenticated requests. The cap did its
+# job; it was the only thing standing between a stranger and the box, and it was
+# being used as a trigger rather than a backstop.
+#
+# Uploads now stream to a file in /var/lib/tickets/attachments as they arrive and
+# hold sixty-four bytes each, so this is a backstop again. Keep it that way:
+# anything added here that grows with the size of a request body has to be
+# checked against this number times nginx's `limit_conn` before it ships.
 MemoryMax=256M
 TasksMax=64
 

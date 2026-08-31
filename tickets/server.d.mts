@@ -65,9 +65,21 @@ export function signatureMatches(
 	entry: { magic?: number[]; at4?: number[]; at8?: number[]; [key: string]: unknown }
 ): boolean;
 
-/** Store an uploaded body, or explain why it was refused. */
-export function storeUpload(buffer: Buffer): {
+/**
+ * Claim a received upload, or explain why it was refused.
+ *
+ * Takes a file already on disk rather than a body in memory: an upload streams
+ * to a temporary file as it arrives, and only its first bytes — enough for
+ * `sniff` and no more — are ever held. Eight concurrent twenty-megabyte uploads
+ * are permitted, and holding all of them used to be three hundred megabytes
+ * against a 256M `MemoryMax`.
+ *
+ * Whatever is passed in, this owns: every refusal below deletes that file before
+ * returning, and so does a failed claim.
+ */
+export function storeUpload(received: { path: string; bytes: number; head: Buffer }): {
 	error?: string;
+	full?: boolean;
 	attachment?: { id: string; type: string; kind: string; bytes: number };
 };
 

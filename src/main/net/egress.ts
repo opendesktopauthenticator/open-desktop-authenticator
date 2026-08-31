@@ -298,28 +298,192 @@ export function describeNetworkError(error: unknown, routedThrough?: string): st
  * careful, because the one that is not careful is the one nobody checked.
  */
 export function redactCredentials(message: string): string {
-	// scheme://<anything>@host -> scheme://***:***@host
-	//
-	// **Any userinfo, not only a `user:pass` pair.** The pattern used to require
-	// both halves to be non-empty, while `planProxy` accepts credentials when
-	// *either* is — so `http://alice@proxy:8080` and `http://:secret@proxy:8080`
-	// are routable, are credential-bearing, and travelled through this function
-	// completely untouched into renderer-visible errors and activity records.
-	//
-	// Greedy, and stopping only at a character that ends the authority. The URL
-	// parser treats the **last** `@` in an authority as the delimiter, so
-	// `http://alice:secret@part@proxy:8080` has the password `secret@part` — and a
-	// class that also excluded `@` stopped at the first one, leaving `part` of that
-	// password in the message it was supposed to be scrubbing from.
-	//
-	// The class excludes `?` and `#` as well as `/`, because all three end the
-	// authority. Bounding on `/` alone was not enough and was actively worse than
-	// the pattern it replaced: `https://example.com?email=alice@example.net` has no
-	// slash before its `@`, so the match ran through the query string and rewrote
-	// the whole thing as `https://***:***@example.net` — destroying the real host
-	// and inventing credentials that were never there, in a message whose job is to
-	// tell somebody what failed.
-	return message.replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, '$1***:***@');
+	// `scheme://<userinfo>@host` -> `scheme://***:***@host`, for every URL the
+	// message carries. Everything interesting is in deciding where `<userinfo>`
+	// ends; see `userinfoEnd`.
+	let out = '';
+	let cursor = 0;
+
+	// Built here rather than at module scope on purpose: an exec loop over a `g`
+	// regex carries `lastIndex` between calls, and a shared one would start the
+	// second caller's message part-way through.
+	const schemes = /([a-z][a-z0-9+.-]*:)\/\//gi;
+	for (let match = schemes.exec(message); match !== null; match = schemes.exec(message)) {
+		const start = match.index + match[0].length;
+		const at = userinfoEnd(message, match[1] as string, start);
+		if (at === undefined) {
+			continue;
+		}
+		out += `${message.slice(cursor, start)}***:***@`;
+		cursor = at + 1;
+		// Resume after the authority we just rewrote, so a `scheme://` that happened
+		// to sit inside somebody's password cannot be matched a second time.
+		schemes.lastIndex = cursor;
+	}
+
+	return out + message.slice(cursor);
+}
+
+/** Anything that ends an authority: `/`, `?`, `#` — and whitespace, usually. */
+const AUTHORITY_END = /[\s/?#]/;
+
+/**
+ * The same, for the one scan that is allowed to cross a space or a tab.
+ *
+ * A line break is never crossed. A password may contain a space; it cannot
+ * contain a newline and still have arrived as one line of a quoted URL, and
+ * refusing to scan past one bounds how much of a multi-line message a single
+ * wrong guess below could rewrite.
+ */
+const CROSSING_END = /[\r\n/?#]/;
+
+/**
+ * Prose punctuation stuck to the end of a URL somebody wrote a sentence around.
+ *
+ * `could not reach http://proxy.example:8080, retrying` ends its authority with
+ * a comma that is not part of it. Stripped before the authority is handed to the
+ * parser, because the parser rejects `8080,` as a port — and a rejected
+ * authority is what sends the scan below looking for credentials further along
+ * the sentence, which is exactly where it can do damage.
+ *
+ * `]` is deliberately absent: it closes an IPv6 literal, and trimming it would
+ * turn `[::1]` into something unparseable for the same reason.
+ */
+const TRAILING_PROSE = /[.,;:!)'"]+$/;
+
+/**
+ * The end of the one word that follows `from`, having skipped the whitespace.
+ *
+ * Used only where both readings of a space parse — see `userinfoEnd`. It is the
+ * difference between `http://alice smith:pw@proxy` (one more word finishes the
+ * authority, so the space was inside the credentials) and
+ * `http://proxy:8080 for account alice@example.net` (the next word is `for`,
+ * which finishes nothing, so the URL had already ended).
+ */
+function nextWordEnd(text: string, from: number, limit: number): number {
+	let word = from;
+	while (word < limit && /\s/.test(text[word] as string)) {
+		word += 1;
+	}
+	return Math.min(limit, boundary(text, word, AUTHORITY_END));
+}
+
+/** The first index at or after `from` that `ends` matches, or the end of `text`. */
+function boundary(text: string, from: number, ends: RegExp): number {
+	for (let i = from; i < text.length; i += 1) {
+		if (ends.test(text[i] as string)) {
+			return i;
+		}
+	}
+	return text.length;
+}
+
+/**
+ * Does this text stand on its own as a complete `host[:port]`, with nobody's
+ * credentials in it?
+ *
+ * The URL parser is the arbiter rather than a second hand-written pattern,
+ * because the parser is what `planProxy`, `steamSessionProxy` and Chromium all
+ * agree with — and a redactor that disagrees with the parser about where an
+ * authority ends is how a password survives redaction. It answers `false` for
+ * `alice:hunter` (a port must be digits) and `true` for `proxy.example:8080`,
+ * which is the distinction the whitespace-crossing scan turns on.
+ */
+function isBareAuthority(scheme: string, candidate: string): boolean {
+	const trimmed = candidate.replace(TRAILING_PROSE, '');
+	if (trimmed === '') {
+		return false;
+	}
+	try {
+		const url = new URL(`${scheme}//${trimmed}`);
+		return url.hostname !== '' && url.username === '' && url.password === '';
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The index of the `@` that ends this URL's credentials, or `undefined` for a
+ * URL that carries none.
+ *
+ * ## Why this is not one regular expression any more
+ *
+ * It was `[^\s/?#]*@`, and the `\s` in that class was a hole. **A proxy password
+ * may contain whitespace**: `new URL('http://alice:hunter 2@proxy.example:8080')`
+ * parses, `planProxy` accepts it, `steamSessionProxy` hands the raw string
+ * — space and all — to the library that quotes it back in its error, and the
+ * pattern stopped dead at the space. `redactCredentials` returned that URL
+ * **unchanged**, so `hunter 2` reached the renderer and the activity log through
+ * the one function whose entire job is to keep it out of them. A tab does the
+ * same, and is nastier still: the URL parser *strips* tabs, so `url.password`
+ * reads back as `hunter2` while the raw text everybody logs still has the tab in
+ * it — nothing downstream can be trusted to have normalised it away.
+ *
+ * ## The two readings, and which one wins
+ *
+ * Whitespace after a scheme is genuinely ambiguous. In
+ * `http://alice:hunter 2@proxy.example:8080` the URL continues past the space;
+ * in `could not reach http://proxy.example:8080 for alice@example.net` it does
+ * not, and a scan that crossed the space anyway would rewrite the whole
+ * sentence as `http://***:***@example.net` — the real host destroyed and
+ * credentials invented, in a message whose job is to say what failed. That is
+ * not hypothetical: an earlier widening of this pattern did exactly that, and
+ * it was worse than the leak it fixed.
+ *
+ * So the space is crossed freely only when the text before it **cannot** be a
+ * URL on its own. `alice:hunter` is not an authority — a port must be digits —
+ * so the URL must continue and the space is inside the credentials.
+ *
+ * When both readings parse the string is genuinely ambiguous, and there are two
+ * of those: `http://alice smith:pw@proxy` (a bare `alice` is a valid host) and
+ * `http://alice:1234 5@proxy` (`alice:1234` is a valid `host:port`). Neither is
+ * exotic — a username with a space, and a password whose first fragment is
+ * digits. There, the crossing is allowed to reach exactly one word further: a
+ * credential fragment is a *word*, while the prose that follows a finished URL
+ * is a *sentence*, so `... for account alice@example.net` stops at `for` and
+ * never reaches the address. What escapes is the ambiguous shape with a
+ * multi-word tail — `http://alice:1234 5 6@proxy` — and what it buys is that a
+ * credential-free URL followed by a sentence is never rewritten, which is the
+ * failure this pattern has already had once.
+ */
+function userinfoEnd(message: string, scheme: string, start: number): number | undefined {
+	const plainEnd = boundary(message, start, AUTHORITY_END);
+	const plain = message.slice(start, plainEnd);
+
+	// The ordinary case, and the whole of the old behaviour: no whitespace to
+	// argue about. The **last** `@` is the delimiter, because that is what the URL
+	// parser uses — `http://alice:secret@part@proxy:8080` has the password
+	// `secret@part`, and stopping at the first `@` left `part` in the message.
+	const lastAt = plain.lastIndexOf('@');
+	if (lastAt !== -1) {
+		return start + lastAt;
+	}
+
+	// No `@` before the first space, so this is the ambiguous case: either the URL
+	// ended there and what follows is prose, or the credentials contain
+	// whitespace.
+	let crossingEnd = boundary(message, start, CROSSING_END);
+	if (isBareAuthority(scheme, plain)) {
+		crossingEnd = Math.min(crossingEnd, nextWordEnd(message, plainEnd, crossingEnd));
+	}
+
+	for (
+		let at = message.indexOf('@', plainEnd);
+		at !== -1 && at < crossingEnd;
+		at = message.indexOf('@', at + 1)
+	) {
+		// What follows the `@` has to be a host and nothing else. That single
+		// requirement also picks the right `@` when the password contains one:
+		// in `http://a:se cret@part@proxy:8080` the first candidate is followed by
+		// `part@proxy:8080`, which the parser reads as carrying a username, so it is
+		// rejected and the scan walks on to the `@` that really ends the userinfo.
+		const hostEnd = boundary(message, at + 1, AUTHORITY_END);
+		if (isBareAuthority(scheme, message.slice(at + 1, hostEnd))) {
+			return at;
+		}
+	}
+
+	return undefined;
 }
 
 export interface ProxyPlan {

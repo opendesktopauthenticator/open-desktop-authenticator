@@ -1016,6 +1016,7 @@ It runs entirely on the user's own machine. There is no account to create, no se
 - Stores the Steam revocation code (Valve calls it the recovery code) and can reveal it again.
 - Optional automatic confirmation, per account and per type, off by default.
 - Optional per-account network routing.
+- An in-app browser, signed in as one account and routed like it, for finishing a trade on Steam or a third-party trading site.
 
 ## What it deliberately does not do
 
@@ -1025,7 +1026,7 @@ Non-goals rather than roadmap items: no trade automation beyond confirmations, n
 
 ## How secrets are protected
 
-Steam secrets are encrypted at rest with scrypt and AES-256-GCM behind the user's passphrase. The interface runs isolated with no Node integration, the vault locks when idle, and the application opens no network connection beyond Steam and an optional update check. ${SITE.origin}/security sets out the model, including what it cannot protect against.
+Steam secrets are encrypted at rest with scrypt and AES-256-GCM behind the user's passphrase. The interface runs isolated with no Node integration, the vault locks when idle, and on its own the application opens no network connection beyond Steam and an optional update check. The in-app browser is the exception and is not a background one: it is a window the user opens and drives, so it loads whatever they navigate to, over that account's configured network route, in a session of its own with no access to the vault. ${SITE.origin}/security sets out the model, including what it cannot protect against.
 
 ## How to check a download is genuine
 

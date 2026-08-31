@@ -287,8 +287,26 @@ export function AddAuthenticator({
 						    stating: an account enrolled from one address and then routed
 						    through another is linked to both, by Steam, through the account
 						    itself. Adding routing later cannot undo the first request. */}
+						{/* **SOCKS4 was on this list, and the transport has never taken it.**
+						    `planProxy` refuses `socks4://` deliberately: the protocol carries an
+						    address and not a hostname, so the client has to resolve first, and
+						    every Steam host is then looked up by this machine, in the clear, on
+						    whatever resolver the network hands out. That is the leak routing an
+						    account exists to close.
+
+						    The screen invited people into it anyway. They typed a socks4 address
+						    into the field above and the main process turned them away with a
+						    message contradicting the sentence directly beneath it — mid sign-in,
+						    password already entered.
+
+						    The reason is spelled out rather than left at "not supported", because
+						    "not supported" reads as "not built yet" and earns a feature request
+						    instead of a socks5 address. */}
 						<p className="hint">
-							HTTP, HTTPS, SOCKS4 and SOCKS5 are all accepted; the example is only an example.{' '}
+							<code>http</code>, <code>https</code> and <code>socks5</code> are accepted; the
+							example is only an example. SOCKS4 is refused rather than merely unbuilt: it cannot
+							ask a proxy to look a hostname up, so this machine would resolve every Steam address
+							itself and your own network would see which accounts you are contacting.{' '}
 							{/* The label above says required under this setting, and the main
 							    process refuses an empty field. A hint still offering to leave
 							    it empty contradicted both. */}

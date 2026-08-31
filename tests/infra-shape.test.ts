@@ -144,7 +144,7 @@ describe('the backup job', () => {
 	 * days cannot be backed by a sweep that fails open.
 	 */
 	it('does not swallow a cutoff it could not compute', () => {
-		const sweep = backup.slice(backup.indexOf("find \"$dest\" -name 'tickets-*.tar.gz'"));
+		const sweep = backup.slice(backup.indexOf('find "$dest" -name \'tickets-*.tar.gz\''));
 		expect(
 			sweep,
 			'the ticket sweep hides its own failure, so an unparseable date disables retention ' +

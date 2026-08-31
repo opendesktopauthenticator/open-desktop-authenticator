@@ -747,8 +747,17 @@ export function MoveAuthenticator({
 					spellCheck={false}
 					placeholder="socks5://host:1080"
 				/>
+				{/* SOCKS4 is turned away by `planProxy`, and this line used to promise it.
+				    The protocol takes an address and never a hostname, so a SOCKS4 client
+				    has to look Steam up locally — and the point of routing a transfer is
+				    that none of it should leave by this machine's own connection. The
+				    reason is said out loud because "unsupported" reads as "coming soon",
+				    and the person reading this is one keystroke from typing socks4. */}
 				<p className="hint">
-					HTTP, HTTPS, SOCKS4 and SOCKS5 are all accepted — the example is only an example.{' '}
+					<code>http</code>, <code>https</code> and <code>socks5</code> are accepted — the example
+					is only an example. SOCKS4 is turned away: it carries an address and not a hostname, so
+					this machine would have to look Steam up itself, over the connection the proxy is here to
+					replace.{' '}
 					{requireProxies
 						? 'This vault requires a proxy, so it cannot be left empty.'
 						: 'Leave it empty to connect directly.'}

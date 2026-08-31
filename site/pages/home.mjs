@@ -207,6 +207,12 @@ export default {
 					page whether a newer version exists, which is the same question any visitor
 					to that page asks. GitHub sees an IP address and that the application is
 					running. Nothing about you or your accounts is sent to anyone, including us.
+					That is the whole of what it reaches on its own — the in-app browser is the
+					exception, and it is one you open. It is a browser: a window for finishing a
+					trade, which goes wherever you point it, on Steam or on a third-party
+					trading site, over whatever network route you configured for that account
+					rather than around it. It carries nothing out of your vault, and
+					<a href="/security">the security model</a> sets out what it is given.
 				</li>
 				<li>
 					<strong>It does not update itself.</strong> It will tell you a newer version

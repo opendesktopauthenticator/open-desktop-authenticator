@@ -462,7 +462,12 @@ export const security = {
 	navTitle: 'Security',
 	title: 'Security model: how your Steam secrets are stored',
 	description:
-		'How Steam secrets are stored: scrypt, AES-256-GCM, an isolated renderer, and no network beyond Steam and an optional update check.',
+		// The old wording stopped at "no network beyond Steam and an optional update
+		// check", which was written before the in-app browser existed and quietly
+		// became the site's largest understatement: that window loads whatever the
+		// user navigates to. A description is the one sentence a search result
+		// shows, so the exception is named in it rather than left to the body.
+		'How Steam secrets are stored: scrypt, AES-256-GCM, an isolated renderer, and no network beyond Steam, an update check and the browser you open.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
@@ -572,9 +577,23 @@ export const security = {
 					each with a validated shape. There is no general-purpose bridge.
 				</li>
 				<li>
-					<strong>No remote content.</strong> A strict content security policy with no
-					remote origins, and navigation locked to the application's own files. There
-					is nothing for an injected script to fetch and nowhere for it to send.
+					<strong>No remote content in the interface.</strong> A strict content
+					security policy with no remote origins, and navigation locked to the
+					application's own files. There is nothing for an injected script to fetch
+					and nowhere for it to send.
+				</li>
+				<li>
+					<strong>The in-app browser is the exception to that, deliberately, and it
+					is the widest surface here.</strong> It exists so a trade can be finished
+					without copying a signed-in session into a browser that is not routed, and
+					that means it is a browser: it loads pages nobody here wrote and goes
+					wherever you point it, because one that could reach a single page could not
+					finish a trade. So the line above is drawn around it instead. It gets no
+					preload, no message bridge and no route to the vault; it runs in a session
+					of its own rather than the one the application uses for Steam; it leaves
+					over whatever network route that account is configured to use, and if that
+					route cannot be applied the window does not open at all. Locking the vault
+					closes it and wipes its storage.
 				</li>
 				<li>
 					<strong>Developer tools are disabled in release builds</strong>, together with
