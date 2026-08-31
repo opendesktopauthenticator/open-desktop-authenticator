@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { CHROME_HEIGHT, CHROME_HTML } from './chrome-html';
 import { addressToUrl, isSteamHost } from './window';
 
-import { denyAllPermissions } from '../security';
+import { denyAllPermissions, SECURE_WEB_PREFERENCES } from '../security';
 import { windowImage } from '../logo-image';
 
 import type {
@@ -46,17 +46,43 @@ import type {
  * describes something Electron actually offers.
  */
 
-/** The window options this application fixes rather than exposes. */
+/**
+ * The window options this application fixes rather than exposes.
+ *
+ * **Composed from the canonical posture, not restated beside it.** This object
+ * used to list four of its eleven fields under a comment claiming it was
+ * "identical to the main window's posture" — and that sentence is the reason
+ * nobody looked again. No value disagreed; the seven it did not name simply
+ * fell through to Electron's defaults, and two of those defaults are wrong:
+ *
+ *  - `devTools` defaults to **on**. Every Steam tab in a packaged build had
+ *    DevTools available, which is the "open the console and paste this to fix
+ *    your codes" vector the constant exists to close. These tabs carry no
+ *    preload, so the vault was never reachable that way — what was reachable is
+ *    the account's authenticated Steam session, in a window that is signed in.
+ *    For an application whose only job is protecting that account, that is the
+ *    scam it exists to defend against, running inside it.
+ *  - `spellcheck` defaults to **on**, and an active spellchecker fetches
+ *    dictionaries from a Google-run CDN — an unproxied request from the one
+ *    window whose entire reason for existing is that its traffic leaves through
+ *    the account's proxy.
+ *
+ * It compounds: these tabs are marked `isAccountBrowserContents` so
+ * `hardenAllWebContents` deliberately skips the navigation lock for them, which
+ * a browser needs. They were therefore the one place in the process carrying
+ * both the navigation exemption and the weakened preference set.
+ *
+ * Adopted popup contents receive no preferences of their own — they inherit
+ * transitively from the opener, which is always one of these tabs, so fixing
+ * this object fixes them too. Do not "fix" that by passing preferences there.
+ */
 const HARDENED = {
-	// Identical to the main window's posture. The pages here are Valve's rather
-	// than ours, which makes it matter more, not less: a renderer with Node
-	// access browsing the open web is the shape of the problem this whole
-	// project exists to warn people about.
-	sandbox: true,
-	contextIsolation: true,
-	nodeIntegration: false,
-	// No preload. The window is a browser and must not be able to reach the
-	// vault, the IPC table, or anything else this process holds.
+	...SECURE_WEB_PREFERENCES,
+	// Restated rather than inherited, because it is this window's reason for
+	// existing separately: the pages here are Valve's rather than ours, and a
+	// browser that could reach the vault, the IPC table or anything else this
+	// process holds is the shape of the problem the project exists to warn
+	// people about. There is no preload on these views for the same reason.
 	webviewTag: false
 } as const;
 
@@ -169,6 +195,16 @@ export const electronBrowserHost: BrowserHost = {
 				preload: join(__dirname, '../preload/browser-chrome.js')
 			}
 		});
+		/*
+		 * **The toolbar's own session, hardened like the tabs'.**
+		 *
+		 * It is a separate partition, so the `denyAllPermissions` applied to the
+		 * account's session does not reach it — and a smoke check measuring the
+		 * live sessions is what showed that: DevTools was correctly off on both
+		 * views while the spellchecker was still enabled on this one. Its partition
+		 * had simply never been through the hardening the others get.
+		 */
+		denyAllPermissions(chrome.webContents.session);
 		window.contentView.addChildView(chrome);
 
 		/*

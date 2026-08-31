@@ -33,13 +33,58 @@ const SOURCE = readFileSync(
 const ADAPTER = SOURCE.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/.*/g, ' ');
 
 describe('the Electron adapter for the in-app browser', () => {
+	/**
+	 * **This used to check the wrong thing, and passed while the posture was
+	 * weaker than the main window's.**
+	 *
+	 * It asserted four literal fields — `sandbox`, `contextIsolation`,
+	 * `nodeIntegration`, `webviewTag` — were written out in this file. They were,
+	 * with the right values, under a comment claiming the object was "identical
+	 * to the main window's posture". It was not: the canonical constant has
+	 * eleven fields, and the seven this file did not name fell through to
+	 * Electron's defaults. Two of those are wrong, `devTools` and `spellcheck`,
+	 * so every Steam tab in a packaged build had DevTools available.
+	 *
+	 * A test that enumerates fields can only ever catch the fields somebody
+	 * thought to enumerate. Asserting the **composition** catches the next one
+	 * too, which is the whole point: the failure was an omission, not a
+	 * disagreement.
+	 */
+	it('composes its preferences from the canonical posture rather than restating them', () => {
+		expect(ADAPTER, 'the browser declares its own posture instead of inheriting one').toMatch(
+			/const HARDENED = \{\s*\.\.\.SECURE_WEB_PREFERENCES/
+		);
+		expect(ADAPTER).toMatch(/import \{[^}]*SECURE_WEB_PREFERENCES[^}]*\} from '\.\.\/security'/);
+	});
+
+	/*
+	 * The one field restated on purpose, because it is this window's reason for
+	 * existing separately from the main one.
+	 */
+	it('still fixes webviewTag off itself', () => {
+		expect(ADAPTER).toMatch(/webviewTag:\s*false/);
+	});
+
+	/**
+	 * **Nothing may quietly relax a canonical field back.**
+	 *
+	 * Composing is only worth having if a later `devTools: true` after the spread
+	 * is caught. The main window relaxes exactly one field, deliberately and only
+	 * when unpackaged; this window relaxes none.
+	 */
 	it.each([
-		['sandbox', /sandbox:\s*true/],
-		['contextIsolation', /contextIsolation:\s*true/],
-		['nodeIntegration off', /nodeIntegration:\s*false/],
-		['webviewTag off', /webviewTag:\s*false/]
-	])('hardens %s', (_name, pattern) => {
-		expect(ADAPTER).toMatch(pattern);
+		['devTools', /devTools:/],
+		['spellcheck', /spellcheck:/],
+		['sandbox', /sandbox:/],
+		['contextIsolation', /contextIsolation:/],
+		['nodeIntegration', /nodeIntegration:\s*true/],
+		['webSecurity', /webSecurity:/]
+	])('does not override %s after the spread', (_name, pattern) => {
+		const hardened = ADAPTER.slice(
+			ADAPTER.indexOf('const HARDENED ='),
+			ADAPTER.indexOf('} as const;', ADAPTER.indexOf('const HARDENED ='))
+		);
+		expect(hardened, 'a canonical field was relaxed in the browser').not.toMatch(pattern);
 	});
 
 	/*

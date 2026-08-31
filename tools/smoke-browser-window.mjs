@@ -235,6 +235,63 @@ const main = async () => {
 	 * completely wrong about whose. Identity answers the question that was
 	 * actually being asked.
 	 */
+	/**
+	 * **The preferences the views actually got, measured rather than read.**
+	 *
+	 * This check exists because a source assertion was trusted to prove a runtime
+	 * property and could not. `tests/browser-host.test.ts` grepped this repository
+	 * for `sandbox: true` and friends; it found them, passed, and said nothing
+	 * while the object listed four of the canonical eleven fields and let
+	 * `devTools` and `spellcheck` fall through to Electron's defaults — both of
+	 * which default **on**. Every Steam tab in a packaged build could open
+	 * DevTools, in a window signed in to the user's account.
+	 *
+	 * So this asks the live `WebContents` rather than the file. `openDevTools()`
+	 * on a view built with `devTools: false` is inert, and that is the only
+	 * evidence that settles it. Both kinds of view are checked — the tab and the
+	 * toolbar — because they are built from the same object and the toolbar is
+	 * the one carrying a preload.
+	 */
+	const beforePosture = new Set(webContents.getAllWebContents().map((c) => c.id));
+	const posture = electronBrowserHost.createWindow({
+		width: 800,
+		height: 600,
+		title: 'posture — browser',
+		partition,
+		userAgent: 'SmokeTest/1'
+	});
+	await posture.loadURL('data:text/html,' + encodeURIComponent('<title>Posture</title>'));
+	await wait(400);
+
+	const postureViews = webContents
+		.getAllWebContents()
+		.filter((c) => !beforePosture.has(c.id) && !c.isDestroyed());
+	check('the posture window brought its views', postureViews.length >= 2, `${postureViews.length}`);
+
+	for (const contents of postureViews) {
+		contents.openDevTools({ mode: 'detach' });
+	}
+	await wait(700);
+
+	const opened = postureViews.filter((c) => !c.isDestroyed() && c.isDevToolsOpened());
+	check(
+		'no browser view can open DevTools',
+		opened.length === 0,
+		`${opened.length} of ${postureViews.length} view(s) opened DevTools`
+	);
+
+	const spellSessions = postureViews.filter(
+		(c) => !c.isDestroyed() && c.session.isSpellCheckerEnabled()
+	);
+	check(
+		'no browser session runs a spellchecker',
+		spellSessions.length === 0,
+		`enabled on ${spellSessions.length} of ${postureViews.length} view session(s)`
+	);
+
+	posture.close();
+	await wait(800);
+
 	const before = new Set(webContents.getAllWebContents().map((contents) => contents.id));
 	const leaky = electronBrowserHost.createWindow({
 		width: 800,

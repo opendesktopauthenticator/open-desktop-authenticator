@@ -17,7 +17,7 @@ to fix. H1 is the one to do first.
 
 | #   | Finding                                                                | Severity | Effort |
 | --- | ---------------------------------------------------------------------- | -------- | ------ |
-| H1  | Browser tabs run with DevTools and spellcheck enabled                  | High     | Small  |
+| H1  | ~~Browser tabs run with DevTools and spellcheck enabled~~ **fixed**    | High     | Small  |
 | H2  | Published signature-verification instructions check only the org       | High     | Small  |
 | M1  | `osv-scanner` gates CI but not releases                                | Medium   | Small  |
 | M2  | A tag-mismatched dispatch produces a valid signature for the wrong tag | Medium   | Medium |
@@ -29,7 +29,25 @@ Listed because it is one line to fix.
 
 ---
 
-## 1. H1 — the in-app browser weakens its own hardening by omission
+## 1. H1 — the in-app browser weakens its own hardening by omission — **FIXED**
+
+> **Done.** `HARDENED` is composed from `SECURE_WEB_PREFERENCES`, both posture
+> tests were rewritten to check composition rather than enumerate fields, and a
+> real-Electron smoke check now measures the live views rather than reading the
+> source — because a source assertion being trusted to prove a runtime property
+> is how this happened in the first place.
+>
+> **Building it found more than the report did.** `spellcheck: false` on
+> `webPreferences` governs the _view_; the spellchecker is a **session** service,
+> and a live run showed it still enabled with `en-US` loaded on a session whose
+> every view had the preference off. `denyAllPermissions` now calls
+> `setSpellCheckerEnabled(false)`. That in turn exposed a second gap: the
+> toolbar's `browser-chrome` partition had never been through session hardening
+> at all, so it was the last view still running one.
+>
+> Measured, not argued: `no browser view can open DevTools — 0 of 2`,
+> `no browser session runs a spellchecker — enabled on 0 of 2`. Five mutants
+> applied including the original defect restored verbatim; all five caught.
 
 **This is the finding to act on first**, and it was reported to me as a code
 duplication issue. It is not. It is a live weakening of the security posture in

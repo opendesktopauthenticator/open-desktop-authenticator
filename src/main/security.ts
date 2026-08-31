@@ -51,6 +51,24 @@ export function applyContentSecurityPolicy(
 export function denyAllPermissions(session: Session): void {
 	session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
 	session.setPermissionCheckHandler(() => false);
+
+	/**
+	 * **`spellcheck: false` on `webPreferences` is not enough, and that was
+	 * measured rather than assumed.**
+	 *
+	 * `SECURE_WEB_PREFERENCES` sets it, and the stated reason is the network
+	 * call: an active spellchecker downloads Hunspell dictionaries from a
+	 * Google-run CDN, which is a request this application never disclosed and
+	 * one that would leave by the machine's own address rather than an account's
+	 * proxy. But the preference governs the *view*; the spellchecker itself is a
+	 * session-level service, and a real Electron run shows it still enabled with
+	 * `en-US` loaded on a session whose every view has the preference off.
+	 *
+	 * Nothing should be requesting a dictionary in that state. This closes the
+	 * question rather than reasoning about it — which is the same mistake the
+	 * preference audit made once already.
+	 */
+	session.setSpellCheckerEnabled(false);
 }
 
 /**
