@@ -535,6 +535,7 @@ export function App(): React.JSX.Element {
 			return (
 				<AutoConfirm
 					account={current}
+					accounts={accounts}
 					onSave={(settings) => api.setAccountAutoConfirm(current.steamId64, settings)}
 					onClose={() => {
 						setAutoConfirmFor(undefined);

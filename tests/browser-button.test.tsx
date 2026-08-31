@@ -26,7 +26,12 @@ function account(overrides: Record<string, unknown> = {}): AccountSummary {
 		hasRevocationCode: true,
 		hasProxy: false,
 		routing: 'off',
-		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 30 },
+		autoConfirm: {
+			marketListings: false,
+			trades: false,
+			pollIntervalSeconds: 30,
+			notify: { enabled: false, detail: 'full' }
+		},
 		...overrides
 	});
 }

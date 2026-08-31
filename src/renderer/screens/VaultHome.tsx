@@ -778,12 +778,16 @@ export function VaultHome({
 									<button
 										type="button"
 										className={
+											// **Only approving earns the warning colour.** Watching an
+											// account changes nothing without a person, so colouring it
+											// the same as "trades are approved unattended" would spend
+											// the one signal that ought to mean exactly that.
 											account.autoConfirm.trades || account.autoConfirm.marketListings
 												? 'flag warn actionable'
 												: 'flag actionable'
 										}
 										onClick={() => onChangeAutoConfirm(account)}
-										title="Approve trades or market listings without asking. Off by default."
+										title="Approve trades or market listings without asking, or just be told about them. Both off by default."
 									>
 										{describeAutoConfirm(account.autoConfirm)}
 									</button>
@@ -881,18 +885,34 @@ function routingExplanation(account: AccountSummary): string {
 	}
 }
 
-function describeAutoConfirm(settings: AccountSummary['autoConfirm']): string {
+/**
+ * What this account does on its own.
+ *
+ * **Watching is a real state and used to read as "off".** With notifications
+ * available on their own, an account being polled every fifteen seconds and
+ * raising toasts printed `auto-confirm: off` — which is true about
+ * auto-confirm and wrong about the account, and it is the reading that would
+ * make somebody switch a feature on twice.
+ *
+ * Approving is named first wherever it applies, because it is the part with
+ * consequences. Notifications are mentioned but never lead.
+ */
+export function describeAutoConfirm(settings: AccountSummary['autoConfirm']): string {
+	const watching = settings.notify.enabled;
+
 	if (settings.trades && settings.marketListings) {
-		return 'auto-confirm: trades + market';
+		return watching ? 'auto-confirm: trades + market, notifying' : 'auto-confirm: trades + market';
 	}
 	// Trades first when only one is on: it is the consequential one.
 	if (settings.trades) {
-		return 'auto-confirm: trades';
+		return watching ? 'auto-confirm: trades, notifying' : 'auto-confirm: trades';
 	}
 	if (settings.marketListings) {
-		return 'auto-confirm: market';
+		return watching ? 'auto-confirm: market, notifying' : 'auto-confirm: market';
 	}
-	return 'auto-confirm: off';
+	// Nothing is approved here, so the word "auto-confirm" would be misleading
+	// whichever value followed it.
+	return watching ? 'notifying, approving nothing' : 'auto-confirm: off';
 }
 
 function describeStatus(status: AccountSummary['status']): string {

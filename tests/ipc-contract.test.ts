@@ -207,7 +207,12 @@ describe('S2 — no long-term secret has a path to the renderer', () => {
 					hasRevocationCode: true,
 					hasProxy: false,
 					routing: 'off',
-					autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
+					autoConfirm: {
+						marketListings: false,
+						trades: false,
+						pollIntervalSeconds: 15,
+						notify: { enabled: false, detail: 'full' }
+					},
 					...SECRETS
 				}
 			]
@@ -230,7 +235,12 @@ describe('S2 — no long-term secret has a path to the renderer', () => {
 					routing: 'blocked',
 					routedVia: 'socks5://***:***@10.0.0.1:1080',
 					routingProblem: 'this connection would be made directly instead',
-					autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+					autoConfirm: {
+						marketListings: false,
+						trades: false,
+						pollIntervalSeconds: 15,
+						notify: { enabled: false, detail: 'full' }
+					}
 				}
 			]
 		});
@@ -523,7 +533,8 @@ describe('the trades acknowledgement field', () => {
 	const base = {
 		steamId64: '76561198000000001',
 		marketListings: false,
-		pollIntervalSeconds: 15
+		pollIntervalSeconds: 15,
+		notify: { enabled: false, detail: 'full' }
 	};
 
 	it('is optional, because only the handler knows if this is a transition', () => {

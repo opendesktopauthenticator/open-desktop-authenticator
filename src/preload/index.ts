@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { NotifyDetail } from '../shared/vault-schema';
 // Values come from the zod-free module; types are erased at compile time.
 // Importing CHANNELS from '../shared/ipc' would emit require("zod") into this
 // bundle, which a sandboxed preload cannot resolve — see shared/channels.ts.
@@ -147,6 +148,8 @@ const api: RendererApi = {
 			pollIntervalSeconds: number;
 			/** Forwarded, never synthesised here. The handler is what enforces it. */
 			tradesAcknowledgement?: string;
+			/** Desktop notifications. Required: the request is `.strict()`. */
+			notify: { enabled: boolean; detail: NotifyDetail };
 		}
 	) =>
 		ipcRenderer.invoke(CHANNELS.accountSetAutoConfirm, { steamId64, ...settings }) as Promise<{

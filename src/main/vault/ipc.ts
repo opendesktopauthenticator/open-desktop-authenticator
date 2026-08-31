@@ -6,6 +6,7 @@ import { registerHandler } from '../ipc/router';
 import { planProxy } from '../net/egress';
 import type { RoutingStatus } from '../net/transport';
 import { matchesTradesAck, TRADES_ACK, type AccountSummary } from '../../shared/ipc';
+import type { NotifyDetail } from '../../shared/vault-schema';
 
 /*
  * Re-exported, not redefined.
@@ -214,7 +215,14 @@ export function registerVaultHandlers(
 
 	registerHandler(
 		CHANNELS.accountSetAutoConfirm,
-		async ({ steamId64, marketListings, trades, pollIntervalSeconds, tradesAcknowledgement }) => {
+		async ({
+			steamId64,
+			marketListings,
+			trades,
+			pollIntervalSeconds,
+			tradesAcknowledgement,
+			notify
+		}) => {
 			await vault.mutate((draft) => {
 				const account = draft.accounts.find((entry) => entry.steamId64 === steamId64);
 				if (!account) {
@@ -235,6 +243,11 @@ export function registerVaultHandlers(
 				account.autoConfirm.marketListings = marketListings;
 				account.autoConfirm.trades = trades;
 				account.autoConfirm.pollIntervalSeconds = pollIntervalSeconds;
+				// Field by field here too, and for the same reason — a spread would
+				// write whatever future key arrived on the request without anyone
+				// having decided it should be writable from the renderer.
+				account.autoConfirm.notify.enabled = notify.enabled;
+				account.autoConfirm.notify.detail = notify.detail;
 			});
 
 			onAutoConfirmChanged(steamId64);
@@ -441,7 +454,12 @@ export function toSummary(
 		status: string;
 		revocationCode?: string | undefined;
 		proxyUrl?: string | undefined;
-		autoConfirm: { marketListings: boolean; trades: boolean; pollIntervalSeconds: number };
+		autoConfirm: {
+			marketListings: boolean;
+			trades: boolean;
+			pollIntervalSeconds: number;
+			notify: { enabled: boolean; detail: NotifyDetail };
+		};
 	},
 	routing?: RoutingStatus
 ): AccountSummary {
@@ -460,7 +478,15 @@ export function toSummary(
 		autoConfirm: {
 			marketListings: account.autoConfirm.marketListings,
 			trades: account.autoConfirm.trades,
-			pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds
+			pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds,
+			// A fresh object, like everything else here. This one crosses to the
+			// renderer, and handing out a reference into vault contents is how a
+			// screen ends up able to write to the vault by assigning to what it was
+			// shown.
+			notify: {
+				enabled: account.autoConfirm.notify.enabled,
+				detail: account.autoConfirm.notify.detail
+			}
 		}
 	};
 

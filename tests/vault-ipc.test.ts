@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { newAutoConfirm } from '../src/shared/vault-schema';
 import {
 	applyProxyChange,
 	markRevocationBackedUp,
@@ -26,7 +27,7 @@ const account = {
 	proxyUrl: 'socks5h://user:PROXY-PASSWORD@host:1080',
 	status: 'active',
 	addedAt: '2026-08-08T00:00:00.000Z',
-	autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 20 }
+	autoConfirm: { ...newAutoConfirm(), marketListings: true, pollIntervalSeconds: 20 }
 };
 
 /** Every string reachable in a value. */
@@ -81,8 +82,47 @@ describe('account summaries carry no secrets', () => {
 		expect(summary.autoConfirm).toEqual({
 			marketListings: true,
 			trades: false,
-			pollIntervalSeconds: 20
+			pollIntervalSeconds: 20,
+			notify: { enabled: false, detail: 'full' }
 		});
+	});
+
+	/*
+	 * **The other half of the round trip.** The screen renders its controls from
+	 * this summary, so a value the vault holds and this drops is a control that
+	 * silently shows the default — and saving from that screen then writes the
+	 * default back over what the user had chosen.
+	 *
+	 * Asserted on a non-default value, because projecting a hard-coded default
+	 * would pass against a fixture that used the default.
+	 */
+	it('carries the notification settings the vault actually holds', () => {
+		const summary = toSummary({
+			...account,
+			autoConfirm: {
+				...account.autoConfirm,
+				notify: { enabled: true, detail: 'count' }
+			}
+		});
+		expect(summary.autoConfirm.notify, 'the screen would render a stale control').toEqual({
+			enabled: true,
+			detail: 'count'
+		});
+	});
+
+	/*
+	 * A fresh object, like everything else that crosses. Handing out a reference
+	 * into vault contents is how a screen ends up able to write to the vault by
+	 * assigning to what it was shown.
+	 */
+	it('does not hand out a reference into the vault', () => {
+		const source = {
+			...account,
+			autoConfirm: { ...account.autoConfirm, notify: { enabled: true, detail: 'count' as const } }
+		};
+		const summary = toSummary(source);
+		summary.autoConfirm.notify.enabled = false;
+		expect(source.autoConfirm.notify.enabled, 'the renderer wrote into the vault').toBe(true);
 	});
 
 	it('produces something the response schema accepts', () => {

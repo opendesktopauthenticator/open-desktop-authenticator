@@ -794,8 +794,6 @@ toast, rather than throwing.
 
 ---
 
-## 7. Phase 5---
-
 ## 7. Phase 5 — reaching the screen
 
 **Gate: full suite green. Feature reachable.**

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { notifyDetailSchema, type NotifyDetail } from './vault-schema';
 
 /**
  * The IPC contract — the single source of truth for every channel (§10.2, §11 S6).
@@ -158,7 +159,15 @@ export const accountSummary = z.object({
 	autoConfirm: z.object({
 		marketListings: z.boolean(),
 		trades: z.boolean(),
-		pollIntervalSeconds: z.number()
+		pollIntervalSeconds: z.number(),
+		/**
+		 * Desktop notifications. Independent of the two switches above — an
+		 * account may watch without ever approving anything.
+		 *
+		 * Carried on the summary because the screen cannot render a control for a
+		 * value it was never told.
+		 */
+		notify: z.object({ enabled: z.boolean(), detail: notifyDetailSchema })
 	})
 });
 
@@ -924,7 +933,21 @@ export const IPC_CONTRACT = {
 				 * the gate belongs at the boundary that decides — but on the transition,
 				 * not on the value.
 				 */
-				tradesAcknowledgement: z.string().optional()
+				tradesAcknowledgement: z.string().optional(),
+				/**
+				 * Desktop notifications for this account.
+				 *
+				 * Declared explicitly because this request is `.strict()`: an
+				 * unrecognised key is *rejected*, not ignored, so a screen sending
+				 * `notify` against a contract that did not name it would fail the whole
+				 * save rather than quietly drop the field.
+				 *
+				 * **No acknowledgement ceremony.** Trades spend money while nobody is
+				 * watching, which is why they demand a typed phrase; a notification
+				 * spends nothing and must not inherit that gate — the disclosure about
+				 * what a toast shows belongs on the screen, beside the switch.
+				 */
+				notify: z.object({ enabled: z.boolean(), detail: notifyDetailSchema })
 			})
 			.strict(),
 		response: okResponse
@@ -1157,6 +1180,14 @@ export interface RendererApi {
 			pollIntervalSeconds: number;
 			/** Required by the contract when switching `trades` on. See `TRADES_ACK`. */
 			tradesAcknowledgement?: string;
+			/**
+			 * Desktop notifications for this account.
+			 *
+			 * Not optional. The request schema is `.strict()`, so a save that omits
+			 * it fails rather than leaving the field alone — and a screen that can
+			 * silently skip a field is a screen that can silently reset it.
+			 */
+			notify: { enabled: boolean; detail: NotifyDetail };
 		}
 	): Promise<{ ok: true }>;
 	/**

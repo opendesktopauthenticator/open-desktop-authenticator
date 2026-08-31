@@ -1,7 +1,46 @@
 import { useState } from 'react';
 import type { AccountSummary } from '../../shared/ipc';
+import type { NotifyDetail } from '../../shared/vault-schema';
 import { matchesTradesAck, TRADES_ACK } from '../../shared/acknowledgements';
 import { messageOf } from '../ipc-message';
+
+/** Below this, the screen says what the interval costs. */
+export const RATE_WARNING_BELOW_SECONDS = 30;
+
+/**
+ * Whether an account is polled at all.
+ *
+ * Either switch does it. An account that only watches still costs a request
+ * per interval, which is the whole point of counting them here.
+ */
+export function isPolled(account: AccountSummary): boolean {
+	return (
+		account.autoConfirm.marketListings ||
+		account.autoConfirm.trades ||
+		account.autoConfirm.notify.enabled
+	);
+}
+
+/**
+ * Requests a minute across every polled account, and how many that is.
+ *
+ * Exported and tested directly: this project has no DOM runner, and the
+ * arithmetic is the part that can be wrong in a way nobody notices. An earlier
+ * draft of the test asserted `interval × accounts`, which is the reciprocal —
+ * it would have expected 30 where the screen prints 8.
+ *
+ * `polled` counts accounts that are **actually** polled, not `accounts.length`.
+ * Counting every account inflates the number for a vault where most are idle,
+ * and a warning that overstates its case is one people learn to dismiss.
+ */
+export function pollLoad(
+	intervalSeconds: number,
+	accounts: readonly AccountSummary[]
+): { requestsPerMinute: number; polled: number } {
+	const polled = accounts.filter(isPolled).length;
+	const safeInterval = Math.max(1, intervalSeconds);
+	return { requestsPerMinute: Math.round((60 / safeInterval) * polled), polled };
+}
 
 /**
  * Turning automatic confirmation on for one account (§12 F6).
@@ -23,15 +62,24 @@ import { messageOf } from '../ipc-message';
  */
 export function AutoConfirm({
 	account,
+	accounts,
 	onSave,
 	onClose
 }: {
 	account: AccountSummary;
+	/**
+	 * Every account, so the rate warning can count the ones actually polled.
+	 *
+	 * The load this interval creates is not a property of one account — Steam
+	 * rate-limits the machine, not the setting.
+	 */
+	accounts: readonly AccountSummary[];
 	onSave: (settings: {
 		marketListings: boolean;
 		trades: boolean;
 		pollIntervalSeconds: number;
 		tradesAcknowledgement?: string;
+		notify: { enabled: boolean; detail: NotifyDetail };
 	}) => Promise<unknown>;
 	onClose: () => void;
 }): React.JSX.Element {
@@ -40,6 +88,8 @@ export function AutoConfirm({
 	const [pollIntervalSeconds, setPollIntervalSeconds] = useState(
 		account.autoConfirm.pollIntervalSeconds
 	);
+	const [notifyEnabled, setNotifyEnabled] = useState(account.autoConfirm.notify.enabled);
+	const [notifyDetail, setNotifyDetail] = useState<NotifyDetail>(account.autoConfirm.notify.detail);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 	const [acknowledgement, setAcknowledgement] = useState('');
@@ -69,6 +119,7 @@ export function AutoConfirm({
 			marketListings,
 			trades,
 			pollIntervalSeconds,
+			notify: { enabled: notifyEnabled, detail: notifyDetail },
 			...(turningTradesOn ? { tradesAcknowledgement: acknowledgement } : {})
 		})
 			.then(() => onClose())
@@ -143,7 +194,68 @@ export function AutoConfirm({
 					</>
 				)}
 
-				<label htmlFor="poll-interval">Check for confirmations every</label>
+				<label className="checkbox">
+					<input
+						type="checkbox"
+						checked={notifyEnabled}
+						onChange={(event) => setNotifyEnabled(event.target.checked)}
+					/>
+					<span>
+						<strong>Notify me about confirmations that need me</strong>
+						{/*
+						 * **The disclosure sits here, beside the switch — not beside the
+						 * `full` radio below.** `full` is the default, so the sentence has
+						 * to be read by anyone switching notifications on, not only by
+						 * somebody who goes looking at the detail options.
+						 *
+						 * It names **both** the lock screen and notification history. An
+						 * earlier draft named only the history, which is the smaller of
+						 * the two, and this sentence is the only thing standing between
+						 * the default and an unattended screen — a proposal to degrade
+						 * `full` while Windows is locked was considered and deliberately
+						 * rejected, so nothing else covers this.
+						 */}
+						<p className="hint">
+							Notifications name the trade and its items. Windows shows them on the lock screen and
+							keeps them in notification history, so they can be read by anyone at this machine.
+							Choose <strong>Count only</strong> or <strong>Type only</strong> below to leave the
+							details out.
+						</p>
+					</span>
+				</label>
+
+				{notifyEnabled && (
+					<fieldset className="radios">
+						<legend>What a notification says</legend>
+						{(
+							[
+								['full', 'Everything', 'Trade with SomeTrader — you give: AK-47 Redline'],
+								['type', 'Type only', '1 trade, 1 market listing'],
+								['count', 'Count only', '2 confirmations need you']
+							] as const
+						).map(([value, label, example]) => (
+							<label className="radio" key={value}>
+								<input
+									type="radio"
+									name="notify-detail"
+									value={value}
+									checked={notifyDetail === value}
+									onChange={() => setNotifyDetail(value)}
+								/>
+								<span>
+									<strong>{label}</strong>
+									<p className="hint">{example}</p>
+								</span>
+							</label>
+						))}
+						<p className="hint">
+							<strong>Count only</strong> and <strong>Type only</strong> are the answer for a
+							machine other people can see, or one you walk away from.
+						</p>
+					</fieldset>
+				)}
+
+				<label htmlFor="poll-interval">How often this account is checked</label>
 				<input
 					id="poll-interval"
 					type="number"
@@ -155,9 +267,28 @@ export function AutoConfirm({
 					}
 				/>
 				<p className="hint">
-					Seconds, at least 10. Checking harder does not make Steam answer faster — it makes Steam
+					Seconds, at least 10. This interval serves both automatic confirmation and notifications —
+					they are the same poll. Checking harder does not make Steam answer faster; it makes Steam
 					start refusing.
 				</p>
+
+				{pollIntervalSeconds < RATE_WARNING_BELOW_SECONDS &&
+					(() => {
+						/*
+						 * Shown at the default of 15 seconds, and deliberately not
+						 * special-cased away. The default really does make this many
+						 * requests, and a warning that hides at the one value most people
+						 * never change is a warning that never appears.
+						 */
+						const { requestsPerMinute, polled } = pollLoad(pollIntervalSeconds, accounts);
+						return (
+							<p className="hint bad">
+								About <strong>{requestsPerMinute}</strong> requests a minute across{' '}
+								<strong>{polled}</strong> {polled === 1 ? 'account' : 'accounts'}. Steam
+								rate-limits, and a blocked account stops confirmations entirely for a while.
+							</p>
+						);
+					})()}
 
 				<div className="controls">
 					<button type="submit" disabled={busy || !acknowledged}>
