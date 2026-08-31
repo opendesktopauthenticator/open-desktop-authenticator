@@ -270,6 +270,37 @@ export interface OpenBrowserOptions {
 	 * the thing the caller's dirty-partition tracking exists to prevent.
 	 */
 	onWipe?: (cleared: boolean) => void;
+	/**
+	 * Throw if this attempt has been disowned since it started.
+	 *
+	 * **The caller could only ask afterwards, and afterwards is too late.**
+	 * `AccountBrowsers.open` checked its generation and epoch around its single
+	 * `await openAccountBrowser(...)`, which makes the whole of this function one
+	 * indivisible step from outside — and it is not. It waits on `setProxy`,
+	 * which is Chromium IPC and can take as long as Chromium likes.
+	 *
+	 * A lock landing inside that wait ran `closeAll`, which found nothing:
+	 * `onCreated` had not fired, so the account was in no map. This function then
+	 * carried on, wrote Steam's cookie into the partition the sweep had just
+	 * wiped, and created a signed-in window that was registered *after* the sweep
+	 * had finished. Measured: one window created after the lock, still on screen,
+	 * while `isOpen()` reported false — so nothing could find it to close it, and
+	 * the next lock had no record of it either.
+	 *
+	 * Called after every await here, and before the two irreversible steps: the
+	 * cookie, and the window. Where it throws after the cookie exists, the
+	 * partition is wiped again on the way out.
+	 *
+	 * **The call sites are deliberately redundant, and mutation testing says so.**
+	 * Deleting any single one of them leaves the suite green, because the next
+	 * one down catches the same disown a moment later; deleting the lot — or
+	 * stubbing this to a no-op — fails three tests. That is defence in depth
+	 * behaving exactly as intended rather than missing coverage, and it is
+	 * recorded here so the next person to run a mutant does not go looking for a
+	 * test that cannot exist. What is genuinely pinned is the property: no cookie
+	 * is written and no window is built for an attempt that has been disowned.
+	 */
+	stillWanted?: () => void;
 }
 
 /**
@@ -367,6 +398,15 @@ export async function openAccountBrowser(
 	}
 
 	/*
+	 * **The first await is over, so ask whether this is still wanted.**
+	 *
+	 * `setProxy` is Chromium IPC and takes as long as Chromium takes. A lock
+	 * landing inside it used to be invisible here: this function had told nobody
+	 * it existed yet, so the sweep found nothing to close and this carried on.
+	 */
+	options.stillWanted?.();
+
+	/*
 	 * **Configured is not applied, and only Chromium can settle which.**
 	 *
 	 * `setProxy` resolving means the settings were accepted. `transport.ts` has
@@ -416,6 +456,8 @@ export async function openAccountBrowser(
 					{ cause }
 				);
 			}
+			// Each probe is a round trip of its own, and there are several.
+			options.stillWanted?.();
 			if (describesDirectRoute(resolved) || routedEndpoint(resolved) !== plan.endpoint) {
 				throw new BrowserSessionError(
 					`this account is set to route through ${plan.redacted}, but this window would not. ` +
@@ -426,7 +468,33 @@ export async function openAccountBrowser(
 		}
 	}
 
+	/*
+	 * **The last moment nothing has happened yet.**
+	 *
+	 * Everything above is a question — apply a proxy, ask Chromium where a URL
+	 * would go — and every one of them was an await this attempt could be
+	 * disowned during. Below is the cookie, which is a signed-in Steam session
+	 * sitting in a partition, and after it a window. Asked here so a lock that
+	 * landed in any of those waits costs nothing at all.
+	 */
+	options.stillWanted?.();
+
 	await signIn(session, options.steamId64, options.accessToken);
+
+	/*
+	 * **And again, because the cookie is the point of no return.**
+	 *
+	 * `signIn` is two `cookies.set` calls, which is two more awaits. A lock
+	 * during them leaves Steam's session in a partition that the sweep has
+	 * already wiped and will not look at again — so this clears it rather than
+	 * leaving it for a lock that has been and gone.
+	 */
+	try {
+		options.stillWanted?.();
+	} catch (cause) {
+		options.onWipe?.(await clearSession(session));
+		throw cause;
+	}
 
 	const window = host.createWindow({
 		width: 1280,
@@ -450,6 +518,22 @@ export async function openAccountBrowser(
 	 * From here a sweep can close it synchronously without waiting for anything.
 	 */
 	options.onCreated?.(window);
+
+	/*
+	 * **Once more, now that the window exists and is findable.**
+	 *
+	 * `createWindow` is synchronous, so nothing can have changed since the check
+	 * above — but this is the first instant a sweep could have closed this window
+	 * itself, and the first instant `abandon` has something to close. Asking here
+	 * means a disown that arrived during `signIn` ends with the window shut and
+	 * the partition wiped, rather than a signed-in window nobody is holding.
+	 */
+	try {
+		options.stillWanted?.();
+	} catch (cause) {
+		options.onWipe?.(await abandon(window, session));
+		throw cause;
+	}
 
 	/*
 	 * A proxy carries HTTP; WebRTC opens its own UDP and hands a page the
@@ -717,6 +801,23 @@ function withoutLocale(pathname: string): string {
  * the lock that was supposed to end it. Swallowing the second failure silently
  * made them look like one thing.
  */
+/**
+ * Empty a partition when there is no window to close yet.
+ *
+ * `abandon` needs a window; the disown that arrives between the cookie and the
+ * window has none, and the cookie is already there. Same answer to the same
+ * question — did the storage actually clear — so the caller records it the same
+ * way.
+ */
+async function clearSession(session: BrowserSessionHandle): Promise<boolean> {
+	try {
+		await session.clearStorageData?.();
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 async function abandon(
 	window: BrowserWindowHandle,
 	session: BrowserSessionHandle
@@ -804,6 +905,22 @@ export class AccountBrowsers {
 	private readonly opening = new Map<string, OpeningAttempt>();
 
 	/**
+	 * The route each `open` was *asked* for, from its first line.
+	 *
+	 * **`opening` is registered too late to police a route switch.** Changing an
+	 * open account to another route tears the old window down first and awaits
+	 * its storage wipe; only then is this attempt recorded. Throughout that wait
+	 * the account is in no map at all, so `closeNotFullyRouted` — the sweep that
+	 * makes `Require proxies` true of what is already running — walked straight
+	 * past a Direct request that was seconds from producing a window.
+	 *
+	 * Set before any teardown and cleared in the same `finally` as `opening`, so
+	 * there is no instant between "the user asked for this route" and "something
+	 * can refuse it".
+	 */
+	private readonly requested = new Map<string, string>();
+
+	/**
 	 * The route each open window is actually on.
 	 *
 	 * **Because "one window per account" was answering a question nobody asked.**
@@ -885,7 +1002,26 @@ export class AccountBrowsers {
 	 */
 	private readonly dirty = new Set<string>();
 
-	constructor(private readonly host: BrowserHost) {}
+	constructor(
+		private readonly host: BrowserHost,
+		/**
+		 * Whether the vault currently refuses an unrouted window.
+		 *
+		 * **Asked again inside the open, not only at the door.** `browser/ipc.ts`
+		 * checks this before calling `open`, which answers a question about the
+		 * moment the button was pressed — and a route switch then tears the old
+		 * window down and *awaits its storage wipe* before this attempt is
+		 * registered anywhere. A sweep landing in that gap found nothing to
+		 * refuse, and the Direct window arrived afterwards under a rule that
+		 * forbids it. Re-asking after the teardown closes the gap with the rule
+		 * itself rather than with a counter that the teardown's own epoch bump
+		 * would swallow.
+		 *
+		 * Defaults to permissive so every existing test constructs unchanged; the
+		 * refusal that matters is still `ipc.ts`'s, and this is the second one.
+		 */
+		private readonly requireProxies: () => boolean = () => false
+	) {}
 
 	/**
 	 * What `closeAll` has bumped so far.
@@ -940,6 +1076,40 @@ export class AccountBrowsers {
 		sinceEpoch = this.epochOf(options.steamId64)
 	): Promise<void> {
 		const wanted = routeKey(options);
+
+		/*
+		 * **Declared before anything is torn down, because there is a gap there.**
+		 *
+		 * Switching an open account to a different route closes the old window
+		 * first and *awaits its storage wipe*, and only registers this attempt in
+		 * `opening` afterwards. For the whole of that wipe, a `Require proxies`
+		 * sweep saw neither the old window — already out of `windows` — nor the
+		 * Direct request that was about to replace it. Measured: open proxied,
+		 * hold the old partition's wipe, ask for Direct, turn the setting on and
+		 * let its sweep finish, then release the wipe. Result: a second, live,
+		 * unrouted window, created by an attempt the sweep had no way to see.
+		 *
+		 * A route is recorded here so the sweep can disown the *request* rather
+		 * than only the window it has not produced yet. Cleared in the same
+		 * `finally` that clears `opening`.
+		 */
+		this.requested.set(options.steamId64, wanted);
+		try {
+			await this.attempt(options, since, sinceEpoch, wanted);
+		} finally {
+			if (this.requested.get(options.steamId64) === wanted) {
+				this.requested.delete(options.steamId64);
+			}
+		}
+	}
+
+	/** The body of `open`, so its route registration can wrap everything. */
+	private async attempt(
+		options: OpenBrowserOptions,
+		since: number,
+		sinceEpoch: number,
+		wanted: string
+	): Promise<void> {
 
 		/*
 		 * **Captured before the first await, not after the last one.**
@@ -1041,6 +1211,28 @@ export class AccountBrowsers {
 		// deliberately a few lines above, and capturing it at the door would make
 		// this open cancel itself over its own teardown.
 		const epoch = this.epochOf(options.steamId64);
+
+		/*
+		 * **And the rule itself, re-asked now the teardown is over.**
+		 *
+		 * The epoch cannot carry this one. A route switch bumps it on purpose a
+		 * few lines above, so it is re-read here — which means a sweep that bumped
+		 * it during the teardown is absorbed by that re-read and vanishes.
+		 * `Require proxies` turning on during the awaited wipe was therefore
+		 * invisible to everything: the old window was already out of `windows`,
+		 * this attempt was not yet in `opening`, and the counter that would have
+		 * disowned it had just been re-read.
+		 *
+		 * Asking the rule directly has no such gap, and it is the same reader
+		 * `ipc.ts` uses rather than a second source of truth.
+		 */
+		if (this.requireProxies() && !wanted.startsWith('proxy:')) {
+			throw new BrowserSessionError(
+				'this vault now requires every account to browse through its proxy, so the window ' +
+					'was not opened. Choose “Through the proxy”, or turn the setting off in Settings.'
+			);
+		}
+
 		const attempt = (async () => {
 			/*
 			 * **Synchronously, before anything is built.**
@@ -1123,7 +1315,17 @@ export class AccountBrowsers {
 					// change can close it without waiting for a load that may never
 					// finish.
 					onCreated: (created) => this.building.set(options.steamId64, created),
-					onWipe: (cleared) => this.mark(options.steamId64, cleared)
+					onWipe: (cleared) => this.mark(options.steamId64, cleared),
+					/*
+					 * **The same two counters, asked from inside.**
+					 *
+					 * Checking them either side of this call treats the whole open as one
+					 * step, and it is four awaits long. The check below covers a disown
+					 * that arrives while the *page* loads; this covers the ones that
+					 * arrive while the proxy is being applied and while the cookie is
+					 * being written, which is where the window gets created.
+					 */
+					stillWanted: () => this.stillWanted(options.steamId64, generation, epoch)
 				});
 			} finally {
 				// **In a `finally`, because the throwing paths matter as much.**
@@ -1417,6 +1619,22 @@ export class AccountBrowsers {
 		 * Before any await, for the reason `closeAll` gives about its own counter:
 		 * anything that runs later races the sweep, and wins.
 		 */
+		/*
+		 * **And the routes only *asked* for, which `opening` does not yet hold.**
+		 *
+		 * A route switch tears the old window down and awaits its wipe before
+		 * registering the new attempt, so for the length of that wipe the account
+		 * appears in neither `windows` nor `opening`. A sweep in that gap saw
+		 * nothing to refuse and the Direct window arrived afterwards, under a rule
+		 * that forbids it. Bumping the epoch here disowns the request itself —
+		 * `open` re-reads it after every await, including the one it is sitting in.
+		 */
+		for (const [steamId64, route] of [...this.requested]) {
+			if (!route.startsWith('proxy:')) {
+				this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
+			}
+		}
+
 		// Snapshotted, because `abandonOpening` deletes from this map.
 		for (const [steamId64, entry] of [...this.opening]) {
 			if (!entry.route.startsWith('proxy:')) {

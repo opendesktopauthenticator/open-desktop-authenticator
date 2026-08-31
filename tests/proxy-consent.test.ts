@@ -57,16 +57,55 @@ describe('a destination nobody has approved', () => {
 		expect(asked).toHaveLength(2);
 	});
 
-	/*
-	 * **Credentials are not part of it.** They go to the proxy operator and never
-	 * onto the wire as a name, so rotating a password is not a new destination —
-	 * and asking again for one would train the user to click through.
+	/**
+	 * **Credentials ARE part of it, and reasoning otherwise was the hole.**
+	 *
+	 * This test used to assert the opposite, on the argument that credentials
+	 * reach the proxy operator and never travel as a name, so rotating a password
+	 * is not a new destination and asking again would train people to click
+	 * through. The first half is true; the conclusion does not follow.
+	 *
+	 * A compromised renderer does not need a *new* destination. It saves the same
+	 * approved endpoint with attacker-chosen username and password, matches on
+	 * `host:port`, skips the dialog entirely — and the transport then sends those
+	 * strings to the proxy on the next authentication. The credentials are the
+	 * payload and the approved operator is the recipient: the same exfiltration
+	 * channel this class exists to close, reached through the one field it
+	 * ignored.
 	 */
-	it('does not ask again when only the credentials changed', async () => {
+	it('asks again when the credentials change on an approved endpoint', async () => {
 		const { consent, asked } = harness();
 		await consent.require('http://alice:one@10.0.0.9:8080', { reason: 'route' });
 		await consent.require('http://alice:two@10.0.0.9:8080', { reason: 'route' });
-		expect(asked).toHaveLength(1);
+		expect(
+			asked,
+			'attacker-chosen credentials were sent to an approved proxy without a dialog'
+		).toHaveLength(2);
+	});
+
+	it('asks again when credentials are added to an endpoint approved without any', async () => {
+		const { consent, asked } = harness();
+		await consent.require('http://10.0.0.9:8080', { reason: 'route' });
+		await consent.require('http://carrier:payload@10.0.0.9:8080', { reason: 'route' });
+		expect(asked).toHaveLength(2);
+	});
+
+	/*
+	 * And the scheme, for a plainer reason: http and socks5 to one address are two
+	 * protocols reaching two listeners, and the user agreed to one of them.
+	 */
+	it('asks again when the scheme changes', async () => {
+		const { consent, asked } = harness();
+		await consent.require('http://10.0.0.9:8080', { reason: 'route' });
+		await consent.require('socks5://10.0.0.9:8080', { reason: 'route' });
+		expect(asked).toHaveLength(2);
+	});
+
+	it('does not ask twice for the very same address', async () => {
+		const { consent, asked } = harness();
+		await consent.require('http://alice:one@10.0.0.9:8080', { reason: 'route' });
+		await consent.require('http://alice:one@10.0.0.9:8080', { reason: 'signIn' });
+		expect(asked, 'an unchanged address raised a dialog with no decision in it').toHaveLength(1);
 	});
 
 	it('never puts the credentials in the dialog', async () => {
@@ -155,7 +194,10 @@ describe('the addresses already in the vault', () => {
 	it('skips entries that are not usable addresses', () => {
 		const { consent } = harness();
 		expect(() => consent.seed(['', undefined, 'not a url', 'http://10.0.0.9:8080'])).not.toThrow();
-		expect(consent.has('10.0.0.9:8080')).toBe(true);
+		// `has` takes the whole address now: an approval is bound to the scheme and
+		// the credentials as well, so a bare endpoint is no longer a question this
+		// class can answer.
+		expect(consent.has('http://10.0.0.9:8080')).toBe(true);
 	});
 });
 
@@ -173,6 +215,77 @@ describe('locking', () => {
 		consent.clear();
 		await consent.require('http://10.0.0.9:8080', { reason: 'route' });
 		expect(asked, 'an approval outlived the person who gave it').toHaveLength(2);
+	});
+});
+
+/**
+ * **A dialog outlives the lock that was supposed to stop it.**
+ *
+ * `clear()` dropped the approvals that existed. It said nothing about the
+ * question being asked *right now* — and that question is an OS dialog a person
+ * can leave sitting for as long as they like, while the vault locks on its own
+ * schedule.
+ *
+ * Measured before the fix: hold the dialog, lock the vault (which calls
+ * `clear()`), then approve. The approval was recorded and the caller carried on
+ * — enrolment with a password, transfer with a password and a Steam Guard code
+ * — through an endpoint approved by nobody who was present.
+ */
+describe('a consent dialog still on screen when the vault locks', () => {
+	function pending(): {
+		consent: ProxyConsent;
+		answer: (allowed: boolean) => void;
+	} {
+		let settle: ((allowed: boolean) => void) | undefined;
+		const consent = new ProxyConsent({
+			ask: () =>
+				new Promise<boolean>((resolve) => {
+					settle = resolve;
+				})
+		});
+		return {
+			consent,
+			answer: (allowed) => settle?.(allowed)
+		};
+	}
+
+	it('refuses an approval given after the lock', async () => {
+		const { consent, answer } = pending();
+		const asking = consent.require('http://10.0.0.9:8080', { reason: 'signIn' });
+		// Let the dialog reach the point of waiting.
+		await Promise.resolve();
+
+		consent.clear();
+		answer(true);
+
+		await expect(
+			asking,
+			'a password was about to go through an endpoint approved after the vault closed'
+		).rejects.toBeInstanceOf(EgressError);
+	});
+
+	it('does not remember it either', async () => {
+		const { consent, answer } = pending();
+		const asking = consent.require('http://10.0.0.9:8080', { reason: 'signIn' });
+		await Promise.resolve();
+		consent.clear();
+		answer(true);
+		await expect(asking).rejects.toBeInstanceOf(EgressError);
+
+		expect(
+			consent.has('http://10.0.0.9:8080'),
+			'the late approval was recorded, so the next attempt would not ask'
+		).toBe(false);
+	});
+
+	it('still honours one given before it', async () => {
+		const { consent, answer } = pending();
+		const asking = consent.require('http://10.0.0.9:8080', { reason: 'route' });
+		await Promise.resolve();
+		answer(true);
+
+		await expect(asking).resolves.toBeUndefined();
+		expect(consent.has('http://10.0.0.9:8080')).toBe(true);
 	});
 });
 

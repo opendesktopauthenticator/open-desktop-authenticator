@@ -311,15 +311,24 @@ export function registerVaultHandlers(
 			 * would block the very edit that replaces it. Unreadable means "not a
 			 * destination", which asks rather than skips — the safe direction.
 			 */
-			let current: string | undefined;
-			if (account?.proxyUrl !== undefined && account.proxyUrl !== '') {
-				try {
-					current = planProxy(account.proxyUrl).endpoint;
-				} catch {
-					current = undefined;
-				}
-			}
-			if (current !== planProxy(proxyUrl).endpoint) {
+			/*
+			 * **The whole address, not its endpoint.**
+			 *
+			 * Comparing `host:port` meant saving the same approved endpoint with
+			 * different credentials counted as "unchanged" and skipped the dialog —
+			 * and the transport then sends those credentials to the proxy on the
+			 * next authentication. A compromised renderer needs no new destination
+			 * for that: it encodes what it wants to leak into the username and
+			 * password and posts it to an operator the user already approved.
+			 *
+			 * String equality is deliberately strict. A cosmetic difference
+			 * re-asks, which is the safe direction to be wrong in, and the same
+			 * fingerprint inside `ProxyConsent` means a genuine re-save of the
+			 * identical address still never reaches a dialog.
+			 */
+			const current =
+				account?.proxyUrl === undefined || account.proxyUrl === '' ? undefined : account.proxyUrl;
+			if (current !== proxyUrl) {
 				await proxyConsent.require(proxyUrl, {
 					...(account?.accountName === undefined ? {} : { accountName: account.accountName }),
 					reason: 'route'

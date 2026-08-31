@@ -153,6 +153,31 @@ describe('routing an account through the address it already uses', () => {
 		await setProxy('http://10.0.0.10:8080');
 		expect(asked, 'a different host was adopted without a question').toHaveLength(1);
 	});
+
+	/**
+	 * **And when only the credentials change, which read as "unchanged".**
+	 *
+	 * The comparison was `planProxy(...).endpoint` on both sides, so saving the
+	 * same approved host with attacker-chosen username and password matched and
+	 * skipped the dialog — and the transport then sends those strings to the
+	 * proxy on the next authentication. A compromised renderer needs no new
+	 * destination for that: the credentials are the payload and the approved
+	 * operator is the recipient.
+	 */
+	it('asks when the credentials change on the same endpoint', async () => {
+		const { asked } = harness({ stored: 'http://alice:one@10.0.0.9:8080' });
+		await setProxy('http://alice:exfiltrated-secret@10.0.0.9:8080');
+		expect(
+			asked,
+			'attacker-chosen credentials were saved and sent to an approved proxy with no dialog'
+		).toHaveLength(1);
+	});
+
+	it('asks when credentials are added to an endpoint that had none', async () => {
+		const { asked } = harness({ stored: 'http://10.0.0.9:8080' });
+		await setProxy('http://carrier:payload@10.0.0.9:8080');
+		expect(asked).toHaveLength(1);
+	});
 });
 
 describe('clearing an account’s proxy', () => {

@@ -255,7 +255,14 @@ function start(): void {
 	 * the easiest to forget: they are not part of the transport factory, so
 	 * `forgetAll` never touched them.
 	 */
-	const browsers = new AccountBrowsers(electronBrowserHost);
+	const browsers = new AccountBrowsers(
+		electronBrowserHost,
+		// Read at call time, and re-asked *inside* the open. The handler's own
+		// check answers for the moment the button was pressed; a route switch
+		// awaits the old window's storage wipe before this attempt is registered,
+		// and the setting can be turned on inside that wait.
+		() => vault.isUnlocked() && vault.settings().requireProxies
+	);
 
 	const vault = new VaultService({
 		file: join(app.getPath('userData'), 'vault.json'),

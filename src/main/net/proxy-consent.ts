@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { EgressError, planProxy } from './egress';
 
 /**
@@ -34,6 +35,52 @@ import { EgressError, planProxy } from './egress';
  * one that is visible, consented, and rate-limited by human attention.
  */
 
+/**
+ * What an approval is *for*: the scheme, the endpoint, and whether the
+ * credentials are the ones that were approved.
+ *
+ * **`host:port` alone was not the destination, and that was a real hole.** The
+ * first version of this reasoned that credentials reach the proxy operator and
+ * never travel as a name, so rotating a password was not a new destination and
+ * asking again would only train people to click through. The first half is
+ * true and the conclusion does not follow: a compromised renderer does not need
+ * a *new* destination. It saves the same approved endpoint with attacker-chosen
+ * username and password, skips the dialog entirely because the endpoint matches,
+ * and the transport then sends those strings to the proxy on the next
+ * authentication. The credentials are the payload, and the approved operator is
+ * the recipient — the same exfiltration channel the gate was built to close,
+ * reached through the one field the gate ignored.
+ *
+ * Hashed rather than stored: this decides whether two attempts agree, and it
+ * never needs to say what they agree *on*. A rotated password therefore
+ * re-prompts, naming the host and never the secret.
+ *
+ * The scheme is in the key for a plainer reason — `http://` and `socks5://` to
+ * one address are two different protocols to two different listeners, and the
+ * user agreed to one of them.
+ */
+function destinationKey(proxyUrl: string, endpoint: string): string {
+	let scheme = '';
+	let credentials = '';
+	try {
+		const url = new URL(proxyUrl);
+		scheme = url.protocol;
+		credentials = `${url.username}:${url.password}`;
+	} catch {
+		// `planProxy` has already accepted this, so it parses. Keyed conservatively
+		// if that ever stops being true: an unreadable address matches nothing
+		// previously approved, which asks rather than assumes.
+		return `unparsed:${proxyUrl}`;
+	}
+	// Truncated because this is an equality check between two strings this
+	// process produced, not a signature over anything.
+	const fingerprint =
+		credentials === ':'
+			? 'none'
+			: createHash('sha256').update(credentials).digest('hex').slice(0, 32);
+	return `${scheme}//${endpoint}#${fingerprint}`;
+}
+
 /** Why a destination is being introduced, which changes what the dialog says. */
 export type ProxyConsentReason = 'route' | 'signIn';
 
@@ -61,6 +108,22 @@ export class ProxyConsent {
 	private readonly approved = new Set<string>();
 	private readonly ask: ProxyConsentAsk;
 
+	/**
+	 * Bumped by {@link clear}, so a dialog already on screen cannot outlive it.
+	 *
+	 * **Clearing the set was not enough.** `clear()` drops approvals that exist;
+	 * it said nothing about the question being asked *right now*, and that
+	 * question is an OS dialog a person may leave sitting for as long as they
+	 * like. Measured: hold the dialog, lock the vault — which calls `clear()` —
+	 * then approve. The approval was recorded and enrolment carried on with the
+	 * password, sending it through an endpoint approved after the vault had
+	 * closed. Transfer takes the same path and carries a Steam Guard code too.
+	 *
+	 * A generation captured before the await and compared after it is what turns
+	 * "forget what was approved" into "and abandon what is being asked".
+	 */
+	private generation = 0;
+
 	constructor(options: { ask?: ProxyConsentAsk } = {}) {
 		// Refusing by default matters: a wiring mistake that left this unset would
 		// otherwise approve everything silently, which is the state being fixed.
@@ -83,16 +146,27 @@ export class ProxyConsent {
 				continue;
 			}
 			try {
-				this.approved.add(planProxy(proxyUrl).endpoint);
+				this.approved.add(destinationKey(proxyUrl, planProxy(proxyUrl).endpoint));
 			} catch {
 				// Not a usable address, so nothing will ever connect to it.
 			}
 		}
 	}
 
-	/** Already approved, so no dialog is raised for it. */
-	has(endpoint: string): boolean {
-		return this.approved.has(endpoint);
+	/**
+	 * Already approved, so no dialog is raised for it.
+	 *
+	 * Takes the whole address rather than an endpoint: an approval is bound to
+	 * the scheme and the credentials as well, and a caller that could ask about
+	 * a bare `host:port` would be asking a question this class deliberately
+	 * stopped answering.
+	 */
+	has(proxyUrl: string): boolean {
+		try {
+			return this.approved.has(destinationKey(proxyUrl, planProxy(proxyUrl).endpoint));
+		} catch {
+			return false;
+		}
 	}
 
 	/**
@@ -108,22 +182,37 @@ export class ProxyConsent {
 		// Throws for an unusable address before anything is asked, so the dialog
 		// never quotes a host that could not be connected to anyway.
 		const plan = planProxy(proxyUrl);
-		if (this.approved.has(plan.endpoint)) {
+		const key = destinationKey(proxyUrl, plan.endpoint);
+		if (this.approved.has(key)) {
 			return;
 		}
 
+		const asked = this.generation;
 		const allowed = await this.ask({
 			endpoint: plan.endpoint,
 			redacted: plan.redacted,
 			...(context.accountName === undefined ? {} : { accountName: context.accountName }),
 			reason: context.reason
 		});
+		/*
+		 * **The answer is only good for the session it was asked in.**
+		 *
+		 * A dialog can sit on screen indefinitely, and the vault locks on its own
+		 * schedule. An approval given after that lock is an approval nobody
+		 * present agreed to — and the caller is about to send a password through
+		 * the endpoint it names.
+		 */
+		if (asked !== this.generation) {
+			throw new EgressError(
+				`the vault locked while ${plan.endpoint} was waiting to be approved, so it was not used`
+			);
+		}
 		if (!allowed) {
 			throw new EgressError(
 				`sending this account's traffic through ${plan.endpoint} was not approved`
 			);
 		}
-		this.approved.add(plan.endpoint);
+		this.approved.add(key);
 	}
 
 	/**
@@ -137,5 +226,7 @@ export class ProxyConsent {
 	 */
 	clear(): void {
 		this.approved.clear();
+		// And disown any dialog still on screen. See `generation`.
+		this.generation += 1;
 	}
 }

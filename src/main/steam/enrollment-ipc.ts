@@ -111,6 +111,21 @@ export function registerEnrollmentHandlers(
 		 */
 		if (proxyUrl !== undefined && proxyUrl !== '') {
 			await proxyConsent.require(proxyUrl, { accountName, reason: 'signIn' });
+			/*
+			 * **And the vault is checked again, because the dialog waits.**
+			 *
+			 * `requireUnlocked()` above answered for the moment the button was
+			 * pressed. Consent is an OS dialog a person can leave on screen
+			 * indefinitely, and the vault locks on its own schedule — so without
+			 * this, approving after a lock sent the password to Steam for a vault
+			 * that had closed, over an endpoint approved by nobody who was there.
+			 * The rule is re-asked too: `Require proxies` can be turned on inside
+			 * the same wait.
+			 */
+			requireUnlocked();
+			if (vault.settings().requireProxies && (proxyUrl === undefined || proxyUrl === '')) {
+				throw new EnrollmentError(PROXY_REQUIRED);
+			}
 		}
 		return enrollment.begin(accountName, password, proxyUrl);
 	});

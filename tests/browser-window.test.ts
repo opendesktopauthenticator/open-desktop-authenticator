@@ -67,6 +67,8 @@ function harness(
 		loadHangs?: boolean;
 		/** `clearStorageData` rejects, so the partition keeps its cookies. */
 		wipeFails?: boolean;
+		/** Hold every storage wipe until `releaseWipe()` is called. */
+		gateWipes?: boolean;
 		/**
 		 * A redirect the main frame passes through *during* the first load.
 		 *
@@ -163,6 +165,17 @@ function harness(
 			if (wipeFails) {
 				return Promise.reject(new Error('session gone'));
 			}
+			/*
+			 * **Held open on request**, because a route switch *awaits* this wipe
+			 * before registering its new attempt — and that wait is a window in
+			 * which the account is in no map at all. It is the only way to stand a
+			 * policy sweep up inside it.
+			 */
+			if (gateWipes) {
+				return new Promise<void>((resolve) => {
+					wipeGates.push(resolve);
+				});
+			}
 			return Promise.resolve();
 		},
 		cookies: {
@@ -176,6 +189,8 @@ function harness(
 	// Mutable, so a test can let the retry succeed — which is the difference
 	// between "refuses for ever" and "asks again once".
 	let wipeFails = overrides.wipeFails === true;
+	const gateWipes = overrides.gateWipes === true;
+	const wipeGates: (() => void)[] = [];
 	let loadFails = overrides.loadFails === true;
 
 	const window: BrowserWindowHandle = {
@@ -257,6 +272,14 @@ function harness(
 		/** Let a wipe that was failing start working. */
 		letWipeSucceed: () => {
 			wipeFails = false;
+		},
+		/** Let go of every held storage wipe, and say how many there were. */
+		releaseWipe: (): number => {
+			const held = wipeGates.splice(0);
+			for (const gate of held) {
+				gate();
+			}
+			return held.length;
 		},
 		/** Let a load that was failing start working. */
 		letLoadSucceed: () => {
@@ -1009,9 +1032,32 @@ function lockHarness(cleared: string[], closed: string[]): BrowserHost {
  * set, first page loaded. Everything below is about what happens *during* those,
  * which is a window nothing has a reference to yet.
  */
-function slowHarness() {
+function slowHarness(options: { gateLoad?: boolean; gateResolve?: boolean } = {}) {
 	const created: { closed: boolean }[] = [];
 	const wiped: string[] = [];
+	/*
+	 * **A second gate, at the page load.**
+	 *
+	 * `setProxy` is the only await this harness used to hold, and once the open
+	 * learned to check whether it was still wanted after that await, a lock
+	 * landing there stopped producing a window at all — which is the fix, and
+	 * which left the *other* half of the race uncovered: a lock that arrives once
+	 * the window is already on screen and the page is still loading. That one
+	 * must still end with the window closed and the partition wiped.
+	 */
+	const loadGates: (() => void)[] = [];
+	/*
+	 * And a third, at the routing verification.
+	 *
+	 * `resolveProxy` sits between the proxy being applied and Steam's cookie
+	 * being written, and it is asked once per probed domain — several real round
+	 * trips. It is the only place that can tell the check after `setProxy` apart
+	 * from the check before the cookie: with only the first two gates, removing
+	 * either one leaves the other covering it, and a mutant that deletes the
+	 * pre-cookie check survives while a disown arriving here would still write a
+	 * signed-in session into the partition.
+	 */
+	const resolveGates: (() => void)[] = [];
 	/*
 	 * Every gate currently held, not just the newest one.
 	 *
@@ -1029,7 +1075,12 @@ function slowHarness() {
 			// Obeys whatever was last asked for, like the main harness. Answering
 			// DIRECT unconditionally would make every routed open in here fail the
 			// verification check for a reason that has nothing to do with the test.
-			resolveProxy: () => {
+			resolveProxy: async () => {
+				if (options.gateResolve === true) {
+					await new Promise<void>((resolve) => {
+						resolveGates.push(resolve);
+					});
+				}
 				const last = proxies.at(-1);
 				if (!last || last.mode !== 'fixed_servers' || last.proxyRules === undefined) {
 					return Promise.resolve('DIRECT');
@@ -1053,7 +1104,12 @@ function slowHarness() {
 			const record = { closed: false };
 			created.push(record);
 			return {
-				loadURL: () => Promise.resolve(),
+				loadURL: () =>
+					options.gateLoad === true
+						? new Promise<void>((resolve) => {
+								loadGates.push(resolve);
+							})
+						: Promise.resolve(),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
 				setWebRtcPolicy: () => undefined,
@@ -1080,20 +1136,49 @@ function slowHarness() {
 				gate();
 			}
 			return held.length;
+		},
+		/** And the routing probes, which sit between the proxy and the cookie. */
+		releaseResolve: (): number => {
+			const held = resolveGates.splice(0);
+			for (const gate of held) {
+				gate();
+			}
+			return held.length;
+		},
+		/** And the page loads, held separately so the two waits can be told apart. */
+		releaseLoad: (): number => {
+			const held = loadGates.splice(0);
+			for (const gate of held) {
+				gate();
+			}
+			return held.length;
 		}
 	};
 }
 
 describe('a browser that opens while something is trying to stop it', () => {
-	/*
+	/**
 	 * **The lock swept a map the window was not in yet.**
 	 *
 	 * `closeAll` iterates finished windows. An open in flight is not one, so the
 	 * sweep passed over it and the window appeared afterwards — a signed-in Steam
 	 * window created by a locked vault, which is the single thing the lock exists
 	 * to prevent.
+	 *
+	 * These two assert the stronger outcome now: **no window is built at all.**
+	 * The open used to be one indivisible step from outside — the caller checked
+	 * its counters either side of `openAccountBrowser` — and it is four awaits
+	 * long. `setProxy` is Chromium IPC and takes as long as Chromium takes, so a
+	 * lock landing inside it found nothing to close, and this function carried on
+	 * to write Steam's cookie into a partition the sweep had already wiped and
+	 * create a window registered after the sweep had finished. Measured before
+	 * the fix: a window on screen, signed in, while `isOpen()` reported false —
+	 * so nothing could find it, and the next lock had no record of it either.
+	 *
+	 * Asking after each await means the lock now costs a `setProxy` and nothing
+	 * else. The half of the race where the window *does* already exist is below.
 	 */
-	it('closes a window that finished opening after the vault locked', async () => {
+	it('never builds a window when the vault locks while the proxy is applied', async () => {
 		const { host, created, wiped, release } = slowHarness();
 		const browsers = new AccountBrowsers(host);
 
@@ -1103,19 +1188,104 @@ describe('a browser that opens while something is trying to stop it', () => {
 		release();
 
 		expect(why(await opening)).toMatch(/locked/i);
-		expect(created, 'the window was still built').toHaveLength(1);
-		expect(created[0]?.closed, 'it outlived the lock').toBe(true);
+		expect(
+			created,
+			'a signed-in window was built after the lock had already swept for one'
+		).toEqual([]);
 		expect(wiped).toContain(browserPartitionFor(ACCOUNT.steamId64));
 		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(false);
 	});
 
-	it('closes a window that finished opening after the account’s routing changed', async () => {
+	it('never builds one when the routing changes while the proxy is applied', async () => {
 		const { host, created, wiped, release } = slowHarness();
 		const browsers = new AccountBrowsers(host);
 
 		const opening = settled(browsers.open(ACCOUNT));
 		await browsers.closeAccount(ACCOUNT.steamId64);
 		release();
+
+		expect(why(await opening)).toMatch(/routing changed/i);
+		expect(created, 'a window was built on a route the account had left').toEqual([]);
+		expect(wiped).toContain(browserPartitionFor(ACCOUNT.steamId64));
+		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(false);
+	});
+
+	/**
+	 * **The wait between the proxy and the cookie.**
+	 *
+	 * `resolveProxy` is asked once per probed domain, and each is a real round
+	 * trip. A disown landing here has already got past the check after
+	 * `setProxy`, so only the check immediately before `signIn` can stop it — and
+	 * without that one, Steam's cookie is written into a partition the sweep has
+	 * finished with. Nothing else in this file can tell those two checks apart:
+	 * with a gate only at `setProxy`, deleting either leaves the other covering
+	 * it, and the mutant survives.
+	 */
+	it('writes no cookie when the vault locks while the routing is verified', async () => {
+		const { host, created, wiped, release, releaseResolve } = slowHarness({ gateResolve: true });
+		const browsers = new AccountBrowsers(host);
+
+		const opening = settled(browsers.open(PROXIED));
+		release();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+
+		await browsers.closeAll();
+		releaseResolve();
+
+		expect(why(await opening)).toMatch(/locked/i);
+		expect(
+			created,
+			'a signed-in window was built from a routing check the lock had already overtaken'
+		).toEqual([]);
+		expect(wiped).toContain(browserPartitionFor(PROXIED.steamId64));
+	});
+
+	/*
+	 * **And the other half: the window already exists.**
+	 *
+	 * Once the proxy is applied the window is built and handed over, and the page
+	 * is still loading. A lock arriving there cannot be answered by declining to
+	 * build anything — there is something on screen, signed in — so it has to be
+	 * closed and its partition wiped. Held at the load rather than at the proxy,
+	 * because that is the only wait left after the window exists.
+	 */
+	it('closes a window that finished opening after the vault locked', async () => {
+		const { host, created, wiped, release, releaseLoad } = slowHarness({ gateLoad: true });
+		const browsers = new AccountBrowsers(host);
+
+		const opening = settled(browsers.open(ACCOUNT));
+		release();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		expect(created, 'the window should exist before the lock, or this tests nothing').toHaveLength(
+			1
+		);
+
+		await browsers.closeAll();
+		releaseLoad();
+
+		expect(why(await opening)).toMatch(/locked/i);
+		expect(created[0]?.closed, 'it outlived the lock').toBe(true);
+		expect(wiped).toContain(browserPartitionFor(ACCOUNT.steamId64));
+		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(false);
+	});
+
+	it('closes a window that finished opening after the account’s routing changed', async () => {
+		const { host, created, wiped, release, releaseLoad } = slowHarness({ gateLoad: true });
+		const browsers = new AccountBrowsers(host);
+
+		const opening = settled(browsers.open(ACCOUNT));
+		release();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		expect(created).toHaveLength(1);
+
+		await browsers.closeAccount(ACCOUNT.steamId64);
+		releaseLoad();
 
 		expect(why(await opening)).toMatch(/routing changed/i);
 		expect(created[0]?.closed).toBe(true);
@@ -2748,6 +2918,53 @@ describe('Require proxies while a window is still being built', () => {
 			browsers.open({ ...PROXIED }),
 			'the abandoned direct-route jar was handed to the proxied open'
 		).rejects.toBeInstanceOf(BrowserSessionError);
+	});
+
+	/**
+	 * **The gap between tearing the old window down and registering the new one.**
+	 *
+	 * Switching an open account to another route closes the old window and
+	 * *awaits its storage wipe*, and only registers the new attempt afterwards.
+	 * For the whole of that wipe the account is in no map: out of `windows`
+	 * already, not yet in `opening`. A `Require proxies` sweep landing there saw
+	 * nothing to refuse, and the Direct window arrived once the wipe finished —
+	 * under a rule that had just been turned on to forbid exactly it.
+	 *
+	 * The epoch cannot carry this. A route switch bumps it deliberately and the
+	 * open re-reads it after the teardown, so a bump from the sweep is absorbed
+	 * by that re-read and disappears. The rule is asked directly instead.
+	 */
+	it('refuses a Direct switch when the rule is turned on during the teardown', async () => {
+		let strict = false;
+		const h = harness({ gateWipes: true });
+		const browsers = new AccountBrowsers(h.host, () => strict);
+
+		// Open proxied, and let it finish.
+		await browsers.open(PROXIED);
+		expect(browsers.isOpen(PROXIED.steamId64)).toBe(true);
+
+		// Ask for Direct. The old window's wipe is held, so the switch parks
+		// inside the teardown with the account in no map at all.
+		const switching = settled(browsers.open({ ...ACCOUNT, route: 'direct' }));
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+
+		// The setting goes on, and its sweep completes — finding nothing, because
+		// there is nothing in either map to find.
+		strict = true;
+		await browsers.closeNotFullyRouted();
+
+		h.releaseWipe();
+
+		expect(
+			why(await switching),
+			'an unrouted window opened after the rule forbidding it had already swept'
+		).toMatch(/requires every account|not opened/i);
+		expect(
+			browsers.isOpen(ACCOUNT.steamId64),
+			'a live Direct window survived the rule that forbids it'
+		).toBe(false);
 	});
 
 	/**

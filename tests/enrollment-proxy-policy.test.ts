@@ -39,10 +39,12 @@ import { ProxyConsent, type ProxyConsentRequest } from '../src/main/net/proxy-co
  * told Steam the thing the proxy existed to hide.
  */
 
-function harness(requireProxies: boolean, options: { approve?: boolean } = {}) {
+function harness(requireProxies: boolean, options: { approve?: boolean; hold?: boolean } = {}) {
 	const begin = vi.fn().mockResolvedValue({ state: 'needsEmailCode' });
+	/** Flipped by a test to lock the vault while the dialog is on screen. */
+	let unlocked = true;
 	const vault = {
-		isUnlocked: () => true,
+		isUnlocked: () => unlocked,
 		touch: () => undefined,
 		settings: () => ({ requireProxies }),
 		read: () => ({ accounts: [] })
@@ -56,9 +58,15 @@ function harness(requireProxies: boolean, options: { approve?: boolean } = {}) {
 	 * written for; the refusal has its own describe below.
 	 */
 	const asked: ProxyConsentRequest[] = [];
+	let settle: ((allowed: boolean) => void) | undefined;
 	const proxyConsent = new ProxyConsent({
 		ask: (request) => {
 			asked.push(request);
+			if (options.hold === true) {
+				return new Promise<boolean>((resolve) => {
+					settle = resolve;
+				});
+			}
 			return Promise.resolve(options.approve ?? true);
 		}
 	});
@@ -71,7 +79,29 @@ function harness(requireProxies: boolean, options: { approve?: boolean } = {}) {
 		undefined,
 		proxyConsent
 	);
-	return { begin, asked };
+	return {
+		begin,
+		asked,
+		/** Lock the vault, exactly as the idle timer would. */
+		lock: () => {
+			unlocked = false;
+			proxyConsent.clear();
+		},
+		/**
+		 * Lock without telling the consent gate.
+		 *
+		 * Not a shape the app produces — `onLock` calls both — but the handler must
+		 * not *depend* on the gate to notice a lock, or the two guards are one
+		 * guard with a spare. With them coupled, deleting the handler's own recheck
+		 * left every test green while the password went to Steam for a closed
+		 * vault.
+		 */
+		lockOnly: () => {
+			unlocked = false;
+		},
+		/** Answer a dialog that was held open. */
+		answer: (allowed: boolean) => settle?.(allowed)
+	};
 }
 
 function enrol(request: Record<string, unknown>): Promise<unknown> {
@@ -187,5 +217,68 @@ describe('a proxy destination the user has not approved', () => {
 		const { asked } = harness(false);
 		await enrol({ accountName: 'alice', password: 'secret' });
 		expect(asked).toEqual([]);
+	});
+});
+
+/**
+ * **The dialog waits, and the vault does not.**
+ *
+ * `requireUnlocked()` at the top of the handler answers for the moment the
+ * button was pressed. Consent is an OS dialog a person can leave on screen
+ * indefinitely, and the idle lock runs on its own schedule — so approving after
+ * a lock sent this password to Steam for a vault that had closed, through an
+ * endpoint nobody present had agreed to.
+ *
+ * Two independent guards, and both are wanted: `ProxyConsent` refuses the late
+ * approval because `clear()` disowns the question, and the handler asks the
+ * vault again because a lock is a reason to stop whatever the dialog said.
+ */
+describe('a consent dialog that outlives the vault', () => {
+	it('does not send the password after a lock', async () => {
+		const h = harness(false, { hold: true });
+		const enrolling = enrol({
+			accountName: 'alice',
+			password: 'secret',
+			proxyUrl: 'http://10.0.0.9:8080'
+		});
+		await Promise.resolve();
+		expect(h.asked, 'the dialog was never raised, so this tests nothing').toHaveLength(1);
+
+		h.lock();
+		h.answer(true);
+
+		await expect(enrolling).rejects.toThrow();
+		expect(
+			h.begin,
+			'a password went to Steam for a vault that had already locked'
+		).not.toHaveBeenCalled();
+	});
+});
+
+/**
+ * **The handler's own recheck, pinned apart from the consent gate's.**
+ *
+ * Both refuse a late approval, and that is deliberate — but a test where they
+ * both fire cannot tell which one did. This one locks the vault without
+ * clearing consent, so only the handler can catch it.
+ */
+describe('the vault locking while consent is decided', () => {
+	it('is caught by the handler even when consent still approves', async () => {
+		const h = harness(false, { hold: true });
+		const enrolling = enrol({
+			accountName: 'alice',
+			password: 'secret',
+			proxyUrl: 'http://10.0.0.9:8080'
+		});
+		await Promise.resolve();
+
+		h.lockOnly();
+		h.answer(true);
+
+		await expect(enrolling).rejects.toThrow();
+		expect(
+			h.begin,
+			'the handler trusted the consent gate to notice the lock, and it had not been told'
+		).not.toHaveBeenCalled();
 	});
 });

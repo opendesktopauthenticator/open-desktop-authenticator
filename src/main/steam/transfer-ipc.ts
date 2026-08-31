@@ -103,6 +103,16 @@ export function registerTransferHandlers(
 			 */
 			if (proxyUrl !== undefined && proxyUrl !== '') {
 				await proxyConsent.require(proxyUrl, { accountName, reason: 'signIn' });
+				/*
+				 * **And again after the dialog**, for the reason enrolment gives and
+				 * with more at stake: this call carries a password *and* a Steam
+				 * Guard code. A consent dialog left on screen outlives the vault's
+				 * idle lock easily.
+				 */
+				requireUnlocked();
+				if (vault.settings().requireProxies && (proxyUrl === undefined || proxyUrl === '')) {
+					throw new TransferError(PROXY_REQUIRED);
+				}
 			}
 			return transfer.authenticate(accountName, password, steamGuardCode, proxyUrl);
 		}
