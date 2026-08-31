@@ -41,7 +41,8 @@ describe('the shared routing teardown', () => {
 		['the confirmation session and pending nonces', 'confirmations.forgetAccount(steamId64)'],
 		['the notifier state', 'notifier.forgetAccount(steamId64)'],
 		['the poller schedule and epoch', 'autoConfirm.forgetAccount(steamId64)'],
-		['the enrolment access token', 'enrollment.forgetAccount(steamId64)']
+		['the enrolment access token', 'enrollment.forgetAccount(steamId64)'],
+		['the activity log entries and open runs', 'activity.forgetAccount(steamId64)']
 	])('drops %s', (_what, call) => {
 		expect(body, `${call} is missing, so that cache outlives the route it belongs to`).toContain(
 			call
@@ -54,5 +55,39 @@ describe('the shared routing teardown', () => {
 	 */
 	it('closes the account browser', () => {
 		expect(body).toContain('browsers.closeAccount(steamId64)');
+	});
+});
+
+/**
+ * **Every success signal the notifier and the activity log depend on.**
+ *
+ * Both track "we already said this" per account, and both need telling when a
+ * poll worked. The engine has two success callbacks and the wiring used only
+ * one of them for each, which is invisible from either class's own tests: an
+ * account with auto-confirm on and notifications off never reaches `onPending`,
+ * so the notifier's flag was never cleared and every expiry after its first was
+ * swallowed for the life of the session.
+ */
+describe('the engine callbacks in index.ts', () => {
+	const source = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+
+	const wiring = (() => {
+		const start = source.indexOf('const autoConfirm = new AutoConfirmEngine({');
+		expect(start, 'the engine is no longer constructed here').toBeGreaterThan(-1);
+		return source.slice(start, source.indexOf('\n\t});', start));
+	})();
+
+	it.each([
+		['the confirm arm tells the notifier a poll worked', 'notifier.pollSucceeded(steamId64)'],
+		[
+			'the notify arm tells the activity log a poll worked',
+			'activity.notePollSucceeded(steamId64)'
+		],
+		['the notify arm reaches the notifier', 'notifier.pending('],
+		['a halt reaches the notifier', 'notifier.halted('],
+		['an expiry reaches the activity log', 'activity.recordSignInRequired(steamId64)'],
+		['an expiry reaches the notifier', 'notifier.signInNeeded(steamId64, accountName)']
+	])('%s', (_what, call) => {
+		expect(wiring, `${call} is missing, so that surface never hears about it`).toContain(call);
 	});
 });

@@ -522,3 +522,51 @@ describe('an expiry after a recovery', () => {
 		expect(log.for(ID)).toHaveLength(1);
 	});
 });
+
+/**
+ * **An open run outlived the account it belonged to.**
+ *
+ * Nothing cleared `signInOpen` per account, so removing an account and adding
+ * it back — which arrives with no saved session and therefore expires on its
+ * first poll — found the run still open, wrote no entry and lit no badge.
+ * Silence on exactly the condition this class exists to stop being silent
+ * about, at the moment the user is most likely to be watching.
+ */
+describe('an account that is removed and added back', () => {
+	const ID = '76561198000000001';
+
+	it('reports its expired session as a new run', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		log.acknowledge();
+
+		log.forgetAccount(ID);
+
+		log.recordSignInRequired(ID);
+		expect(log.for(ID), 'the re-added account inherited the old open run').toHaveLength(1);
+		expect(log.hasUrgent(), 'the badge stayed dark on a live expired session').toBe(true);
+	});
+
+	/*
+	 * And its old entries go. They described an account the vault no longer
+	 * holds, and the Activity screen went on listing its trades.
+	 */
+	it('drops the entries that described the account that left', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordPass(ID, [confirmation()], [], 0);
+		expect(log.for(ID)).toHaveLength(1);
+
+		log.forgetAccount(ID);
+		expect(log.for(ID), 'a removed account kept its history').toEqual([]);
+	});
+
+	it('leaves other accounts alone', () => {
+		const log = new ActivityLog(() => NOW);
+		const other = '76561198000000002';
+		log.recordPass(ID, [confirmation()], [], 0);
+		log.recordPass(other, [confirmation()], [], 0);
+
+		log.forgetAccount(ID);
+		expect(log.for(other), "removing one account cleared another's history").toHaveLength(1);
+	});
+});

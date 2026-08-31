@@ -157,11 +157,18 @@ export const download = {
 					<a href="/code-signing-policy">our code signing policy</a>.
 				</li>
 				<li>
-					<strong>The checksum list <em>is</em> signed.</strong> Every release carries
+					${
+						s.release.signed
+							? `<strong>The checksum list <em>is</em> signed.</strong> Every release carries
 					<code>SHA256SUMS.txt.sig</code> and a certificate, so you can check the list
 					came from our workflow rather than only that your file matches it.
-					<a href="/verify">Step 5 walks through it.</a> The two things still missing
-					are below.
+					<a href="/verify">Step 5 walks through it.</a>`
+							: `<strong>The checksum list is not signed yet.</strong> The release workflow
+					signs it now, but it started doing so after the current release was
+					published — so there is no <code>SHA256SUMS.txt.sig</code> to fetch for the
+					build you can download today. <a href="/verify">Step 5 says so plainly</a>
+					rather than printing a command that cannot succeed.`
+					}
 				</li>
 				<li>
 					<strong>Reproducible builds.</strong> You cannot yet rebuild the tag and

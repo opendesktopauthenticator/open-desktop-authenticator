@@ -1908,3 +1908,100 @@ describe('a schedule invalidated while another account is mid-poll', () => {
 		expect(h.reads(), 'a sibling rescheduling undid the invalidation').toBeGreaterThan(before);
 	});
 });
+
+/**
+ * **A sign-in failure must not launder the failure count.**
+ *
+ * The branch correctly declines to *count* an expired session — backing off
+ * cannot fix one. It also used to write a fresh state record, which discarded
+ * whatever had already accumulated. An account alternating 403s with ordinary
+ * errors, which is what a flaky proxy in front of Steam looks like, therefore
+ * reset its tally every other poll: it never reached the halt and never built
+ * up backoff, failing forever at a fifteen-second cadence while the user
+ * believes it is working.
+ */
+describe('a session expiry among ordinary failures', () => {
+	it('does not reset the tally that leads to a halt', async () => {
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		let call = 0;
+		const failures: { halted: boolean }[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				// Every other poll is an expiry, the rest are ordinary failures.
+				runAutoConfirm: () => {
+					call += 1;
+					return call % 2 === 0
+						? Promise.reject(new ConfirmationsError('the saved session expired.', true))
+						: Promise.reject(new Error('steam said no'));
+				}
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, _reason, halted) => failures.push({ halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		for (let i = 0; i < 40; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+
+		expect(
+			failures.some((entry) => entry.halted),
+			'an account alternating expiries with real failures never halted'
+		).toBe(true);
+	});
+
+	/*
+	 * And a genuine success still clears it, which is the whole point of the
+	 * counter being resettable at all.
+	 */
+	it('is still cleared by a poll that works', async () => {
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		let fail = true;
+		const failures: { halted: boolean }[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () =>
+					fail
+						? Promise.reject(new Error('steam said no'))
+						: Promise.resolve({ approved: [], held: [], unreadable: 0 })
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, _reason, halted) => failures.push({ halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		for (let i = 0; i < 9; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		fail = false;
+		await engine.tick();
+		clock += 20 * 60_000;
+
+		fail = true;
+		for (let i = 0; i < 5; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+
+		expect(
+			failures.some((entry) => entry.halted),
+			'a success did not clear the count that had built up before it'
+		).toBe(false);
+	});
+});

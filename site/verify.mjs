@@ -494,6 +494,41 @@ const CLAIMS = [
 	},
 	{
 		/*
+		 * **Missing entirely until five pages went out claiming it.**
+		 *
+		 * `STALE_ABSENCE` listed `signed`, but that array only fires the other
+		 * way — flag true, page saying the thing is absent. The overclaim half
+		 * had no entry at all, so when the flag went false because the published
+		 * release carries no `SHA256SUMS.txt.sig`, /download, the homepage, and
+		 * three more pages went on asserting a signature in the present tense and
+		 * this file printed "no problems found".
+		 *
+		 * /download told visitors every release carries the file and linked them
+		 * to the step that says it does not, which is the same failure the flag
+		 * was flipped to remove, one page over.
+		 */
+		flag: 'signed',
+		says: 'the published checksum list carries a signature',
+		/*
+		 * Assertions about **our** release, not descriptions of the ideal.
+		 *
+		 * A first draft matched a bare "a signature over that list", which flagged
+		 * /scam-clones for the sentence "Ideally a signature over that list too —
+		 * ours does not have one yet". That page is right, and gates on the flag;
+		 * the tripwire was wrong. A check that cries wolf on correct copy gets
+		 * loosened by the next person, so it is narrowed to the claiming forms.
+		 */
+		patterns: [
+			/checksum list <em>is<\/em> signed/i,
+			/the checksum list is signed/i,
+			/ours carries one/i,
+			/checksums,? (?:and )?a signature over (?:that list|them)/i,
+			/signature over the checksum list/i,
+			/every release carries[^.]{0,40}SHA256SUMS\.txt\.sig/i
+		]
+	},
+	{
+		/*
 		 * Split from `signed` when the checksum list gained a sigstore
 		 * signature. The list being signed does not make the binaries signed,
 		 * and one flag covering both would have permitted "signed builds" the

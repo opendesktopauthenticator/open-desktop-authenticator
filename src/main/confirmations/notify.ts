@@ -300,6 +300,26 @@ export class ConfirmationNotifier {
 	}
 
 	/**
+	 * A poll reached Steam and got an answer, whether or not it found anything.
+	 *
+	 * **The only success signal that does not depend on notifications being on.**
+	 * `pending()` cleared the "already said this" flag, and the engine calls
+	 * `pending()` only when `notify` is set — so an account with auto-confirm on
+	 * and notifications off never reached it. Its first expiry toasted, and every
+	 * later one for the life of the session was swallowed, because the flag it
+	 * checks had nothing left that could clear it.
+	 *
+	 * That is the account shape the schema defaults to, and the toast is the only
+	 * surface it has: `signInNeeded` is called for it, `pending` is not.
+	 */
+	pollSucceeded(steamId64: string): void {
+		const existing = this.stateFor(steamId64);
+		if (existing) {
+			existing.toldSignInNeeded = false;
+		}
+	}
+
+	/**
 	 * The saved session expired. Only the user can fix this, so it is said once.
 	 *
 	 * Not counted as a failure by the engine either — backing off cannot help,

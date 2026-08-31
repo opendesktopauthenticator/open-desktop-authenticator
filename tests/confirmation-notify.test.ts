@@ -175,14 +175,27 @@ describe('the order the steps run in', () => {
 		expect(h.toasts).toHaveLength(1);
 	});
 
-	it('does not let the seen set grow without bound', () => {
+	/*
+	 * **This asserted the wrong quantity and could not fail.** It counted toasts
+	 * and bounded them at 210 — but removing the pruning makes the run *quieter*,
+	 * not louder, because ids that are never dropped are never fresh again. The
+	 * bound it named was unobservable through the thing it measured.
+	 *
+	 * Pruning is observable as forgetting: an id dropped from `awaiting` and later
+	 * returning must be announced again. Two hundred polls of distinct ids leave
+	 * an unpruned set holding all of them, so id `0` coming back says nothing —
+	 * which is the actual consequence of the set growing for ever.
+	 */
+	it('forgets ids that are no longer pending, however many have passed', () => {
 		for (let i = 0; i < 200; i += 1) {
 			h.notifier.pending(ID, 'trader', [summary({ id: String(i) })], 0, 'count');
 		}
-		// Each poll replaces the previous single entry, so pruning must keep the
-		// set at one rather than accumulating two hundred ids.
+		const before = h.toasts.length;
+
+		// `0` left the list 199 polls ago. Its return is news.
 		h.notifier.pending(ID, 'trader', [summary({ id: '0' })], 0, 'count');
-		expect(h.toasts.length, 'a long-lived session accumulated ids forever').toBeLessThan(210);
+
+		expect(h.toasts.length, 'the seen set kept every id it had ever been shown').toBe(before + 1);
 	});
 });
 
@@ -538,5 +551,47 @@ describe('the toast title', () => {
 		const h = harness();
 		h.notifier.halted(ID, 'trader', 'confirm');
 		expect(h.toasts[0]?.title).toBe('trader');
+	});
+});
+
+/**
+ * **The account shape whose only surface is the toast.**
+ *
+ * With auto-confirm on and notifications off — which is what the schema
+ * defaults to for a confirming account — the engine calls `signInNeeded` but
+ * never `pending`. The flag that stops a repeat toast was cleared only inside
+ * `pending`, so the first expiry spoke and every later one for the life of the
+ * session was swallowed, because nothing left could clear it.
+ */
+describe('an account that confirms without notifying', () => {
+	it('is told again about a second expiry', () => {
+		const h = harness();
+		h.notifier.signInNeeded(ID, 'trader');
+
+		// A successful confirm poll: no `pending`, because notifications are off.
+		h.notifier.pollSucceeded(ID);
+		h.notifier.signInNeeded(ID, 'trader');
+
+		expect(
+			h.toasts.filter((t) => t.body.includes('Sign in again')),
+			'the second expiry was swallowed for the life of the session'
+		).toHaveLength(2);
+	});
+
+	it('still says it only once within one run', () => {
+		const h = harness();
+		h.notifier.signInNeeded(ID, 'trader');
+		h.notifier.signInNeeded(ID, 'trader');
+		expect(h.toasts).toHaveLength(1);
+	});
+
+	it('leaves other accounts alone', () => {
+		const h = harness();
+		const other = '76561198000000002';
+		h.notifier.signInNeeded(ID, 'trader');
+		h.notifier.signInNeeded(other, 'second');
+		h.notifier.pollSucceeded(ID);
+		h.notifier.signInNeeded(other, 'second');
+		expect(h.toasts).toHaveLength(2);
 	});
 });

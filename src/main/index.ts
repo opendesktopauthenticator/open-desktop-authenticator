@@ -486,6 +486,12 @@ function start(): void {
 		// reused a credential established through the old proxy — and a removed
 		// account left it resident until the vault locked.
 		enrollment.forgetAccount(steamId64);
+		// **And the activity log's open runs.** An expired-session run outlived
+		// the account, so removing one and adding it back — which arrives with no
+		// saved session and expires on its first poll — wrote no entry and lit no
+		// badge. Its old entries went with it: they described an account the vault
+		// no longer holds.
+		activity.forgetAccount(steamId64);
 
 		// **And the browser window, which is the newest thing tied to a route.**
 		// The two calls above drop what this process holds; a window opened for
@@ -594,8 +600,14 @@ function start(): void {
 		// seconds later — inside the transport timeout — so on a skewed machine that
 		// pass signed with a zero offset and Steam refused every confirmation in it.
 		ensureClock: () => clock.ensureSynced(),
-		onOutcome: (steamId64, outcome) =>
-			activity.recordPass(steamId64, outcome.approved, outcome.held, outcome.unreadable),
+		onOutcome: (steamId64, outcome) => {
+			activity.recordPass(steamId64, outcome.approved, outcome.held, outcome.unreadable);
+			// **The confirm arm's success signal for the notifier.** `onPending` is
+			// gated on notifications being on, so an account with auto-confirm on
+			// and notifications off never reached the place that clears "already
+			// said sign in again" — and every expiry after its first was swallowed.
+			notifier.pollSucceeded(steamId64);
+		},
 		onFailure: (steamId64, reason, halted, context) => {
 			activity.recordFailure(steamId64, reason, halted);
 			// **The halt is the part worth interrupting somebody for.** An ordinary

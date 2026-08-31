@@ -682,7 +682,26 @@ export class AutoConfirmEngine {
 			// every account with an auto type on takes the confirm arm, so the
 			// accounts that have this problem are the ones the fix would miss.
 			if (err instanceof ConfirmationsError && err.needsSignIn) {
-				this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
+				/*
+				 * **Not counted, and not erased either.**
+				 *
+				 * Writing a fresh record here discarded whatever the account had
+				 * already accumulated. An account alternating 403s with ordinary
+				 * errors — a flaky proxy in front of Steam is exactly that — reset
+				 * its counter on every other poll, so it never reached the halt and
+				 * never accumulated backoff: failing forever at a fifteen-second
+				 * cadence while the user believes it is working, which is the
+				 * outcome the halt exists to prevent. It also turned a failure into
+				 * a speed-up, from a maxed backoff back to the plain interval.
+				 *
+				 * So the schedule moves and the tally stays.
+				 */
+				const carried = this.state.get(steamId64);
+				this.state.set(steamId64, {
+					nextDueAt: this.now() + interval + jitter,
+					...(carried?.failures === undefined ? {} : { failures: carried.failures }),
+					...(carried?.backoffMs === undefined ? {} : { backoffMs: carried.backoffMs })
+				});
 				this.rememberEarliest();
 				this.onSignInNeeded(steamId64, accountName);
 				return;

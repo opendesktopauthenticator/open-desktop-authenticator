@@ -193,6 +193,23 @@ export class ActivityLog {
 		this.signInOpen.delete(steamId64);
 	}
 
+	/**
+	 * Drop everything held for one account. Called when it is removed.
+	 *
+	 * **An open run outlived the account it belonged to.** Nothing cleared
+	 * `signInOpen` per account, so removing an account and adding it back — which
+	 * arrives with no saved session, and therefore expires on its first poll —
+	 * found the run still open and wrote no entry and lit no badge. Silence on
+	 * exactly the condition this class exists to stop being silent about.
+	 *
+	 * The entries go too. They described an account the vault no longer holds,
+	 * and the Activity screen went on listing its trades.
+	 */
+	forgetAccount(steamId64: string): void {
+		this.signInOpen.delete(steamId64);
+		this.entries.delete(steamId64);
+	}
+
 	/** Newest first, because the newest is what someone returning wants. */
 	for(steamId64: string): ActivityEntry[] {
 		return [...(this.entries.get(steamId64) ?? [])].reverse();

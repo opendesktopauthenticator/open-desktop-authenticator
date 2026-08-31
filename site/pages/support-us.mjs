@@ -199,7 +199,7 @@ const SPENDS = [
 		That warning is the correct advice for an unsigned binary, and it is also the reason
 		an honest small project looks more suspicious than a well-funded scam that bought a
 		certificate. It is the largest single cost left. Packaging, installers and published
-		checksums and a signature over them shipped with 1.0. A certificate for the
+		checksums shipped with 1.0. A certificate for the
 		binaries themselves has not arrived yet, and neither has a reproducible build
 		others can compare against.
 		<a href="/download">The download page tracks where each one stands.</a>`
