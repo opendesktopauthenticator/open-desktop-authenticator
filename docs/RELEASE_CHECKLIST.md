@@ -25,6 +25,15 @@ Platforms: **Windows and Linux** (D11 — macOS built but not published; see
 - [ ] Dependency diff since the last release reviewed by a human. Any new
       transitive dependency understood and named.
 - [ ] CHANGELOG entry written — user-facing language, not commit subjects.
+- [ ] **Confirm the release page actually lists `SHA256SUMS.txt.sig` and
+      `SHA256SUMS.txt.pem`**, then flip `release.signed` in `site/build.mjs`
+      and the canary in `tests/site-release-gaps.test.ts` in the same change.
+      That flag says "a signature is on the release somebody can download", not
+      "the workflow signs" — it was true for three days before any signed
+      release existed, and /verify spent that time telling visitors to fetch two
+      files that were not there. A missing signature file is what tampering
+      looks like, so the page was teaching people to distrust a release that was
+      fine.
 - [ ] **Run the published verify command against a real asset**, exactly as
       written on /verify and in the draft release notes, with the tag
       substituted. The workflow verifies its own signature with an identity it

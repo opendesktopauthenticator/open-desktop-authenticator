@@ -256,18 +256,30 @@ export const SITE = {
 		/** Artifacts are listed with SHA-256 checksums on the release page. */
 		checksums: true,
 		/*
-		 * **`SHA256SUMS.txt` carries a signature.** True since the release
-		 * workflow began signing it with sigstore `cosign`, keylessly, under the
-		 * workflow's own OIDC identity.
+		 * **Whether a signature is on the release somebody can download right
+		 * now** — not whether the workflow signs.
 		 *
-		 * This flag was one word doing three jobs, and splitting it was the
-		 * precondition for flipping any of them. "Signed" can mean the checksum
-		 * list is signed, or the binaries carry a code-signing certificate, or
-		 * that a `.asc` exists for someone reaching for `gpg --verify`. Only the
-		 * first is true, and a single flag would have licensed all three
-		 * phrasings the moment it flipped.
+		 * It was `true` from the day the signing step was written, and that was
+		 * three days after v1.0.0 was tagged. So the only published release has
+		 * no `SHA256SUMS.txt.sig` and no `.pem`, while /verify told every visitor
+		 * to fetch both and run `cosign verify-blob` against them. The command
+		 * cannot succeed. Worse than useless: a missing signature file is what
+		 * tampering looks like, so the page taught people to suspect a release
+		 * that is fine.
+		 *
+		 * **Flip this back to `true` in the same change that publishes a signed
+		 * release, and not before.** The workflow signs correctly today; the
+		 * question this flag answers is whether the bytes on the release page
+		 * carry the result, which is a fact about the release and not about the
+		 * code.
+		 *
+		 * The flag was already split three ways — checksum-list signature,
+		 * binary code-signing, and a `.asc` for `gpg --verify` — because one word
+		 * doing three jobs would have licensed all three phrasings the moment any
+		 * one became true. Being split is what makes it safe to say "checksums,
+		 * yes; signature, not yet" rather than going silent about both.
 		 */
-		signed: true,
+		signed: false,
 		/*
 		 * **The binaries are not code-signed**, and this is the flag that says
 		 * so. The Microsoft Store package carries Microsoft's signature because

@@ -349,6 +349,9 @@ export const verify = {
 				only tool here you may not already have.
 			</p>
 
+			${
+				s.release.signed
+					? `
 			<h2>5. Check the checksum list is ours</h2>
 			<p>
 				Step 1 told you to take <code>SHA256SUMS.txt</code> from the release page rather
@@ -379,6 +382,26 @@ export const verify = {
 				still stand on their own — this step tells you the <em>list</em> came from our
 				workflow, not just that your file matches it.
 			</p>
+			`
+					: `
+			<h2>5. The checksum list is not signed yet</h2>
+			<p>
+				A hash file proves nothing about itself: anyone who could swap a binary on a
+				page could usually swap the list beside it. The answer to that is a signature
+				over the list, and the release workflow now produces one — but it started
+				doing so after the current release was published, so there is nothing to
+				check on the build you can download today. Rather than print a command that
+				cannot succeed, this step says so.
+			</p>
+			<p>
+				<strong>Do not read a missing signature file as tampering.</strong> If you went
+				looking for <code>SHA256SUMS.txt.sig</code> because an older version of this
+				page told you to, that is our mistake and not a sign that anything is wrong
+				with the download. The build provenance in step 4 covers the same ground for
+				now: it names the workflow, the repository and the commit the bytes came from.
+			</p>
+			`
+			}
 
 			<h2>6. On Windows, check the publisher</h2>
 			<pre><code>Get-AuthenticodeSignature .\\&lt;file&gt;.exe | Format-List Status, SignerCertificate</code></pre>

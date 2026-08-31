@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /**
  * The sentences that describe what this project has not done yet.
@@ -244,5 +246,97 @@ describe('the pages that carry the sentence', () => {
 		expect(at({ ...NOTHING, signed: true, audited: true, reproducible: true })).toMatch(
 			/One thing is not yet done/
 		);
+	});
+});
+
+/**
+ * **The page must not print a command that cannot succeed.**
+ *
+ * `signed` was `true` from the day the signing step was written, which was
+ * three days after the only published release was tagged. So /verify told every
+ * visitor to fetch `SHA256SUMS.txt.sig` and `SHA256SUMS.txt.pem` and run
+ * `cosign verify-blob` against them, and neither file is on that release.
+ *
+ * The command failing is the smaller half. A missing signature file is exactly
+ * what tampering looks like, so the page taught people to distrust a release
+ * that is fine — the opposite of what a verification page is for.
+ *
+ * The flag describes the release somebody can download, not what the workflow
+ * does. These pin both directions so it cannot drift back.
+ */
+describe('the verify page and the signature that may not exist yet', () => {
+	const verifyBody = (release: Release): string => pageBySlug('verify').body(site(release));
+
+	it('prints no cosign command while nothing published is signed', () => {
+		expect(
+			verifyBody({ ...NOTHING, signed: false }),
+			'the page asked for a signature file the release does not have'
+		).not.toContain('cosign verify-blob');
+	});
+
+	/*
+	 * It may still *name* the file — the unsigned copy does, to tell somebody who
+	 * went looking for it that its absence is our mistake. What it must not do is
+	 * hand them flags to fetch it with.
+	 */
+	it('gives no instruction to fetch a signature file', () => {
+		const body = verifyBody({ ...NOTHING, signed: false });
+		expect(body).not.toContain('--signature');
+		expect(body).not.toContain('--certificate');
+		expect(body).not.toContain('SHA256SUMS.txt.pem');
+	});
+
+	/*
+	 * And it must say why, rather than going quiet — somebody who followed the
+	 * old page went looking for a file that is not there, and needs to be told
+	 * that is our mistake rather than evidence.
+	 */
+	it('says the list is not signed yet, instead of omitting the step', () => {
+		const body = verifyBody({ ...NOTHING, signed: false });
+		expect(body).toContain('not signed yet');
+		expect(body).toMatch(/not read a missing signature file as tampering/i);
+	});
+
+	/**
+	 * **A canary on the live value, because no local test can check the world.**
+	 *
+	 * Every other case here parameterises `signed`, which is right for the
+	 * rendering rules and useless for this one: flipping the real flag in
+	 * `site/build.mjs` left all of them green while /verify published a command
+	 * that could not succeed. The flag is a claim about which files are on a
+	 * release page, and nothing in this repository can see a release page.
+	 *
+	 * So the guard is deliberateness. Flipping it means editing this test, in the
+	 * same change, having actually looked at the release and seen
+	 * `SHA256SUMS.txt.sig` and `SHA256SUMS.txt.pem` listed on it.
+	 * `docs/RELEASE_CHECKLIST.md` carries that step.
+	 */
+	it('is a deliberate claim: no published release is signed yet', () => {
+		// Read rather than imported: `build.mjs` writes the site when it runs, and
+		// a test must not. The claim being pinned is what is checked in.
+		const source = readFileSync(join(__dirname, '..', 'site', 'build.mjs'), 'utf8');
+		expect(
+			source,
+			'flip this only in the change that publishes a signed release, and update this test with it'
+		).toContain('signed: false,');
+		expect(source).not.toContain('signed: true,');
+	});
+
+	it('prints the command once a signed release exists', () => {
+		const body = verifyBody({ ...NOTHING, signed: true });
+		expect(body).toContain('cosign verify-blob');
+		expect(body).toContain('SHA256SUMS.txt.sig');
+	});
+
+	/*
+	 * The identity has to name the tag, not just the organisation — the earlier
+	 * published command accepted a signature from any workflow in any repository
+	 * the org owns, run from any branch.
+	 */
+	it('binds the published identity to repository, workflow and tag', () => {
+		const body = verifyBody({ ...NOTHING, signed: true });
+		expect(body).toContain('--certificate-identity ');
+		expect(body).not.toContain('--certificate-identity-regexp');
+		expect(body).toContain('/.github/workflows/release.yml@refs/tags/');
 	});
 });
