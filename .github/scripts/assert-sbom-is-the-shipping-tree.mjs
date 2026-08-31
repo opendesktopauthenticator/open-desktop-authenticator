@@ -275,18 +275,23 @@ if (!builderFiles) {
  * that decides what the published report *claims* about every dependency, and
  * a verifier defeated the first version of it with an equivalent glob.
  */
+/** `zod@4.1.5` -> `zod`, `@types/node@24.13.3` -> `@types/node`. */
+const packageName = (id) => id.slice(0, id.lastIndexOf('@'));
+
 let excludedPackages;
 try {
-	excludedPackages = excludedPackagesFrom(builderFiles);
+	/*
+	 * The closure is handed over so a scope-wide exclusion — `!node_modules/@types/**`
+	 * — can be answered with the packages it actually removes. Those names exist
+	 * nowhere else, and the parser refuses rather than guessing without them.
+	 */
+	excludedPackages = excludedPackagesFrom(builderFiles, [...required].map(packageName));
 } catch (err) {
 	fail(
 		`${builderConfigPath}: ${err instanceof Error ? err.message : String(err)} The report below ` +
 			'says how each dependency reaches the user, and it must not guess.'
 	);
 }
-
-/** `zod@4.1.5` -> `zod`, `@types/node@24.13.3` -> `@types/node`. */
-const packageName = (id) => id.slice(0, id.lastIndexOf('@'));
 
 const bundled = [...required].filter((id) => excludedPackages.has(packageName(id)));
 // An exclusion naming something outside the production closure is not a

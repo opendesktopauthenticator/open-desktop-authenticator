@@ -24,6 +24,13 @@ export declare class ExclusionShapeError extends Error {
  * element type is `unknown` and not `string`. electron-builder also accepts
  * `{ from, to, filter }` objects, and typing this as `string[]` would hide from
  * the compiler the exact case the parser exists to refuse.
+ * @param candidates every package name that could be excluded — the production
+ * closure. Needed only to answer a scope-wide exclusion such as
+ * `!node_modules/@types/**`, which names no package; without it such an entry is
+ * refused rather than guessed at.
  * @returns the package names removed from the installer completely.
  */
-export declare function excludedPackagesFrom(files: readonly unknown[]): Set<string>;
+export declare function excludedPackagesFrom(
+	files: readonly unknown[],
+	candidates?: readonly string[]
+): Set<string>;

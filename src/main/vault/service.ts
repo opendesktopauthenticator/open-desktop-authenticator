@@ -571,18 +571,15 @@ export class VaultService {
 		// Verify the current passphrase against the file rather than trusting that
 		// the session is unlocked — an unattended unlocked machine must not be
 		// enough to lock the real owner out.
-		const envelope = readEnvelope(this.file);
-		const verification = await unseal(envelope, current).catch(() => undefined);
+		const verification = await unseal(readEnvelope(this.file), current).catch(() => undefined);
 		if (!verification) {
 			throw new VaultServiceError('the current passphrase is not correct');
 		}
 		/*
-		 * Kept, because the backup has to be rewritten under the new key too and
-		 * the honest thing to put in it is what was there before — the previous
-		 * good state, which is the whole point of a backup. Re-sealed rather than
-		 * copied: a copy is still readable with the passphrase being retired.
+		 * Verification only. Neither the envelope nor the plaintext read here is
+		 * carried past this point, and that is the fix rather than an oversight —
+		 * see the snapshot below.
 		 */
-		const previousPlaintext = verification.plaintext;
 		wipe(verification.key);
 
 		const salt = randomBytes(SALT_BYTES);
@@ -615,6 +612,31 @@ export class VaultService {
 			throw new VaultLockedError();
 		}
 
+		/*
+		 * **The snapshot the transaction rolls back to, taken here and not before.**
+		 *
+		 * The two things this rotation must be able to undo — the file as it stands
+		 * and the plaintext to put in the backup — were both read before
+		 * `deriveKey`. Everything the comment above says about `contents` applies to
+		 * them just as hard, and it was missed: scrypt takes the better part of a
+		 * second, a save can complete inside it, and both values then describe a
+		 * vault that no longer exists.
+		 *
+		 * The backup was the mild half — it held a state one save older than the
+		 * one it claimed to be preserving. The rollback was not. Restoring the
+		 * pre-derivation envelope wrote that older vault back over the file and
+		 * destroyed the save that had completed in between, under a message
+		 * promising "Nothing was altered".
+		 *
+		 * From here to the last `writeBackupEnvelope` there is no `await`, so
+		 * nothing can interleave: the read, the sealing and both writes are one
+		 * synchronous run. `JSON.stringify(state.contents)` is exactly the plaintext
+		 * on disk rather than an approximation of it — `mutate` seals that same
+		 * string and only then assigns it to `state.contents`.
+		 */
+		const priorEnvelope = readEnvelope(this.file);
+		const priorPlaintext = JSON.stringify(state.contents);
+
 		const contents = { ...state.contents, seq: state.contents.seq + 1 };
 		contents.updatedAt = new Date(this.now()).toISOString();
 
@@ -623,7 +645,7 @@ export class VaultService {
 		 * nothing and the only failures left to handle are on the disk.
 		 */
 		const rotatedVault = sealWithKey(JSON.stringify(contents), newKey, kdf);
-		const rotatedBackup = sealWithKey(previousPlaintext, newKey, kdf);
+		const rotatedBackup = sealWithKey(priorPlaintext, newKey, kdf);
 
 		try {
 			writeEnvelope(this.file, rotatedVault);
@@ -658,7 +680,7 @@ export class VaultService {
 			writeBackupEnvelope(this.file, rotatedBackup);
 		} catch (err) {
 			try {
-				restoreEnvelopeInPlace(this.file, envelope);
+				restoreEnvelopeInPlace(this.file, priorEnvelope);
 			} catch {
 				// Both halves failed. Say so rather than implying the vault is back
 				// as it was — the file on disk is now under the new passphrase and

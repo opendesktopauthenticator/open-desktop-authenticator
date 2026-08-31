@@ -91,6 +91,81 @@ describe('exclusions that remove a whole package', () => {
 	});
 });
 
+/**
+ * **Scoped packages, which the version that introduced "classify or refuse"
+ * could not see at all.**
+ *
+ * A scoped name is two path segments. Splitting at the first slash read
+ * `!node_modules/@doctormckay/stdlib/**` as the scope `@doctormckay` having part
+ * of it removed, so it was skipped in silence — not placed, not refused, which
+ * is precisely what that rule forbids. It shipped in the commit that wrote the
+ * rule, with no scoped name anywhere in this file, while the production closure
+ * holds twelve scoped packages: `@types/node`, nine `@protobufjs/*` and two
+ * `@doctormckay/*`.
+ */
+describe('exclusions that remove a whole scoped package', () => {
+	it.each<[string, string[], string[]]>([
+		['a doubled star', ['!node_modules/@doctormckay/stdlib/**'], ['@doctormckay/stdlib']],
+		['a doubled star and a single', ['!node_modules/@types/node/**/*'], ['@types/node']],
+		['one star', ['!node_modules/@protobufjs/base64/*'], ['@protobufjs/base64']],
+		[
+			'a brace list of names inside one scope',
+			['!node_modules/@types/{node,react}/**'],
+			['@types/node', '@types/react']
+		],
+		[
+			'several scopes at once',
+			['!node_modules/@protobufjs/float/**', '!node_modules/@doctormckay/stdlib/**'],
+			['@doctormckay/stdlib', '@protobufjs/float']
+		]
+	])('are recognised when written with %s', (_shape, files, expected) => {
+		expect(
+			[...excludedPackagesFrom(files)].sort(),
+			'a scoped whole-package exclusion was skipped, so the SBOM would claim these ship as ' +
+				'directories inside the asar while the installer does not contain them'
+		).toEqual(expected);
+	});
+
+	it.each([
+		['type declarations inside one scoped package', '!node_modules/@types/node/**/*.d.ts'],
+		['one subdirectory of one scoped package', '!node_modules/@types/node/ts5.0/**'],
+		['a file type across a whole scope', '!node_modules/@types/**/*.md']
+	])('leave %s out of the excluded set', (_what, pattern) => {
+		expect(excludedPackagesFrom([pattern])).toEqual(new Set());
+	});
+
+	it('refuses a scoped name with no path after it', () => {
+		expect(() => excludedPackagesFrom(['!node_modules/@types/node'])).toThrow(ExclusionShapeError);
+	});
+});
+
+/**
+ * A scope-wide exclusion names no package, so it can only be answered against
+ * the list of what is installed. Guessing is the thing this module exists not to
+ * do, so without that list it refuses.
+ */
+describe('exclusions that remove a whole scope', () => {
+	const CLOSURE = ['@types/node', '@protobufjs/base64', '@protobufjs/float', 'zod', 'react'];
+
+	it('expands to every installed package in the scope', () => {
+		expect([...excludedPackagesFrom(['!node_modules/@protobufjs/**'], CLOSURE)].sort()).toEqual([
+			'@protobufjs/base64',
+			'@protobufjs/float'
+		]);
+	});
+
+	it('takes nothing from a scope with nothing installed in it', () => {
+		expect(excludedPackagesFrom(['!node_modules/@nobody/**'], CLOSURE)).toEqual(new Set());
+	});
+
+	it('refuses when it was given no list to expand against', () => {
+		expect(
+			() => excludedPackagesFrom(['!node_modules/@types/**']),
+			'answering this without knowing what is installed is a guess, and the report is published'
+		).toThrow(ExclusionShapeError);
+	});
+});
+
 describe('exclusions that only trim files out of a package', () => {
 	/*
 	 * The package still ships as a directory, which is what the report is about.
