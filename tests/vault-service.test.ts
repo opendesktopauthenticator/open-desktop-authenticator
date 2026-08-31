@@ -1038,3 +1038,97 @@ describe('verifyPassphrase against a concurrent rotation', () => {
 		await expect(proof).resolves.toMatch(/refused|locked/i);
 	});
 });
+
+/**
+ * **What the poller is allowed to see, and nothing more.**
+ *
+ * This projection exists because the alternative — `read()` on every beat —
+ * deep-clones every shared secret, identity secret and revocation code in the
+ * vault, once a second, forever, to rediscover that there is nothing to do.
+ * Its whole value is that it carries no secrets, and the way that value gets
+ * lost is somebody adding one field too many while wiring up a feature.
+ *
+ * So the keys are asserted **exactly**, not with `objectContaining`. A partial
+ * match is precisely the assertion that would keep passing on the day this
+ * starts carrying `sharedSecret`.
+ */
+describe('the auto-confirm projection', () => {
+	async function withAccount(overrides: Partial<Account> = {}) {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((draft) => {
+			draft.accounts.push({ ...account, ...overrides });
+		});
+		return v;
+	}
+
+	it('carries exactly these keys, and no secret among them', async () => {
+		const v = await withAccount();
+		const row = v.autoConfirmSchedule()[0];
+		expect(Object.keys(row ?? {}).sort()).toEqual([
+			'accountName',
+			'hasProxy',
+			'marketListings',
+			'notify',
+			'pollIntervalSeconds',
+			'steamId64',
+			'trades'
+		]);
+		expect(Object.keys(row?.notify ?? {}).sort()).toEqual(['detail', 'enabled']);
+	});
+
+	it('carries the account name, for the notification title', async () => {
+		const v = await withAccount();
+		expect(v.autoConfirmSchedule()[0]?.accountName).toBe('trader');
+	});
+
+	it('carries the notify settings', async () => {
+		const v = await withAccount({
+			autoConfirm: { ...newAutoConfirm(), notify: { enabled: true, detail: 'count' } }
+		});
+		expect(v.autoConfirmSchedule()[0]?.notify).toEqual({ enabled: true, detail: 'count' });
+	});
+
+	/*
+	 * A boolean, never the URL. A proxy address carries credentials, and this
+	 * object is rebuilt on every beat of a one-second scheduler.
+	 */
+	it('says whether a proxy exists without saying what it is', async () => {
+		const v = await withAccount({ proxyUrl: 'http://user:secret@proxy.example:8080' });
+		const row = v.autoConfirmSchedule()[0];
+		expect(row?.hasProxy).toBe(true);
+		expect(JSON.stringify(row)).not.toContain('secret');
+		expect(JSON.stringify(row)).not.toContain('proxy.example');
+	});
+
+	it('treats an empty proxy string as no proxy', async () => {
+		// "" and "unset" being the same value is how a control that looks cleared
+		// leaves something behind — and under `Require proxies` the difference
+		// decides whether the account is polled at all.
+		const v = await withAccount({ proxyUrl: '' });
+		expect(v.autoConfirmSchedule()[0]?.hasProxy).toBe(false);
+	});
+
+	it('reports no proxy when none is stored', async () => {
+		const v = await withAccount();
+		expect(v.autoConfirmSchedule()[0]?.hasProxy).toBe(false);
+	});
+
+	/*
+	 * Handing out a live reference into the vault's contents would let a caller
+	 * write to it. Every other field here is a primitive that cannot be.
+	 */
+	it('hands out a notify object the caller cannot write back through', async () => {
+		const v = await withAccount();
+		const row = v.autoConfirmSchedule()[0];
+		if (row) {
+			row.notify.enabled = true;
+		}
+		expect(v.autoConfirmSchedule()[0]?.notify.enabled, 'a caller wrote into the vault').toBe(false);
+	});
+
+	it('refuses while locked', () => {
+		const v = service();
+		expect(() => v.autoConfirmSchedule()).toThrow(VaultLockedError);
+	});
+});

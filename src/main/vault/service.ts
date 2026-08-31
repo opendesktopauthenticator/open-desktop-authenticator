@@ -14,6 +14,7 @@ import {
 	emptyVault,
 	passphraseProblem,
 	vaultContentsSchema,
+	type NotifyDetail,
 	type VaultContents,
 	type VaultSettings
 } from '../../shared/vault-schema';
@@ -405,21 +406,47 @@ export class VaultService {
 	 * secret the user owns makes an acknowledged limit measurably worse for no
 	 * benefit at all.
 	 *
-	 * What comes back holds no secrets — an account id, two switches and an
-	 * interval — so the clone is cheap and there is nothing here worth
-	 * protecting.
+	 * What comes back holds no secrets — an account id, a display name, three
+	 * switches, an interval and a boolean — so the clone is cheap and there is
+	 * nothing here worth protecting. `hasProxy` is deliberately a boolean rather
+	 * than the URL: a proxy address carries credentials, and this object is
+	 * rebuilt on every beat.
+	 *
+	 * `notify` is a **fresh object**, not the stored one. Handing out a live
+	 * reference into the vault's contents would let a caller write to it, and
+	 * everything else here is a primitive that cannot be.
 	 */
 	autoConfirmSchedule(): {
 		steamId64: string;
+		/**
+		 * For the notification title. Not a secret — it is the name shown on the
+		 * accounts list — and the alternative is reaching for `read()`, which is
+		 * the whole cost this method exists to avoid.
+		 */
+		accountName: string;
 		marketListings: boolean;
 		trades: boolean;
 		pollIntervalSeconds: number;
+		notify: { enabled: boolean; detail: NotifyDetail };
+		/**
+		 * Whether a proxy is stored — **not the URL**. The engine only needs to
+		 * know whether `Require proxies` would refuse this account, and putting
+		 * the address here would put a credentialed URL into an object that is
+		 * built on every beat.
+		 */
+		hasProxy: boolean;
 	}[] {
 		return this.require().contents.accounts.map((account) => ({
 			steamId64: account.steamId64,
+			accountName: account.accountName,
 			marketListings: account.autoConfirm.marketListings,
 			trades: account.autoConfirm.trades,
-			pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds
+			pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds,
+			notify: {
+				enabled: account.autoConfirm.notify.enabled,
+				detail: account.autoConfirm.notify.detail
+			},
+			hasProxy: account.proxyUrl !== undefined && account.proxyUrl !== ''
 		}));
 	}
 
