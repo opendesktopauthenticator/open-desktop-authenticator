@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { NotifyDetail } from '../src/shared/vault-schema';
+import type { ConfirmationSummary } from '../src/shared/ipc';
+import { ConfirmationsError } from '../src/main/confirmations/service';
 import { AutoConfirmEngine } from '../src/main/confirmations/auto';
 import type { AutoConfirmOutcome, ConfirmationsService } from '../src/main/confirmations/service';
 import type { VaultService } from '../src/main/vault/service';
@@ -19,16 +22,24 @@ const NOW = Date.parse('2026-08-10T12:00:00Z');
 /** Longer than the largest backoff, so each tick in a loop is always due. */
 const BACKOFF_ENOUGH = 20 * 60_000;
 
-function account(overrides: Partial<{ marketListings: boolean; trades: boolean }> = {}): {
-	steamId64: string;
-	autoConfirm: { marketListings: boolean; trades: boolean; pollIntervalSeconds: number };
-} {
+function account(
+	overrides: Partial<{
+		marketListings: boolean;
+		trades: boolean;
+		pollIntervalSeconds: number;
+		notify: { enabled: boolean; detail: NotifyDetail };
+	}> = {},
+	identity: Partial<{ steamId64: string; accountName: string; proxyUrl: string }> = {}
+): VaultAccountLike {
 	return {
 		steamId64: '76561198000000001',
+		accountName: 'trader',
+		...identity,
 		autoConfirm: {
 			marketListings: false,
 			trades: false,
 			pollIntervalSeconds: 15,
+			notify: { enabled: false, detail: 'full' },
 			...overrides
 		}
 	};
@@ -46,22 +57,35 @@ function account(overrides: Partial<{ marketListings: boolean; trades: boolean }
  */
 function scheduleOf(accounts: readonly VaultAccountLike[] = []): {
 	steamId64: string;
+	accountName: string;
 	marketListings: boolean;
 	trades: boolean;
 	pollIntervalSeconds: number;
+	notify: { enabled: boolean; detail: NotifyDetail };
+	hasProxy: boolean;
 }[] {
 	return accounts.map((account) => ({
 		steamId64: account.steamId64,
+		accountName: account.accountName,
 		marketListings: account.autoConfirm.marketListings,
 		trades: account.autoConfirm.trades,
-		pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds
+		pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds,
+		notify: { ...account.autoConfirm.notify },
+		hasProxy: account.proxyUrl !== undefined && account.proxyUrl !== ''
 	}));
 }
 
 /** Only the fields these fakes actually populate. */
 interface VaultAccountLike {
 	steamId64: string;
-	autoConfirm: { marketListings: boolean; trades: boolean; pollIntervalSeconds: number };
+	accountName: string;
+	proxyUrl?: string;
+	autoConfirm: {
+		marketListings: boolean;
+		trades: boolean;
+		pollIntervalSeconds: number;
+		notify: { enabled: boolean; detail: NotifyDetail };
+	};
 }
 
 function harness(options: {
@@ -592,6 +616,58 @@ describe('stopping while a sweep is in the air', () => {
 		expect(harness.dueTimes()).toHaveLength(0);
 	});
 
+	/**
+	 * **A toast raised after the vault closed is what `stop()` exists to
+	 * prevent**, and nothing was asserting it — the mutation that fired
+	 * `onPending` on the disowned generation left the whole suite green.
+	 *
+	 * The outcome is still reported, because Steam really did act. The
+	 * notification is not, because the person is gone and the toast would name a
+	 * trade partner and an item on a screen they have just walked away from.
+	 */
+	it('raises no notification for a sweep the lock disowned', async () => {
+		let settle: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			settle = resolve;
+		});
+		const accounts = [account({ trades: true, notify: { enabled: true, detail: 'full' } })];
+		const pending: string[] = [];
+		const outcomes: string[] = [];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: async () => {
+					await gate;
+					return {
+						approved: [],
+						held: [{ confirmation: { id: '1' } as unknown as ConfirmationSummary, reason: 'held' }],
+						unreadable: 0
+					} as unknown as AutoConfirmOutcome;
+				}
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onOutcome: (steamId64) => outcomes.push(steamId64),
+			onPending: (steamId64) => pending.push(steamId64),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		const sweep = engine.tick();
+		await inFlight();
+		engine.stop();
+		settle?.();
+		await sweep;
+
+		expect(pending, 'a toast was raised after the vault locked').toEqual([]);
+		// The approval still happened, so the log still hears about it.
+		expect(outcomes).toHaveLength(1);
+	});
+
 	it('still reports an outcome that really happened', async () => {
 		// Being disowned by a lock does not make the approval imaginary. Steam acted
 		// on it, so the activity log has to say so.
@@ -705,11 +781,23 @@ describe('one slow account does not block the others', () => {
 		const both: VaultAccountLike[] = [
 			{
 				steamId64: '76561198000000001',
-				autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: true,
+					trades: false,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
 			},
 			{
 				steamId64: '76561198000000002',
-				autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: true,
+					trades: false,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
 			}
 		];
 		const vault = {
@@ -752,10 +840,9 @@ describe('scheduling two accounts on the same interval', () => {
 	it('separates them onto different beats after the first sweep', async () => {
 		let at = 0;
 		const beats: number[] = [];
-		const accounts = ['76561198000000001', '76561198000000002'].map((steamId64) => ({
-			steamId64,
-			autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
-		}));
+		const accounts = ['76561198000000001', '76561198000000002'].map((steamId64) =>
+			account({ marketListings: true }, { steamId64 })
+		);
 		const vault = {
 			isUnlocked: () => true,
 			read: () => ({ accounts }),
@@ -800,7 +887,13 @@ describe('after auto-confirm halts', () => {
 		const enabled: VaultAccountLike[] = [
 			{
 				steamId64: '76561198000000001',
-				autoConfirm: { marketListings: false, trades: true, pollIntervalSeconds: 15 }
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: false,
+					trades: true,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
 			}
 		];
 		const vault = {
@@ -862,11 +955,23 @@ describe('a vault with auto-confirm switched off everywhere', () => {
 		const idle: VaultAccountLike[] = [
 			{
 				steamId64: '76561198000000001',
-				autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: false,
+					trades: false,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
 			},
 			{
 				steamId64: '76561198000000002',
-				autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: false,
+					trades: false,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
 			}
 		];
 		const vault = {
@@ -905,16 +1010,432 @@ describe('a vault with auto-confirm switched off everywhere', () => {
 			scheduleOf([
 				{
 					steamId64: '76561198000000001',
-					autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 45 }
+					accountName: 'trader',
+					autoConfirm: {
+						marketListings: true,
+						trades: false,
+						pollIntervalSeconds: 45,
+						notify: { enabled: false, detail: 'full' }
+					}
 				}
 			])
 		).toEqual([
 			{
 				steamId64: '76561198000000001',
+				accountName: 'trader',
 				marketListings: true,
 				trades: false,
-				pollIntervalSeconds: 45
+				pollIntervalSeconds: 45,
+				notify: { enabled: false, detail: 'full' },
+				hasProxy: false
 			}
 		]);
+	});
+});
+
+/**
+ * **Watching without approving.**
+ *
+ * An account may have notifications on and both auto-confirm switches off. It
+ * is polled, and everything it finds is reported to a person; nothing is ever
+ * approved on its behalf. The dangerous mistake here is routing such an account
+ * through `runAutoConfirm`, which approves nothing with both switches off and
+ * returns an empty outcome — a feature that polls forever and tells nobody
+ * anything. So these assert on `list` being called and `runAutoConfirm` not.
+ */
+describe('notify-only accounts', () => {
+	function notifyHarness(options: {
+		accounts?: VaultAccountLike[];
+		requireProxies?: boolean;
+		list?: (steamId64: string) => Promise<{
+			confirmations: ConfirmationSummary[];
+			unreadable: number;
+		}>;
+		run?: (steamId64: string) => Promise<AutoConfirmOutcome>;
+	}) {
+		let clock = NOW;
+		const pending: {
+			steamId64: string;
+			accountName: string;
+			awaiting: ConfirmationSummary[];
+			unreadable: number;
+			detail: NotifyDetail;
+		}[] = [];
+		const signIns: { steamId64: string; accountName: string }[] = [];
+		const failures: {
+			steamId64: string;
+			reason: string;
+			halted: boolean;
+			context?: { accountName: string; mode: string };
+		}[] = [];
+
+		const runAutoConfirm = vi.fn(
+			options.run ??
+				((): Promise<AutoConfirmOutcome> =>
+					Promise.resolve({ approved: [], held: [], unreadable: 0 }))
+		);
+		const list = vi.fn(
+			options.list ??
+				((): Promise<{ confirmations: ConfirmationSummary[]; unreadable: number }> =>
+					Promise.resolve({ confirmations: [], unreadable: 0 }))
+		);
+
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts: options.accounts ?? [] }),
+			autoConfirmSchedule: () => scheduleOf(options.accounts)
+		} as unknown as VaultService;
+
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: { runAutoConfirm, list } as unknown as ConfirmationsService,
+			now: () => clock,
+			requireProxies: () => options.requireProxies ?? false,
+			onPending: (steamId64, accountName, awaiting, unreadable, detail) =>
+				pending.push({ steamId64, accountName, awaiting, unreadable, detail }),
+			onSignInNeeded: (steamId64, accountName) => signIns.push({ steamId64, accountName }),
+			onFailure: (steamId64, reason, halted, context) =>
+				failures.push({ steamId64, reason, halted, context }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		return {
+			engine,
+			runAutoConfirm,
+			list,
+			pending,
+			signIns,
+			failures,
+			advance: (ms: number) => {
+				clock += ms;
+			}
+		};
+	}
+
+	const watching = account({ notify: { enabled: true, detail: 'full' } });
+
+	it('is polled with both auto-confirm switches off', async () => {
+		const h = notifyHarness({ accounts: [watching] });
+		await h.engine.tick();
+		expect(h.list).toHaveBeenCalledWith('76561198000000001');
+	});
+
+	it('never goes through runAutoConfirm', async () => {
+		const h = notifyHarness({ accounts: [watching] });
+		await h.engine.tick();
+		expect(
+			h.runAutoConfirm,
+			'a watching account was sent down the approve path, which never lists, so never notifies'
+		).not.toHaveBeenCalled();
+	});
+
+	it('reports what it found', async () => {
+		const h = notifyHarness({
+			accounts: [watching],
+			list: () =>
+				Promise.resolve({
+					confirmations: [{ id: '1' } as unknown as ConfirmationSummary],
+					unreadable: 2
+				})
+		});
+		await h.engine.tick();
+		expect(h.pending).toHaveLength(1);
+		expect(h.pending[0]?.accountName).toBe('trader');
+		expect(h.pending[0]?.awaiting).toHaveLength(1);
+		expect(h.pending[0]?.unreadable).toBe(2);
+		expect(h.pending[0]?.detail).toBe('full');
+	});
+
+	it('is not polled when neither notifications nor auto-confirm are on', async () => {
+		const h = notifyHarness({ accounts: [account()] });
+		await h.engine.tick();
+		expect(h.list).not.toHaveBeenCalled();
+		expect(h.runAutoConfirm).not.toHaveBeenCalled();
+	});
+
+	/*
+	 * One poll serves both. An account with an auto type on takes the confirm
+	 * arm even when it also wants toasts, and what `runAutoConfirm` held back is
+	 * what a person still has to look at.
+	 */
+	it('polls once when both are on, and reports what was held', async () => {
+		const both = account({ trades: true, notify: { enabled: true, detail: 'type' } });
+		const h = notifyHarness({
+			accounts: [both],
+			run: () =>
+				Promise.resolve({
+					approved: [],
+					held: [{ confirmation: { id: '9' } as unknown as ConfirmationSummary, reason: 'nope' }],
+					unreadable: 0
+				} as unknown as AutoConfirmOutcome)
+		});
+		await h.engine.tick();
+		expect(h.runAutoConfirm).toHaveBeenCalledTimes(1);
+		expect(h.list).not.toHaveBeenCalled();
+		expect(h.pending[0]?.awaiting).toHaveLength(1);
+		expect(h.pending[0]?.detail).toBe('type');
+	});
+
+	it('does not report pending for an account that only auto-confirms', async () => {
+		const h = notifyHarness({ accounts: [account({ trades: true })] });
+		await h.engine.tick();
+		expect(h.runAutoConfirm).toHaveBeenCalledTimes(1);
+		expect(h.pending).toHaveLength(0);
+	});
+});
+
+/**
+ * **`Require proxies` refuses at construction, so polling anyway is wasted.**
+ *
+ * `transports.forAccount` throws before any request is made. Ten of those in a
+ * row reach the halt — an account hidden by a policy refusal rather than a
+ * fault, until something unrelated changes.
+ */
+describe('Require proxies', () => {
+	function h(requireProxies: boolean, proxyUrl?: string) {
+		const accounts = [account({ trades: true }, proxyUrl === undefined ? {} : { proxyUrl })];
+		const runAutoConfirm = vi.fn(() => Promise.resolve({ approved: [], held: [], unreadable: 0 }));
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: { runAutoConfirm } as unknown as ConfirmationsService,
+			now: () => NOW,
+			requireProxies: () => requireProxies,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return { engine, runAutoConfirm };
+	}
+
+	it('skips an account with no proxy when the rule is on', async () => {
+		const { engine, runAutoConfirm } = h(true);
+		await engine.tick();
+		expect(runAutoConfirm).not.toHaveBeenCalled();
+	});
+
+	it('polls it when the rule is off', async () => {
+		const { engine, runAutoConfirm } = h(false);
+		await engine.tick();
+		expect(runAutoConfirm).toHaveBeenCalled();
+	});
+
+	it('polls an account that has a proxy', async () => {
+		const { engine, runAutoConfirm } = h(true, 'http://proxy.example:8080');
+		await engine.tick();
+		expect(runAutoConfirm).toHaveBeenCalled();
+	});
+
+	it('treats an empty proxy string as no proxy', async () => {
+		const { engine, runAutoConfirm } = h(true, '');
+		await engine.tick();
+		expect(runAutoConfirm).not.toHaveBeenCalled();
+	});
+});
+
+/**
+ * **An expired session is not a fault that backing off fixes.**
+ *
+ * Counting it toward the ten-strike halt spends ten intervals arriving at a
+ * message phrased "failures in a row" — for the one condition only the user can
+ * clear, and which the activity log's `failed` kind is not urgent enough to
+ * surface. So it is caught ahead of the failure counter.
+ *
+ * **On both arms, and that is the whole point of these tests.** An earlier
+ * draft caught it inside the notify branch only. Every account with an auto
+ * type on takes the confirm branch, so the accounts that actually have this
+ * problem were exactly the ones the fix would have missed.
+ */
+describe('a session that needs signing in again', () => {
+	function h(mode: 'confirm' | 'notify') {
+		const accounts = [
+			mode === 'confirm'
+				? account({ trades: true })
+				: account({ notify: { enabled: true, detail: 'full' } })
+		];
+		const expired = new ConfirmationsError('the saved session expired. Sign in again.', true);
+		const reject = (): Promise<never> => Promise.reject(expired);
+		const signIns: { steamId64: string; accountName: string }[] = [];
+		const failures: { reason: string; halted: boolean }[] = [];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		let clock = NOW;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: reject,
+				list: reject
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onSignInNeeded: (steamId64, accountName) => signIns.push({ steamId64, accountName }),
+			onFailure: (_id, reason, halted) => failures.push({ reason, halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return {
+			engine,
+			signIns,
+			failures,
+			advance: (ms: number) => {
+				clock += ms;
+			}
+		};
+	}
+
+	it('is reported, not counted, on the confirm arm', async () => {
+		const { engine, signIns, failures } = h('confirm');
+		await engine.tick();
+		expect(signIns, 'a confirm-mode account with an expired session said nothing').toEqual([
+			{ steamId64: '76561198000000001', accountName: 'trader' }
+		]);
+		expect(failures, 'an expired session was counted toward the halt').toEqual([]);
+	});
+
+	it('is reported, not counted, on the notify arm', async () => {
+		const { engine, signIns, failures } = h('notify');
+		await engine.tick();
+		expect(signIns).toHaveLength(1);
+		expect(failures).toEqual([]);
+	});
+
+	/*
+	 * The clock has to move: a sign-in failure reschedules at the ordinary
+	 * interval, so without advancing it every tick after the first early-outs on
+	 * `nextDueAt` and the account is polled exactly once — which would make this
+	 * pass while proving nothing.
+	 */
+	it('never halts, however many times it happens', async () => {
+		const { engine, signIns, failures, advance } = h('confirm');
+		for (let i = 0; i < 12; i += 1) {
+			await engine.tick();
+			advance(20 * 60_000);
+		}
+		expect(failures, 'twelve expired-session polls reached the halt').toEqual([]);
+		expect(signIns, 'the account stopped being polled').toHaveLength(12);
+	});
+
+	/*
+	 * The distinction that matters: an ordinary error is still a failure, still
+	 * backs off, and still halts at ten. Catching sign-in ahead of the counter
+	 * must not have swallowed the counter.
+	 */
+	it('still counts an ordinary failure', async () => {
+		const accounts = [account({ trades: true })];
+		const failures: { halted: boolean }[] = [];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		let clock = NOW;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: () => Promise.reject(new Error('steam said no'))
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, _reason, halted) => failures.push({ halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		for (let i = 0; i < 10; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		expect(failures).toHaveLength(10);
+		expect(failures[9]?.halted, 'ten ordinary failures no longer halt').toBe(true);
+	});
+});
+
+/**
+ * **The halt sentence, and who it is about.**
+ *
+ * An account that was only ever watching never had automatic confirmation to
+ * stop, so telling its owner that automatic confirmation has stopped describes
+ * a feature they never switched on.
+ */
+describe('what a halt says', () => {
+	async function haltWith(mode: 'confirm' | 'notify') {
+		const accounts = [
+			mode === 'confirm'
+				? account({ trades: true })
+				: account({ notify: { enabled: true, detail: 'full' } })
+		];
+		const reject = (): Promise<never> => Promise.reject(new Error('steam said no'));
+		const failures: {
+			reason: string;
+			halted: boolean;
+			context?: { accountName: string; mode: string };
+		}[] = [];
+		let clock = NOW;
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: reject,
+				list: reject
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, reason, halted, context) => failures.push({ reason, halted, context }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		for (let i = 0; i < 10; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		return failures[failures.length - 1];
+	}
+
+	it('says automatic confirmation stopped, for an account that was confirming', async () => {
+		const last = await haltWith('confirm');
+		expect(last?.halted).toBe(true);
+		expect(last?.reason).toContain('Automatic confirmation stopped');
+	});
+
+	it('says checking stopped, for an account that was only watching', async () => {
+		const last = await haltWith('notify');
+		expect(last?.halted).toBe(true);
+		expect(
+			last?.reason,
+			'a watching account was told automatic confirmation stopped, which it never had'
+		).not.toContain('Automatic confirmation');
+		expect(last?.reason).toContain('Checking stopped');
+	});
+
+	/*
+	 * Both sentences contain "stopped", so the flag is the only thing that can
+	 * distinguish a halt — which is why the activity log stopped inferring it
+	 * from the wording.
+	 */
+	it('carries the halt as a flag, not something to read out of the sentence', async () => {
+		const confirm = await haltWith('confirm');
+		const notify = await haltWith('notify');
+		expect(confirm?.reason).toContain('stopped');
+		expect(notify?.reason).toContain('stopped');
+		expect(confirm?.halted).toBe(true);
+		expect(notify?.halted).toBe(true);
+	});
+
+	it('carries the account name and mode, which a toast needs', async () => {
+		expect(await haltWith('confirm').then((f) => f?.context)).toEqual({
+			accountName: 'trader',
+			mode: 'confirm'
+		});
+		expect(await haltWith('notify').then((f) => f?.context)).toEqual({
+			accountName: 'trader',
+			mode: 'notify'
+		});
 	});
 });

@@ -528,7 +528,10 @@ function start(): void {
 		ensureClock: () => clock.ensureSynced(),
 		onOutcome: (steamId64, outcome) =>
 			activity.recordPass(steamId64, outcome.approved, outcome.held, outcome.unreadable),
-		onFailure: (steamId64, reason, halted) => activity.recordFailure(steamId64, reason, halted)
+		onFailure: (steamId64, reason, halted) => activity.recordFailure(steamId64, reason, halted),
+		// The **existing** reader the transports already use (line 381), not a
+		// second one — two readers of one rule is how they come to disagree.
+		requireProxies
 	});
 
 	/** Set only by the tray's Quit item, so `close` knows to stop hiding. */

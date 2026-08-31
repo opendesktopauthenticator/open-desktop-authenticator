@@ -1,6 +1,9 @@
 import { redactCredentials } from '../net/egress';
+import { ConfirmationsError } from './service';
 import type { ConfirmationsService, AutoConfirmOutcome } from './service';
 import type { VaultService } from '../vault/service';
+import type { ConfirmationSummary } from '../../shared/ipc';
+import type { NotifyDetail } from '../../shared/vault-schema';
 
 /**
  * The automatic confirmation loop (§12 F6, milestone 0.3).
@@ -61,14 +64,55 @@ const BACKOFF_MAX_MS = 15 * 60_000;
  */
 const HALT_AFTER_FAILURES = 10;
 
+/**
+ * Why this account is being polled.
+ *
+ * `confirm` acts on what it finds; `notify` only looks. `runAutoConfirm` is the
+ * approve path and it returns an empty outcome when neither auto type is on —
+ * so sending a notify-only account through it produces a feature that polls
+ * forever and never tells anybody anything. It never lists, so it never
+ * notifies.
+ */
+export type PollMode = 'confirm' | 'notify';
+
 export interface AutoConfirmEngineOptions {
 	vault: VaultService;
 	confirmations: ConfirmationsService;
 	/** Told what happened, so the UI or a notification can surface it. */
 	onOutcome?: (steamId64: string, outcome: AutoConfirmOutcome) => void;
 	/** Told when a pass failed, with the reason already made presentable. */
-	/** @param halted true when the engine has given up on this account entirely. */
-	onFailure?: (steamId64: string, reason: string, halted: boolean) => void;
+	/**
+	 * @param halted true when the engine has given up on this account entirely.
+	 * @param context the account's display name and why it was being polled.
+	 *
+	 * `context` is optional so the activity log, which wants neither, keeps its
+	 * existing three-argument call. A halt notification needs both: the title is
+	 * the account name, and an account that was only ever watching never had
+	 * automatic confirmation to stop, so the sentence differs.
+	 */
+	onFailure?: (
+		steamId64: string,
+		reason: string,
+		halted: boolean,
+		context?: { accountName: string; mode: PollMode }
+	) => void;
+	/** Confirmations now awaiting a person, after a poll of either kind. */
+	onPending?: (
+		steamId64: string,
+		accountName: string,
+		awaiting: ConfirmationSummary[],
+		unreadable: number,
+		detail: NotifyDetail
+	) => void;
+	/** A poll that found the saved session needs a password again. */
+	onSignInNeeded?: (steamId64: string, accountName: string) => void;
+	/**
+	 * Whether the vault refuses to talk to Steam without a proxy.
+	 *
+	 * Wired to the **existing** reader the transports already use, not a second
+	 * one — two readers of one rule is how they come to disagree.
+	 */
+	requireProxies?: () => boolean;
 	/**
 	 * Makes sure Steam's clock has been checked before a pass signs anything.
 	 *
@@ -87,6 +131,17 @@ export interface AutoConfirmEngineOptions {
 	now?: () => number;
 	setTimer?: (callback: () => void, ms: number) => NodeJS.Timeout;
 	clearTimer?: (handle: NodeJS.Timeout) => void;
+}
+
+/** One account this beat decided to poll, and everything the poll needs. */
+interface DueAccount {
+	steamId64: string;
+	accountName: string;
+	pollIntervalSeconds: number;
+	mode: PollMode;
+	/** Whether a toast is wanted, independent of `mode`. */
+	notify: boolean;
+	detail: NotifyDetail;
 }
 
 interface AccountState {
@@ -109,7 +164,21 @@ export class AutoConfirmEngine {
 	private readonly vault: VaultService;
 	private readonly confirmations: ConfirmationsService;
 	private readonly onOutcome: (steamId64: string, outcome: AutoConfirmOutcome) => void;
-	private readonly onFailure: (steamId64: string, reason: string, halted: boolean) => void;
+	private readonly onFailure: (
+		steamId64: string,
+		reason: string,
+		halted: boolean,
+		context?: { accountName: string; mode: PollMode }
+	) => void;
+	private readonly onPending: (
+		steamId64: string,
+		accountName: string,
+		awaiting: ConfirmationSummary[],
+		unreadable: number,
+		detail: NotifyDetail
+	) => void;
+	private readonly onSignInNeeded: (steamId64: string, accountName: string) => void;
+	private readonly requireProxies: () => boolean;
 	private readonly ensureClock: () => Promise<void>;
 	private readonly now: () => number;
 	private readonly setTimer: (callback: () => void, ms: number) => NodeJS.Timeout;
@@ -157,6 +226,9 @@ export class AutoConfirmEngine {
 		this.confirmations = options.confirmations;
 		this.onOutcome = options.onOutcome ?? ((): void => undefined);
 		this.onFailure = options.onFailure ?? ((): void => undefined);
+		this.onPending = options.onPending ?? ((): void => undefined);
+		this.onSignInNeeded = options.onSignInNeeded ?? ((): void => undefined);
+		this.requireProxies = options.requireProxies ?? ((): boolean => false);
 		this.ensureClock = options.ensureClock ?? ((): Promise<void> => Promise.resolve());
 		this.now = options.now ?? ((): number => Date.now());
 		this.setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
@@ -254,20 +326,16 @@ export class AutoConfirmEngine {
 			if (this.generation !== generation || !this.vault.isUnlocked()) {
 				return;
 			}
-			await Promise.all(
-				due.map((account, index) =>
-					this.runOne(account.steamId64, account.pollIntervalSeconds, generation, index)
-				)
-			);
+			await Promise.all(due.map((account, index) => this.runOne(account, generation, index)));
 		} finally {
 			this.running = false;
 		}
 	}
 
 	/** Accounts with something enabled, whose next attempt is due. */
-	private dueAccounts(): { steamId64: string; pollIntervalSeconds: number }[] {
+	private dueAccounts(): DueAccount[] {
 		const now = this.now();
-		const due: { steamId64: string; pollIntervalSeconds: number }[] = [];
+		const due: DueAccount[] = [];
 
 		/*
 		 * The projection, not the whole vault.
@@ -276,16 +344,30 @@ export class AutoConfirmEngine {
 		 * every beat that the `earliestDueAt` early-out does not cover — which,
 		 * for a vault where nobody has switched auto-confirm on, is all of them,
 		 * forever. Nothing scheduled means nothing cached means the early-out
-		 * never fires. What is actually needed is an id, two switches and an
-		 * interval.
+		 * never fires. What is actually needed is an id, a name, three switches,
+		 * an interval and whether a proxy exists.
 		 */
 		for (const account of this.vault.autoConfirmSchedule()) {
-			// The switch the user set is what decides whether this account is polled
-			// at all. Nothing enabled means no request is ever made for it.
-			if (!account.marketListings && !account.trades) {
+			const wantsConfirm = account.marketListings || account.trades;
+			const wantsNotify = account.notify.enabled;
+
+			// The switches the user set are what decide whether this account is
+			// polled at all. Nothing enabled means no request is ever made for it.
+			if (!wantsConfirm && !wantsNotify) {
 				this.state.delete(account.steamId64);
 				continue;
 			}
+
+			// **Under `Require proxies`, an account with none cannot build a
+			// transport at all** — `transports.forAccount` throws before any request
+			// is made. Polling it anyway spends ten failures reaching a halt caused
+			// by a policy refusal rather than a fault, and then hides the account
+			// until something unrelated changes.
+			if (this.requireProxies() && !account.hasProxy) {
+				this.state.delete(account.steamId64);
+				continue;
+			}
+
 			const state = this.state.get(account.steamId64);
 			// A halted account is left alone until something changes — settings, a
 			// lock, or a restart. Continuing to poke a dead session forever, quietly,
@@ -298,7 +380,14 @@ export class AutoConfirmEngine {
 			}
 			due.push({
 				steamId64: account.steamId64,
-				pollIntervalSeconds: account.pollIntervalSeconds
+				accountName: account.accountName,
+				pollIntervalSeconds: account.pollIntervalSeconds,
+				// An account with an auto type on takes the confirm arm even if it
+				// also wants notifications: one poll serves both, and `runAutoConfirm`
+				// reports what it held back.
+				mode: wantsConfirm ? 'confirm' : 'notify',
+				notify: wantsNotify,
+				detail: account.notify.detail
 			});
 		}
 
@@ -343,30 +432,58 @@ export class AutoConfirmEngine {
 	 * has been called since — see the note there.
 	 */
 	private async runOne(
-		steamId64: string,
-		pollIntervalSeconds: number,
+		account: DueAccount,
 		generation = this.generation,
 		/** This account's position in the sweep. See `staggerFor`. */
 		index = 0
 	): Promise<void> {
-		const interval = Math.max(MIN_INTERVAL_MS, pollIntervalSeconds * 1000);
+		const { steamId64, accountName, mode, notify, detail } = account;
+		const interval = Math.max(MIN_INTERVAL_MS, account.pollIntervalSeconds * 1000);
 		const jitter = this.staggerFor(index, interval);
 
 		try {
-			const outcome = await this.confirmations.runAutoConfirm(steamId64);
+			if (mode === 'confirm') {
+				const outcome = await this.confirmations.runAutoConfirm(steamId64);
 
-			// Disowned by a `stop` that happened while this was in the air. Reporting
-			// the outcome is still right — it describes something that really did
-			// occur — but nothing may be scheduled on a cleared map.
-			if (this.generation !== generation) {
+				// Disowned by a `stop` that happened while this was in the air.
+				// Reporting the outcome is still right — it describes something that
+				// really did occur — but nothing may be scheduled on a cleared map,
+				// and **no `onPending`**: a lock happened, and a toast raised after
+				// the vault closed is precisely what `stop()` exists to prevent.
+				if (this.generation !== generation) {
+					this.onOutcome(steamId64, outcome);
+					return;
+				}
+
+				// No `backoffMs` and no `failures`: a success clears both penalties.
+				this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
+				this.rememberEarliest();
 				this.onOutcome(steamId64, outcome);
+
+				if (notify) {
+					// `held` is the set that still needs a person: anything Steam listed
+					// that the policy refused to approve.
+					this.onPending(
+						steamId64,
+						accountName,
+						outcome.held.map((entry) => entry.confirmation),
+						outcome.unreadable,
+						detail
+					);
+				}
 				return;
 			}
 
-			// No `backoffMs` and no `failures`: a success clears both penalties.
+			// Notify-only. `list()`, never `runAutoConfirm` — which approves nothing
+			// with both switches off and returns an empty outcome, so an account
+			// routed through it would poll forever and never tell anybody anything.
+			const listing = await this.confirmations.list(steamId64);
+			if (this.generation !== generation) {
+				return;
+			}
 			this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
 			this.rememberEarliest();
-			this.onOutcome(steamId64, outcome);
+			this.onPending(steamId64, accountName, listing.confirmations, listing.unreadable, detail);
 		} catch (err) {
 			// **The failure is not recorded at all if a lock caused it.**
 			//
@@ -375,6 +492,24 @@ export class AutoConfirmEngine {
 			// locking eventually stops automatic confirmation for good — a fault the
 			// user never caused and cannot see the cause of.
 			if (this.generation !== generation) {
+				return;
+			}
+
+			// **Before the failure counter, and on both arms.**
+			//
+			// An expired session is not a fault that backing off fixes, and it is
+			// the same condition whichever arm found it. Counting it would spend ten
+			// strikes reaching a halt phrased "failures in a row" — for the one
+			// condition only the user can clear, and which the activity log's
+			// `failed` kind is not urgent enough to surface.
+			//
+			// Catching this on the notify arm alone would be exactly backwards:
+			// every account with an auto type on takes the confirm arm, so the
+			// accounts that have this problem are the ones the fix would miss.
+			if (err instanceof ConfirmationsError && err.needsSignIn) {
+				this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
+				this.rememberEarliest();
+				this.onSignInNeeded(steamId64, accountName);
 				return;
 			}
 
@@ -395,12 +530,20 @@ export class AutoConfirmEngine {
 				// that there was nothing to do — for as long as the process ran.
 				this.rememberEarliest();
 				// The flag, not the wording. The activity log used to decide whether
-				// this was a halt by running `/stopped/i` over the sentence below.
+				// this was a halt by running `/stopped/i` over the sentence below —
+				// and **both** sentences below now contain "stopped", so that would be
+				// ambiguous as well as fragile.
+				const what =
+					mode === 'confirm'
+						? 'Automatic confirmation stopped for this account'
+						: // An account that was only ever watching never had automatic
+							// confirmation to stop.
+							'Checking stopped for this account';
 				this.onFailure(
 					steamId64,
-					`Automatic confirmation stopped for this account after ${failures} failures in a row. ` +
-						`The last one was: ${reason}`,
-					true
+					`${what} after ${failures} failures in a row. The last one was: ${reason}`,
+					true,
+					{ accountName, mode }
 				);
 				return;
 			}
@@ -414,7 +557,7 @@ export class AutoConfirmEngine {
 			this.state.set(steamId64, { nextDueAt: this.now() + backoffMs, backoffMs, failures });
 			this.rememberEarliest();
 
-			this.onFailure(steamId64, reason, false);
+			this.onFailure(steamId64, reason, false, { accountName, mode });
 		}
 	}
 
