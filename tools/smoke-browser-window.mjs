@@ -252,6 +252,42 @@ const main = async () => {
 	 * toolbar — because they are built from the same object and the toolbar is
 	 * the one carrying a preload.
 	 */
+	/*
+	 * **The first `loadURL` must resolve on the page it was given.**
+	 *
+	 * Electron's `loadURL` resolves on the contents' next `did-finish-load` and
+	 * does not care which navigation caused it. `openTab` used to fire an
+	 * un-awaited `about:blank` on the same contents, so this promise resolved on
+	 * that — measured at ~40ms, against a page that had not begun to arrive.
+	 *
+	 * `openAccountBrowser` awaits this load and then reads `currentUrl()` to
+	 * decide whether Steam accepted the session. It read `about:blank`, which
+	 * `looksSignedOut` correctly calls signed out, so **every** attempt to open
+	 * the in-app browser was refused with "Steam did not accept the saved
+	 * session" — after wiping the partition. The feature did not work at all, and
+	 * no unit test could see it: the fake host resolves `loadURL` itself, so only
+	 * a real Electron navigation exposes which one settled the promise.
+	 */
+	{
+		const probe = electronBrowserHost.createWindow({
+			width: 600,
+			height: 400,
+			title: 'first-load probe',
+			partition,
+			userAgent: 'SmokeTest/1'
+		});
+		const target = 'data:text/html,' + encodeURIComponent('<title>Landed</title>');
+		await probe.loadURL(target);
+		const seen = probe.currentUrl();
+		check(
+			'the first loadURL resolves on the page it was given',
+			seen !== 'about:blank' && seen !== '',
+			`currentUrl after first load = ${JSON.stringify(seen)}`
+		);
+		probe.close();
+		await wait(400);
+	}
+
 	const beforePosture = new Set(webContents.getAllWebContents().map((c) => c.id));
 	const posture = electronBrowserHost.createWindow({
 		width: 800,

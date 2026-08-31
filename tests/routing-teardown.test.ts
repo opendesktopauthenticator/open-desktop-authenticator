@@ -77,17 +77,46 @@ describe('the engine callbacks in index.ts', () => {
 		return source.slice(start, source.indexOf('\n\t});', start));
 	})();
 
+	/**
+	 * **Each call is pinned to its own arm, not to the block.**
+	 *
+	 * A first version asserted only that each string appeared somewhere in the
+	 * whole constructor. Moving `notifier.pollSucceeded` from `onOutcome` to
+	 * `onPending` left every row green — and that move *is* the defect this
+	 * describe was written to guard: `onPending` runs only when notifications are
+	 * on, so a confirming account with them off never clears its "already said
+	 * sign in again" flag, and every expiry after the first is swallowed.
+	 */
+	const arm = (name: string): string => {
+		const start = wiring.indexOf(`${name}: `);
+		expect(start, `the ${name} callback is gone`).toBeGreaterThan(-1);
+		const rest = wiring.slice(start + name.length);
+		// Up to the next top-level callback key, which sits at this indent.
+		const end = rest.search(/\n\t\t[a-zA-Z]+[:(]/);
+		return end === -1 ? rest : rest.slice(0, end);
+	};
+
 	it.each([
-		['the confirm arm tells the notifier a poll worked', 'notifier.pollSucceeded(steamId64)'],
-		[
-			'the notify arm tells the activity log a poll worked',
-			'activity.notePollSucceeded(steamId64)'
-		],
-		['the notify arm reaches the notifier', 'notifier.pending('],
-		['a halt reaches the notifier', 'notifier.halted('],
-		['an expiry reaches the activity log', 'activity.recordSignInRequired(steamId64)'],
-		['an expiry reaches the notifier', 'notifier.signInNeeded(steamId64, accountName)']
-	])('%s', (_what, call) => {
-		expect(wiring, `${call} is missing, so that surface never hears about it`).toContain(call);
+		['onOutcome', 'notifier.pollSucceeded(steamId64)'],
+		['onOutcome', 'activity.recordPass('],
+		['onPending', 'activity.notePollSucceeded(steamId64)'],
+		['onPending', 'notifier.pending('],
+		['onFailure', 'notifier.halted('],
+		['onSignInNeeded', 'activity.recordSignInRequired(steamId64)'],
+		['onSignInNeeded', 'notifier.signInNeeded(steamId64, accountName)']
+	])('%s calls %s', (name, call) => {
+		expect(arm(name), `${call} is not in ${name}, so it fires under the wrong condition`).toContain(
+			call
+		);
+	});
+
+	/*
+	 * And the halt toast is gated on the halt. Without that guard every ordinary
+	 * transient failure raises "Automatic confirmation stopped after 10
+	 * failures", once per poll — a sentence that is false and an alarm that is
+	 * constant.
+	 */
+	it('raises the halt toast only on a halt', () => {
+		expect(arm('onFailure')).toContain('if (halted && context)');
 	});
 });

@@ -570,3 +570,109 @@ describe('an account that is removed and added back', () => {
 		expect(log.for(other), "removing one account cleared another's history").toHaveLength(1);
 	});
 });
+
+/**
+ * **A pass reports state; this log records events.**
+ *
+ * `runAutoConfirm` returns what is *currently* pending, so a confirmation the
+ * policy holds back comes round on every poll, and an entry Steam sent that
+ * this build cannot parse stays unparseable until somebody looks. Appending
+ * both unconditionally wrote four entries a minute at the default interval.
+ *
+ * The noise is the smaller half. `MAX_ENTRIES_PER_ACCOUNT` is 100, so within
+ * half an hour the flood evicts everything before it — including the held
+ * account-recovery confirmation this class exists to preserve. And every
+ * appended entry outranks `acknowledgedSeq`, so the badge went dark on
+ * acknowledge and lit again on the next poll, for ever.
+ */
+describe('a pass that keeps finding the same thing', () => {
+	const ID = '76561198000000001';
+	const critical = confirmation({ id: '9', type: 6, securityCritical: true });
+
+	it('records a held confirmation once, not once per poll', () => {
+		const log = new ActivityLog(() => NOW);
+		for (let i = 0; i < 50; i += 1) {
+			log.recordPass(ID, [], [{ confirmation: critical, reason: 'never automatic' }], 0);
+		}
+		expect(log.for(ID), 'one held confirmation wrote fifty entries').toHaveLength(1);
+	});
+
+	it('records an unreadable count once, not once per poll', () => {
+		const log = new ActivityLog(() => NOW);
+		for (let i = 0; i < 50; i += 1) {
+			log.recordPass(ID, [], [], 2);
+		}
+		expect(log.for(ID)).toHaveLength(1);
+	});
+
+	/*
+	 * The consequence that matters: the loudest warning the app can raise must
+	 * survive a long-running session.
+	 */
+	it('keeps the account-recovery warning through a long session', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordPass(ID, [], [{ confirmation: critical, reason: 'never automatic' }], 0);
+		for (let i = 0; i < 200; i += 1) {
+			log.recordPass(ID, [], [{ confirmation: critical, reason: 'never automatic' }], 1);
+		}
+
+		const held = log
+			.for(ID)
+			.filter((entry) => entry.kind === 'held' && entry.confirmation.securityCritical);
+		expect(held, 'the takeover warning was evicted by its own repetitions').toHaveLength(1);
+	});
+
+	/*
+	 * And the badge must be dischargeable. Every appended entry outranks the
+	 * acknowledgement watermark, so a per-poll append made "I have read this"
+	 * impossible to express.
+	 */
+	it('stays acknowledged while nothing new happens', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordPass(ID, [], [{ confirmation: critical, reason: 'never automatic' }], 0);
+		expect(log.hasUrgent()).toBe(true);
+		log.acknowledge();
+		expect(log.hasUrgent()).toBe(false);
+
+		for (let i = 0; i < 20; i += 1) {
+			log.recordPass(ID, [], [{ confirmation: critical, reason: 'never automatic' }], 0);
+		}
+		expect(log.hasUrgent(), 'the badge relit itself on an unchanged state').toBe(false);
+	});
+
+	/*
+	 * Resolved and returning is a genuinely new event, on both counts.
+	 */
+	it('says it again when a held confirmation is resolved and comes back', () => {
+		const log = new ActivityLog(() => NOW);
+		const held = [{ confirmation: critical, reason: 'never automatic' }];
+		log.recordPass(ID, [], held, 0);
+		log.recordPass(ID, [], [], 0);
+		log.recordPass(ID, [], held, 0);
+		expect(log.for(ID).filter((entry) => entry.kind === 'held')).toHaveLength(2);
+	});
+
+	it('says it again when the unreadable count rises', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordPass(ID, [], [], 1);
+		log.recordPass(ID, [], [], 1);
+		log.recordPass(ID, [], [], 3);
+		expect(log.for(ID).filter((entry) => entry.kind === 'unreadable')).toHaveLength(2);
+	});
+
+	it('says it again after the unreadable count returns to zero', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordPass(ID, [], [], 2);
+		log.recordPass(ID, [], [], 0);
+		log.recordPass(ID, [], [], 2);
+		expect(log.for(ID).filter((entry) => entry.kind === 'unreadable')).toHaveLength(2);
+	});
+
+	it('still records an approval every time, because each is its own event', () => {
+		const log = new ActivityLog(() => NOW);
+		for (let i = 0; i < 3; i += 1) {
+			log.recordPass(ID, [confirmation({ id: String(i) })], [], 0);
+		}
+		expect(log.for(ID).filter((entry) => entry.kind === 'approved')).toHaveLength(3);
+	});
+});

@@ -647,7 +647,17 @@ describe('what enabling Require proxies tears down', () => {
 	// `registerImportHandlers` is imported at the top of the file, so an
 	// `indexOf` for it ends the slice before it begins.
 	const start = MAIN.indexOf('void browsers.closeNotFullyRouted();');
-	const callback = MAIN.slice(start, start + 2500);
+	/*
+	 * **To the end of the callback, not a fixed number of characters.**
+	 *
+	 * This was `start + 2500`, which silently stopped covering the tail of the
+	 * handler the moment a comment was added above it — so an assertion about a
+	 * line that is still there failed, and one about a line that had been deleted
+	 * would have passed. A slice that measures the file rather than the block is
+	 * a check whose reach depends on prose.
+	 */
+	const end = MAIN.indexOf('\n\t\t\t}', start);
+	const callback = MAIN.slice(start, end === -1 ? start + 4000 : end);
 
 	it('closes the windows the rule forbids', () => {
 		expect(callback).toContain('browsers.closeNotFullyRouted()');
@@ -662,6 +672,18 @@ describe('what enabling Require proxies tears down', () => {
 	 * The three that never build a transport, so nothing above reaches them:
 	 * `steam-session` speaks over Node's own stack.
 	 */
+	/*
+	 * The aborts above reach the engine as ordinary errors, so the polls they
+	 * kill have to be disowned or the user's own settings save is scored against
+	 * the accounts the setting exists to protect.
+	 */
+	it('disowns the polls those aborts are about to fail', () => {
+		expect(
+			callback,
+			'turning the rule on logged a failure against every correctly-routed account'
+		).toContain('autoConfirm.forgetAccount(account.steamId64)');
+	});
+
 	it('cancels the sign-ins that no transport covers', () => {
 		expect(callback).toContain('confirmations.cancelUnroutedSignIns()');
 		expect(callback).toContain('enrollment.forgetUnrouted()');

@@ -701,6 +701,26 @@ function start(): void {
 				directTransports.forgetAll();
 
 				/*
+				 * **And disown every poll those aborts are about to fail.**
+				 *
+				 * `forgetAll` bumps the transport generation and aborts what is in
+				 * flight, and that abort reaches the engine as an ordinary error —
+				 * "this account was closed before the request was sent". The engine's
+				 * own generation and epochs are untouched, so `current()` is still
+				 * true and the ordinary-failure arm runs: the user's own settings
+				 * save becomes a `failed` activity entry, a backoff, and a strike
+				 * toward the halt.
+				 *
+				 * Unproxied accounts self-heal, because `dueAccounts` deletes their
+				 * state on the next beat. The victims are the correctly-routed
+				 * accounts the setting exists to protect. `dropAccountRouting` calls
+				 * this for exactly the same reason; the settings path was left out.
+				 */
+				for (const account of vault.read().accounts) {
+					autoConfirm.forgetAccount(account.steamId64);
+				}
+
+				/*
 				 * **And the paths that never build a transport.**
 				 *
 				 * `steam-session` speaks over Node's own HTTP stack, so nothing

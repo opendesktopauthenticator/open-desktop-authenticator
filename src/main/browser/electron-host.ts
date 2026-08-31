@@ -536,15 +536,33 @@ export const electronBrowserHost: BrowserHost = {
 			return { id, view };
 		};
 
-		const openTab = (url?: string): number | undefined => {
+		/**
+		 * @param navigate whether to start a navigation at all.
+		 *
+		 * **`false` exists because firing one here breaks the caller's promise.**
+		 * Electron's `loadURL` resolves on the contents' next `did-finish-load`,
+		 * and it does not care which navigation produced it. So a caller that
+		 * created the tab here and then issued its own `loadURL` had its promise
+		 * resolved by *this* function's `about:blank` — measured at ~40ms, against
+		 * a real page that had not begun to arrive.
+		 *
+		 * That is not a cosmetic race. `openAccountBrowser` awaits its load and
+		 * then reads `currentUrl()` to decide whether Steam accepted the session;
+		 * it read `about:blank`, which `looksSignedOut` correctly calls signed
+		 * out, so **every** attempt to open the in-app browser was refused with
+		 * "Steam did not accept the saved session" after wiping the partition.
+		 */
+		const openTab = (url?: string, navigate = true): number | undefined => {
 			const opened = newTab();
 			if (!opened) {
 				return undefined;
 			}
-			// `about:blank` rather than nothing at all: a view with no document
-			// reports no title and no URL, which the strip and the address bar both
-			// read as an empty tab — which is exactly what it is.
-			void opened.view.webContents.loadURL(url ?? 'about:blank').catch(publish);
+			if (navigate) {
+				// `about:blank` rather than nothing at all: a view with no document
+				// reports no title and no URL, which the strip and the address bar
+				// both read as an empty tab — which is exactly what it is.
+				void opened.view.webContents.loadURL(url ?? 'about:blank').catch(publish);
+			}
 			show(opened.id);
 			return opened.id;
 		};
@@ -748,7 +766,12 @@ export const electronBrowserHost: BrowserHost = {
 				if (!alive()) {
 					return Promise.reject(new Error('the browser window has already closed'));
 				}
-				const id = tabs.size === 0 ? openTab() : activeId;
+				// **Created without navigating**, so the `loadURL` below is the only
+				// navigation on these contents and the promise returned describes it.
+				// Creating the tab with its usual `about:blank` meant this method
+				// resolved on that instead, handing the caller a window whose page had
+				// not loaded.
+				const id = tabs.size === 0 ? openTab(undefined, false) : activeId;
 				const view = id === undefined ? undefined : tabs.get(id);
 				if (!view) {
 					return Promise.reject(new Error('the browser window has no tab to load into'));

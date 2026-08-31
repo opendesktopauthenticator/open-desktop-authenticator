@@ -72,6 +72,27 @@ export class ActivityLog {
 	private readonly signInOpen = new Set<string>();
 
 	/**
+	 * The unreadable count and the held ids already recorded, per account.
+	 *
+	 * **A pass reports state, and this log records events.** `runAutoConfirm`
+	 * returns what is *currently* pending, so a confirmation the policy holds
+	 * back comes round again on every poll, and an entry Steam sent that this
+	 * build cannot parse stays unparseable until somebody looks. Appending both
+	 * unconditionally wrote four entries a minute at the default interval.
+	 *
+	 * That is not merely noisy. `MAX_ENTRIES_PER_ACCOUNT` is 100, so within half
+	 * an hour the flood evicts everything before it — including the held
+	 * account-recovery confirmation this class exists to preserve, the loudest
+	 * warning the application can raise. And every appended entry outranks
+	 * `acknowledgedSeq`, so the badge could never be discharged: it went dark on
+	 * acknowledge and lit again on the next poll, for ever.
+	 *
+	 * `signInRequired` was given run-dedup for exactly this reason. These two
+	 * are the same shape and were left out of it.
+	 */
+	private readonly reported = new Map<string, { unreadable: number; held: Set<string> }>();
+
+	/**
 	 * A counter, not a timestamp, deciding what counts as unseen.
 	 *
 	 * `Date.parse(entry.at) > acknowledgedAtMs` looked equivalent and was not: two
@@ -114,7 +135,15 @@ export class ActivityLog {
 		this.signInOpen.delete(steamId64);
 		const at = new Date(this.now()).toISOString();
 
-		if (unreadable > 0) {
+		const seen = this.reported.get(steamId64) ?? { unreadable: 0, held: new Set<string>() };
+		this.reported.set(steamId64, seen);
+
+		// **A rise, not a presence** — the same rule the notifier applies, and for
+		// the same reason. Recorded before the guard so a return to zero is
+		// written down and a later reappearance is news again.
+		const roseUnreadable = unreadable > seen.unreadable;
+		seen.unreadable = unreadable;
+		if (roseUnreadable) {
 			// Recorded first, above whatever the pass did manage to do. It is the entry
 			// that says this record is incomplete, and a caveat printed under the
 			// findings it qualifies has already let the reader draw a conclusion.
@@ -124,7 +153,23 @@ export class ActivityLog {
 		if (approved.length > 0) {
 			this.push(steamId64, { kind: 'approved', at, confirmations: approved });
 		}
+		// Anything no longer held has been dealt with; if it comes back it is a new
+		// event and deserves saying again.
+		const stillHeld = new Set(held.map((entry) => entry.confirmation.id));
+		for (const id of seen.held) {
+			if (!stillHeld.has(id)) {
+				seen.held.delete(id);
+			}
+		}
+
 		for (const entry of held) {
+			// **Once per confirmation, not once per poll.** The same one is held on
+			// every pass until a person deals with it, and re-recording it four
+			// times a minute buries everything else in a hundred-entry log.
+			if (seen.held.has(entry.confirmation.id)) {
+				continue;
+			}
+			seen.held.add(entry.confirmation.id);
 			// One entry each, not a summary count. A held account-recovery
 			// confirmation is not a statistic.
 			this.push(steamId64, {
@@ -207,6 +252,7 @@ export class ActivityLog {
 	 */
 	forgetAccount(steamId64: string): void {
 		this.signInOpen.delete(steamId64);
+		this.reported.delete(steamId64);
 		this.entries.delete(steamId64);
 	}
 
@@ -294,6 +340,7 @@ export class ActivityLog {
 	clear(): void {
 		this.entries.clear();
 		this.signInOpen.clear();
+		this.reported.clear();
 	}
 
 	private push(steamId64: string, entry: ActivityEntry): void {
