@@ -36,19 +36,6 @@ export const accountStatusSchema = z.enum([
 ]);
 
 /**
- * Defaults are named constants rather than inline literals because zod 4
- * requires a `.default()` to be the schema's full output type — so the same
- * values are needed twice, and two copies of a security-relevant default is how
- * "off by default" quietly becomes "on".
- */
-export const AUTO_CONFIRM_DEFAULTS = {
-	marketListings: false,
-	trades: false,
-	pollIntervalSeconds: 15,
-	notify: { enabled: false, detail: 'full' }
-} as const;
-
-/**
  * How much a confirmation notification says.
  *
  * A toast is not a private surface: Windows shows it on the lock screen and
@@ -66,6 +53,25 @@ export const AUTO_CONFIRM_DEFAULTS = {
  */
 export const notifyDetailSchema = z.enum(['count', 'type', 'full']);
 export type NotifyDetail = z.infer<typeof notifyDetailSchema>;
+
+/**
+ * Defaults are named constants rather than inline literals because zod 4
+ * requires a `.default()` to be the schema's full output type — so the same
+ * values are needed twice, and two copies of a security-relevant default is how
+ * "off by default" quietly becomes "on".
+ */
+export const AUTO_CONFIRM_DEFAULTS = Object.freeze({
+	marketListings: false,
+	trades: false,
+	pollIntervalSeconds: 15,
+	/**
+	 * Frozen **separately**. `Object.freeze` is shallow and `as const` is a
+	 * type-level claim with no runtime effect, so without this line the nested
+	 * object stays writable — and a single stray write to it changes what every
+	 * later parse defaults to, for the life of the process.
+	 */
+	notify: Object.freeze({ enabled: false, detail: 'full' })
+});
 
 // `.passthrough()` on every persisted object, not just accounts. The promise at
 // the top of this file — a vault written by a newer build survives an older one
@@ -101,7 +107,21 @@ export const autoConfirmSchema = z
 			// `mutate()` in an older build, which is exactly the promise the top of
 			// this file makes.
 			.passthrough()
-			.default({ ...AUTO_CONFIRM_DEFAULTS.notify })
+			// **A function, not a literal — defensively, and measurably not yet
+			// load-bearing.** zod resolves a `.default()` with a *shallow* clone, so
+			// a literal here is safe today: every field inside `notify` is a
+			// primitive, and each parse gets its own copy of them. Measured, not
+			// assumed.
+			//
+			// It matters one level up, where `accountSchema` defaults the whole
+			// `autoConfirm` — there the shallow clone copies the outer object and
+			// leaves `notify` shared, which is the bug this file used to have.
+			//
+			// The function form is kept because the day somebody adds a nested field
+			// inside `notify`, the literal silently becomes the same bug. Swapping
+			// it back turns no test red, and that is recorded here rather than
+			// papered over with a test that cannot honestly fail.
+			.default(() => ({ ...AUTO_CONFIRM_DEFAULTS.notify }))
 	})
 	.passthrough();
 
@@ -177,7 +197,16 @@ export const accountSchema = z
 		proxyUrl: z.string().optional(),
 
 		status: accountStatusSchema,
-		autoConfirm: autoConfirmSchema.default(AUTO_CONFIRM_DEFAULTS),
+		/**
+		 * `newAutoConfirm` as a **function**, not `AUTO_CONFIRM_DEFAULTS` as a
+		 * value. zod resolves a default with a shallow clone, so passing the
+		 * constant gave every account parsed without an `autoConfirm` — a legacy
+		 * vault, a hand-edited one, a recovery file — the *same* nested `notify`,
+		 * shared with the exported constant. One in-place write then flipped
+		 * notifications on for every co-defaulted account and for every account
+		 * created afterwards.
+		 */
+		autoConfirm: autoConfirmSchema.default(newAutoConfirm),
 
 		addedAt: z.string(),
 		/** Set when the forced revocation-code ceremony completed (§11 S12). */

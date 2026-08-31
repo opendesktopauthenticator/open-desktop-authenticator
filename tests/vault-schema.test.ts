@@ -268,6 +268,16 @@ describe('notification settings', () => {
 		).toThrow();
 	});
 
+	it('accepts exactly the floor', () => {
+		// Without this, raising `min(10)` to `min(30)` refuses every interval the
+		// UI offers between the two and the suite stays green.
+		const parsed = accountSchema.parse({
+			...account,
+			autoConfirm: { ...AUTO_CONFIRM_DEFAULTS, pollIntervalSeconds: 10 }
+		});
+		expect(parsed.autoConfirm.pollIntervalSeconds).toBe(10);
+	});
+
 	it('still enforces the ten-second interval floor', () => {
 		expect(() =>
 			accountSchema.parse({
@@ -323,5 +333,71 @@ describe('newAutoConfirm', () => {
 
 	it('matches the schema defaults', () => {
 		expect(newAutoConfirm()).toEqual(accountSchema.parse(account).autoConfirm);
+	});
+});
+
+/**
+ * **Nothing may hand out the module constant itself.**
+ *
+ * These are reference assertions, deliberately, and the reason is that the
+ * value-equality version of them passed while the bug was live. zod resolves a
+ * `.default()` with a *shallow* clone: the outer `autoConfirm` came back fresh
+ * and the nested `notify` was the exported constant. Two accounts parsed
+ * without an `autoConfirm` — a legacy vault, a hand-edited one, a recovery file
+ * — therefore shared one `notify` with each other and with the defaults, so a
+ * single in-place write flipped notifications on for all of them *and* for
+ * every account created afterwards, for the life of the process.
+ *
+ * That is precisely the "off by default quietly becomes on" failure the
+ * docblock above `AUTO_CONFIRM_DEFAULTS` names, so `toEqual` is not a strong
+ * enough assertion to be worth writing here.
+ */
+describe('the defaults are never handed out by reference', () => {
+	const other = { ...account, steamId64: '76561198000000002' };
+
+	it('gives two defaulted accounts separate notify objects', () => {
+		const a = accountSchema.parse(account);
+		const b = accountSchema.parse(other);
+		expect(a.autoConfirm.notify, 'two accounts share one notify').not.toBe(b.autoConfirm.notify);
+	});
+
+	it('never returns the exported constant itself', () => {
+		const parsed = accountSchema.parse(account);
+		expect(parsed.autoConfirm).not.toBe(AUTO_CONFIRM_DEFAULTS);
+		expect(parsed.autoConfirm.notify, 'a parse handed back the module constant').not.toBe(
+			AUTO_CONFIRM_DEFAULTS.notify
+		);
+	});
+
+	it('does not let one account written to reach another, or the next parse', () => {
+		const a = accountSchema.parse(account);
+		a.autoConfirm.notify.enabled = true;
+		expect(accountSchema.parse(other).autoConfirm.notify.enabled).toBe(false);
+		expect(AUTO_CONFIRM_DEFAULTS.notify.enabled, 'the defaults were rewritten').toBe(false);
+	});
+
+	/*
+	 * The backstop, in case a future default is added by value again. Freezing
+	 * turns a silent process-wide corruption into a thrown error at the write.
+	 */
+	it('freezes the constant, nested object included', () => {
+		expect(Object.isFrozen(AUTO_CONFIRM_DEFAULTS)).toBe(true);
+		expect(Object.isFrozen(AUTO_CONFIRM_DEFAULTS.notify), 'the nested object is writable').toBe(
+			true
+		);
+	});
+
+	it('gives the partial-notify path a fresh object too', () => {
+		// This one takes `notify`'s own default rather than `autoConfirm`'s.
+		const a = accountSchema.parse({
+			...account,
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+		const b = accountSchema.parse({
+			...other,
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+		expect(a.autoConfirm.notify).not.toBe(b.autoConfirm.notify);
+		expect(a.autoConfirm.notify).not.toBe(AUTO_CONFIRM_DEFAULTS.notify);
 	});
 });

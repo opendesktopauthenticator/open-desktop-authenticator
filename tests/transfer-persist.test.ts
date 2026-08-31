@@ -200,6 +200,30 @@ describe('storing a replacement Steam has issued', () => {
 		await h.service.completeTransfer('12345');
 		expect(h.stored[0]?.status).toBe('pendingRevocationBackup');
 	});
+
+	/*
+	 * **The one interval in the codebase that deliberately differs from the
+	 * default, and nothing pinned it.** A mechanical rewrite of this construction
+	 * site — of exactly the kind adding `notify` to the schema required — could
+	 * have collapsed it to the 15-second default with the whole suite green.
+	 * Asserted on the number, not on "not the default", so it also fails if the
+	 * default is ever changed to 30 and the distinction quietly disappears.
+	 */
+	it('keeps its own poll interval rather than the default', async () => {
+		const h = harness();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345');
+		expect(h.stored[0]?.autoConfirm.pollIntervalSeconds).toBe(30);
+	});
+
+	it('starts with notifications and auto-confirm off, like any new account', async () => {
+		const h = harness();
+		await readyToSubmit(h);
+		await h.service.completeTransfer('12345');
+		expect(h.stored[0]?.autoConfirm.notify).toEqual({ enabled: false, detail: 'full' });
+		expect(h.stored[0]?.autoConfirm.marketListings).toBe(false);
+		expect(h.stored[0]?.autoConfirm.trades).toBe(false);
+	});
 });
 
 describe('when storing fails after Steam has already rotated', () => {
