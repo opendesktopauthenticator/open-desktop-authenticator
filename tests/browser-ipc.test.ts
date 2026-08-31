@@ -706,3 +706,84 @@ describe('what enabling Require proxies tears down', () => {
 		);
 	});
 });
+
+/**
+ * **What a failed mint is still allowed to answer.**
+ *
+ * `mintToken` is a Steam round trip with a thirty-second timeout behind it, and
+ * inside that window the vault can lock, `Require proxies` can be switched on,
+ * the account's routing can change, and the account itself can be removed. Every
+ * one of those was re-checked after the mint — on the success path. The
+ * `needsSignIn` branch returned above all of it.
+ *
+ * `signInRequired` is not an inert answer. It is what makes the renderer offer a
+ * sign-in, so removing an account mid-mint produced an offer to sign in to an
+ * account the vault no longer held. A failure to mint is not a reason to skip the
+ * questions; it is the path least likely to have been thought about.
+ */
+describe('a mint that fails while the world changes underneath it', () => {
+	const expired = () => Promise.reject(new AccessTokenError('that session has expired', true));
+
+	it('does not ask for a sign-in for an account that was removed', async () => {
+		const harness = deps({
+			mintToken: () => {
+				harness.changeRouting();
+				return expired();
+			}
+		});
+		registerBrowserHandlers(harness.deps);
+
+		await expect(
+			invoke({ steamId64: '76561198000000001', route: 'proxy' }),
+			'the handler offered a sign-in for an account that had gone while Steam was answering'
+		).rejects.toThrow(/changed while it was opening/);
+	});
+
+	it('does not ask for a sign-in on a vault that locked during the mint', async () => {
+		let unlocked = true;
+		const harness = deps({
+			isUnlocked: () => unlocked,
+			mintToken: () => {
+				unlocked = false;
+				return expired();
+			}
+		});
+		registerBrowserHandlers(harness.deps);
+
+		await expect(invoke({ steamId64: '76561198000000001', route: 'proxy' })).rejects.toThrow(
+			/unlock the vault/i
+		);
+	});
+
+	it('does not ask for a sign-in once Require proxies has been switched on', async () => {
+		let strict = false;
+		const harness = deps({
+			requireProxies: () => strict,
+			mintToken: () => {
+				strict = true;
+				return expired();
+			}
+		});
+		registerBrowserHandlers(harness.deps);
+
+		await expect(invoke({ steamId64: '76561198000000001', route: 'direct' })).rejects.toThrow(
+			/proxies/i
+		);
+	});
+
+	/*
+	 * And the answer the branch exists to give, which has to survive: an expired
+	 * refresh token with nothing else wrong is still "sign in again".
+	 */
+	it('still asks for a sign-in when nothing else changed', async () => {
+		const harness = deps({ mintToken: expired });
+		registerBrowserHandlers(harness.deps);
+
+		const result = (await invoke({
+			steamId64: '76561198000000001',
+			route: 'proxy'
+		})) as { signInRequired: boolean };
+
+		expect(result.signInRequired).toBe(true);
+	});
+});

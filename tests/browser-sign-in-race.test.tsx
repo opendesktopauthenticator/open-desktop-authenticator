@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { claimSignInScreen } from '../src/renderer/App';
+import { abandonPendingSignIns, claimSignInScreen, mayShowSignInPrompt } from '../src/renderer/App';
 import { accountSummary, type AccountSummary, type OpenBrowserResult } from '../src/shared/ipc';
 
 /**
@@ -142,5 +142,102 @@ describe('two browser opens in flight at once', () => {
 			Object.hasOwn(bare as object, 'reason'),
 			'an absent reason became a present undefined'
 		).toBe(false);
+	});
+});
+
+/**
+ * **The door the generation did not cover.**
+ *
+ * It is claimed by a newer *open*, which is why two rows racing each other work.
+ * Ordinary navigation left it alone, and the sign-in prompt is rendered ahead of
+ * the view switch — so pressing Trade, going to Settings, typing into both
+ * passphrase fields, and then letting the Trade request settle as
+ * `signInRequired` unmounted Settings and erased what had been typed.
+ *
+ * The same erasure the generation exists to prevent, through the one path it did
+ * not watch. Leaving the screen now abandons what that screen started.
+ */
+describe('a browser open the user has navigated away from', () => {
+	it('cannot put its sign-in screen up afterwards', () => {
+		const settle = claimSignInScreen();
+
+		// The user goes to Settings and starts typing.
+		abandonPendingSignIns();
+
+		expect(
+			settle(A, 'direct', NEEDS_SIGN_IN),
+			'a request the user had walked away from replaced the screen they were on, erasing what ' +
+				'they had typed into it'
+		).toBeUndefined();
+	});
+
+	it('still cannot once they have come back', () => {
+		const settle = claimSignInScreen();
+		abandonPendingSignIns();
+		// Back to the account list. The open still belongs to a screen that has
+		// been and gone; returning to the list is not the same as never leaving.
+		abandonPendingSignIns();
+
+		expect(settle(A, 'proxy', NEEDS_SIGN_IN)).toBeUndefined();
+	});
+
+	/*
+	 * And an open begun after the navigation is the current one, so its answer
+	 * must still land.
+	 */
+	it('does not block an open begun from the screen the user is on', () => {
+		claimSignInScreen();
+		abandonPendingSignIns();
+		const settle = claimSignInScreen();
+
+		expect(settle(B, 'direct', NEEDS_SIGN_IN)).toEqual({
+			account: B,
+			route: 'direct',
+			reason: NEEDS_SIGN_IN.reason
+		});
+	});
+
+	/*
+	 * A successful open is not a screen change and must stay silent either way.
+	 */
+	it('says nothing for an open that succeeded', () => {
+		const settle = claimSignInScreen();
+		abandonPendingSignIns();
+		expect(settle(A, 'direct', OPENED)).toBeUndefined();
+	});
+});
+
+/**
+ * **The barrier that survives the bookkeeping being deleted.**
+ *
+ * The generation and the effect that advances it on navigation are both things
+ * somebody has to remember to keep. Effects do not run under
+ * `renderToStaticMarkup` and this project has no DOM runner, so removing that
+ * effect breaks nothing any test can see — which is the shape of defect this
+ * repository keeps shipping.
+ *
+ * So the rule is stated again in the render, as a function of what is on screen
+ * and nothing else. An open can only be started from the account list, so its
+ * answer has no claim on any other screen whatever the counter says.
+ */
+describe('whether a sign-in prompt may take the window', () => {
+	const PROMPT = { account: A, route: 'direct' as const };
+
+	it('may, on the screen the open was started from', () => {
+		expect(mayShowSignInPrompt(PROMPT, 'accounts')).toBe(true);
+	});
+
+	it.each(['settings', 'import', 'activity', 'enroll', 'move', 'recover', 'about'])(
+		'may not, over %s',
+		(view) => {
+			expect(
+				mayShowSignInPrompt(PROMPT, view),
+				`a browser answer replaced ${view}, and any half-typed field on it went with the screen`
+			).toBe(false);
+		}
+	);
+
+	it('may not when there is no prompt at all', () => {
+		expect(mayShowSignInPrompt(undefined, 'accounts')).toBe(false);
 	});
 });

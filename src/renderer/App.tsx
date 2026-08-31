@@ -128,6 +128,50 @@ let uiGeneration = 0;
  * erasure above felt in the first place. The row's own error path is unaffected
  * — a sign-in is not an error and never travelled that way.
  */
+/**
+ * Give up on every browser open still in flight.
+ *
+ * The generation above is claimed by a *newer open*, which covers one row's
+ * answer landing on top of another's and covers nothing else. Ordinary
+ * navigation left it untouched, and the sign-in prompt is rendered ahead of the
+ * view switch — so pressing Trade, going to Settings, typing both passphrase
+ * fields, and then letting the Trade request settle as `signInRequired`
+ * unmounted Settings and **erased what had been typed**. The same erasure the
+ * generation was introduced to stop, reached by the door it did not cover.
+ *
+ * Exported so the effect that watches the view can call it, and so this rule can
+ * be tested without a DOM: a module-level counter cannot be reached any other
+ * way.
+ */
+export function abandonPendingSignIns(): void {
+	uiGeneration += 1;
+}
+
+/**
+ * Whether a sign-in prompt may take the window, given where the user is.
+ *
+ * **The barrier that does not depend on anything being remembered.** The
+ * generation above, and the effect that advances it on navigation, are both
+ * bookkeeping: correct today, and one deleted `useEffect` from being wrong
+ * again, with no test able to notice because effects do not run under
+ * `renderToStaticMarkup` and this project has no DOM runner.
+ *
+ * This is the same rule expressed where it cannot be forgotten — in the render
+ * itself, as a pure function of what is on screen. An open can only be started
+ * from the account list, so an answer to one has nothing to say about any other
+ * screen. Settings cannot be replaced by a stale response whatever the counter
+ * says.
+ *
+ * A type predicate rather than a boolean so the caller keeps its narrowing and
+ * the check cannot be written and then ignored.
+ */
+export function mayShowSignInPrompt(
+	prompt: BrowserSignInPrompt | undefined,
+	view: string
+): prompt is BrowserSignInPrompt {
+	return prompt !== undefined && view === 'accounts';
+}
+
 export function claimSignInScreen(): (
 	account: AccountSummary,
 	route: BrowserRoute,
@@ -165,6 +209,21 @@ export function App(): React.JSX.Element {
 	const [view, setView] = useState<
 		'accounts' | 'import' | 'settings' | 'activity' | 'enroll' | 'move' | 'recover' | 'about'
 	>('accounts');
+	/*
+	 * **Leaving the screen abandons what it started.**
+	 *
+	 * An open begun from the account list belongs to the account list. Navigating
+	 * anywhere means the user has moved on, and an answer arriving afterwards has
+	 * no claim on the screen they are looking at now — least of all the sign-in
+	 * prompt, which renders ahead of the view switch and takes the whole window.
+	 *
+	 * On `view` rather than at each `setView`: there are twenty-one of those, and
+	 * the one that gets forgotten is the bug coming back.
+	 */
+	useEffect(() => {
+		abandonPendingSignIns();
+	}, [view]);
+
 	/**
 	 * An enrolled-but-unactivated account being resumed, if any.
 	 *
@@ -828,7 +887,7 @@ export function App(): React.JSX.Element {
 			);
 		}
 
-		if (browserSignIn) {
+		if (mayShowSignInPrompt(browserSignIn, view)) {
 			return (
 				<SteamSignIn
 					// Holds a typed password. Same reasoning as `Confirmations`: a

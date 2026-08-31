@@ -164,6 +164,55 @@ export function registerBrowserHandlers(deps: BrowserHandlerDeps): void {
 		 */
 		const sinceEpoch = deps.browsers.epochNow(steamId64);
 
+		/**
+		 * **Everything that may have changed while Steam was answering — on every
+		 * way out of the mint, not only the successful one.**
+		 *
+		 * `mintToken` is a Steam round trip with a thirty-second timeout behind it.
+		 * Inside that window the vault can lock, `Require proxies` can be switched
+		 * on, the account's routing can change, and the account itself can be
+		 * removed. The checks for all of that sat after the mint on the success
+		 * path, and the `needsSignIn` branch returned above them.
+		 *
+		 * So removing an account mid-mint still answered `signInRequired`, and that
+		 * answer is not inert: it is what makes the renderer offer a sign-in — for
+		 * an account the vault no longer holds, and on a screen the user may have
+		 * left. A failure to mint is not a reason to skip the questions; it is the
+		 * path least likely to have been thought about.
+		 *
+		 * Throws rather than returning, because every one of these is a refusal
+		 * with a sentence the user can act on, and `signInRequired` is not one of
+		 * them.
+		 */
+		const revalidate = (): void => {
+			if (deps.requireProxies() && !routeSatisfiesStrictMode(route, account.proxyUrl)) {
+				throw new BrowserRequestError(DIRECT_REFUSED);
+			}
+			if (!deps.isUnlocked()) {
+				throw new BrowserRequestError('unlock the vault first');
+			}
+		};
+
+		/**
+		 * The epoch, checked only where nothing else will.
+		 *
+		 * On the success path `open` is handed `sinceEpoch` and owns this decision
+		 * — deliberately, so a routing change during the open itself is caught in
+		 * the one place that can also close the window it has already built.
+		 * Checking eagerly here would take that decision away from it.
+		 *
+		 * The `signInRequired` path never reaches `open`, so the question is asked
+		 * nowhere at all. It is the reason removing an account mid-mint still came
+		 * back as "sign in again" for an account that no longer existed.
+		 */
+		const stillTheSameAccount = (): void => {
+			if (deps.browsers.epochNow(steamId64) !== sinceEpoch) {
+				throw new BrowserRequestError(
+					'this account changed while it was opening, so nothing was opened'
+				);
+			}
+		};
+
 		let accessToken: string;
 		try {
 			accessToken = await deps.mintToken(steamId64, account.refreshToken, route);
@@ -172,29 +221,14 @@ export function registerBrowserHandlers(deps: BrowserHandlerDeps): void {
 			// and indistinguishable to the user from never having signed in — so it
 			// gets the same answer rather than a raw error about a token.
 			if (err instanceof AccessTokenError && err.needsSignIn) {
+				revalidate();
+				stillTheSameAccount();
 				return { signInRequired: true, reason: err.message };
 			}
 			throw err;
 		}
 
-		/*
-		 * **Read again, because minting is long enough for the answer to change.**
-		 *
-		 * The check above is a fact about the moment the button was pressed.
-		 * `mintToken` is a Steam round trip with a thirty-second timeout behind
-		 * it, and `Require proxies` can be switched on inside that window — so a
-		 * Direct window whose request started a moment earlier still opened,
-		 * signed in, and kept making requests, on a vault that by then forbade
-		 * exactly that. The lock has always been re-read here for the same
-		 * reason; the policy was not.
-		 */
-		if (deps.requireProxies() && !routeSatisfiesStrictMode(route, account.proxyUrl)) {
-			throw new BrowserRequestError(DIRECT_REFUSED);
-		}
-
-		if (!deps.isUnlocked()) {
-			throw new BrowserRequestError('unlock the vault first');
-		}
+		revalidate();
 
 		try {
 			await deps.browsers.open(
