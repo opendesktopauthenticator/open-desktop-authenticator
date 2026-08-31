@@ -425,3 +425,118 @@ describe('forgetting', () => {
 		expect(h.toasts[0]?.title).toBe('second');
 	});
 });
+
+/**
+ * **An unreadable entry is a state, not an event.**
+ *
+ * It stays unparseable on Steam until somebody looks at it, so `unreadable > 0`
+ * is true on every poll — and the first version of this class announced it on
+ * every poll, four times a minute, forever. That is the alarm the top of
+ * `notify.ts` says a notification must not become, written by the same person
+ * who wrote the warning.
+ */
+describe('an unreadable entry that does not change', () => {
+	let h: ReturnType<typeof harness>;
+	beforeEach(() => {
+		h = harness();
+		h.notifier.pending(ID, 'trader', [], 0, 'count');
+	});
+
+	it('is announced once, not on every poll', () => {
+		h.notifier.pending(ID, 'trader', [], 2, 'count');
+		h.notifier.pending(ID, 'trader', [], 2, 'count');
+		h.notifier.pending(ID, 'trader', [], 2, 'count');
+		expect(h.toasts, 'an unchanged unreadable count re-announced itself').toHaveLength(1);
+	});
+
+	it('is announced again when the count rises', () => {
+		h.notifier.pending(ID, 'trader', [], 2, 'count');
+		h.notifier.pending(ID, 'trader', [], 3, 'count');
+		expect(h.toasts).toHaveLength(2);
+		expect(h.toasts[1]?.body).toContain('3');
+	});
+
+	/*
+	 * A drop means one was resolved. Nobody needs interrupting for that.
+	 */
+	it('is not announced when the count falls', () => {
+		h.notifier.pending(ID, 'trader', [], 3, 'count');
+		h.notifier.pending(ID, 'trader', [], 1, 'count');
+		expect(h.toasts).toHaveLength(1);
+	});
+
+	/*
+	 * **The ordering trap.** If the count were recorded only when a toast is
+	 * sent, a return to zero would never be written down — and the reappearance
+	 * would then compare against the old high-water mark and be swallowed for
+	 * good.
+	 */
+	it('announces a reappearance after the count returns to zero', () => {
+		h.notifier.pending(ID, 'trader', [], 2, 'count');
+		h.notifier.pending(ID, 'trader', [], 0, 'count');
+		h.notifier.pending(ID, 'trader', [], 2, 'count');
+		expect(h.toasts, 'a reappearing unreadable entry was swallowed for good').toHaveLength(2);
+	});
+
+	it('still rides along on a toast a new confirmation earned', () => {
+		h.notifier.pending(ID, 'trader', [], 2, 'count');
+		h.notifier.pending(ID, 'trader', [summary()], 2, 'count');
+		expect(h.toasts).toHaveLength(2);
+		expect(h.toasts[1]?.body).toContain('could not be read');
+	});
+});
+
+/**
+ * **The first poll must not choose between the two things it may not hold
+ * back.**
+ *
+ * An earlier version returned straight after the security-critical toast, so an
+ * account whose first poll carried both a takeover attempt and an entry this
+ * build could not parse was told about the first and not the second — and the
+ * unparseable one might have been another takeover attempt.
+ */
+describe('a first poll carrying both a takeover and an unreadable entry', () => {
+	it('says both, in one toast', () => {
+		const h = harness();
+		h.notifier.pending(
+			ID,
+			'trader',
+			[summary({ type: 6, typeName: 'Account recovery', securityCritical: true })],
+			2,
+			'type'
+		);
+		expect(h.toasts).toHaveLength(1);
+		expect(h.toasts[0]?.body).toContain('account recovery');
+		expect(h.toasts[0]?.body, 'the unreadable entry was swallowed by the return').toContain(
+			'could not be read'
+		);
+	});
+});
+
+/**
+ * **The account name is un-authored text too.**
+ *
+ * The body was carefully capped and stripped while the title beside it went to
+ * the OS verbatim. Names are usually copied out of an imported maFile, whose
+ * schema asks only for a non-empty string — so a 50KB name, or one carrying a
+ * bidirectional override, reached a lock-screen toast exactly as written.
+ */
+describe('the toast title', () => {
+	it('caps an over-long account name', () => {
+		const h = harness();
+		h.notifier.halted(ID, 'A'.repeat(500), 'confirm');
+		expect(h.toasts[0]?.title.length, 'an unbounded name reached the OS').toBeLessThan(80);
+	});
+
+	it('strips control characters from an account name', () => {
+		const h = harness();
+		h.notifier.halted(ID, 'tra‮der', 'confirm');
+		expect(h.toasts[0]?.title, 'a bidi override reached a toast title').not.toContain('‮');
+	});
+
+	it('leaves an ordinary name alone', () => {
+		const h = harness();
+		h.notifier.halted(ID, 'trader', 'confirm');
+		expect(h.toasts[0]?.title).toBe('trader');
+	});
+});

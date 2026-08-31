@@ -434,3 +434,91 @@ describe('a session that needs signing in again', () => {
 		expect(log.hasUrgent(), 'a second expiry after an acknowledgement said nothing').toBe(true);
 	});
 });
+
+/**
+ * **A second expiry, after the first was acknowledged, must speak again.**
+ *
+ * The dedup used to ask "is the newest entry `signInRequired`?", which assumed
+ * every successful poll writes something. Most write nothing: a notify-only
+ * poll writes nothing by design, and a confirm pass that approved nothing and
+ * held nothing back writes nothing either. So the newest entry stayed
+ * `signInRequired` for ever, and the account that expired, was acknowledged,
+ * recovered and expired **again** produced no entry and no badge.
+ *
+ * The old test for this passed `recordPass` a non-empty `approved` array, which
+ * does write an entry — so it exercised the one path the bug was not on.
+ */
+describe('an expiry after a recovery', () => {
+	const ID = '76561198000000001';
+
+	it('speaks again after a poll that succeeded and wrote nothing', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		log.acknowledge();
+		// A quiet confirm pass: nothing approved, nothing held, nothing unreadable.
+		log.recordPass(ID, [], [], 0);
+		expect(log.for(ID), 'the quiet pass should have written nothing').toHaveLength(1);
+
+		log.recordSignInRequired(ID);
+		expect(
+			log.for(ID).filter((entry) => entry.kind === 'signInRequired'),
+			'the second expiry was swallowed'
+		).toHaveLength(2);
+		expect(log.hasUrgent(), 'the badge stayed silent on a live expired session').toBe(true);
+	});
+
+	/*
+	 * The notify arm writes no activity entry at all, so this is its only
+	 * success signal.
+	 */
+	it('speaks again after a notify-only poll succeeded', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		log.acknowledge();
+		log.notePollSucceeded(ID);
+		log.recordSignInRequired(ID);
+		expect(log.for(ID).filter((entry) => entry.kind === 'signInRequired')).toHaveLength(2);
+		expect(log.hasUrgent()).toBe(true);
+	});
+
+	it('still writes one entry per run, not one per poll', () => {
+		const log = new ActivityLog(() => NOW);
+		for (let i = 0; i < 40; i += 1) {
+			log.recordSignInRequired(ID);
+		}
+		expect(log.for(ID)).toHaveLength(1);
+	});
+
+	it('keeps runs per account', () => {
+		const log = new ActivityLog(() => NOW);
+		const other = '76561198000000002';
+		log.recordSignInRequired(ID);
+		log.recordSignInRequired(other);
+		log.notePollSucceeded(ID);
+		log.recordSignInRequired(ID);
+		// The other account's run was never ended, so it stays deduplicated.
+		log.recordSignInRequired(other);
+		expect(log.for(ID)).toHaveLength(2);
+		expect(log.for(other)).toHaveLength(1);
+	});
+
+	/*
+	 * Acknowledging is the user saying "I have read this", not "this is fixed".
+	 * Re-arming the run on acknowledge would write a duplicate on the next poll.
+	 */
+	it('does not re-arm on acknowledge alone', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		log.acknowledge();
+		log.recordSignInRequired(ID);
+		expect(log.for(ID)).toHaveLength(1);
+	});
+
+	it('forgets open runs when the log is cleared', () => {
+		const log = new ActivityLog(() => NOW);
+		log.recordSignInRequired(ID);
+		log.clear();
+		log.recordSignInRequired(ID);
+		expect(log.for(ID)).toHaveLength(1);
+	});
+});

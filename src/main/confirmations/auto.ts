@@ -75,6 +75,36 @@ const HALT_AFTER_FAILURES = 10;
  */
 export type PollMode = 'confirm' | 'notify';
 
+/**
+ * Wrap a caller-supplied listener so a throw in it cannot be mistaken for a
+ * Steam failure.
+ *
+ * **Every listener runs inside `runOne`, and four of the six run inside its
+ * `try`.** A notification that threw therefore landed in the catch, where the
+ * code cannot tell it from Steam refusing: the successful pass was overwritten
+ * with a backoff, logged as `failed` with the *listener's* message, and on an
+ * hourly account the next poll was pulled from 3600s to 30s — the module's own
+ * rule that a failure never speeds anything up, inverted. The two that run
+ * inside the catch were worse: a throw there escaped `runOne` entirely and
+ * surfaced as an unhandled rejection with no handler anywhere in the app.
+ *
+ * Guarding here rather than at the six call sites means a listener added later
+ * is covered without anybody remembering. The `try` encloses exactly one
+ * expression — the listener — so a real Steam error still reaches the catch
+ * that is supposed to see it.
+ */
+function guarded<A extends unknown[]>(fn?: (...args: A) => void): (...args: A) => void {
+	return (...args: A): void => {
+		try {
+			fn?.(...args);
+		} catch (err) {
+			// Never reported through `onFailure`: that path calls the notifier too,
+			// so a broken notifier would recurse through its own failure report.
+			console.error('an auto-confirm listener threw', err);
+		}
+	};
+}
+
 export interface AutoConfirmEngineOptions {
 	vault: VaultService;
 	confirmations: ConfirmationsService;
@@ -195,6 +225,21 @@ export class AutoConfirmEngine {
 	 * "not yet". Reset to 0 by anything that can add or change a schedule, so a
 	 * new or re-enabled account is never held back by it.
 	 */
+	/**
+	 * Bumped per account whenever its route or its settings change.
+	 *
+	 * **Separate from `generation`, which means "the vault locked".** Bumping the
+	 * global counter to disown one account's in-flight poll would disown every
+	 * other account's too, which is the mistake `confirmations/service.ts`
+	 * documents having made and replaced with per-account epochs.
+	 *
+	 * Without this, saving a proxy aborted the request in flight and the abort
+	 * came back as an ordinary error: the user's own save was recorded as a
+	 * failure, pushed the next poll out by up to fifteen minutes, and counted
+	 * toward the ten-strike halt.
+	 */
+	private readonly epochs = new Map<string, number>();
+
 	private earliestDueAt = 0;
 	private ticker: NodeJS.Timeout | undefined;
 	/** Guards against a slow pass overlapping the next tick. */
@@ -224,10 +269,10 @@ export class AutoConfirmEngine {
 	constructor(options: AutoConfirmEngineOptions) {
 		this.vault = options.vault;
 		this.confirmations = options.confirmations;
-		this.onOutcome = options.onOutcome ?? ((): void => undefined);
-		this.onFailure = options.onFailure ?? ((): void => undefined);
-		this.onPending = options.onPending ?? ((): void => undefined);
-		this.onSignInNeeded = options.onSignInNeeded ?? ((): void => undefined);
+		this.onOutcome = guarded(options.onOutcome);
+		this.onFailure = guarded(options.onFailure);
+		this.onPending = guarded(options.onPending);
+		this.onSignInNeeded = guarded(options.onSignInNeeded);
 		this.requireProxies = options.requireProxies ?? ((): boolean => false);
 		this.ensureClock = options.ensureClock ?? ((): Promise<void> => Promise.resolve());
 		this.now = options.now ?? ((): number => Date.now());
@@ -333,9 +378,33 @@ export class AutoConfirmEngine {
 	}
 
 	/** Accounts with something enabled, whose next attempt is due. */
+	private epochOf(steamId64: string): number {
+		return this.epochs.get(steamId64) ?? 0;
+	}
+
+	/**
+	 * This account's route or settings changed. Disown whatever is in the air.
+	 *
+	 * Also clears its schedule, so the next beat rebuilds it from the vault —
+	 * which is what lets replacing a dead proxy lift the halt that dead proxy
+	 * caused. Nothing else did: a halted account was pinned until a settings
+	 * save, a lock, or a restart.
+	 */
+	forgetAccount(steamId64: string): void {
+		this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
+		this.state.delete(steamId64);
+		// A removed account never appears in the projection again, so nothing else
+		// could ever clear its entry — and a halted one left behind pins
+		// `earliestDueAt` at infinity, which stops the engine reading the vault at
+		// all.
+		this.earliestDueAt = 0;
+	}
+
 	private dueAccounts(): DueAccount[] {
 		const now = this.now();
 		const due: DueAccount[] = [];
+		/** How many accounts this beat is meeting for the first time. */
+		let seeded = 0;
 
 		/*
 		 * The projection, not the whole vault.
@@ -370,11 +439,44 @@ export class AutoConfirmEngine {
 
 			const state = this.state.get(account.steamId64);
 			// A halted account is left alone until something changes — settings, a
-			// lock, or a restart. Continuing to poke a dead session forever, quietly,
-			// is exactly what the halt exists to stop.
+			// route, a lock, or a restart. Continuing to poke a dead session
+			// forever, quietly, is exactly what the halt exists to stop.
 			if (state?.halted) {
 				continue;
 			}
+
+			// **An account nothing has scheduled yet gets a slot, not a request.**
+			//
+			// "No state" used to mean "due now", so every enabled account polled on
+			// the same beat after an unlock — twelve accounts, twelve concurrent
+			// requests, on twelve different proxies, at the one moment the vault is
+			// most obviously in use. The stagger existed but only ever applied to
+			// the *next* due time, so the first sweep of every session, and of every
+			// lock/unlock cycle, went out in lockstep.
+			//
+			// Seeding costs one beat before the first poll and keeps the spacing
+			// afterwards, because the accounts keep the offsets assigned here.
+			if (!state) {
+				const intervalMs = Math.max(MIN_INTERVAL_MS, account.pollIntervalSeconds * 1000);
+				// Spread over the **whole** interval, not the quarter `staggerFor`
+				// uses. That cap keeps a long list from walking into the next cycle,
+				// which matters when the offsets are already established; here there
+				// is nothing to walk into, and a quarter of fifteen seconds is three
+				// slots for however many accounts the vault holds.
+				const beats = Math.max(1, Math.floor(intervalMs / SCHEDULER_TICK_MS));
+				const offset = (seeded % beats) * SCHEDULER_TICK_MS;
+				seeded += 1;
+				if (offset > 0) {
+					this.state.set(account.steamId64, { nextDueAt: now + offset });
+					continue;
+				}
+				// Offset zero: this one goes now, and `runOne` writes its schedule.
+				// Holding even the first account back would make every unlock feel
+				// like the app had not started.
+			}
+
+			// `state` is still undefined on the offset-zero fall-through above, which
+			// is the one path that reaches here without one.
 			if (state && state.nextDueAt > now) {
 				continue;
 			}
@@ -389,6 +491,13 @@ export class AutoConfirmEngine {
 				notify: wantsNotify,
 				detail: account.notify.detail
 			});
+		}
+
+		// The seeded entries are new deadlines, so the cheap early-out has to learn
+		// about them — otherwise it keeps the stale one and the beat that was
+		// supposed to poll them never reads the vault.
+		if (seeded > 0) {
+			this.rememberEarliest();
 		}
 
 		return due;
@@ -440,6 +549,18 @@ export class AutoConfirmEngine {
 		const { steamId64, accountName, mode, notify, detail } = account;
 		const interval = Math.max(MIN_INTERVAL_MS, account.pollIntervalSeconds * 1000);
 		const jitter = this.staggerFor(index, interval);
+		/**
+		 * The route this poll was started on.
+		 *
+		 * Checked beside `generation` at every write. A proxy change aborts the
+		 * request in flight, and that abort arrives as an ordinary error — so
+		 * without this the user's own save was scored as a Steam failure, backed
+		 * the account off by up to fifteen minutes, and counted toward the halt.
+		 */
+		const epoch = this.epochOf(steamId64);
+		/** True while this poll still owns the account it was started for. */
+		const current = (): boolean =>
+			this.generation === generation && this.epochOf(steamId64) === epoch;
 
 		try {
 			if (mode === 'confirm') {
@@ -450,7 +571,7 @@ export class AutoConfirmEngine {
 				// really did occur — but nothing may be scheduled on a cleared map,
 				// and **no `onPending`**: a lock happened, and a toast raised after
 				// the vault closed is precisely what `stop()` exists to prevent.
-				if (this.generation !== generation) {
+				if (!current()) {
 					this.onOutcome(steamId64, outcome);
 					return;
 				}
@@ -478,7 +599,7 @@ export class AutoConfirmEngine {
 			// with both switches off and returns an empty outcome, so an account
 			// routed through it would poll forever and never tell anybody anything.
 			const listing = await this.confirmations.list(steamId64);
-			if (this.generation !== generation) {
+			if (!current()) {
 				return;
 			}
 			this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
@@ -491,7 +612,9 @@ export class AutoConfirmEngine {
 			// lock", and counting the second toward the ten-strike halt means normal
 			// locking eventually stops automatic confirmation for good — a fault the
 			// user never caused and cannot see the cause of.
-			if (this.generation !== generation) {
+			// A lock, or this account's route changing under the request. Neither is
+			// a Steam failure and neither may write to a schedule that has moved on.
+			if (!current()) {
 				return;
 			}
 

@@ -55,6 +55,23 @@ export class ActivityLog {
 	private readonly entries = new Map<string, ActivityEntry[]>();
 
 	/**
+	 * Accounts whose session is currently known to be expired.
+	 *
+	 * **The run is tracked here rather than inferred from the newest entry**,
+	 * and that distinction is the whole fix. Keying on "is the last entry
+	 * `signInRequired`?" assumed every successful poll writes something. Most do
+	 * not: a notify-only poll writes nothing by design, and a confirm pass that
+	 * approved nothing and held nothing back writes nothing either. So the
+	 * newest entry stayed `signInRequired` for ever, and an account that expired,
+	 * was acknowledged, recovered and expired **again** produced no second entry
+	 * and no badge — silence on exactly the condition only the user can clear.
+	 *
+	 * A Set keyed by account is also unaffected by the hundred-entry trim, which
+	 * the last-entry check was not.
+	 */
+	private readonly signInOpen = new Set<string>();
+
+	/**
 	 * A counter, not a timestamp, deciding what counts as unseen.
 	 *
 	 * `Date.parse(entry.at) > acknowledgedAtMs` looked equivalent and was not: two
@@ -91,6 +108,10 @@ export class ActivityLog {
 		/** Entries Steam sent that this build could not read. */
 		unreadable = 0
 	): void {
+		// **Before the guards below, not after them.** A pass that approved
+		// nothing and held nothing back writes no entry at all — and it is still
+		// proof that the session works.
+		this.signInOpen.delete(steamId64);
 		const at = new Date(this.now()).toISOString();
 
 		if (unreadable > 0) {
@@ -127,6 +148,9 @@ export class ActivityLog {
 	 * to show it had happened.
 	 */
 	recordFailure(steamId64: string, reason: string, halted = false): void {
+		// A failure that is not an expiry still proves the request went out and
+		// came back, so it ends any run in progress.
+		this.signInOpen.delete(steamId64);
 		const at = new Date(this.now()).toISOString();
 		this.push(steamId64, { kind: halted ? 'halted' : 'failed', at, reason });
 	}
@@ -150,11 +174,23 @@ export class ActivityLog {
 	 * composed in another file.
 	 */
 	recordSignInRequired(steamId64: string): void {
-		const list = this.entries.get(steamId64);
-		if (list && list[list.length - 1]?.kind === 'signInRequired') {
+		if (this.signInOpen.has(steamId64)) {
 			return;
 		}
+		this.signInOpen.add(steamId64);
 		this.push(steamId64, { kind: 'signInRequired', at: new Date(this.now()).toISOString() });
+	}
+
+	/**
+	 * A poll reached Steam and got an answer. The session works.
+	 *
+	 * Called for **every** success, including the quiet ones that write no entry
+	 * — which is why it exists at all. It deliberately records nothing: a poll
+	 * that found nothing is not something to read about later, but it is proof
+	 * that an earlier expiry is over.
+	 */
+	notePollSucceeded(steamId64: string): void {
+		this.signInOpen.delete(steamId64);
 	}
 
 	/** Newest first, because the newest is what someone returning wants. */
@@ -240,6 +276,7 @@ export class ActivityLog {
 	/** Drop everything. Called on quit. */
 	clear(): void {
 		this.entries.clear();
+		this.signInOpen.clear();
 	}
 
 	private push(steamId64: string, entry: ActivityEntry): void {

@@ -805,22 +805,47 @@ describe('one slow account does not block the others', () => {
 			read: () => ({ accounts: both }),
 			autoConfirmSchedule: () => scheduleOf(both)
 		} as unknown as VaultService;
+		// Armed only for the sweep under test: the two seeding ticks below have to
+		// complete, and gating the first account would hang them.
+		let gated = false;
 		const confirmations = {
 			runAutoConfirm: async (steamId64: string) => {
 				ran.push(steamId64);
-				if (steamId64 === '76561198000000001') {
+				if (gated && steamId64 === '76561198000000001') {
 					await gateA;
 				}
 				return { approved: [], held: [], unreadable: 0 };
 			}
 		} as unknown as ConfirmationsService;
 
-		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => 0 });
+		/*
+		 * **Two accounts have to be due in the SAME sweep for this to mean
+		 * anything**, and after the stampede fix they are not on the first one:
+		 * accounts are given staggered slots before any of them polls. So the
+		 * clock is advanced until both come round together, which is the state
+		 * this property is actually about — a sweep that holds two accounts must
+		 * not serialise them behind each other's network call.
+		 */
+		let at = 0;
+		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => at });
+
+		// Beat 0 seeds both and polls the first; beat 1 polls the second.
+		await engine.tick();
+		at = 1000;
+		await engine.tick();
+		expect(ran, 'both accounts should have had a first poll by now').toHaveLength(2);
+
+		// Far enough ahead that both intervals have elapsed.
+		ran.length = 0;
+		gated = true;
+		at = 60_000;
 		const sweep = engine.tick();
 
 		// Both must have been *started* while A is still gated.
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		expect(ran).toContain('76561198000000002');
+		expect(ran, 'the sweep serialised two accounts behind one another').toContain(
+			'76561198000000002'
+		);
 
 		releaseA?.();
 		await sweep;
@@ -864,9 +889,20 @@ describe('scheduling two accounts on the same interval', () => {
 			if (ranThisBeat > 0) beats.push(ranThisBeat);
 		}
 
-		// The first sweep is necessarily joint — nothing is scheduled yet.
-		expect(beats[0]).toBe(2);
-		expect(beats.slice(1).every((n) => n === 1)).toBe(true);
+		// **No joint beat at all, including the first — and that is the change.**
+		//
+		// This used to read "the first sweep is necessarily joint, nothing is
+		// scheduled yet", and asserted `beats[0]` was 2. That premise was the
+		// defect: an account with no state counted as due, so every unlock sent
+		// every enabled account to Steam on one beat, over as many proxies as the
+		// vault has. The stagger existed but only ever moved the *next* poll.
+		//
+		// Accounts are now given a slot before any of them polls, so there is no
+		// sweep in which two share a beat.
+		expect(
+			beats.every((n) => n === 1),
+			'two accounts shared a beat'
+		).toBe(true);
 		expect(beats.length).toBeGreaterThan(4);
 	});
 });
@@ -1437,5 +1473,204 @@ describe('what a halt says', () => {
 			accountName: 'trader',
 			mode: 'notify'
 		});
+	});
+});
+
+/**
+ * **A listener that throws is not Steam saying no.**
+ *
+ * Four of the six listeners run inside `runOne`'s `try`, so a notification that
+ * threw landed in the catch — where nothing can tell it from Steam refusing.
+ * The successful pass was overwritten with a backoff, logged as `failed` with
+ * the listener's own message, and on an hourly account the next poll was pulled
+ * from an hour to thirty seconds: the rule that a failure never speeds anything
+ * up, inverted by the reporting of a success. The two that run inside the catch
+ * were worse — a throw there escaped the sweep as an unhandled rejection.
+ */
+describe('a notification listener that throws', () => {
+	function h(which: 'onOutcome' | 'onPending' | 'onFailure' | 'onSignInNeeded', fail = false) {
+		const accounts = [account({ trades: true, notify: { enabled: true, detail: 'full' } })];
+		const boom = (): never => {
+			throw new Error('the toast host exploded');
+		};
+		const failures: { halted: boolean }[] = [];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: fail
+					? () => Promise.reject(new Error('steam said no'))
+					: () => Promise.resolve({ approved: [], held: [], unreadable: 0 })
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onOutcome: which === 'onOutcome' ? boom : () => undefined,
+			onPending: which === 'onPending' ? boom : () => undefined,
+			onSignInNeeded: which === 'onSignInNeeded' ? boom : () => undefined,
+			onFailure:
+				which === 'onFailure'
+					? boom
+					: (_id, _reason, halted) => {
+							failures.push({ halted });
+						},
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return { engine, failures };
+	}
+
+	it('does not turn a successful pass into a failure', async () => {
+		const { engine, failures } = h('onOutcome');
+		await engine.tick();
+		expect(failures, 'a throwing listener was recorded as Steam refusing').toEqual([]);
+	});
+
+	it('does not turn a successful poll into a failure from onPending either', async () => {
+		const { engine, failures } = h('onPending');
+		await engine.tick();
+		expect(failures).toEqual([]);
+	});
+
+	/*
+	 * The listeners inside the catch never reached a failure counter — they
+	 * escaped `runOne` entirely, rejecting the sweep with nothing anywhere in the
+	 * application handling it.
+	 */
+	it('does not reject the sweep from inside the failure path', async () => {
+		const { engine } = h('onFailure', true);
+		await expect(engine.tick()).resolves.toBeUndefined();
+	});
+
+	it('does not reject the sweep from the sign-in path', async () => {
+		const accounts = [account({ notify: { enabled: true, detail: 'full' } })];
+		const expired = new ConfirmationsError('the saved session expired.', true);
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				list: () => Promise.reject(expired)
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onSignInNeeded: () => {
+				throw new Error('the toast host exploded');
+			},
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		await expect(engine.tick()).resolves.toBeUndefined();
+	});
+
+	/*
+	 * And the guard must not swallow the thing it is standing next to.
+	 */
+	it('still records a real Steam failure', async () => {
+		const { engine, failures } = h('onOutcome', true);
+		await engine.tick();
+		expect(failures, 'guarding the listeners swallowed a real failure').toHaveLength(1);
+	});
+});
+
+/**
+ * **A route that changed under a request is not a failure.**
+ *
+ * Saving a proxy aborts whatever was in the air, and that abort reaches the
+ * engine as an ordinary error. Without a per-account epoch the user's own save
+ * was scored against them: a `failed` entry, a backoff of up to fifteen
+ * minutes, and a strike toward the halt.
+ */
+describe('an account whose route changes mid-poll', () => {
+	function parkedAccount() {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const accounts = [account({ trades: true })];
+		const failures: string[] = [];
+		const outcomes: string[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: async () => {
+					await gate;
+					throw new Error("this account's routing changed while the request was in the air.");
+				}
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onFailure: (_id, reason) => failures.push(reason),
+			onOutcome: (id) => outcomes.push(id),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return { engine, failures, outcomes, release: () => release?.() };
+	}
+
+	it('is not counted against the account', async () => {
+		const h = parkedAccount();
+		const sweep = h.engine.tick();
+		// Let the sweep reach the parked request before the route changes.
+		for (let i = 0; i < 5; i += 1) {
+			await Promise.resolve();
+		}
+
+		h.engine.forgetAccount('76561198000000001');
+		h.release();
+		await sweep;
+
+		expect(h.failures, "the user's own proxy save was logged as a Steam failure").toEqual([]);
+	});
+
+	/*
+	 * Replacing a dead proxy is the obvious remedy for the routing errors that
+	 * caused a halt. Nothing cleared it before: only a settings save, a lock, or
+	 * a restart did.
+	 */
+	it('clears a halt, so a replaced proxy can be tried again', async () => {
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		const failures: { halted: boolean }[] = [];
+		let calls = 0;
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () => {
+					calls += 1;
+					return Promise.reject(new Error('routing refused'));
+				}
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, _reason, halted) => failures.push({ halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		for (let i = 0; i < 10; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		expect(failures[9]?.halted, 'the account should be halted by now').toBe(true);
+
+		const before = calls;
+		await engine.tick();
+		expect(calls, 'a halted account was polled anyway').toBe(before);
+
+		engine.forgetAccount('76561198000000001');
+		clock += 20 * 60_000;
+		await engine.tick();
+		await engine.tick();
+		expect(calls, 'replacing the proxy did not lift the halt').toBeGreaterThan(before);
 	});
 });

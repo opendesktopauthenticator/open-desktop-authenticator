@@ -75,6 +75,16 @@ interface AccountNotifyState {
 	 * again.
 	 */
 	toldSignInNeeded: boolean;
+	/**
+	 * How many entries were unreadable on the last poll.
+	 *
+	 * **Without this the count has no memory and an unchanged one re-announces
+	 * itself every fifteen seconds, forever** — an unparseable entry that stays
+	 * pending on Steam is not an event, it is a state. That is precisely what the
+	 * note at the top of this file forbids, and the first version of this class
+	 * did it anyway: `unreadable > 0` was checked against nothing.
+	 */
+	lastUnreadable: number;
 }
 
 /**
@@ -97,7 +107,16 @@ const MAX_STEAM_TEXT = 60;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g;
 
-/** Cap and strip a string this application did not author. */
+/**
+ * Cap and strip a string this application did not author.
+ *
+ * **Applies to the account name as well as to Steam's strings**, which is not
+ * where this started. The name is typed by the user — or, far more often,
+ * copied verbatim out of an imported maFile, where nothing bounds it: the
+ * import schema asks only for a non-empty string. A 50KB name, or one carrying
+ * a bidirectional override, reached the toast **title** unmodified while the
+ * body beside it was carefully capped.
+ */
 function safeSteamText(value: string): string {
 	const stripped = value.replace(CONTROL_CHARACTERS, '').trim();
 	return stripped.length > MAX_STEAM_TEXT ? `${stripped.slice(0, MAX_STEAM_TEXT - 1)}…` : stripped;
@@ -180,7 +199,14 @@ export class ConfirmationNotifier {
 	 * a toast that looks identical and does nothing when clicked.
 	 */
 	private toast(steamId64: string, title: string, body: string): void {
-		this.host.show({ title, body, onClick: () => this.onActivate(steamId64) });
+		// The title is sanitised here rather than at each call site, for the same
+		// reason the click is attached here: four call sites is three chances to
+		// forget, and the one forgotten looks identical.
+		this.host.show({
+			title: safeSteamText(title),
+			body,
+			onClick: () => this.onActivate(steamId64)
+		});
 	}
 
 	private stateFor(steamId64: string): AccountNotifyState | undefined {
@@ -214,13 +240,22 @@ export class ConfirmationNotifier {
 		//    account takeover would show nothing at all.
 		if (!existing?.seeded) {
 			const critical = awaiting.filter((entry) => entry.securityCritical);
-			this.state.set(steamId64, { seeded: true, seen: ids, toldSignInNeeded: false });
-			if (critical.length > 0) {
-				this.toast(steamId64, accountName, composeBody(detail, critical, 0));
-				return;
-			}
-			if (unreadable > 0) {
-				this.toast(steamId64, accountName, composeBody(detail, [], unreadable));
+			this.state.set(steamId64, {
+				seeded: true,
+				seen: ids,
+				toldSignInNeeded: false,
+				// What was already there is the baseline, not news — the same
+				// reasoning as seeding `seen`. Recording 0 here instead would make
+				// the very next poll re-announce what this one just said.
+				lastUnreadable: unreadable
+			});
+			// **One toast, not two — on the first poll as well.** An earlier version
+			// returned after the critical toast, so an account whose first poll
+			// carried both a takeover attempt and an unparseable entry was told
+			// about the takeover and not about the entry that could not be read —
+			// which might have been a second one.
+			if (critical.length > 0 || unreadable > 0) {
+				this.toast(steamId64, accountName, composeBody(detail, critical, unreadable));
 			}
 			return;
 		}
@@ -244,9 +279,21 @@ export class ConfirmationNotifier {
 			existing.seen.add(entry.id);
 		}
 
-		// 5. One toast, not two. A poll bringing both a new confirmation and an
+		// 5. **A rise, not a presence.** `unreadable > 0` describes a state that
+		//    persists until somebody looks; announcing it per poll is an alarm,
+		//    not a notification. A drop is deliberately not announced — one of
+		//    them being resolved is not worth interrupting anybody for.
+		//
+		//    The assignment sits **above** the early return on purpose. Below it,
+		//    a poll that returns to zero would never be recorded, so a later
+		//    reappearance would compare against the old high-water mark and be
+		//    swallowed for good.
+		const newlyUnreadable = unreadable > existing.lastUnreadable;
+		existing.lastUnreadable = unreadable;
+
+		// 6. One toast, not two. A poll bringing both a new confirmation and an
 		//    unparseable one is still one thing happening.
-		if (fresh.length === 0 && unreadable === 0) {
+		if (fresh.length === 0 && !newlyUnreadable) {
 			return;
 		}
 		this.toast(steamId64, accountName, composeBody(detail, fresh, unreadable));
@@ -269,7 +316,12 @@ export class ConfirmationNotifier {
 		} else {
 			// `seeded: false` on purpose — no poll has succeeded, so the next one
 			// that does is still this account's first and must seed silently.
-			this.state.set(steamId64, { seeded: false, seen: new Set(), toldSignInNeeded: true });
+			this.state.set(steamId64, {
+				seeded: false,
+				seen: new Set(),
+				toldSignInNeeded: true,
+				lastUnreadable: 0
+			});
 		}
 		this.toast(steamId64, accountName, 'Sign in again to keep checking this account.');
 	}

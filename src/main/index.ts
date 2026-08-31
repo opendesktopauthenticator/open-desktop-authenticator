@@ -469,6 +469,18 @@ function start(): void {
 		directTransports.forget(steamId64);
 		confirmations.forgetAccount(steamId64);
 		notifier.forgetAccount(steamId64);
+		// **And the poller's schedule for it.** Changing a proxy aborts whatever
+		// was in the air, and that abort arrives at the engine as an ordinary
+		// error — so without this the user's own save was recorded as a Steam
+		// failure, pushed the next poll out by up to fifteen minutes, and counted
+		// toward the ten-strike halt. It also means replacing a dead proxy lifts
+		// the halt that dead proxy caused, which nothing else did.
+		//
+		// For a removed account it is the only thing that can clear the entry: a
+		// removed account never appears in the projection again, and a halted one
+		// left behind pins `earliestDueAt` at infinity, which stops the engine
+		// reading the vault at all.
+		autoConfirm.forgetAccount(steamId64);
 
 		// **And the browser window, which is the newest thing tied to a route.**
 		// The two calls above drop what this process holds; a window opened for
@@ -588,8 +600,14 @@ function start(): void {
 				notifier.halted(steamId64, context.accountName, context.mode);
 			}
 		},
-		onPending: (steamId64, accountName, awaiting, unreadable, detail) =>
-			notifier.pending(steamId64, accountName, awaiting, unreadable, detail),
+		onPending: (steamId64, accountName, awaiting, unreadable, detail) => {
+			// **The only success signal the notify arm emits.** It writes no
+			// activity entry by design, so without this an account that expired,
+			// recovered and expired again would produce no second alert — the log
+			// would still believe the first expiry was live.
+			activity.notePollSucceeded(steamId64);
+			notifier.pending(steamId64, accountName, awaiting, unreadable, detail);
+		},
 		onSignInNeeded: (steamId64, accountName) => {
 			// Both, and they answer different questions. The toast interrupts once;
 			// the log entry is what a person finds when they come back to a machine
