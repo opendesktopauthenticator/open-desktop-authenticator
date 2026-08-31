@@ -176,6 +176,7 @@ function harness(
 	// Mutable, so a test can let the retry succeed — which is the difference
 	// between "refuses for ever" and "asks again once".
 	let wipeFails = overrides.wipeFails === true;
+	let loadFails = overrides.loadFails === true;
 
 	const window: BrowserWindowHandle = {
 		loadURL: (url) => {
@@ -188,7 +189,7 @@ function harness(
 				// Electron reports navigation as the load happens, not after it.
 				navigate(overrides.redirectsToDuringLoad);
 			}
-			if (overrides.loadFails === true) {
+			if (loadFails) {
 				return Promise.reject(new Error('ERR_TUNNEL_CONNECTION_FAILED'));
 			}
 			/*
@@ -256,6 +257,10 @@ function harness(
 		/** Let a wipe that was failing start working. */
 		letWipeSucceed: () => {
 			wipeFails = false;
+		},
+		/** Let a load that was failing start working. */
+		letLoadSucceed: () => {
+			loadFails = false;
 		},
 		/** Fire the window's own `closed`, as Electron would. */
 		endWindow: () => {
@@ -2682,5 +2687,83 @@ describe('a partition a lock could not clear', () => {
 		h.endWindow();
 		await browsers.closeAll();
 		await expect(browsers.open(ACCOUNT)).resolves.toBeUndefined();
+	});
+});
+
+/**
+ * **The sweeps that must reach a window whose load never settled.**
+ *
+ * Handing the window over before the load is only half the fix; every path that
+ * tears a window down has to look in that map. `closeNotFullyRouted` did not,
+ * so turning on `Require proxies` bumped the epoch for an in-flight open — a
+ * check that only runs after an await which, for a hanging load, never
+ * arrives — and left the unrouted signed-in window on screen under a rule
+ * forbidding exactly it.
+ */
+describe('Require proxies while a window is still being built', () => {
+	it('closes an unrouted window whose load has not settled', async () => {
+		const h = harness({ loadHangs: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		void browsers.open({ ...ACCOUNT, route: 'direct' }).catch(() => undefined);
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		expect(h.recorded.windows, 'the window should exist by now').toHaveLength(1);
+
+		await browsers.closeNotFullyRouted();
+
+		expect(
+			h.recorded.closed,
+			'an unrouted signed-in window survived the rule that forbids it'
+		).toBe(1);
+	});
+});
+
+/**
+ * **A wipe that failed has to be remembered on every path that performs one.**
+ *
+ * Three of them dropped the answer: the cancel branch inside `open`, and both
+ * refusal paths inside `openAccountBrowser`. A partition left holding a
+ * `steamLoginSecure` is then reused by the next open — including one on a
+ * different route, which is the two routes sharing a cookie jar that links
+ * them.
+ */
+describe('a wipe that failed on a path other than closeAccount', () => {
+	it('is remembered when a failed load could not clear the jar', async () => {
+		const h = harness({ loadFails: true, wipeFails: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		await expect(browsers.open(ACCOUNT)).rejects.toBeInstanceOf(BrowserSessionError);
+
+		// The retry is the observable: a remembered dirty partition refuses rather
+		// than reusing the jar the failed attempt signed into.
+		h.letLoadSucceed();
+		await expect(
+			browsers.open(ACCOUNT),
+			'the next open reused a jar the failed attempt had signed into'
+		).rejects.toBeInstanceOf(BrowserSessionError);
+	});
+
+	/*
+	 * And a lock reaches it. `closeAccount` removes the account from `seeded`
+	 * before wiping, so a wipe that then failed left it in neither map — and the
+	 * lock sweep, built from those two, issued no clear at all. The refusal the
+	 * user sees says to lock and unlock the vault; this is what makes that true.
+	 */
+	it('is wiped by the next lock, which is what the refusal advises', async () => {
+		const h = harness({ wipeFails: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		await browsers.open(ACCOUNT);
+		await browsers.closeAccount(ACCOUNT.steamId64);
+		const afterClose = h.recorded.wiped.length;
+
+		await browsers.closeAll();
+
+		expect(
+			h.recorded.wiped.length,
+			'the lock did not even try the partition it had been told was dirty'
+		).toBeGreaterThan(afterClose);
 	});
 });

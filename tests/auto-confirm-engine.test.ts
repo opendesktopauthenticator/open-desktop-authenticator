@@ -1774,3 +1774,137 @@ describe('notification settings changed while a poll was in the air', () => {
 		expect(outcomes, 'a real approval went unrecorded').toHaveLength(1);
 	});
 });
+
+/**
+ * **An invalidation a sibling could undo.**
+ *
+ * `forgetAccount` and `reset` set `earliestDueAt = 0` so the next beat re-reads
+ * the vault. Any *other* account's poll finishing later in the same sweep then
+ * calls `rememberEarliest`, which recomputes that cache from the state map —
+ * and the forgotten account is no longer in it, so the invalidation is quietly
+ * reversed by an account it has nothing to do with.
+ *
+ * With one account it is harmless: the map goes empty and the recompute yields
+ * 0 anyway, which is exactly why every earlier test of these two methods
+ * missed it. With two it is not, and the worst shape is a halted sibling: its
+ * entry holds `Infinity`, so the recompute pins the cache there and the beat's
+ * early-out stops the engine reading the vault at all — for every account.
+ */
+describe('a schedule invalidated while another account is mid-poll', () => {
+	function twoAccounts(runFor: (steamId64: string) => Promise<never> | Promise<unknown>) {
+		const accounts = [
+			account({ trades: true }, { steamId64: '76561198000000001' }),
+			account({ trades: true }, { steamId64: '76561198000000002' })
+		];
+		let clock = NOW;
+		let reads = 0;
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => {
+				reads += 1;
+				return scheduleOf(accounts);
+			}
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: { runAutoConfirm: runFor } as unknown as ConfirmationsService,
+			now: () => clock,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return {
+			engine,
+			reads: () => reads,
+			advance: (ms: number) => {
+				clock += ms;
+			}
+		};
+	}
+
+	it('still re-reads the vault when a halted sibling holds infinity', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let park = false;
+		// **The SIBLING is the one parked.** The forgotten account's own poll is
+		// disowned by its epoch and returns before writing anything, so it cannot
+		// be what undoes the invalidation. It is the other account — whose epoch
+		// is untouched, and which therefore completes normally and recomputes the
+		// cache from a map the forgotten account has just left.
+		const h = twoAccounts(async (steamId64) => {
+			if (steamId64 === '76561198000000002') {
+				if (park) {
+					await gate;
+				}
+				throw new Error('steam said no');
+			}
+			return { approved: [], held: [], unreadable: 0 };
+		});
+
+		// Nine failures: one short of the halt, so the tenth lands while parked.
+		for (let i = 0; i < 9; i += 1) {
+			await h.engine.tick();
+			h.advance(20 * 60_000);
+		}
+
+		park = true;
+		const sweep = h.engine.tick();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+
+		// The user repairs the OTHER account's proxy while that poll is in flight.
+		h.engine.forgetAccount('76561198000000001');
+
+		// The sibling's tenth failure halts it, writing `Infinity` and recomputing.
+		release?.();
+		await sweep;
+
+		const before = h.reads();
+		await h.engine.tick();
+
+		expect(
+			h.reads(),
+			'a halted sibling pinned the cache at infinity and the engine went silent'
+		).toBeGreaterThan(before);
+	});
+
+	it('still re-reads the vault when a sibling reschedules normally', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let park = false;
+		const h = twoAccounts(async (steamId64) => {
+			if (steamId64 === '76561198000000002' && park) {
+				await gate;
+			}
+			return { approved: [], held: [], unreadable: 0 };
+		});
+
+		// Both accounts get their slots and their first polls.
+		await h.engine.tick();
+		h.advance(1000);
+		await h.engine.tick();
+		h.advance(20 * 60_000);
+
+		// The sibling's poll is in flight when the user saves settings for the
+		// other account. Its healthy `nextDueAt` must not overwrite the
+		// invalidation `reset` just made.
+		park = true;
+		const sweep = h.engine.tick();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		h.engine.reset('76561198000000001');
+		release?.();
+		await sweep;
+
+		const before = h.reads();
+		await h.engine.tick();
+
+		expect(h.reads(), 'a sibling rescheduling undid the invalidation').toBeGreaterThan(before);
+	});
+});

@@ -259,6 +259,17 @@ export interface OpenBrowserOptions {
 	 * in, in no map, for as long as the hang lasts.
 	 */
 	onCreated?: (window: BrowserWindowHandle) => void;
+	/**
+	 * Told whether a failed open managed to empty the partition behind it.
+	 *
+	 * Both refusal paths below close the window and wipe the session, and both
+	 * used to discard whether the wipe worked. A failure there leaves the jar
+	 * holding the `steamLoginSecure` this function had just set — so a retry, or
+	 * an open on a *different* route, silently inherits the session the failed
+	 * attempt established. That is the two routes sharing a cookie jar, which is
+	 * the thing the caller's dirty-partition tracking exists to prevent.
+	 */
+	onWipe?: (cleared: boolean) => void;
 }
 
 /**
@@ -527,14 +538,21 @@ export async function openAccountBrowser(
 	try {
 		await window.loadURL(START_URL);
 	} catch (cause) {
-		await abandon(window, session);
+		// **Awaited into a variable, never inline into `onWipe?.()`.** Optional
+		// chaining short-circuits the whole call expression *including its
+		// arguments*, so with no listener attached the `abandon` would never run —
+		// the window would stay open and the partition unwiped, on the two paths
+		// whose entire job is to undo a signed-in window.
+		const cleared = await abandon(window, session);
+		options.onWipe?.(cleared);
 		throw new BrowserSessionError('the browser could not reach Steam, so it was closed', {
 			cause
 		});
 	}
 
 	if (looksSignedOut(window.currentUrl())) {
-		await abandon(window, session);
+		const cleared = await abandon(window, session);
+		options.onWipe?.(cleared);
 		throw new BrowserSignInRequired(
 			`Steam did not accept the saved session for ${options.accountName}. ` +
 				'Sign in to that account again.'
@@ -1085,7 +1103,8 @@ export class AccountBrowsers {
 					// Recorded while it is still being built, so a lock or a routing
 					// change can close it without waiting for a load that may never
 					// finish.
-					onCreated: (created) => this.building.set(options.steamId64, created)
+					onCreated: (created) => this.building.set(options.steamId64, created),
+					onWipe: (cleared) => this.mark(options.steamId64, cleared)
 				});
 			} finally {
 				// **In a `finally`, because the throwing paths matter as much.**
@@ -1098,7 +1117,11 @@ export class AccountBrowsers {
 				// The vault locked, or this account's routing changed, while the
 				// window was being built. Either way what just opened is signed in
 				// under conditions that no longer hold.
-				await abandon(window, this.sessionFor(options.steamId64));
+				// **Recorded, like every other wipe.** Dropping this boolean meant a
+				// partition emptied on the one path that exists to undo a signed-in
+				// window was never marked when it failed — so the next open reused a
+				// jar still holding the session this branch was cancelling.
+				this.mark(options.steamId64, await abandon(window, this.sessionFor(options.steamId64)));
 				throw new BrowserSessionError(
 					generation !== this.generation
 						? 'the vault locked while the browser was opening, so it was closed'
@@ -1306,6 +1329,28 @@ export class AccountBrowsers {
 		for (const [steamId64, entry] of this.opening) {
 			if (!entry.route.startsWith('proxy:')) {
 				this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
+
+				/*
+				 * **And close the window if one already exists.**
+				 *
+				 * The epoch bump above is read by `open` after every await, and a
+				 * load that never settles never reaches one — which is the whole
+				 * reason the window is handed over before the load rather than
+				 * after. Bumping alone left the exact window this sweep exists for,
+				 * signed in and unrouted, on screen under a rule that forbids it.
+				 */
+				const halfBuilt = this.building.get(steamId64);
+				this.building.delete(steamId64);
+				if (halfBuilt) {
+					try {
+						if (!halfBuilt.isDestroyed()) {
+							halfBuilt.close();
+						}
+					} catch {
+						// Already gone.
+					}
+					this.dirty.add(steamId64);
+				}
 			}
 		}
 
@@ -1393,7 +1438,17 @@ export class AccountBrowsers {
 		 * A window the user closed themselves is exactly the case the map cannot
 		 * answer for, and it is the common one.
 		 */
-		const partitions = new Set([...closing.keys(), ...this.seeded]);
+		/*
+		 * **And every partition a previous teardown failed to empty.**
+		 *
+		 * `closeAccount` removes the account from `seeded` before it wipes, so a
+		 * wipe that then failed left it in neither map — and this sweep, built
+		 * from those two, issued no clear for it at all. The refusal a later open
+		 * gives tells the user to lock and unlock the vault, which is advice this
+		 * sweep could not act on. Now it can, and that is the whole reason the
+		 * message says it.
+		 */
+		const partitions = new Set([...closing.keys(), ...this.seeded, ...this.dirty]);
 		this.seeded.clear();
 
 		for (const window of [...closing.values(), ...halfBuilt]) {

@@ -240,6 +240,28 @@ export class AutoConfirmEngine {
 	 */
 	private readonly epochs = new Map<string, number>();
 
+	/**
+	 * The schedule was invalidated and has not been rebuilt from the vault yet.
+	 *
+	 * **`earliestDueAt = 0` is not enough on its own**, and assuming it was is a
+	 * defect this class shipped with. Any other account's `runOne` finishing
+	 * later in the same sweep calls `rememberEarliest`, which recomputes the
+	 * cache from the state map — a map the forgotten account is no longer in — so
+	 * the invalidation is silently undone by a sibling.
+	 *
+	 * With one account it is harmless: the map goes empty and the ternary yields
+	 * 0 anyway, which is why every test of `reset` and `forgetAccount` missed it.
+	 * With two it is not. A halted sibling holds `nextDueAt: Infinity`, so the
+	 * recompute pins `earliestDueAt` at Infinity and the beat's early-out stops
+	 * the engine reading the vault at all — for **every** account, until a lock
+	 * or another settings save. The account whose proxy was just repaired is
+	 * never re-seeded, which is precisely the freeze `forgetAccount` was written
+	 * to prevent.
+	 *
+	 * Cleared by `tick` once `dueAccounts` has actually re-read the vault.
+	 */
+	private scheduleDirty = false;
+
 	private earliestDueAt = 0;
 	private ticker: NodeJS.Timeout | undefined;
 	/** Guards against a slow pass overlapping the next tick. */
@@ -338,6 +360,7 @@ export class AutoConfirmEngine {
 		 */
 		this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
 		this.state.delete(steamId64);
+		this.scheduleDirty = true;
 		// The schedule just changed; the cached soonest time may no longer be it.
 		this.earliestDueAt = 0;
 	}
@@ -385,6 +408,17 @@ export class AutoConfirmEngine {
 			// still caught: `runOne` checks the generation around its own await, and
 			// the service refuses work for a locked vault.
 			const due = this.dueAccounts();
+			// The vault has now been re-read and the schedule rebuilt from it, so
+			// the invalidation has been honoured and a later `rememberEarliest` may
+			// trust the map again.
+			//
+			// **Clearing it one line earlier is an equivalent mutant, not an
+			// untested one.** Nothing between the two positions reads the flag
+			// except the seeded-accounts `rememberEarliest` inside `dueAccounts`,
+			// and recomputing there is correct: those slots were just assigned from
+			// the vault this call read. Recorded so the next person to notice does
+			// not go looking for the missing test.
+			this.scheduleDirty = false;
 			if (this.generation !== generation || !this.vault.isUnlocked()) {
 				return;
 			}
@@ -410,6 +444,7 @@ export class AutoConfirmEngine {
 	forgetAccount(steamId64: string): void {
 		this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
 		this.state.delete(steamId64);
+		this.scheduleDirty = true;
 		// A removed account never appears in the projection again, so nothing else
 		// could ever clear its entry — and a halted one left behind pins
 		// `earliestDueAt` at infinity, which stops the engine reading the vault at
@@ -708,6 +743,12 @@ export class AutoConfirmEngine {
 	 * has never run has no entry at all.
 	 */
 	private rememberEarliest(): void {
+		// An invalidation outranks a recomputation: the map cannot describe an
+		// account that was just removed from it.
+		if (this.scheduleDirty) {
+			this.earliestDueAt = 0;
+			return;
+		}
 		let soonest = Number.POSITIVE_INFINITY;
 		for (const entry of this.state.values()) {
 			if (entry.nextDueAt < soonest) {
