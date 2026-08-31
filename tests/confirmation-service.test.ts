@@ -1393,3 +1393,94 @@ describe('cancelling unrouted sign-ins when the policy changes', () => {
 		expect(cancelled).toEqual([]);
 	});
 });
+
+/**
+ * **Steam signals an expired session with an HTTP status, and nothing read it.**
+ *
+ * A real 401 or 403 becomes `ConfirmationProtocolError({ kind: 'sessionExpired'
+ * })` in the client, while both consumers of this service ask only about
+ * `ConfirmationsError.needsSignIn`. So the one condition a person can actually
+ * fix arrived as an anonymous error: the confirmations screen printed a generic
+ * message instead of the password form, and the poller counted it as an
+ * ordinary failure — backing off, and halting the account after ten of them.
+ *
+ * These go through the real client, from an HTTP status to what the service
+ * throws, because the translation is the whole point and a fake that threw
+ * `ConfirmationsError` directly would prove nothing.
+ */
+describe('a session Steam has stopped accepting', () => {
+	/** Answers the token endpoint, then refuses mobileconf with `status`. */
+	function refusing(status: number): SteamTransportFactory {
+		const transport = (request: SteamRequest): Promise<SteamResponse> => {
+			if (request.url.includes('GenerateAccessTokenForApp')) {
+				return Promise.resolve({
+					status: 200,
+					text: JSON.stringify({ response: { access_token: ACCESS } })
+				});
+			}
+			return Promise.resolve({ status, text: '' });
+		};
+		return { forAccount: () => Promise.resolve(transport) } as unknown as SteamTransportFactory;
+	}
+
+	it.each([401, 403])('is reported as needing a sign-in, not as an error (%i)', async (status) => {
+		const svc = service(fakeVault([account()]), refusing(status));
+		const outcome = await svc.list('76561198000000001').then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		expect(outcome, `HTTP ${status} did not surface as a sign-in`).toBeInstanceOf(
+			ConfirmationsError
+		);
+		expect(
+			(outcome as ConfirmationsError).needsSignIn,
+			'the screen would show a generic error instead of the password form'
+		).toBe(true);
+	});
+
+	/*
+	 * The poller's path, which is the one that compounds. Without the
+	 * translation it is an ordinary failure: backoff, then a halt after ten —
+	 * for a condition no amount of retrying resolves.
+	 */
+	it('is reported the same way on the auto-confirm path', async () => {
+		const svc = service(
+			fakeVault([account({ autoConfirm: { ...newAutoConfirm(), trades: true } })]),
+			refusing(401)
+		);
+		const outcome = await svc.runAutoConfirm('76561198000000001').then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		expect(outcome).toBeInstanceOf(ConfirmationsError);
+		expect((outcome as ConfirmationsError).needsSignIn).toBe(true);
+	});
+
+	it('is reported the same way when acting on a confirmation', async () => {
+		const svc = service(fakeVault([account()]), refusing(403));
+		// `act` needs a listed id, and listing is what fails here — so the refusal
+		// surfaces from the list this call performs first.
+		const outcome = await svc.act('76561198000000001', 'allow', ['11']).then(
+			() => undefined,
+			(err: unknown) => err
+		);
+		expect(outcome).toBeInstanceOf(ConfirmationsError);
+	});
+
+	/*
+	 * And an ordinary Steam failure must not be mistaken for one. Translating too
+	 * eagerly would send somebody to a password form over a 500.
+	 */
+	it('does not treat an ordinary failure as a sign-in', async () => {
+		const svc = service(fakeVault([account()]), refusing(500));
+		const outcome = await svc.list('76561198000000001').then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		const needsSignIn = outcome instanceof ConfirmationsError ? outcome.needsSignIn : false;
+		expect(needsSignIn, 'a server error sent the user to a password form').toBe(false);
+	});
+});

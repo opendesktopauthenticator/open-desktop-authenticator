@@ -124,3 +124,44 @@ describe('opening confirmations from a notification', () => {
 		expect(effect).toContain('accounts.length === 0');
 	});
 });
+
+/**
+ * **A screen holding one account's state must not be handed another account.**
+ *
+ * `<Confirmations>` had no key, so React reused the instance when the target
+ * changed. Its fetch effect depends on the id and re-ran; nothing else did.
+ * Clicking account B's notification left A's confirmation list on screen with
+ * buttons that now acted on B, A's error text, and — if A was showing the
+ * password form — the password already typed into it, with the callback
+ * silently repointed at B.
+ *
+ * Notification click-to-open is what made this reachable in one gesture, but
+ * every account-scoped screen holding unsaved input has the same shape.
+ *
+ * Asserted against the source because this project has no DOM runner. It is a
+ * weaker test than rendering the transition, and it is pinned on the one line
+ * that decides it.
+ */
+describe('screens that hold one account state', () => {
+	const app = readFileSync(join(__dirname, '..', 'src', 'renderer', 'App.tsx'), 'utf8');
+
+	/** The props of one JSX element, from its opening tag to the first `/>`. */
+	const element = (name: string): string => {
+		const start = app.indexOf(`<${name}`);
+		expect(start, `${name} is no longer mounted here`).toBeGreaterThan(-1);
+		return app.slice(start, app.indexOf('/>', start));
+	};
+
+	it.each([
+		['Confirmations', 'confirmingFor.steamId64'],
+		['SteamSignIn', 'browserSignIn.account.steamId64'],
+		['RemoveAccount', 'removingFor.steamId64'],
+		['AutoConfirm', 'current.steamId64'],
+		['AccountRouting', 'current.steamId64']
+	])('%s is keyed by account', (name, key) => {
+		expect(
+			element(name),
+			`${name} would be reused across accounts, carrying the previous one's state`
+		).toContain(`key={${key}}`);
+	});
+});

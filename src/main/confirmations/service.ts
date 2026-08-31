@@ -1,5 +1,6 @@
 import { ConfirmationsClient, buildSessionCookie, type ConfirmationAccount } from './client';
 import { describeType, isAutoConfirmable, isSecurityCritical } from './policy';
+import { ConfirmationProtocolError } from './protocol';
 import type { Confirmation, ConfirmationAction } from './protocol';
 import { AccessTokenError, mintAccessToken } from '../steam/access-token';
 import { PROXY_POLICY_STOPPED, signIn, SteamLoginError } from '../steam/login';
@@ -210,6 +211,34 @@ export class ConfirmationsService {
 	}
 
 	/** Pending confirmations for one account, as the renderer may see them. */
+	/**
+	 * Run work that talks to Steam, translating an expired session on the way out.
+	 *
+	 * **Steam signals expiry with an HTTP status, and nothing was reading it.**
+	 * A real 401 or 403 becomes `ConfirmationProtocolError({ kind:
+	 * 'sessionExpired' })` in the client, while both consumers ask only about
+	 * `ConfirmationsError.needsSignIn`. So the one condition a person can
+	 * actually fix arrived as an anonymous error: the confirmations screen
+	 * printed a generic message instead of the password form, and the poller
+	 * counted it as an ordinary failure — backing off, and halting the account
+	 * after ten of them.
+	 *
+	 * Translated here rather than at each call site, and rather than in the
+	 * client: the client's job is to say what Steam sent, and this is the
+	 * boundary where that becomes something the rest of the app acts on. It
+	 * mirrors what already happens one layer down for `AccessTokenError`.
+	 */
+	private async translating<T>(work: () => Promise<T>): Promise<T> {
+		try {
+			return await work();
+		} catch (err) {
+			if (err instanceof ConfirmationProtocolError && err.failure.kind === 'sessionExpired') {
+				throw new ConfirmationsError(err.failure.message, true);
+			}
+			throw err;
+		}
+	}
+
 	async list(steamId64: string): Promise<ConfirmationListing> {
 		// Captured here, at the call, rather than inside the queued work. Work that
 		// has not started yet was still *requested* before the lock, and reading the
@@ -217,23 +246,27 @@ export class ConfirmationsService {
 		// changed — making the guard agree with itself and catch nothing.
 		const grant = this.grantFor(steamId64);
 
-		return this.serialise(steamId64, async () => {
-			const { account, client, cookie } = await this.connect(steamId64, grant);
-			const { confirmations, unreadable } = await client.list(account, cookie);
+		return this.translating(() =>
+			this.serialise(steamId64, async () => {
+				const { account, client, cookie } = await this.connect(steamId64, grant);
+				const { confirmations, unreadable } = await client.list(account, cookie);
 
-			// Checked *after* the await, before anything is written back. If the vault
-			// locked while this was in flight, these nonces are no longer ours to keep.
-			this.requireGrant(steamId64, grant);
+				// Checked *after* the await, before anything is written back. If the vault
+				// locked while this was in flight, these nonces are no longer ours to keep.
+				this.requireGrant(steamId64, grant);
 
-			// Remembered so `act` can resolve an id back to its nonce and type without
-			// the renderer ever holding either.
-			this.pending.set(
-				steamId64,
-				new Map(confirmations.map((entry) => [entry.id, { nonce: entry.nonce, type: entry.type }]))
-			);
+				// Remembered so `act` can resolve an id back to its nonce and type without
+				// the renderer ever holding either.
+				this.pending.set(
+					steamId64,
+					new Map(
+						confirmations.map((entry) => [entry.id, { nonce: entry.nonce, type: entry.type }])
+					)
+				);
 
-			return { confirmations: confirmations.map(toSummary), unreadable };
-		});
+				return { confirmations: confirmations.map(toSummary), unreadable };
+			})
+		);
 	}
 
 	/**
@@ -251,32 +284,34 @@ export class ConfirmationsService {
 
 		const grant = this.grantFor(steamId64);
 
-		return this.serialise(steamId64, async () => {
-			const resolved: Confirmation[] = [];
-			for (const id of ids) {
-				const entry = this.pending.get(steamId64)?.get(id);
-				if (entry === undefined) {
-					throw new ConfirmationsError('this list is out of date. Refresh it and choose again.');
+		return this.translating(() =>
+			this.serialise(steamId64, async () => {
+				const resolved: Confirmation[] = [];
+				for (const id of ids) {
+					const entry = this.pending.get(steamId64)?.get(id);
+					if (entry === undefined) {
+						throw new ConfirmationsError('this list is out of date. Refresh it and choose again.');
+					}
+					// The type comes from what Steam actually sent, not from the renderer —
+					// so S16's batch rule cannot be sidestepped by a caller claiming a
+					// recovery confirmation is a trade.
+					resolved.push({ id, nonce: entry.nonce, type: entry.type });
 				}
-				// The type comes from what Steam actually sent, not from the renderer —
-				// so S16's batch rule cannot be sidestepped by a caller claiming a
-				// recovery confirmation is a trade.
-				resolved.push({ id, nonce: entry.nonce, type: entry.type });
-			}
 
-			const { account, client, cookie } = await this.connect(steamId64, grant);
-			await client.act(account, cookie, action, resolved);
+				const { account, client, cookie } = await this.connect(steamId64, grant);
+				await client.act(account, cookie, action, resolved);
 
-			this.requireGrant(steamId64, grant);
+				this.requireGrant(steamId64, grant);
 
-			// Acted on, so no longer pending. Read fresh rather than held across the
-			// await: a map captured beforehand could have been replaced, leaving the
-			// removal to land on an orphan while the live one still held the nonce.
-			const current = this.pending.get(steamId64);
-			for (const id of ids) {
-				current?.delete(id);
-			}
-		});
+				// Acted on, so no longer pending. Read fresh rather than held across the
+				// await: a map captured beforehand could have been replaced, leaving the
+				// removal to land on an orphan while the live one still held the nonce.
+				const current = this.pending.get(steamId64);
+				for (const id of ids) {
+					current?.delete(id);
+				}
+			})
+		);
 	}
 
 	/**
@@ -295,75 +330,78 @@ export class ConfirmationsService {
 	async runAutoConfirm(steamId64: string): Promise<AutoConfirmOutcome> {
 		const grant = this.grantFor(steamId64);
 
-		return this.serialise(steamId64, async () => {
-			const { account, client, cookie } = await this.connect(steamId64, grant);
+		return this.translating(() =>
+			this.serialise(steamId64, async () => {
+				const { account, client, cookie } = await this.connect(steamId64, grant);
 
-			// Nothing enabled means nothing to do, and no reason to have asked Steam.
-			if (!account.autoConfirm.marketListings && !account.autoConfirm.trades) {
-				return { approved: [], held: [], unreadable: 0 };
-			}
+				// Nothing enabled means nothing to do, and no reason to have asked Steam.
+				if (!account.autoConfirm.marketListings && !account.autoConfirm.trades) {
+					return { approved: [], held: [], unreadable: 0 };
+				}
 
-			// `unreadable` travels with the outcome. It has no `ConfirmationSummary` to
-			// attach to and must not go through `onFailure`, which counts toward the
-			// ten-strike halt — so the activity log gets an entry kind of its own.
-			//
-			// It was briefly dropped here, on the reasoning that the interactive list
-			// already warns. That is the wrong way round for this path: automatic
-			// confirmation is the one that runs while nobody is watching, and an entry
-			// that failed to parse could be the account-recovery confirmation. Silence
-			// is the one response that cannot be right.
-			const { confirmations, unreadable } = await client.list(account, cookie);
-			this.requireGrant(steamId64, grant);
+				// `unreadable` travels with the outcome. It has no `ConfirmationSummary` to
+				// attach to and must not go through `onFailure`, which counts toward the
+				// ten-strike halt — so the activity log gets an entry kind of its own.
+				//
+				// It was briefly dropped here, on the reasoning that the interactive list
+				// already warns. That is the wrong way round for this path: automatic
+				// confirmation is the one that runs while nobody is watching, and an entry
+				// that failed to parse could be the account-recovery confirmation. Silence
+				// is the one response that cannot be right.
+				const { confirmations, unreadable } = await client.list(account, cookie);
+				this.requireGrant(steamId64, grant);
 
-			// **The settings are re-read here, after the await.** `connect` copied
-			// them before the list request went out, and that request takes as long
-			// as Steam takes — long enough for somebody to open Settings and turn
-			// automatic confirmation off. Approving from the copy meant "disable"
-			// did not apply to the pass already in flight: the toggle saved, the
-			// screen said off, and the trade was approved anyway. Reading the vault
-			// again costs nothing and makes the setting mean what it says.
-			const fresh = this.vault
-				.read()
-				.accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm;
-			if (fresh === undefined) {
-				// Removed from the vault while the list was loading. Nothing may be
-				// approved for an account that no longer exists here.
-				return { approved: [], held: [], unreadable };
-			}
-			account.autoConfirm = {
-				marketListings: fresh.marketListings,
-				trades: fresh.trades
-			};
+				// **The settings are re-read here, after the await.** `connect` copied
+				// them before the list request went out, and that request takes as long
+				// as Steam takes — long enough for somebody to open Settings and turn
+				// automatic confirmation off. Approving from the copy meant "disable"
+				// did not apply to the pass already in flight: the toggle saved, the
+				// screen said off, and the trade was approved anyway. Reading the vault
+				// again costs nothing and makes the setting mean what it says.
+				const fresh = this.vault
+					.read()
+					.accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm;
+				if (fresh === undefined) {
+					// Removed from the vault while the list was loading. Nothing may be
+					// approved for an account that no longer exists here.
+					return { approved: [], held: [], unreadable };
+				}
+				account.autoConfirm = {
+					marketListings: fresh.marketListings,
+					trades: fresh.trades
+				};
 
-			const { approved, held } = await client.autoConfirm(
-				account,
-				cookie,
-				confirmations,
-				// Read from the vault each time it is asked, so the answer is the
-				// setting as it stands at the moment the request goes out — not the
-				// copy taken when the pass began, nor even the reread above.
-				() => this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm
-			);
-			this.requireGrant(steamId64, grant);
+				const { approved, held } = await client.autoConfirm(
+					account,
+					cookie,
+					confirmations,
+					// Read from the vault each time it is asked, so the answer is the
+					// setting as it stands at the moment the request goes out — not the
+					// copy taken when the pass began, nor even the reread above.
+					() =>
+						this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm
+				);
+				this.requireGrant(steamId64, grant);
 
-			// The full list is remembered so the UI can act on what was held back
-			// without fetching again, minus anything just approved.
-			const remaining = new Map(
-				confirmations
-					.filter((entry) => !approved.some((done) => done.id === entry.id))
-					.map((entry) => [entry.id, { nonce: entry.nonce, type: entry.type }])
-			);
-			this.pending.set(steamId64, remaining);
+				// The full list is remembered so the UI can act on what was held back
+				// without fetching again, minus anything just approved.
+				const remaining = new Map(
+					confirmations
+						.filter((entry) => !approved.some((done) => done.id === entry.id))
+						.map((entry) => [entry.id, { nonce: entry.nonce, type: entry.type }])
+				);
+				this.pending.set(steamId64, remaining);
 
-			return {
-				approved: approved.map(toSummary),
-				held: held.map((entry) => ({
-					confirmation: toSummary(entry.confirmation),
-					reason: entry.reason
-				})),
-				unreadable
-			};
-		});
+				return {
+					approved: approved.map(toSummary),
+					held: held.map((entry) => ({
+						confirmation: toSummary(entry.confirmation),
+						reason: entry.reason
+					})),
+					unreadable
+				};
+			})
+		);
 	}
 
 	/**

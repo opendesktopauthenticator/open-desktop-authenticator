@@ -624,6 +624,8 @@ export function App(): React.JSX.Element {
 				accounts.find((entry) => entry.steamId64 === autoConfirmFor.steamId64) ?? autoConfirmFor;
 			return (
 				<AutoConfirm
+					// Holds unsaved switch positions and the trades acknowledgement.
+					key={current.steamId64}
 					account={current}
 					accounts={accounts}
 					onSave={(settings) => api.setAccountAutoConfirm(current.steamId64, settings)}
@@ -638,6 +640,8 @@ export function App(): React.JSX.Element {
 		if (removingFor) {
 			return (
 				<RemoveAccount
+					// Holds a typed passphrase and an acknowledgement.
+					key={removingFor.steamId64}
 					account={removingFor}
 					onRemove={(passphrase) => api.removeAccount(removingFor.steamId64, passphrase)}
 					onDeactivate={(passphrase, acknowledgement) =>
@@ -654,6 +658,23 @@ export function App(): React.JSX.Element {
 		if (confirmingFor) {
 			return (
 				<Confirmations
+					/*
+					 * **Keyed by account, so switching target remounts rather than
+					 * reuses.**
+					 *
+					 * Without this React keeps the instance when `confirmingFor`
+					 * changes: the fetch effect re-runs because it depends on the id,
+					 * and nothing else resets. Clicking account B's notification left
+					 * A's confirmation list on screen with buttons that now acted on
+					 * B, A's error text, and — if A was showing the password form —
+					 * the password already typed into it, with the callback silently
+					 * repointed at B.
+					 *
+					 * A key is the whole fix: every piece of account-scoped state in
+					 * that subtree is discarded at once, which is stronger than
+					 * remembering to clear each one.
+					 */
+					key={confirmingFor.steamId64}
 					account={confirmingFor}
 					onList={() => api.listConfirmations(confirmingFor.steamId64)}
 					onAct={(action, ids) => api.actOnConfirmations(confirmingFor.steamId64, action, ids)}
@@ -666,6 +687,9 @@ export function App(): React.JSX.Element {
 		if (browserSignIn) {
 			return (
 				<SteamSignIn
+					// Holds a typed password. Same reasoning as `Confirmations`: a
+					// different account must never inherit one.
+					key={browserSignIn.account.steamId64}
 					accountName={browserSignIn.account.accountName}
 					{...(browserSignIn.reason === undefined ? {} : { reason: browserSignIn.reason })}
 					onSignIn={async (password) => {
@@ -726,6 +750,8 @@ export function App(): React.JSX.Element {
 				accounts.find((entry) => entry.steamId64 === routingFor.steamId64) ?? routingFor;
 			return (
 				<AccountRouting
+					// Holds a typed proxy URL, which is account-specific by definition.
+					key={current.steamId64}
 					account={current}
 					onSave={(proxyUrl) => api.setAccountProxy(current.steamId64, proxyUrl)}
 					onClose={() => {
