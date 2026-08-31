@@ -506,6 +506,28 @@ const CLAIMS = [
 		 * /download told visitors every release carries the file and linked them
 		 * to the step that says it does not, which is the same failure the flag
 		 * was flipped to remove, one page over.
+		 *
+		 * **Then the entry existed, and still missed the sentence it was written
+		 * for.** Three separate holes, each confirmed by substituting the wording
+		 * into /download's gaps list, building, and watching this file print "no
+		 * problems found":
+		 *
+		 * 1. The homepage's actual pre-fix wording was "published checksums with a
+		 *    signature over them", and the pattern meant to catch it demanded that
+		 *    "a signature" follow "checksums" across nothing wider than an
+		 *    optional comma and a single space. One interposed word — "with" —
+		 *    carried the exact sentence this entry was written for straight past
+		 *    it, and no other pattern came close. The two halves now get a short
+		 *    run of words between them rather than the one punctuation the first
+		 *    draft happened to be looking at.
+		 * 2. "The checksum list is signed." failed the build, while "Our checksum
+		 *    list is signed." and "This checksum list is signed." both passed. The
+		 *    pattern required the literal determiner "the", so its coverage was an
+		 *    accident of how /download's sentence happened to start rather than a
+		 *    property of the claim, and any rewrite that put a different word in
+		 *    front of the noun would have ended it without anyone noticing.
+		 * 3. A pattern spelled `checksum list <em>is</em> signed` could not
+		 *    fire at all, in any wording, on any page, ever. See the note below.
 		 */
 		flag: 'signed',
 		says: 'the published checksum list carries a signature',
@@ -516,14 +538,46 @@ const CLAIMS = [
 		 * /scam-clones for the sentence "Ideally a signature over that list too —
 		 * ours does not have one yet". That page is right, and gates on the flag;
 		 * the tripwire was wrong. A check that cries wolf on correct copy gets
-		 * loosened by the next person, so it is narrowed to the claiming forms.
+		 * loosened by the next person, so it was narrowed to the claiming forms —
+		 * and narrowing was the only lever there was, because the loop had no way
+		 * to tell a claim from its denial. It has one now: a hit is rescued when
+		 * its own sentence denies or defers it. That is what makes it safe to
+		 * widen these back out, and it is why "There is no signature over the
+		 * checksum list yet" no longer has to be an unwritable sentence in order
+		 * for "The checksum list is signed" to be a catchable one.
+		 *
+		 * **Never put markup in a pattern here.** The loop replaces every tag with
+		 * a space before matching, so by the time a pattern sees the text there is
+		 * no `<em>`, no `<strong>` and no `<code>` left in it,
+		 * and a word split by a tag has become two words. The deleted first
+		 * pattern was `checksum list <em>is</em> signed`, copied out of the
+		 * source of /download's flag-true branch, and it could never match the
+		 * rendered page: it read like the emphasised wording was covered while the
+		 * plain pattern beside it quietly did all the work. Match sentences as the
+		 * reader receives them — words and single spaces.
 		 */
 		patterns: [
-			/checksum list <em>is<\/em> signed/i,
-			/the checksum list is signed/i,
+			/*
+			 * Determiner-independent on purpose. "The", "Our", "This", "That" and
+			 * no determiner at all are the same claim to the person reading it.
+			 * The honest forms are untouched without needing the sentence window
+			 * to rescue them, because "is not signed" and "is unsigned" do not
+			 * contain "is signed".
+			 */
+			/\bchecksum list is signed\b/i,
+			/\bsigned checksum list\b/i,
+			/\bchecksum list (?:now )?carries (?:a|its own) signature\b/i,
 			/ours carries one/i,
-			/checksums,? (?:and )?a signature over (?:that list|them)/i,
-			/signature over the checksum list/i,
+			/*
+			 * "checksums" and "a signature over them" in one breath, however the
+			 * sentence chooses to join the halves: "checksums with a signature
+			 * over them", "checksums, and a signature over that list", "checksums
+			 * plus a signature over that checksum list". The gap is bounded and
+			 * may not contain a full stop, so the two halves have to be one claim
+			 * rather than two sentences that happen to sit next to each other.
+			 */
+			/checksums[^.]{0,24}a signature over (?:them|(?:that|the|this|our) (?:checksum )?list)\b/i,
+			/signature over (?:the|that|this|our) checksum list/i,
 			/every release carries[^.]{0,40}SHA256SUMS\.txt\.sig/i
 		]
 	},
@@ -609,6 +663,95 @@ const QUALIFIER =
 /** How far either side of the phrase a qualifier may sit and still count. */
 const QUALIFIER_WINDOW = 200;
 
+/**
+ * A negator that governs the phrase **immediately after it**.
+ *
+ * QUALIFIER answers a neighbouring but different question: whether a bare noun
+ * phrase — "reproducible builds" — is being offered as a plan. It is a
+ * vocabulary of intentions, and matching it anywhere in a sentence is right for
+ * that. This one has to decide whether a claim a CLAIMS pattern has *already
+ * matched* is being denied, and that is a question about attachment, not about
+ * vocabulary.
+ *
+ * **Which is why it reads a few words, not the sentence.** A first version
+ * tested a bag of negation words against the whole sentence, and 40% of the
+ * sentences on the built site contain one — 48% on /download. Measured, it
+ * turned two overclaims this file used to catch into passes: "The checksum list
+ * is signed, and the binaries are not code-signed yet." and "The checksum list
+ * is signed, and code signing has not landed yet." Both are false about the
+ * signature and honest about something else in the same breath, which is
+ * exactly the shape a claim-detector exists to separate. A denial that is not
+ * next to the claim is a denial of something else.
+ */
+const CLAIM_DENIAL_BEFORE = /\b(?:no|not|nothing|none|never|without|nor)\b[^.]{0,16}$/i;
+
+/**
+ * The other half: futurity attached to the phrase it follows.
+ *
+ * "a signature over that list **is still to come**" denies the claim it comes
+ * after, and no negator sits in front of it to be found by the rule above.
+ */
+const CLAIM_DENIAL_AFTER =
+	/^[^.]{0,16}\b(?:is|are|remains?|stays?)\s+(?:still\s+)?(?:to come|planned|missing|absent|unsigned|not\b)|^[^.]{0,12}\bstill to come\b|^[^.]{0,16}\byet to\b/i;
+
+/** How far either side of a hit a denial has to sit to be about that hit. */
+const DENIAL_REACH = 24;
+
+/** Sentence boundary: terminal punctuation followed by whitespace. */
+const SENTENCE_BREAK = /[.!?]\s/g;
+
+/**
+ * The sentence a hit sits in, clipped to QUALIFIER_WINDOW characters either side.
+ *
+ * UNBUILT_CAPABILITY gets away with a flat window because the phrases it matches
+ * are nouns, and a noun qualified anywhere nearby is usually qualified on
+ * purpose. The CLAIMS patterns match the claim itself, so a qualifier outside the
+ * sentence is a qualifier about something else — and on /download it demonstrably
+ * is. Substituting "The checksum list is signed." into the gaps list on that page
+ * puts the code-signing bullet's "It has not been granted yet" 192 characters
+ * upstream and the reproducible-builds bullet's "You cannot yet rebuild the tag"
+ * just downstream, so a flat 200-character window rescues the exact overclaim
+ * this check exists to catch, from two directions at once. Bounding to the
+ * sentence is what stops one bullet's honesty from laundering the bullet beside
+ * it.
+ *
+ * A boundary is terminal punctuation followed by whitespace, which is why
+ * `SHA256SUMS.txt.sig` does not chop a sentence into three: the dots inside
+ * it have no space after them.
+ */
+const sentenceAround = (words, index, length) => {
+	const from = Math.max(0, index - QUALIFIER_WINDOW);
+	const to = Math.min(words.length, index + length + QUALIFIER_WINDOW);
+	let start = from;
+	SENTENCE_BREAK.lastIndex = from;
+	let brk;
+	while ((brk = SENTENCE_BREAK.exec(words)) !== null && brk.index < index) {
+		start = brk.index + brk[0].length;
+	}
+	SENTENCE_BREAK.lastIndex = index + length;
+	const next = SENTENCE_BREAK.exec(words);
+	const end = next !== null && next.index < to ? next.index + 1 : to;
+	return words.slice(start, end);
+};
+
+/**
+ * Every match of a CLAIMS pattern on the page, not only the first one.
+ *
+ * The CLAIMS table is declared without `g` so `exec` cannot carry a
+ * `lastIndex` from one page into the next, and that was sufficient while
+ * any match at all failed the build. It stopped being sufficient the moment a
+ * match could be rescued by its sentence: a page whose first hit is the honest
+ * "there is no signature over the checksum list yet" would then hide every
+ * overclaim after it, which is the same silent-pass failure this whole file
+ * exists to prevent. Rather than making the table global and reintroducing the
+ * `lastIndex` bookkeeping that STALE_ABSENCE has to do, the global copy is
+ * made here and thrown away as soon as the iteration ends.
+ */
+const everyMatch = (pattern, words) =>
+	words.matchAll(
+		new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`)
+	);
+
 /*
  * The same problem pointed the other way: claiming absence after the fact.
  *
@@ -639,7 +782,28 @@ const STALE_ABSENCE = [
 			/when it exists/gi,
 			/once (?:there is|we have) a release/gi,
 			/before the first release/gi,
-			/still to come/gi
+			/*
+			 * Anchored to a subject, unlike its neighbours, because "still to
+			 * come" on its own is not a claim about the release at all. The bare
+			 * form made the phrase unwritable anywhere on the site the day
+			 * `published` went true, and it took an honest sentence down with it:
+			 * "a signature over that list is still to come" is accurate, is about
+			 * a different capability entirely, and failed the build as though it
+			 * had said there was no release. What this pattern was written for was
+			 * the donations page listing installers as still to come after 1.0
+			 * shipped, and that still matches. Checksums are deliberately absent
+			 * from the subject list because the entry below already catches
+			 * "checksums are still to" against its own flag.
+			 *
+			 * **It is an allowlist of subjects, so it misses the ones not on it.**
+			 * The first draft listed five nouns and silently dropped coverage the
+			 * bare pattern had: "The 1.0 packages are still to come." and
+			 * "Something you can actually install is still to come." both passed
+			 * while `published` was true. Those two are on the list now, and the
+			 * shape of the gap is worth knowing before writing the next sentence
+			 * about a release — a subject nobody thought of reads as honest here.
+			 */
+			/(?:releases?|builds?|downloads?|installers?|binaries|packages?|versions?|1\.0|something you can[^.]{0,30})[^.]{0,40}\bstill to come\b/gi
 		]
 	},
 	{
@@ -699,8 +863,25 @@ for (const [slug, html] of built) {
 			continue;
 		}
 		for (const pattern of claim.patterns) {
-			const hit = pattern.exec(words);
-			if (hit) {
+			for (const hit of everyMatch(pattern, words)) {
+				/*
+				 * The sentence the claim stands in, never the paragraph. A claim
+				 * denied where it is made is honest copy; the same words with the
+				 * denial two bullets away are two different sentences, and only
+				 * one of them is true.
+				 */
+				const sentence = sentenceAround(words, hit.index, hit[0].length);
+				/*
+				 * Clipped to the sentence first, so a denial cannot reach across a
+				 * full stop, and then to a few words either side of the hit, so one
+				 * bullet's honesty cannot launder the bullet beside it.
+				 */
+				const at = hit.index - words.indexOf(sentence);
+				const before = sentence.slice(Math.max(0, at - DENIAL_REACH), at);
+				const after = sentence.slice(at + hit[0].length);
+				if (CLAIM_DENIAL_BEFORE.test(before) || CLAIM_DENIAL_AFTER.test(after)) {
+					continue;
+				}
 				fail(
 					slug,
 					`states that ${claim.says}, which SITE.release.${claim.flag} says is not true yet — "${hit[0].slice(0, 60)}"`

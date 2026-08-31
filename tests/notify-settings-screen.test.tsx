@@ -124,6 +124,48 @@ describe('what the account row says', () => {
 	const watching = { enabled: true, detail: 'full' } as const;
 	const quiet = { enabled: false, detail: 'full' } as const;
 
+	/*
+	 * The cases below are meant to be exhaustive over the branches of
+	 * describeAutoConfirm, not a sample of them. It approves one of four shapes —
+	 * nothing, trades, market, both — and is either watching or quiet, so there
+	 * are eight strings it can return and there is a case here for each one.
+	 *
+	 * It is written that way because sampling is what let the real bug through.
+	 * The one shape nobody had asserted was trades + market + watching, the
+	 * most-enabled an account gets; dropping its ", notifying" suffix made that
+	 * row read identically to an account with notifications switched off, and the
+	 * whole suite stayed green. A branch added to the function later without a
+	 * case added here should look conspicuously missing against this list.
+	 *
+	 * **Exhaustive over approve-shape × `enabled`, and that is two of the three
+	 * axes.** Every case below fixes `detail` at `full`, so a branch keyed on
+	 * `detail` would not look missing at all — it would look covered. That axis
+	 * gets its own case immediately below rather than multiplying these eight by
+	 * three, because the property there is the opposite one: `detail` decides how
+	 * much a *toast* says and must make no difference to this row.
+	 */
+
+	/*
+	 * A `count`-detail account is watching just as much as a `full`-detail one.
+	 * Gating the suffix on `detail === 'full'` leaves every case below green
+	 * while an enabled-at-count account prints `auto-confirm: off` — the same
+	 * understatement, reached by the one axis the eight cases hold fixed.
+	 */
+	it.each(['count', 'type', 'full'] as const)(
+		'says an account is notifying whatever its detail is set to (%s)',
+		(detail) => {
+			expect(
+				describeAutoConfirm({
+					marketListings: true,
+					trades: true,
+					pollIntervalSeconds: 15,
+					notify: { enabled: true, detail }
+				}),
+				`a watching account set to ${detail} detail read as quieter than it is`
+			).toBe('auto-confirm: trades + market, notifying');
+		}
+	);
+
 	it('says off only when nothing at all is on', () => {
 		expect(
 			describeAutoConfirm({
@@ -180,5 +222,65 @@ describe('what the account row says', () => {
 				notify: quiet
 			})
 		).toBe('auto-confirm: trades + market');
+	});
+
+	/*
+	 * The branch that had no case. Everything switched on is the account with the
+	 * most going on behind it, and it is the one whose ", notifying" suffix can go
+	 * missing without any other case noticing: the row then says exactly what a
+	 * quiet trades + market account says, so the loudest account in the vault is
+	 * indistinguishable from a silent one and reads as doing less than it does.
+	 */
+	it('still says it is notifying when both auto types are on', () => {
+		expect(
+			describeAutoConfirm({
+				marketListings: true,
+				trades: true,
+				pollIntervalSeconds: 15,
+				notify: watching
+			}),
+			'the most-enabled account read exactly like one with notifications off'
+		).toBe('auto-confirm: trades + market, notifying');
+	});
+
+	it('says trades alone for a quiet account that approves only trades', () => {
+		expect(
+			describeAutoConfirm({
+				marketListings: false,
+				trades: true,
+				pollIntervalSeconds: 15,
+				notify: quiet
+			}),
+			'a silent trades-only account was described as notifying, or as approving market listings'
+		).toBe('auto-confirm: trades');
+	});
+
+	/*
+	 * Market on its own is the shape that reaches the third branch. Nothing else
+	 * in this describe does, so without these two an edit there — the wrong noun,
+	 * a lost suffix — would land in the account row unchallenged.
+	 */
+	it('names market on its own, and still says it is notifying', () => {
+		expect(
+			describeAutoConfirm({
+				marketListings: true,
+				trades: false,
+				pollIntervalSeconds: 15,
+				notify: watching
+			}),
+			'a watching market-only account lost either the market listings or the notifications'
+		).toBe('auto-confirm: market, notifying');
+	});
+
+	it('names market on its own for a quiet account', () => {
+		expect(
+			describeAutoConfirm({
+				marketListings: true,
+				trades: false,
+				pollIntervalSeconds: 15,
+				notify: quiet
+			}),
+			'a silent market-only account was described as notifying, or as approving trades'
+		).toBe('auto-confirm: market');
 	});
 });

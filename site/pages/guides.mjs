@@ -130,6 +130,48 @@ export const download = {
 				<li>The application itself: codes, confirmations, enrollment, import and export, encrypted vault, recovery files.</li>
 				<li>The security posture described on the <a href="/security">security page</a>.</li>
 				<li>An automated test suite that runs on every change.</li>
+				${
+					/*
+					 * **The checksum-list signature is listed here, under the flag, rather
+					 * than as a fourth entry in "What is still missing" below.**
+					 *
+					 * It used to live down there in both directions: one `<li>` whose signed
+					 * branch read "The checksum list <em>is</em> signed. Every release carries
+					 * SHA256SUMS.txt.sig ...", sitting under a heading that says "What is
+					 * still missing" and a lead-in promising the reader is being told what has
+					 * not been done. A finished thing announced as an outstanding one is the
+					 * same class of error the release flags exist to prevent, only aimed at
+					 * the reader's comprehension instead of at the facts — and nothing catches
+					 * it, because `CLAIMS` in site/verify.mjs skips the entry while the flag is
+					 * true and `STALE_ABSENCE` only ever hunts for absence phrasings.
+					 *
+					 * An earlier draft bridged the position instead, ending the signed branch
+					 * with "The two things still missing are below." That parses, but it makes
+					 * the heading a lie the next sentence then apologises for, and it only
+					 * reads correctly for as long as this item happens to sit above the
+					 * remaining ones. The neighbouring reproducible-builds entry already
+					 * survives the build only because "cannot yet" lands inside a
+					 * 200-character qualifier window, so a second position-dependent sentence
+					 * in the same list is a second thing that breaks silently when somebody
+					 * reorders it. Moving the item leaves both headings literally true
+					 * whichever way the flag points, which is the reading a careful editor
+					 * arrives at without having to reconcile anything.
+					 *
+					 * The wording changes with the move as well: entries in this list are
+					 * plain noun phrases and the ones below lead with a bold claim, so the
+					 * sentence is rewritten to the grammar of the list it now belongs to
+					 * rather than carried over intact from the one it left.
+					 */
+					s.release.signed
+						? `<li>
+					A signature over the checksum list: every release carries
+					<code>SHA256SUMS.txt.sig</code> and the certificate that goes with it, so
+					you can check that the list itself came from our workflow rather than only
+					that your download matches the list.
+					<a href="/verify">Step 5 walks through it.</a>
+				</li>`
+						: ''
+				}
 				<li>
 					End-to-end testing against live Steam accounts — import from SDA,
 					enrollment, codes, confirmations, backup and recovery — with the defects it
@@ -156,20 +198,26 @@ export const download = {
 					release notes change with it. See
 					<a href="/code-signing-policy">our code signing policy</a>.
 				</li>
-				<li>
-					${
-						s.release.signed
-							? `<strong>The checksum list <em>is</em> signed.</strong> Every release carries
-					<code>SHA256SUMS.txt.sig</code> and a certificate, so you can check the list
-					came from our workflow rather than only that your file matches it.
-					<a href="/verify">Step 5 walks through it.</a>`
-							: `<strong>The checksum list is not signed yet.</strong> The release workflow
+				${
+					/*
+					 * Absent from this list entirely once the flag is true, because what it
+					 * describes is then finished and is stated up under "What is finished" —
+					 * the note there explains why it moved rather than being bridged in place.
+					 *
+					 * The conditional wraps the whole `<li>` instead of sitting inside one, so
+					 * the signed rendering has three bullets rather than three bullets and an
+					 * empty one.
+					 */
+					s.release.signed
+						? ''
+						: `<li>
+					<strong>The checksum list is not signed yet.</strong> The release workflow
 					signs it now, but it started doing so after the current release was
 					published — so there is no <code>SHA256SUMS.txt.sig</code> to fetch for the
 					build you can download today. <a href="/verify">Step 5 says so plainly</a>
-					rather than printing a command that cannot succeed.`
-					}
-				</li>
+					rather than printing a command that cannot succeed.
+				</li>`
+				}
 				<li>
 					<strong>Reproducible builds.</strong> You cannot yet rebuild the tag and
 					compare bytes with ours. The provenance attestation is what stands in for it.

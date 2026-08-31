@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import ts from 'typescript';
 
 /**
  * **The disclosure is the only thing standing between `full` and an unattended
@@ -117,11 +118,193 @@ describe('opening confirmations from a notification', () => {
 	 * The collection path is what makes a lock survivable, and it is gated on
 	 * there being an account list to navigate within — asking a beat too early
 	 * would take the intent, fail the lookup, and throw it away.
+	 *
+	 * **Bounded to the effect, and bounded by structure.** The first version of
+	 * this read four hundred characters back from the call and then to the *end of
+	 * the file*, so `accounts.length === 0` occurring anywhere in the seven hundred
+	 * lines below it satisfied the assertion. Both halves were wrong: a fixed reach
+	 * backwards depends on how much prose happens to sit above the call, and an
+	 * unbounded slice forwards is not an assertion about this effect at all. So the
+	 * slice runs from the `useEffect` that owns the call to that effect's own
+	 * dependency array, and the guard has to be found *before* the call inside it —
+	 * which is the whole point, since a check that runs inside the `.then` runs
+	 * after main has already handed the intent over and cleared it.
+	 *
+	 * Still read from the source rather than rendered: effects do not run under
+	 * `renderToStaticMarkup`, which is the only rendering this suite has.
 	 */
+	const collection = (() => {
+		const call = source.indexOf('.takePendingConfirmations()');
+		expect(call, 'nothing collects a pending notification click any more').toBeGreaterThan(-1);
+		const start = source.lastIndexOf('useEffect(() => {', call);
+		expect(
+			start,
+			'the collection no longer sits in an effect; this test needs rewriting'
+		).toBeGreaterThan(-1);
+		/*
+		 * Every hook in this component is one tab in, so this effect ends at the
+		 * first `}, [` at that depth after the call — its own dependency array, and
+		 * nothing further down the file.
+		 */
+		const deps = source.indexOf('\n\t}, [', call);
+		expect(
+			deps,
+			'the effect does not close where this test expects it to; rewrite the bounds'
+		).toBeGreaterThan(start);
+		/*
+		 * **Comments stripped, because a substring search cannot tell code from
+		 * prose.** Remove the guard and leave a sentence behind — "previously gated
+		 * on accounts.length === 0" — and an index check on the raw text is still
+		 * satisfied by the sentence.
+		 */
+		const strip = (text: string): string =>
+			text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+		return {
+			body: strip(source.slice(start, deps)),
+			deps: source.slice(deps, source.indexOf(']', deps))
+		};
+	})();
+
+	/**
+	 * The `.then` callback of the collecting effect, as a syntax tree.
+	 *
+	 * **Text indices could not express the property and never will.** The
+	 * assertion below is "the effect decides before it asks main for the click",
+	 * and where a *substring* sits is not where control flow short-circuits. Two
+	 * escapes were measured on the text version, both leaving the whole suite
+	 * green while the click was consumed and lost: hoisting the condition to
+	 * `const noAccountsYet = accounts.length === 0;` above the call and consuming
+	 * it inside the callback, and — once the literal `accounts` was forbidden
+	 * after the call — the same hoist, because `noAccountsYet` does not contain
+	 * the word.
+	 *
+	 * So it is asked of the tree instead: nothing inside the callback may read
+	 * anything the effect computed before the call. That is the real rule, and it
+	 * holds whatever the intermediate value gets named.
+	 */
+	const collectionCallback = (() => {
+		const file = ts.createSourceFile(
+			'App.tsx',
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TSX
+		);
+
+		let effect: ts.ArrowFunction | undefined;
+		const findEffect = (node: ts.Node): void => {
+			if (
+				ts.isCallExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === 'useEffect' &&
+				node.getText().includes('.takePendingConfirmations()')
+			) {
+				const first = node.arguments[0];
+				if (first && ts.isArrowFunction(first)) {
+					effect = first;
+				}
+			}
+			ts.forEachChild(node, findEffect);
+		};
+		findEffect(file);
+		expect(effect, 'no useEffect collects a pending notification click').toBeDefined();
+
+		let callback: ts.Node | undefined;
+		const findThen = (node: ts.Node): void => {
+			if (
+				ts.isCallExpression(node) &&
+				ts.isPropertyAccessExpression(node.expression) &&
+				node.expression.name.text === 'then' &&
+				node.expression.expression.getText().includes('takePendingConfirmations')
+			) {
+				callback = node.arguments[0];
+			}
+			ts.forEachChild(node, findThen);
+		};
+		findThen(effect as unknown as ts.Node);
+		expect(callback, 'the collected click is no longer handled in a .then').toBeDefined();
+
+		/** Every name the effect binds before it asks main for the click. */
+		const declaredInEffect = new Set<string>();
+		const body = (effect as unknown as ts.ArrowFunction).body;
+		if (ts.isBlock(body)) {
+			for (const statement of body.statements) {
+				if (!ts.isVariableStatement(statement)) {
+					continue;
+				}
+				for (const declaration of statement.declarationList.declarations) {
+					if (ts.isIdentifier(declaration.name)) {
+						declaredInEffect.add(declaration.name.text);
+					}
+				}
+			}
+		}
+
+		const used = new Set<string>();
+		const collect = (node: ts.Node): void => {
+			if (ts.isIdentifier(node)) {
+				used.add(node.text);
+			}
+			ts.forEachChild(node, collect);
+		};
+		collect(callback as unknown as ts.Node);
+
+		return { used, declaredInEffect };
+	})();
+
 	it('waits for an account list before collecting a pending click', () => {
-		expect(source).toContain('takePendingConfirmations()');
-		const effect = source.slice(source.indexOf('api\n\t\t\t.takePendingConfirmations()') - 400);
-		expect(effect).toContain('accounts.length === 0');
+		const guard = collection.body.indexOf('accounts.length === 0');
+		expect(
+			guard,
+			'the effect collects the pending click without waiting for an account list'
+		).toBeGreaterThan(-1);
+		expect(
+			guard,
+			'the account list is checked only after the click has been taken, so main clears the ' +
+				'intent, the renderer finds nobody to navigate to, and a click made while the vault ' +
+				'was locked is lost'
+		).toBeLessThan(collection.body.indexOf('.takePendingConfirmations()'));
+	});
+
+	/**
+	 * **The decision is made before the click is asked for, whatever it is named.**
+	 *
+	 * The index check above is a proxy and both of its escapes were measured on
+	 * the real file, each leaving 97 files and 2248 tests green while a click made
+	 * during a lock was consumed and thrown away. This is the property itself: the
+	 * `.then` may not read the account list, and it may not read anything the
+	 * effect worked out from the account list either — because by the time it
+	 * runs, main has handed the intent over and cleared it, and returning without
+	 * navigating loses it for good.
+	 */
+	it('decides before it asks, not inside the callback', () => {
+		expect(
+			[...collectionCallback.used],
+			'the handler reads the account list after the click has already been taken'
+		).not.toContain('accounts');
+
+		const leaked = [...collectionCallback.used].filter(
+			(name) =>
+				collectionCallback.declaredInEffect.has(name) &&
+				// The only value the effect may legitimately hand its own callback:
+				// whether this effect has been torn down since it started.
+				name !== 'cancelled'
+		);
+		expect(
+			leaked,
+			`the handler reads ${leaked.join(', ')}, computed before the click was taken — a guard ` +
+				'hoisted out of the early return still runs too late, whatever it is called'
+		).toEqual([]);
+	});
+
+	it('runs again when the account list arrives', () => {
+		// Waiting is only survivable if something wakes the effect back up: gate on
+		// a list that starts empty and never re-run, and the intent sits in main
+		// until the next launch.
+		expect(
+			collection.deps,
+			'the effect does not depend on the account list, so it never re-runs once the accounts land'
+		).toContain('accounts.length');
 	});
 });
 

@@ -93,9 +93,36 @@ const main = async () => {
 	// A local document, so this test needs no network and cannot be flaky.
 	const first = 'data:text/html,' + encodeURIComponent('<title>First</title><h1>first</h1>');
 	await window.loadURL(first);
-	await wait(400);
 
-	check('the first tab loads', window.currentUrl().startsWith('data:text/html'));
+	/*
+	 * **Read on the microtask after the load resolves, with nothing slept off.**
+	 *
+	 * This check used to sit behind `await wait(400)`, and 400ms is precisely the
+	 * gap in which an `about:blank` that had settled this promise early is
+	 * replaced by the real page — so the assertion observed a state production
+	 * never sees, and would have gone on passing through the whole of the bug the
+	 * first-load probe below was written for. `openAccountBrowser` reads
+	 * `currentUrl()` the moment its own `loadURL` resolves and decides from it
+	 * whether Steam accepted the session; anything this run only learns after a
+	 * sleep is not what that caller reads.
+	 *
+	 * The probe further down proves the same property on a window of its own.
+	 * This one must not be quietly weaker than it, so it reads at the same
+	 * instant and compares against the exact URL that was asked for rather than
+	 * against a prefix that `about:blank` merely happens not to match.
+	 */
+	check(
+		'the first tab loads, and holds the page asked for the instant loadURL resolves',
+		window.currentUrl() === first,
+		`currentUrl on resolve = ${JSON.stringify(window.currentUrl())}`
+	);
+	/*
+	 * No wait here either: `did-navigate` is what publishes this, and it fires
+	 * before the `did-finish-load` that resolves `loadURL`, so the event has
+	 * already been delivered by the time the await above returns. The waits kept
+	 * further down are the ones covering things that genuinely arrive later — a
+	 * click travelling to the main process, a closed window's trailing events.
+	 */
 	check('navigation is reported to the caller', titles.length > 0, `${titles.length} event(s)`);
 
 	const chrome = chromeContents();
@@ -193,16 +220,82 @@ const main = async () => {
 		userAgent: 'SmokeTest/1'
 	});
 	doomed.on('navigated', () => doomed.setTitle('still here'));
-	void doomed.loadURL('https://example.com/');
+	/*
+	 * **The load is kept, not thrown away.**
+	 *
+	 * This was `void doomed.loadURL(...)`, so nothing in this run could say what
+	 * closing does to a navigation that is still in flight — and that is the half
+	 * of this case with teeth. `openAccountBrowser` awaits exactly this promise
+	 * and decides nothing until it settles, so a close that leaves it pending is
+	 * a caller that never returns and a sign-in screen that never comes back.
+	 *
+	 * Both handlers are attached in the same expression as the call, and that is
+	 * not tidiness. Closing really does settle this one — `ERR_FAILED (-2)`,
+	 * measured here, though it resolves instead when the page wins the race — and
+	 * a bare `void` on a rejecting promise fires `unhandledRejection`, which this
+	 * file collects into `problems`, which the very next check reports as a
+	 * main-process crash that never happened. Handled here, the outcome is
+	 * named in the detail below instead of being either swallowed or miscounted.
+	 */
+	let loadOutcome = 'never settled';
+	const doomedLoad = doomed.loadURL('https://example.com/').then(
+		() => {
+			loadOutcome = 'resolved';
+		},
+		(err) => {
+			loadOutcome = `rejected with ${err instanceof Error ? err.message : String(err)}`;
+		}
+	);
 	doomed.close();
 	// Long enough for every event the closed window would still receive.
 	await wait(2500);
+	// Bounded on purpose. "It never settles" is an outcome to name in the detail
+	// below, not a reason for this run to sit here until the 90s deadline kills
+	// it and prints a timeout instead of everything after this point.
+	await Promise.race([doomedLoad, wait(1000)]);
 	check(
 		'closing a window mid-load does not crash the main process',
 		problems.length === 0,
 		problems.join(' | ')
 	);
-	check('calling into a closed window is safe', doomed.isDestroyed() || true);
+	/*
+	 * Asserted, rather than `doomed.isDestroyed() || true`.
+	 *
+	 * That was the only assertion covering this whole case, and `X || true` is
+	 * always true: a window still live and still signed in after `close()` printed
+	 * `ok` exactly as loudly as a destroyed one, and the checks either side of it
+	 * read only `problems`, so nothing here noticed whether the close had happened
+	 * at all. Proved by making the `close()` above a no-op — the run stayed
+	 * 55/55 green with a live window sitting in it.
+	 */
+	check(
+		'closing a window mid-load really destroys it',
+		doomed.isDestroyed(),
+		doomed.isDestroyed()
+			? `destroyed, and the load in flight ${loadOutcome}`
+			: `STILL LIVE after close() — the account's session keeps running with no window to show it, and no later vault lock can reach it; the load in flight ${loadOutcome}`
+	);
+	/*
+	 * **And the load settles, which is a claim the main process depends on.**
+	 *
+	 * `AccountBrowsers.open` awaits its own attempt rather than the joiners'
+	 * `done`, so the person who pressed the button is released only when the load
+	 * finishes — and a sweep that closes the window out from under it is the case
+	 * where that has to happen without anyone waiting for the page. The comment
+	 * there says Electron rejects with ERR_ABORTED when the contents are
+	 * destroyed mid-load. Nothing established that: `loadOutcome` was computed and
+	 * printed in a detail string, so `never settled` read exactly as `ok`.
+	 *
+	 * If this ever fails, the fix is in window.ts, not here: `open` would have to
+	 * await `done` instead, and take the ordering consequences.
+	 */
+	check(
+		'closing a window mid-load settles the load, so nobody waits on it for ever',
+		loadOutcome !== 'never settled',
+		loadOutcome === 'never settled'
+			? 'the load neither resolved nor rejected within 1s of the close — a caller awaiting it is parked with no bound'
+			: loadOutcome
+	);
 	doomed.setTitle('after close');
 	doomed.focus();
 	doomed.close();

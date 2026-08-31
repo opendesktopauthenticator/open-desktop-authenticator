@@ -1217,9 +1217,10 @@ export class AccountBrowsers {
 			 *
 			 * A load that never settles therefore still parks this caller. In
 			 * Electron it does settle: closing the window destroys the contents and
-			 * `loadURL` rejects with ERR_ABORTED, which is why teardown never waits
-			 * for it — and tools/smoke-browser-window.mjs measures that rather than
-			 * assuming it.
+			 * the load rejects — measured, not assumed, by
+			 * tools/smoke-browser-window.mjs, which reports `ERR_FAILED (-2)` there.
+			 * That is why teardown never waits for the load, and why a fake whose
+			 * `loadURL` hangs is a worse case than production has.
 			 */
 			await attempt;
 		} finally {
