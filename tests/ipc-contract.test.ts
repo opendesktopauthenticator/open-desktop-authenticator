@@ -371,6 +371,12 @@ describe('S2 — no long-term secret has a path to the renderer', () => {
 /** A minimal response that satisfies each channel's schema. */
 function sampleResponse(channel: string): Record<string, unknown> {
 	switch (channel) {
+		/*
+		 * Empty is the valid, ordinary answer: `steamId64` is optional because
+		 * "nothing is waiting" is what this returns almost every time it is asked.
+		 */
+		case CHANNELS.takePendingConfirmations:
+			return {};
 		case CHANNELS.appInfo:
 			return {
 				productName: 'x',

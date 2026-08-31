@@ -15,6 +15,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { branding } from '../shared/branding';
+import { PUSH_CHANNELS } from '../shared/channels';
 import { isAllowedNavigation, type NavigationTarget } from '../shared/security-policy';
 import { setTrustedSender } from './ipc/router';
 import { registerAppInfoHandler } from './app-info';
@@ -42,6 +43,7 @@ import { AutoConfirmEngine } from './confirmations/auto';
 import { ActivityLog } from './confirmations/activity';
 import { notificationImage, windowImage } from './logo-image';
 import { ConfirmationNotifier } from './confirmations/notify';
+import { registerToastClickHandlers, ToastClickRouter } from './confirmations/toast-click';
 import { createTray } from './tray';
 import { registerWindowsIdentity } from './windows-identity';
 import { registerConfirmationHandlers } from './confirmations/ipc';
@@ -276,6 +278,11 @@ function start(): void {
 			// the first poll seeds again, so returning to a vault does not fire a
 			// toast for every confirmation that was already waiting.
 			notifier.forget();
+
+			// And an uncollected click. Somebody who comes back and types a
+			// passphrase has a new intention; navigating them to a toast they
+			// clicked an hour ago is not honouring the old one.
+			toastClicks.forget();
 
 			// And the cookie jars with them. Steam sets cookies on its responses;
 			// Chromium keeps them in the per-account session, and a web session that
@@ -533,10 +540,30 @@ function start(): void {
 	 * app logo on a toast at around 48px and given nothing would scale the 16px
 	 * tray icon up to it.
 	 */
+	/** Set in `whenReady`, once there is a window to put in front of somebody. */
+	let revealWindow: (() => void) | undefined;
+
+	const toastClicks = new ToastClickRouter({
+		reveal: () => revealWindow?.(),
+		push: (steamId64) => {
+			for (const window of BrowserWindow.getAllWindows()) {
+				window.webContents.send(PUSH_CHANNELS.openConfirmations, steamId64);
+			}
+		}
+	});
+	registerToastClickHandlers(toastClicks);
+
 	const notifier = new ConfirmationNotifier({
 		host: {
-			show: ({ title, body }) => new Notification({ title, body, icon: notificationImage() }).show()
-		}
+			show: ({ title, body, onClick }) => {
+				const toast = new Notification({ title, body, icon: notificationImage() });
+				if (onClick) {
+					toast.on('click', onClick);
+				}
+				toast.show();
+			}
+		},
+		onActivate: (steamId64) => toastClicks.activate(steamId64)
 	});
 	// The engine used to report into callbacks nobody supplied, so a held-back
 	// account-recovery confirmation — the loudest warning this app can raise — was
@@ -990,6 +1017,11 @@ function start(): void {
 			window.show();
 			window.focus();
 		};
+
+		// A clicked notification means the same thing the tray click does: put the
+		// window in front of me. Reusing the path rather than repeating it is what
+		// keeps the minimised, hidden and destroyed cases from drifting apart.
+		revealWindow = showMainWindow;
 
 		app.on('second-instance', showMainWindow);
 

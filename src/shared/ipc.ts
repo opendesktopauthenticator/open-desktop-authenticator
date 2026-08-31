@@ -854,6 +854,25 @@ export const IPC_CONTRACT = {
 		response: recoverResponse
 	},
 
+	/**
+	 * Collect a notification click the renderer was not there to receive.
+	 *
+	 * Empty request: the renderer is not asking about an account, it is asking
+	 * whether anything is waiting. Main decides what, from an id it already had.
+	 *
+	 * `steamId64` is optional because "nothing is waiting" is the ordinary
+	 * answer, and reading it **clears** the intent — so a second call returns
+	 * nothing and a stale click cannot navigate somebody twice.
+	 *
+	 * The matching push lives in `PUSH_CHANNELS`, not here: `IPC_CONTRACT`
+	 * describes `ipcMain.handle` request/response pairs, and a
+	 * `webContents.send` has neither.
+	 */
+	[CHANNELS.takePendingConfirmations]: {
+		request: z.object({}).strict(),
+		response: z.object({ steamId64: z.string().optional() }).strict()
+	},
+
 	[CHANNELS.accountDeactivate]: {
 		request: z
 			.object({
@@ -1190,6 +1209,21 @@ export interface RendererApi {
 			notify: { enabled: boolean; detail: NotifyDetail };
 		}
 	): Promise<{ ok: true }>;
+	/**
+	 * Subscribe to notification clicks. Called once, from an effect.
+	 *
+	 * The id is matched against the account list the renderer already holds and
+	 * ignored if absent: this navigates to an account the user has, never to
+	 * whatever arrives on the wire.
+	 */
+	onOpenConfirmations(listener: (steamId64: string) => void): void;
+	/**
+	 * Take a notification click that arrived while nothing was listening.
+	 *
+	 * Returns `{}` when nothing is waiting, which is the ordinary answer.
+	 * Reading clears it, so a second call returns nothing.
+	 */
+	takePendingConfirmations(): Promise<{ steamId64?: string }>;
 	/**
 	 * Remove an account and its secrets from this vault.
 	 *

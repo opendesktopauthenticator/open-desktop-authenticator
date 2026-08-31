@@ -30,11 +30,26 @@ import type { PollMode } from './auto';
  * boot a browser process to run.
  */
 export interface ToastHost {
-	show(options: { title: string; body: string }): void;
+	/**
+	 * `onClick` is optional so a host that cannot deliver clicks is still a valid
+	 * host — which is what keeps this testable headless, and what let the toasts
+	 * ship one phase before the routing behind them.
+	 */
+	show(options: { title: string; body: string; onClick?: () => void }): void;
 }
 
 export interface ConfirmationNotifierOptions {
 	host: ToastHost;
+	/**
+	 * Told which account a clicked toast was about.
+	 *
+	 * **Supplied here rather than threaded through `ToastHost`**, because the
+	 * notifier already holds the id at every call site — it is the key of the
+	 * state map. One option covers the pending, sign-in and halt toasts; putting
+	 * the id in `ToastHost` instead would mean four wirings and a way to get one
+	 * of them wrong.
+	 */
+	onActivate?: (steamId64: string) => void;
 }
 
 interface AccountNotifyState {
@@ -149,10 +164,23 @@ export function composeBody(
 
 export class ConfirmationNotifier {
 	private readonly host: ToastHost;
+	private readonly onActivate: (steamId64: string) => void;
 	private readonly state = new Map<string, AccountNotifyState>();
 
 	constructor(options: ConfirmationNotifierOptions) {
 		this.host = options.host;
+		this.onActivate = options.onActivate ?? ((): void => undefined);
+	}
+
+	/**
+	 * Every toast goes through here, so every toast is clickable.
+	 *
+	 * The alternative — adding `onClick` at each `this.host.show` call — is
+	 * three places to remember and one to forget, and the one forgotten would be
+	 * a toast that looks identical and does nothing when clicked.
+	 */
+	private toast(steamId64: string, title: string, body: string): void {
+		this.host.show({ title, body, onClick: () => this.onActivate(steamId64) });
 	}
 
 	private stateFor(steamId64: string): AccountNotifyState | undefined {
@@ -188,14 +216,11 @@ export class ConfirmationNotifier {
 			const critical = awaiting.filter((entry) => entry.securityCritical);
 			this.state.set(steamId64, { seeded: true, seen: ids, toldSignInNeeded: false });
 			if (critical.length > 0) {
-				this.host.show({
-					title: accountName,
-					body: composeBody(detail, critical, 0)
-				});
+				this.toast(steamId64, accountName, composeBody(detail, critical, 0));
 				return;
 			}
 			if (unreadable > 0) {
-				this.host.show({ title: accountName, body: composeBody(detail, [], unreadable) });
+				this.toast(steamId64, accountName, composeBody(detail, [], unreadable));
 			}
 			return;
 		}
@@ -224,7 +249,7 @@ export class ConfirmationNotifier {
 		if (fresh.length === 0 && unreadable === 0) {
 			return;
 		}
-		this.host.show({ title: accountName, body: composeBody(detail, fresh, unreadable) });
+		this.toast(steamId64, accountName, composeBody(detail, fresh, unreadable));
 	}
 
 	/**
@@ -246,10 +271,7 @@ export class ConfirmationNotifier {
 			// that does is still this account's first and must seed silently.
 			this.state.set(steamId64, { seeded: false, seen: new Set(), toldSignInNeeded: true });
 		}
-		this.host.show({
-			title: accountName,
-			body: 'Sign in again to keep checking this account.'
-		});
+		this.toast(steamId64, accountName, 'Sign in again to keep checking this account.');
 	}
 
 	/**
@@ -262,19 +284,17 @@ export class ConfirmationNotifier {
 	 * there is no second call to guard against — and a flag for one would be
 	 * state that can only ever go stale.
 	 *
-	 * `_steamId64` is unused today and kept because every other method on this
-	 * class is keyed by it, and the click routing added later needs it here.
 	 */
-	halted(_steamId64: string, accountName: string, mode: PollMode): void {
-		this.host.show({
-			title: accountName,
-			body:
-				mode === 'confirm'
-					? 'Automatic confirmation stopped after 10 failures.'
-					: // An account that was only ever watching never had automatic
-						// confirmation to stop.
-						'Stopped checking after 10 failures.'
-		});
+	halted(steamId64: string, accountName: string, mode: PollMode): void {
+		this.toast(
+			steamId64,
+			accountName,
+			mode === 'confirm'
+				? 'Automatic confirmation stopped after 10 failures.'
+				: // An account that was only ever watching never had automatic
+					// confirmation to stop.
+					'Stopped checking after 10 failures.'
+		);
 	}
 
 	/** On lock. Everything is re-seeded on the next unlock. */

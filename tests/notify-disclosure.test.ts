@@ -57,3 +57,70 @@ describe('the disclosure beside the notifications switch', () => {
 		expect(disclosureAt, 'the disclosure moved into the detail group').toBeLessThan(detailGroupAt);
 	});
 });
+
+/**
+ * **A click that navigates nowhere looks broken, and would ship silently.**
+ *
+ * The unlocked view is a stack of `if`s, and `autoConfirmFor` and `removingFor`
+ * are tested *above* `confirmingFor`. Setting the target while either of those
+ * is open therefore does nothing at all — no error, no log, just a toast that
+ * appears to do nothing when clicked.
+ *
+ * Asserted against the source because this project has no DOM runner. That is
+ * weaker than rendering it, and it is the reason the assertion is about the
+ * clears being present in this specific function rather than about the
+ * navigation working.
+ */
+describe('opening confirmations from a notification', () => {
+	const source = readFileSync(join(__dirname, '..', 'src', 'renderer', 'App.tsx'), 'utf8');
+
+	/** The body of `openConfirmationsFor`, which is where the rule has to hold. */
+	const body = (() => {
+		const start = source.indexOf('const openConfirmationsFor = useCallback(');
+		expect(start, 'openConfirmationsFor no longer exists').toBeGreaterThan(-1);
+		const end = source.indexOf('[accounts]', start);
+		expect(end, 'openConfirmationsFor changed shape; this test needs rewriting').toBeGreaterThan(
+			start
+		);
+		return source.slice(start, end);
+	})();
+
+	it('looks the account up rather than trusting the id', () => {
+		expect(body).toContain('confirmationsTargetFor(accounts, steamId64)');
+	});
+
+	it('clears the screens that sit above confirmations in the view stack', () => {
+		// If one of these is dropped, the click silently does nothing whenever
+		// that screen happens to be open.
+		expect(body, 'the auto-confirm screen would swallow the navigation').toContain(
+			'setAutoConfirmFor(undefined)'
+		);
+		expect(body, 'the removal screen would swallow the navigation').toContain(
+			'setRemovingFor(undefined)'
+		);
+		expect(body).toContain('setRoutingFor(undefined)');
+		expect(body).toContain('setBackupFor(undefined)');
+	});
+
+	it('returns to the account list before selecting within it', () => {
+		expect(body).toContain("setView('accounts')");
+		expect(body.indexOf("setView('accounts')")).toBeLessThan(body.indexOf('setConfirmingFor('));
+	});
+
+	it('sets the target last, so nothing clears it afterwards', () => {
+		const target = body.indexOf('setConfirmingFor(account)');
+		expect(target).toBeGreaterThan(body.indexOf('setAutoConfirmFor(undefined)'));
+		expect(target).toBeGreaterThan(body.indexOf('setRemovingFor(undefined)'));
+	});
+
+	/*
+	 * The collection path is what makes a lock survivable, and it is gated on
+	 * there being an account list to navigate within — asking a beat too early
+	 * would take the intent, fail the lookup, and throw it away.
+	 */
+	it('waits for an account list before collecting a pending click', () => {
+		expect(source).toContain('takePendingConfirmations()');
+		const effect = source.slice(source.indexOf('api\n\t\t\t.takePendingConfirmations()') - 400);
+		expect(effect).toContain('accounts.length === 0');
+	});
+});

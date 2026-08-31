@@ -284,7 +284,47 @@ export const CHANNELS = {
 	 * exists. The passphrase inbound is the one the vault had when the file was
 	 * written, which is not necessarily the current one.
 	 */
-	accountRecover: 'account:recover'
+	accountRecover: 'account:recover',
+
+	/**
+	 * Collect a notification click the renderer was not there to receive.
+	 *
+	 * The push above is the fast path and nothing depends on it landing. A lock
+	 * **reloads** the window, so a click can arrive at a document that is about
+	 * to be replaced, or at the unlock screen — in both cases the listener is
+	 * gone. Main remembers the intent; the renderer collects it once it has an
+	 * account list to navigate within, and collecting clears it.
+	 */
+	takePendingConfirmations: 'app:takePendingConfirmations'
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];
+
+/**
+ * Main→renderer pushes, which are a different kind of thing from everything
+ * above.
+ *
+ * `CHANNELS` entries are `ipcMain.handle` request/response pairs, and every one
+ * of them is required to have an `IPC_CONTRACT` schema — a test enforces it,
+ * which is what stops a channel being added without one. A `webContents.send`
+ * has no request to validate and no response to return, so putting one in that
+ * table would mean weakening the rule for the sake of a single entry.
+ *
+ * They are named here rather than written inline because the alternative is
+ * what the browser chrome does today: the same string typed out in the main
+ * process and again in the preload, where a typo produces a listener that is
+ * simply never called and nothing fails to say so.
+ */
+export const PUSH_CHANNELS = {
+	/**
+	 * A clicked notification asking for one account's confirmations.
+	 *
+	 * Carries a SteamID the main process already holds. It does not *act* —
+	 * navigating is all it does, and the renderer ignores an id that is not in
+	 * the account list it already has. Approving still goes through the
+	 * confirmation channels with their own checks.
+	 */
+	openConfirmations: 'app:open-confirmations'
+} as const;
+
+export type PushChannelName = (typeof PUSH_CHANNELS)[keyof typeof PUSH_CHANNELS];

@@ -10,6 +10,10 @@ import { registerUpdateHandlers } from '../src/main/update/ipc';
 import { registerEnrollmentHandlers } from '../src/main/steam/enrollment-ipc';
 import { registerTransferHandlers } from '../src/main/steam/transfer-ipc';
 import { registerBrowserHandlers } from '../src/main/browser/ipc';
+import {
+	registerToastClickHandlers,
+	ToastClickRouter
+} from '../src/main/confirmations/toast-click';
 import type { AccountBrowsers } from '../src/main/browser/window';
 import type { TransferService } from '../src/main/steam/transfer';
 import type { EnrollmentService } from '../src/main/steam/enrollment';
@@ -89,6 +93,9 @@ function registerEverything(): void {
 		requireProxies: () => false,
 		touch: () => undefined
 	});
+	registerToastClickHandlers(
+		new ToastClickRouter({ reveal: () => undefined, push: () => undefined })
+	);
 }
 
 beforeEach(() => {
@@ -152,7 +159,8 @@ describe('IPC registration', () => {
 			CHANNELS.enrollCancel,
 			CHANNELS.accountExport,
 			CHANNELS.accountDeactivate,
-			CHANNELS.accountRecover
+			CHANNELS.accountRecover,
+			CHANNELS.takePendingConfirmations
 		]);
 	});
 

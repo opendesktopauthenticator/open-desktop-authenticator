@@ -3,7 +3,7 @@ import type { NotifyDetail } from '../shared/vault-schema';
 // Values come from the zod-free module; types are erased at compile time.
 // Importing CHANNELS from '../shared/ipc' would emit require("zod") into this
 // bundle, which a sandboxed preload cannot resolve — see shared/channels.ts.
-import { CHANNELS } from '../shared/channels';
+import { CHANNELS, PUSH_CHANNELS } from '../shared/channels';
 import type {
 	BrowserRoute,
 	AccountSummary,
@@ -155,6 +155,26 @@ const api: RendererApi = {
 		ipcRenderer.invoke(CHANNELS.accountSetAutoConfirm, { steamId64, ...settings }) as Promise<{
 			ok: true;
 		}>,
+	/**
+	 * A clicked notification, pushed from main.
+	 *
+	 * Subscribed once. The renderer ignores an id that is not in the account list
+	 * it already has, so this cannot navigate anywhere the user could not.
+	 */
+	onOpenConfirmations: (listener: (steamId64: string) => void) => {
+		ipcRenderer.on(PUSH_CHANNELS.openConfirmations, (_event, steamId64: string) =>
+			listener(steamId64)
+		);
+	},
+	/**
+	 * Collect a click the renderer was not there to receive, and clear it.
+	 *
+	 * The push above is the fast path; this is what makes the locked and
+	 * reloaded cases work, because a lock replaces the document that was
+	 * listening.
+	 */
+	takePendingConfirmations: () =>
+		ipcRenderer.invoke(CHANNELS.takePendingConfirmations) as Promise<{ steamId64?: string }>,
 	setAccountProxy: (steamId64: string, proxyUrl: string | null) =>
 		ipcRenderer.invoke(CHANNELS.accountSetProxy, { steamId64, proxyUrl }) as Promise<{
 			ok: true;

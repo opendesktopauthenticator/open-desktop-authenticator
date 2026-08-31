@@ -64,6 +64,26 @@ export function updateAnswerIsCurrent(
 	return newest === mine && !bannerSuppressed;
 }
 
+/**
+ * The account a notification click should open, or nothing.
+ *
+ * Exported and tested directly, the same way `updateAnswerIsCurrent` is: this
+ * project has no DOM runner, and this is the line that decides whether an id
+ * arriving over IPC can navigate the window.
+ *
+ * **The renderer navigates to an account it already knows about.** The main
+ * process is the only sender and it sends an id it already held, so this is not
+ * the last line of defence — but a lookup that trusted its input would make the
+ * channel a way to point the window at something the account list does not
+ * contain, and there is no reason to accept that when a lookup costs nothing.
+ */
+export function confirmationsTargetFor(
+	accounts: readonly AccountSummary[],
+	steamId64: string
+): AccountSummary | undefined {
+	return accounts.find((entry) => entry.steamId64 === steamId64);
+}
+
 export function App(): React.JSX.Element {
 	const api = window.api;
 
@@ -227,6 +247,76 @@ export function App(): React.JSX.Element {
 		},
 		[api]
 	);
+
+	/**
+	 * Navigate to one account's confirmations, from a clicked notification.
+	 *
+	 * **The lookup is the first thing it does.** The renderer navigates to an
+	 * account it already knows about, never to whatever arrived on the wire — so
+	 * an id it does not recognise is ignored rather than trusted.
+	 *
+	 * **And the competing screens are cleared, not just the target set.** The
+	 * view is a stack of `if`s in which `autoConfirmFor` and `removingFor` are
+	 * tested *above* `confirmingFor`, so setting the target while either is open
+	 * navigates nowhere and the click looks broken.
+	 */
+	const openConfirmationsFor = useCallback(
+		(steamId64: string): boolean => {
+			const account = confirmationsTargetFor(accounts, steamId64);
+			if (!account) {
+				return false;
+			}
+			setAutoConfirmFor(undefined);
+			setRemovingFor(undefined);
+			setRoutingFor(undefined);
+			setBackupFor(undefined);
+			setView('accounts');
+			setConfirmingFor(account);
+			return true;
+		},
+		[accounts]
+	);
+
+	// The fast path: a click while this document is alive and listening.
+	useEffect(() => {
+		if (!api) {
+			return;
+		}
+		api.onOpenConfirmations((steamId64) => openConfirmationsFor(steamId64));
+	}, [api, openConfirmationsFor]);
+
+	/**
+	 * The slow path, and the one that makes a lock survivable.
+	 *
+	 * A lock **reloads** this window, so a click that arrived while the vault was
+	 * locked — or in the instant before the reload landed — reached a document
+	 * that no longer exists. Main kept the intent; this collects it once there is
+	 * an account list to navigate within, and collecting clears it.
+	 *
+	 * Gated on the list being non-empty rather than only on `unlocked`, because
+	 * navigating needs an account to navigate *to*: asking a beat too early would
+	 * take the intent, fail the lookup, and throw it away.
+	 */
+	useEffect(() => {
+		if (!api || !status?.unlocked || accounts.length === 0) {
+			return;
+		}
+		let cancelled = false;
+		api
+			.takePendingConfirmations()
+			.then((pending) => {
+				if (!cancelled && pending.steamId64) {
+					openConfirmationsFor(pending.steamId64);
+				}
+			})
+			.catch(() => {
+				// A click that cannot be collected is not worth an error path; the
+				// account list is on screen and the confirmations are one click away.
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [api, status?.unlocked, accounts.length, openConfirmationsFor]);
 
 	// The window title comes from branding, never from HTML — one source of truth
 	// while Q1 is unresolved. It doubles as the end-to-end IPC signal: if the
