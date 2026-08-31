@@ -29,6 +29,27 @@ export interface OpenRecoveryDialog {
 	pick(): Promise<string | undefined>;
 }
 
+/**
+ * What identifies the authenticator this export is a copy of.
+ *
+ * Not the account id: an account removed and re-enrolled keeps its SteamID and
+ * shares nothing else, and a maFile written from the old secrets would be a
+ * backup of something Steam has already stopped accepting.
+ */
+function fingerprint(account: {
+	steamId64: string;
+	sharedSecret: string;
+	identitySecret: string;
+	revocationCode?: string | undefined;
+}): string {
+	return [
+		account.steamId64,
+		account.sharedSecret,
+		account.identitySecret,
+		account.revocationCode ?? ''
+	].join('|');
+}
+
 export function registerEnrollmentHandlers(
 	enrollment: EnrollmentService,
 	vault: VaultService,
@@ -238,6 +259,17 @@ export function registerEnrollmentHandlers(
 		const temp = `${destination}.${randomUUID()}.tmp`;
 
 		/*
+		 * What this file is about to contain, captured before the write.
+		 *
+		 * Re-read and compared after it, beside the lock check — see there. The
+		 * revocation code is included because replacing it alone makes an exported
+		 * copy wrong in the way that matters most: it is the one secret whose loss
+		 * cannot be undone, and a backup holding the previous one is worse than no
+		 * backup, because somebody will believe it.
+		 */
+		const exported = fingerprint(current);
+
+		/*
 		 * Cleanup and refusal in one place, so both failure paths below can keep a
 		 * **bare** `catch`.
 		 *
@@ -283,6 +315,37 @@ export function registerEnrollmentHandlers(
 			if (!vault.isUnlocked()) {
 				await rm(temp, { force: true }).catch(() => undefined);
 				throw new VaultLockedError();
+			}
+
+			/*
+			 * **And that it is still the same account.**
+			 *
+			 * The lock is re-checked here and the account's identity was not, so
+			 * only half the race was closed. The write is the wait — slow on the
+			 * drives people export to — and an account can be removed, or have its
+			 * authenticator replaced, while it runs. The rename then published a
+			 * plaintext maFile holding secrets the vault no longer has, and told the
+			 * user it had saved their account.
+			 *
+			 * Removed is the worse half: it puts the secrets somebody just chose to
+			 * be rid of into a fresh unencrypted file at a path of their choosing.
+			 * Replaced is quieter and lasts longer — a backup that silently holds
+			 * the previous authenticator, which Steam has already stopped accepting,
+			 * discovered at the one moment it is ever used.
+			 *
+			 * Compared on the secrets themselves rather than on presence, because
+			 * "still in the vault" is true of a re-enrolled account that shares
+			 * nothing with the one this file describes.
+			 */
+			const stillThere = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+			if (!stillThere || fingerprint(stillThere) !== exported) {
+				await rm(temp, { force: true }).catch(() => undefined);
+				throw new Error(
+					!stillThere
+						? 'that account was removed while it was being exported, so nothing was written.'
+						: "that account's authenticator was replaced while it was being exported, so " +
+								'nothing was written. Export it again to get the current one.'
+				);
 			}
 		}
 

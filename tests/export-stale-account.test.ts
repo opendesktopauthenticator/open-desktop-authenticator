@@ -2,6 +2,7 @@ import { mkdtempSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { toMaFile } from '../src/main/import/export';
 import { CHANNELS } from '../src/shared/channels';
 import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
@@ -541,5 +542,125 @@ describe('an export whose set-aside copy cannot be removed', () => {
 		expect(result).toMatchObject({ state: 'saved' });
 		expect(result).not.toMatchObject({ staleCopy: true });
 		expect(readdirSync(dir).filter((name) => name.endsWith('.prev'))).toEqual([]);
+	});
+});
+
+/**
+ * **The lock was re-checked before publishing and the account's identity was
+ * not**, so only half the race was closed.
+ *
+ * The write is a wait — slow on the drives people export to — and an account
+ * can be removed, or have its authenticator replaced, while it runs. The rename
+ * then published a plaintext maFile holding secrets the vault no longer has,
+ * and reported it as saved.
+ *
+ * Removed is the worse half: it puts the secrets somebody just chose to be rid
+ * of into a fresh unencrypted file. Replaced is quieter and lasts longer — a
+ * backup silently holding the previous authenticator, which Steam has already
+ * stopped accepting, discovered at the one moment it is ever used.
+ */
+describe('accountExport while the write is in flight', () => {
+	function run(mutate: (accounts: Account[]) => void): {
+		call: () => Promise<unknown>;
+		destination: string;
+	} {
+		const accounts: Account[] = [{ ...account }];
+		const destination = join(dir, 'out.maFile');
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+
+		// The change lands after the plaintext exists and before it is published.
+		lockDuringWrite = () => mutate(accounts);
+
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+		return { call: () => handler(EVENT, { steamId64: account.steamId64 }), destination };
+	}
+
+	it('publishes nothing when the account is removed mid-write', async () => {
+		const { call, destination } = run((accounts) => {
+			accounts.length = 0;
+		});
+
+		await expect(call()).rejects.toThrow(/removed while it was being exported/);
+		expect(
+			existsSync(destination),
+			'secrets the user had just deleted were written to a plaintext file'
+		).toBe(false);
+	});
+
+	it('publishes nothing when the authenticator is replaced mid-write', async () => {
+		const { call, destination } = run((accounts) => {
+			const entry = accounts[0];
+			if (entry) {
+				entry.sharedSecret = 'ICEiIyQlJicoKSorLC0uLzAxMjM=';
+				entry.identitySecret = 'c2Vjb25kLWlkZW50aXR5LXNlY3I=';
+				entry.revocationCode = 'R54321';
+			}
+		});
+
+		await expect(call()).rejects.toThrow(/replaced while it was being exported/);
+		expect(
+			existsSync(destination),
+			'the backup would have held an authenticator Steam no longer accepts'
+		).toBe(false);
+	});
+
+	/*
+	 * Changing the revocation code alone still invalidates the copy: it is the
+	 * one secret whose loss cannot be undone, and a backup holding the previous
+	 * one is worse than no backup, because somebody will believe it.
+	 */
+	it('publishes nothing when only the revocation code changed', async () => {
+		const { call, destination } = run((accounts) => {
+			const entry = accounts[0];
+			if (entry) {
+				entry.revocationCode = 'R00000';
+			}
+		});
+
+		await expect(call()).rejects.toThrow(/replaced while it was being exported/);
+		expect(existsSync(destination)).toBe(false);
+	});
+
+	it('publishes normally when nothing changed', async () => {
+		const { call, destination } = run(() => undefined);
+		await expect(call()).resolves.toBeDefined();
+		expect(existsSync(destination)).toBe(true);
+	});
+});
+
+/**
+ * **A maFile carries no routing, and the export button says so.**
+ *
+ * Our own importer reads `Session.proxy`, so writing it would round-trip — and
+ * round-trip the credentials with it, since a routed URL is routinely
+ * `user:pass@host` and this file is plaintext by construction. The same
+ * reasoning that keeps the refresh token out applies verbatim.
+ *
+ * The defect was the silence, not the omission: an account exported and
+ * re-imported came back unrouted with nothing said, so a vault without
+ * `Require proxies` would poll it over the machine's own address.
+ */
+describe('what a maFile does not carry', () => {
+	it('omits the proxy, credentials and all', () => {
+		const routed = { ...account, proxyUrl: 'socks5://user:secret@10.0.0.1:1080' };
+		const written = toMaFile(routed);
+
+		expect(written).not.toContain('secret@');
+		expect(written).not.toContain('10.0.0.1');
+		expect(JSON.parse(written).Session.proxy).toBeUndefined();
+	});
+
+	it('omits the refresh token', () => {
+		const withToken = { ...account, refreshToken: 'a-live-credential' };
+		expect(toMaFile(withToken)).not.toContain('a-live-credential');
 	});
 });

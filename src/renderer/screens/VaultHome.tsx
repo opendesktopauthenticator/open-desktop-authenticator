@@ -702,7 +702,7 @@ export function VaultHome({
 												})
 												.finally(() => setExporting(finished(account.steamId64)));
 										}}
-										title="Save this account as a .maFile, readable by SDA and anything else in the ecosystem."
+										title="Save this account as a .maFile, readable by SDA and anything else in the ecosystem. It carries the authenticator secrets in plain text, and it does NOT carry this account's proxy or its Steam session — set the routing again after importing it somewhere else."
 									>
 										{exporting.has(account.steamId64) ? 'Saving…' : 'Export'}
 									</button>
