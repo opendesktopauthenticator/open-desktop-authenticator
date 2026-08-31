@@ -111,9 +111,15 @@ jobs:
           TAG_INPUT: ${{ inputs.tag }}
         run: |
           # Through the environment, not interpolated into the script. GitHub
-          # substitutes `${{ }}` before the shell parses, so a crafted dispatch
-          # input is a command-injection sink. It takes repository write access,
-          # which is already a total compromise — and it is one line.
+          # substitutes expressions before the shell parses, so a dispatch input
+          # written straight into this script is a command-injection sink. It
+          # takes repository write access, which is already a total compromise —
+          # and it is one line.
+          #
+          # Do not write an empty expression here to illustrate the point. An
+          # earlier version of this comment did, and GitHub evaluates expressions
+          # inside `run:` bodies too: the empty one failed the whole workflow at
+          # load, with no job and no log to say why.
           tag="${TAG_INPUT:-$GITHUB_REF_NAME}"
           manifest="v$(node -p "require('./package.json').version")"
           echo "tag=$tag manifest=$manifest"
