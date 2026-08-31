@@ -95,7 +95,56 @@ fi
 # holding backups of deleted reports for longer than the reports themselves
 # would make that promise false.
 ls -1t "$dest"/config-*.tar.gz 2>/dev/null | tail -n +15 | xargs -r rm -f
-find "$dest" -name 'tickets-*.tar.gz' -mtime +90 -delete 2>/dev/null || true
+#
+# **`-mtime +90` kept the archives for ninety-one days, and the page said
+# ninety.**
+#
+# `find` divides a file's age by 24 hours and throws the remainder away, so
+# `-mtime +90` reads as "the whole-day age is greater than 90" — which a file
+# only satisfies once it is 91 complete days old. A ticket archive written on
+# day 0 matched nothing on day 90 and survived to be swept on day 91, so
+# strangers' support reports and the screenshots attached to them outlived the
+# date /privacy promises they are gone by a full day. That is the wrong
+# direction for a retention claim to be wrong in: nobody is harmed by a backup
+# being deleted early, and the promise is what people weighed when they decided
+# whether to attach a screenshot at all.
+#
+# `! -newermt '90 days ago'` is the same comparison with the truncation removed
+# — delete anything whose timestamp is at or before the cutoff — and it spells
+# the number the page states rather than that number minus one, so nobody
+# reading the script and the page side by side has to re-derive an off-by-one
+# before believing they agree. It needs findutils 4.3.3 or newer for
+# `-newerXY`, which is 2006 and far behind anything this box runs.
+#
+# The sweep is still once a day (oda-backup.timer: `OnCalendar=daily` with 30
+# minutes of jitter), so an archive goes at the first run on or after its 90th
+# day rather than the instant it turns 90. That is the resolution of a daily
+# job, not a second day of retention.
+# **The cutoff is computed once, checked, and never swallowed.**
+#
+# `! -newermt '90 days ago'` parses that string at runtime, and the first draft
+# ended `2>/dev/null || true` — which hides both the error and the exit status.
+# So a findutils build or a locale that could not read it would turn retention
+# off **permanently and silently**, while this job went on logging success. A
+# retention promise that fails open is worse than one that is a day late, and it
+# fails in the direction the privacy page cannot afford.
+#
+# The range check catches the rest of the family without needing `find` to
+# cooperate: a sense error or a dropped "ago" resolves to a date in the future,
+# which would delete every ticket archive on every run, and a wrong unit lands
+# far outside 90 days. Both abort instead.
+cutoff=$(date -d '90 days ago' '+%Y-%m-%d %H:%M:%S') || {
+	echo 'oda-backup: cannot compute the 90-day cutoff; ticket archives NOT swept' >&2
+	exit 1
+}
+cutoff_age=$(( $(date '+%s') - $(date -d "$cutoff" '+%s') ))
+# 89 to 91 days, in seconds. Wide enough for a daylight-saving hour, narrow
+# enough that nothing but "about ninety days ago" gets through.
+if [ "$cutoff_age" -lt 7689600 ] || [ "$cutoff_age" -gt 7862400 ]; then
+	echo "oda-backup: refusing to sweep — the cutoff is ${cutoff_age}s old, not ~90 days" >&2
+	exit 1
+fi
+find "$dest" -name 'tickets-*.tar.gz' ! -newermt "$cutoff" -delete
 
 kept_config=$(ls -1 "$dest"/config-*.tar.gz 2>/dev/null | wc -l)
 kept_tickets=$(ls -1 "$dest"/tickets-*.tar.gz 2>/dev/null | wc -l)

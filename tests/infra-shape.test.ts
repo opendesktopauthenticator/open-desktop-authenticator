@@ -132,6 +132,46 @@ describe('the backup job', () => {
 		const reports = backup.slice(backup.indexOf('# ── reports and attachments'));
 		expect(reports).not.toContain('attachments 2>/dev/null');
 	});
+
+	/**
+	 * **Retention must not fail open.**
+	 *
+	 * `! -newermt '90 days ago'` parses that string at runtime, and the first
+	 * version of it ended `2>/dev/null || true` — which hides the error *and* the
+	 * exit status. A findutils build or a locale that could not read the date
+	 * would have turned ticket retention off permanently and silently, while the
+	 * job went on logging success. A privacy page promising deletion in ninety
+	 * days cannot be backed by a sweep that fails open.
+	 */
+	it('does not swallow a cutoff it could not compute', () => {
+		const sweep = backup.slice(backup.indexOf("find \"$dest\" -name 'tickets-*.tar.gz'"));
+		expect(
+			sweep,
+			'the ticket sweep hides its own failure, so an unparseable date disables retention ' +
+				'for ever while the job still reports success'
+		).not.toContain('2>/dev/null || true');
+	});
+
+	/*
+	 * And the sense of the comparison, which one dropped character inverts:
+	 * without the `!`, this deletes everything NEWER than the cutoff and keeps
+	 * the old archives for ever — the exact opposite of a retention sweep.
+	 */
+	it('deletes what is older than the cutoff, not what is newer', () => {
+		expect(backup, 'the retention sweep is inverted').toMatch(
+			/find "\$dest" -name 'tickets-\*\.tar\.gz' ! -newermt "\$cutoff" -delete/
+		);
+	});
+
+	/*
+	 * The runtime check is what catches the rest of the family — a dropped "ago"
+	 * resolves to a date in the *future*, which would delete every ticket archive
+	 * on every run. Asserted here so the guard cannot be quietly removed.
+	 */
+	it('refuses to sweep with a cutoff that is not about ninety days old', () => {
+		expect(backup, 'nothing checks the cutoff before it is used').toContain('cutoff_age');
+		expect(backup).toMatch(/refusing to sweep/);
+	});
 });
 
 describe('the health job', () => {
