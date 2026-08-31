@@ -72,6 +72,7 @@ rather check the bytes than be told they are fine.
 - Steam Guard codes
 - Trade and market confirmations: view, accept, deny
 - Optional auto-confirm, per account, per type, off by default
+- Optional desktop notifications when a confirmation needs you, per account, off by default
 - Optional per-account network routing
 - Runs entirely on your machine
 

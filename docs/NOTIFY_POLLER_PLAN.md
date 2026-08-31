@@ -2,6 +2,26 @@
 
 **Status: signed off on the decisions; implementation held pending further
 review.**
+**Status: implemented.** All seven phases are built, each gated on format,
+lint, typecheck, the full suite, a real build, and its own mutation inventory.
+Where implementation disagreed with this document, the document was corrected
+in place rather than quietly followed — the **[r8]** note in §6 step 4.3 is one
+such correction, and it is a correction of an [r7] claim.
+
+Three defects were found by building rather than by reading, and none of them
+were in this plan:
+
+- `signInNeeded` on an account that had never polled created state, so the
+  _first_ real poll behaved like a second one and announced everything already
+  pending — the twenty-toasts-on-unlock problem, reached by the one path that
+  looks unrelated to it. Seeding now has its own flag.
+- Adding an activity kind made the Activity screen's `describe()` return
+  `undefined`: its `default` assumed every kind carries a `reason`, and its own
+  comment warned about exactly that. It is exhaustive now.
+- The new settings markup shipped without its stylesheet. An existing test
+  caught it; the control would otherwise have rendered unstyled in the real app
+  while every other check passed.
+
 **Revision 7** — a consistency pass over the whole document found seven
 defects that would have produced broken code, chief among them that **phase 6
 was unbuildable**: nothing in the plan produced the toast click it is built on.

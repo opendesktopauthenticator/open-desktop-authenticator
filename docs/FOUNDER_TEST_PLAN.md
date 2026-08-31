@@ -573,6 +573,59 @@ Enable it, lock the vault, send a trade, wait.
 
 **Pass:** nothing is approved until you unlock.
 
+### T34 · Notifications
+
+**Nothing here approves anything.** This is the one poll setting that is safe to
+try on an account you care about — which is also why the interesting failures
+are about what a toast _says_ rather than what it does.
+
+1. On one account, switch **notifications** on and leave both auto-confirm
+   switches **off**. Leave the detail on its default, `Everything`.
+   — With market auto-confirm on, the listing in step 2 is approved and there is
+   correctly no toast, so the test would appear to fail while working.
+2. Set the interval to 60 seconds, so you are not waiting on a 15-second poll
+   while watching for one toast.
+3. Make a market listing from another device.
+
+**Pass:** within about a minute, exactly **one** notification, titled with that
+account's name, naming the listing. The account row reads
+`notifying, approving nothing` — not `auto-confirm: off`.
+
+4. Wait through two more polls without touching anything.
+
+**Pass:** no repeat. The same pending confirmation is announced once, not every
+minute. **Fails if** it repeats — that is the version of this feature people
+switch off.
+
+5. Click the notification.
+
+**Pass:** the window comes to the front, on that account's confirmations. Try it
+again with the window closed to the tray, and again with a different screen
+already open (routing, or the auto-confirm settings) — all three should land in
+the same place.
+
+6. **Lock the vault.** Make another listing. Wait.
+
+**Pass:** no notification at all while locked. Unlock, and the first poll after
+it stays silent too — it establishes what is already there rather than
+announcing a backlog.
+
+7. **Now lock Windows** (Win+L) with the vault still **unlocked**, and make
+   another listing.
+
+**Pass — and read this before filing it as a bug:** the notification **does**
+still arrive, and on the lock screen it **does** name the trade and the item.
+That is the intended behaviour and the disclosure beside the switch says so; see
+`THREAT_MODEL.md` §3.2 for why a degrade was considered and rejected. If you
+would rather it did not, the fix is `Count only` or `Type only`, which is what
+those options are for — switch to `Type only` and repeat this step to confirm
+the item name is gone.
+
+8. Switch notifications **off** and make one more listing.
+
+**Pass:** silence. **Fails if** anything still arrives, which would mean the
+switch does not reach the poller.
+
 ### T23 · Remove an account
 
 **Read this before doing it.** Removing an account from the vault does not remove

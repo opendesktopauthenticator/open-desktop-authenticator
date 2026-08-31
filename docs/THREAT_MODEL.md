@@ -467,6 +467,10 @@ Guardrails, all deliberate:
 
 - Off by default. Two independent switches — market listings and trades — never
   one combined toggle, because they are different risk classes. **Implemented.**
+- A **third** switch, notifications, which approves nothing. An account may be
+  watched without anything acting on its behalf, so "tell me" and "do it for me"
+  are separate decisions rather than one. It carries a disclosure of its own —
+  see §3.2. **Implemented.**
 - Turning **trades** on requires typing `APPROVE TRADES`, because ticking a box
   is muscle memory and typing is not. Switching it off never does.
   **Implemented.**
@@ -535,6 +539,72 @@ that states what a wrongly-approved trade costs, and says plainly that nothing o
 it can widen the allowlist.
 
 ---
+
+### 3.2 Notifications — a second reason to poll, and a disclosure that comes with it
+
+**Implemented.** An account can be watched without anything being approved on
+its behalf: notifications are a switch of their own, independent of the two
+above, and an account with only that switch on is polled and never acts.
+
+**What it asks Steam, and how often.** The same request auto-confirm already
+makes — the mobile confirmation list — on the same interval, over the same
+per-account route, with the same client identity. An account that has both
+notifications and auto-confirm on makes **one** request per interval, not two:
+they are the same poll, and what the policy held back is what a person is told
+about. This adds no new endpoint, no new host, and no request that leaves by a
+different address than the account's own.
+
+**What it costs in traffic.** An account that only watches is polled exactly as
+hard as one that approves. The settings screen states the load in requests per
+minute across the accounts actually being polled, and it says so at the default
+interval rather than hiding the number at the one value most people never
+change.
+
+**It stops with the vault lock**, like everything else here. The engine returns
+before any poll when the vault is locked, the notifier's per-account state is
+cleared, and an uncollected notification click is dropped — somebody who comes
+back and types a passphrase has a new intention.
+
+#### The disclosure, stated as a decision rather than a limitation
+
+A Windows toast is **not a private surface**. It appears on the lock screen and
+persists in notification history. The default detail, `full`, names the trade
+partner and the item — which is what makes the notification worth reading and
+what makes it a disclosure.
+
+**That is the account owner's choice, and it was made deliberately.** The
+reasoning, in full, because a later reader should be able to disagree with it on
+the merits rather than mistake it for an oversight:
+
+- Notifications are **off by default**, per account. Nothing reaches a toast
+  until somebody opens that account's screen and switches them on — which is
+  exactly where the disclosure sits, beside the switch rather than beside the
+  detail options, so it is read by everyone who enables the feature and not only
+  by someone who goes looking.
+- The sentence names **both** the lock screen and notification history, because
+  naming only the second understates it.
+- `Count only` and `Type only` remain, and the screen presents them as the
+  answer for a machine other people can see, or one you walk away from.
+
+**A degrade was considered and rejected.** An earlier draft suppressed the
+details while the Windows session was locked. It was dropped for three reasons:
+it would make the feature quietest at the moment a notification is most worth
+reading on return; it does not actually close the disclosure, since a toast
+raised while the session was unlocked stays in notification history and is
+readable after a later lock; and the person it protects — somebody receiving
+`full` toasts without having chosen to — does not exist in this design.
+
+So: **on a machine left with the vault unlocked and the Windows session locked,
+`full` toasts name trade partners and items on the lock screen.** That is
+accepted, not overlooked.
+
+**What a toast never contains**: a confirmation id, a nonce, a proxy address, a
+revocation code, or any part of a shared or identity secret. The failure text
+behind a halt is not carried either — that is redacted error text composed for
+the activity log, which is where it stays. Steam-authored strings that do reach
+a toast are length-capped and stripped of control characters, including the
+bidirectional overrides, because `full` is the one path on which text this
+application did not write reaches an OS-level surface.
 
 ## 4. Explicitly out of scope
 
