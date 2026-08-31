@@ -69,6 +69,8 @@ function harness(
 		wipeFails?: boolean;
 		/** Hold every storage wipe until `releaseWipe()` is called. */
 		gateWipes?: boolean;
+		/** Reject the second Steam-domain cookie, leaving the first one set. */
+		failSecondCookie?: boolean;
 		/**
 		 * A redirect the main frame passes through *during* the first load.
 		 *
@@ -181,6 +183,15 @@ function harness(
 		cookies: {
 			set: (cookie) => {
 				recorded.cookies.push({ url: cookie.url, name: cookie.name, value: cookie.value });
+				/*
+				 * **The second host rejects, not the first.** Seeding is a loop over
+				 * Steam's domains, so the case that matters is a *partial* success:
+				 * one live `steamLoginSecure` in the partition and a throw on the way
+				 * out, with no window yet for the refusal path to close.
+				 */
+				if (failSecondCookie && recorded.cookies.length >= 2) {
+					return Promise.reject(new Error('the cookie store is unavailable'));
+				}
 				return Promise.resolve();
 			}
 		}
@@ -190,6 +201,7 @@ function harness(
 	// between "refuses for ever" and "asks again once".
 	let wipeFails = overrides.wipeFails === true;
 	const gateWipes = overrides.gateWipes === true;
+	const failSecondCookie = overrides.failSecondCookie === true;
 	const wipeGates: (() => void)[] = [];
 	let loadFails = overrides.loadFails === true;
 
@@ -3059,5 +3071,34 @@ describe('a wipe that failed on a path other than closeAccount', () => {
 			h.recorded.wiped.length,
 			'the lock did not even try the partition it had been told was dirty'
 		).toBeGreaterThan(afterClose);
+	});
+});
+
+/**
+ * **A cookie seeded onto one Steam domain and not the other.**
+ *
+ * `signIn` loops over Steam's hosts. If the first `cookies.set` succeeded and
+ * the second rejected, the throw propagated with a live `steamLoginSecure`
+ * already in the partition — and the caller's refusal path closes a *window*,
+ * which does not exist yet at that point, so nothing wiped it. It sat there
+ * until the vault locked, and any later open on that partition inherited a
+ * signed-in Steam session established by an attempt that had failed.
+ */
+describe('a sign-in cookie that only partly landed', () => {
+	it('empties the partition rather than leaving one behind', async () => {
+		const h = harness({ failSecondCookie: true });
+		const browsers = new AccountBrowsers(h.host);
+
+		await expect(browsers.open(ACCOUNT)).rejects.toBeInstanceOf(Error);
+
+		expect(
+			h.recorded.cookies.length,
+			'this tests nothing unless one cookie was set before the failure'
+		).toBeGreaterThanOrEqual(1);
+		expect(
+			h.recorded.wiped,
+			'a live Steam session was left in the partition by an attempt that failed, for any ' +
+				'later open on that account to inherit'
+		).toContain(browserPartitionFor(ACCOUNT.steamId64));
 	});
 });

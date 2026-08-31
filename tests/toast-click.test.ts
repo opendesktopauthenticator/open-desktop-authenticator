@@ -31,7 +31,11 @@ function summary(overrides: Partial<ConfirmationSummary> = {}): ConfirmationSumm
 describe('the click source', () => {
 	function harness(onActivate?: (steamId64: string) => void) {
 		const toasts: { title: string; body: string; onClick?: () => void }[] = [];
-		const host: ToastHost = { show: (options) => toasts.push(options) };
+		const host: ToastHost = {
+			show: (options) => {
+				toasts.push(options);
+			}
+		};
 		return {
 			notifier: new ConfirmationNotifier(onActivate ? { host, onActivate } : { host }),
 			toasts

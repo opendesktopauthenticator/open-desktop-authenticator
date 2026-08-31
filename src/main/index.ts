@@ -640,15 +640,60 @@ function start(): void {
 	});
 	registerToastClickHandlers(toastClicks);
 
+	/**
+	 * Toasts that have been shown and not yet dismissed.
+	 *
+	 * **Held because nothing else does.** The `Notification` lived in a local
+	 * variable, so once `show()` returned the only reference was whatever the
+	 * click listener closed over — and a collection could take the object and its
+	 * handler with it. A toast still sitting in Windows' notification history
+	 * would then do nothing when clicked, which is indistinguishable from the app
+	 * being broken.
+	 */
+	const liveToasts = new Set<Notification>();
+
 	const notifier = new ConfirmationNotifier({
 		host: {
-			show: ({ title, body, onClick }) => {
-				const toast = new Notification({ title, body, icon: notificationImage() });
-				if (onClick) {
-					toast.on('click', onClick);
-				}
-				toast.show();
-			}
+			show: ({ title, body, onClick }) =>
+				new Promise<boolean>((resolve) => {
+					/*
+					 * **`show()` returning is not the OS having shown anything.**
+					 *
+					 * Electron reports a native creation or display failure
+					 * asynchronously, on `failed`. The notifier records "we said this"
+					 * before it can know, so it is told the real answer here and rolls
+					 * that record back when the answer is no — otherwise a toast that
+					 * never appeared silenced its confirmation for the whole session.
+					 */
+					const toast = new Notification({ title, body, icon: notificationImage() });
+					liveToasts.add(toast);
+
+					/*
+					 * A machine with no notification service shows nothing and fires
+					 * nothing. Reported as delivered on purpose: retrying every fifteen
+					 * seconds cannot help, and the activity log still carries it. What
+					 * this must not do is silently retry for ever on a machine where
+					 * success is impossible.
+					 */
+					if (!Notification.isSupported()) {
+						liveToasts.delete(toast);
+						resolve(true);
+						return;
+					}
+
+					toast.on('show', () => resolve(true));
+					toast.on('failed', () => {
+						liveToasts.delete(toast);
+						resolve(false);
+					});
+					// Kept until it leaves the user's notification centre, because that is
+					// how long the click can still arrive.
+					toast.on('close', () => liveToasts.delete(toast));
+					if (onClick) {
+						toast.on('click', onClick);
+					}
+					toast.show();
+				})
 		},
 		onActivate: (steamId64) => toastClicks.activate(steamId64)
 	});

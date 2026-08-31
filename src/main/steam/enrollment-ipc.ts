@@ -442,14 +442,43 @@ export function registerEnrollmentHandlers(
 		 *    exposure at all. It stays, and the refusal still says the vault
 		 *    locked.
 		 */
-		if (!vault.isUnlocked()) {
-			// Undone completely: the export this lock cancelled leaves the directory
+		/*
+		 * **And the account is checked again, not only the lock.**
+		 *
+		 * The fingerprint was taken before this sequence and never re-read, so the
+		 * post-rename check asked one question — is the vault still open — and let
+		 * everything else through. Removing the account during the awaited renames
+		 * therefore answered `{ state: 'saved' }` with the plaintext maFile sitting
+		 * at the destination: secrets published for an authenticator the vault no
+		 * longer holds, by an export the user had already superseded.
+		 *
+		 * The same fingerprint, for the same reason it exists at all — an account
+		 * removed and re-enrolled keeps its SteamID and shares nothing else, so a
+		 * file written from the old secrets is a backup of something Steam has
+		 * already stopped accepting.
+		 */
+		const stillOurs = vault.isUnlocked()
+			? vault.read().accounts.find((entry) => entry.steamId64 === steamId64)
+			: undefined;
+		if (!vault.isUnlocked() || !stillOurs || fingerprint(stillOurs) !== exported) {
+			// Undone completely: the export this cancelled leaves the directory
 			// exactly as it found it, whether or not something was already there.
 			await rm(destination, { force: true }).catch(() => undefined);
 			if (replacing) {
 				await rename(kept, destination).catch(() => undefined);
 			}
-			throw new VaultLockedError();
+			if (!vault.isUnlocked()) {
+				throw new VaultLockedError();
+			}
+			// The same sentences the pre-rename check gives, so the two read alike —
+			// and so a user who hits the later one is not told something different
+			// about the same situation.
+			throw new Error(
+				!stillOurs
+					? 'that account was removed while it was being exported, so nothing was written.'
+					: "that account's authenticator was replaced while it was being exported, so " +
+							'nothing was written. Export it again to get the current one.'
+			);
 		}
 
 		/*

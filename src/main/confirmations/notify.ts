@@ -34,8 +34,22 @@ export interface ToastHost {
 	 * `onClick` is optional so a host that cannot deliver clicks is still a valid
 	 * host — which is what keeps this testable headless, and what let the toasts
 	 * ship one phase before the routing behind them.
+	 *
+	 * @returns nothing when the host can answer synchronously, or whether the
+	 * toast was actually delivered when it cannot.
+	 *
+	 * **Electron cannot answer synchronously, and pretending it could lost
+	 * alerts.** `Notification.show()` returns before the OS has created
+	 * anything; a native creation or display failure arrives later, on the
+	 * `failed` event. So a toast that never appeared was recorded as announced
+	 * and the confirmation it was about was never mentioned again for the
+	 * session — measured with a delayed failure against the same critical
+	 * confirmation: one delivery attempt, then silence.
+	 *
+	 * `void` still means delivered, so a test host that pushes to an array stays
+	 * a valid host and a throwing one is still caught.
 	 */
-	show(options: { title: string; body: string; onClick?: () => void }): void;
+	show(options: { title: string; body: string; onClick?: () => void }): void | Promise<boolean>;
 }
 
 export interface ConfirmationNotifierOptions {
@@ -217,20 +231,55 @@ export class ConfirmationNotifier {
 	 * useful response to it failing is to try again on the next poll, not to
 	 * abandon the pass that found something.
 	 */
-	private toast(steamId64: string, title: string, body: string): boolean {
+	private toast(
+		steamId64: string,
+		title: string,
+		body: string,
+		/**
+		 * Undo whatever this toast's caller recorded as "we said this".
+		 *
+		 * Called synchronously when `show` throws, and **later** when the host
+		 * reports the OS refused it — which is the only way Electron can report
+		 * it. A caller that committed optimistically has it undone the moment the
+		 * failure is known, and the next poll says the thing again.
+		 */
+		onUndelivered: () => void = () => undefined
+	): void {
 		// The title is sanitised here rather than at each call site, for the same
 		// reason the click is attached here: four call sites is three chances to
 		// forget, and the one forgotten looks identical.
+		let outcome: void | Promise<boolean>;
 		try {
-			this.host.show({
+			outcome = this.host.show({
 				title: safeSteamText(title),
 				body,
 				onClick: () => this.onActivate(steamId64)
 			});
-			return true;
 		} catch {
-			return false;
+			onUndelivered();
+			return;
 		}
+		/*
+		 * **A thenable, not merely "not undefined".**
+		 *
+		 * TypeScript lets a function declared to return `void` return anything, so
+		 * a host written as `show: (o) => toasts.push(o)` type-checks and hands
+		 * back a number. Testing for `undefined` then called `.then` on it. Asking
+		 * whether the answer is actually a promise is the only check that matches
+		 * what the type permits.
+		 */
+		const settled = outcome as Promise<boolean> | undefined;
+		if (typeof settled?.then !== 'function') {
+			return;
+		}
+		void settled.then(
+			(delivered) => {
+				if (!delivered) {
+					onUndelivered();
+				}
+			},
+			() => onUndelivered()
+		);
 	}
 
 	private stateFor(steamId64: string): AccountNotifyState | undefined {
@@ -279,8 +328,7 @@ export class ConfirmationNotifier {
 			// about the takeover and not about the entry that could not be read —
 			// which might have been a second one.
 			if (critical.length > 0 || unreadable > 0) {
-				const said = this.toast(steamId64, accountName, composeBody(detail, critical, unreadable));
-				if (!said) {
+				this.toast(steamId64, accountName, composeBody(detail, critical, unreadable), () => {
 					/*
 					 * **The seed stands; the announcement does not.**
 					 *
@@ -298,7 +346,7 @@ export class ConfirmationNotifier {
 						}
 						seeded.lastUnreadable = 0;
 					}
-				}
+				});
 			}
 			return;
 		}
@@ -341,7 +389,7 @@ export class ConfirmationNotifier {
 		if (fresh.length === 0 && !newlyUnreadable) {
 			return;
 		}
-		if (!this.toast(steamId64, accountName, composeBody(detail, fresh, unreadable))) {
+		this.toast(steamId64, accountName, composeBody(detail, fresh, unreadable), () => {
 			/*
 			 * **Nothing was said, so nothing may be marked as said.**
 			 *
@@ -355,7 +403,7 @@ export class ConfirmationNotifier {
 				existing.seen.delete(entry.id);
 			}
 			existing.lastUnreadable = previouslyUnreadable;
-		}
+		});
 	}
 
 	/**
@@ -402,14 +450,14 @@ export class ConfirmationNotifier {
 				lastUnreadable: 0
 			});
 		}
-		if (!this.toast(steamId64, accountName, 'Sign in again to keep checking this account.')) {
+		this.toast(steamId64, accountName, 'Sign in again to keep checking this account.', () => {
 			// Same rule: the flag means "we told them", and we did not. Cleared so
 			// the next poll — which will find the same expired session — says it.
 			const current = this.stateFor(steamId64);
 			if (current) {
 				current.toldSignInNeeded = false;
 			}
-		}
+		});
 	}
 
 	/**

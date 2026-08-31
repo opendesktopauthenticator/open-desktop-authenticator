@@ -664,3 +664,70 @@ describe('what a maFile does not carry', () => {
 		expect(toMaFile(withToken)).not.toContain('a-live-credential');
 	});
 });
+
+/**
+ * **The account can go during the rename, not only during the write.**
+ *
+ * The fingerprint is taken before the write and checked before the publish, so
+ * everything up to the rename is covered. The rename itself is a filesystem
+ * round trip — slow on the removable and network drives people export to — and
+ * the check after it asked one question: is the vault still open. Removing the
+ * account inside that window therefore answered `{ state: 'saved' }` with the
+ * plaintext maFile sitting at the destination: secrets published for an
+ * authenticator the vault no longer holds.
+ *
+ * `lockDuringRename` already existed for the vault-lock case; the account case
+ * runs through the same door.
+ */
+describe('accountExport while the publish is in flight', () => {
+	function run(mutate: (accounts: Account[]) => void): {
+		call: () => Promise<unknown>;
+		destination: string;
+	} {
+		const accounts: Account[] = [{ ...account }];
+		const destination = join(dir, 'out.maFile');
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+
+		// After the plaintext has been published, before the answer is given.
+		lockDuringRename = () => mutate(accounts);
+
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+		return { call: () => handler(EVENT, { steamId64: account.steamId64 }), destination };
+	}
+
+	it('takes the file back when the account is removed mid-rename', async () => {
+		const { call, destination } = run((accounts) => {
+			accounts.length = 0;
+		});
+
+		await expect(call()).rejects.toThrow(/removed while it was being exported/);
+		expect(
+			existsSync(destination),
+			'a plaintext maFile was published for an account the vault no longer holds, and the ' +
+				'export reported success'
+		).toBe(false);
+	});
+
+	it('takes it back when the authenticator is replaced mid-rename', async () => {
+		const { call, destination } = run((accounts) => {
+			const current = accounts[0];
+			if (current) {
+				accounts[0] = { ...current, sharedSecret: 'AAAAAAAAAAAAAAAAAAAAAAAAAAA=' };
+			}
+		});
+
+		await expect(call()).rejects.toThrow(/replaced while it was being exported/);
+		expect(existsSync(destination), 'a maFile holding superseded secrets was left published').toBe(
+			false
+		);
+	});
+});

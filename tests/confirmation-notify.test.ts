@@ -41,7 +41,11 @@ function harness(): {
 	toasts: { title: string; body: string }[];
 } {
 	const toasts: { title: string; body: string }[] = [];
-	const host: ToastHost = { show: (options) => toasts.push(options) };
+	const host: ToastHost = {
+		show: (options) => {
+			toasts.push(options);
+		}
+	};
 	return { notifier: new ConfirmationNotifier({ host }), toasts };
 }
 
@@ -774,5 +778,101 @@ describe('a notification surface that is refusing', () => {
 		expect(() => h.notifier.pending(ID, 'trader', [summary()], 0, 'full')).not.toThrow();
 		expect(() => h.notifier.signInNeeded(ID, 'trader')).not.toThrow();
 		expect(() => h.notifier.halted(ID, 'trader', 'confirm')).not.toThrow();
+	});
+});
+
+/**
+ * **A failure the OS reports *after* `show()` returned.**
+ *
+ * `Notification.show()` returns before the OS has created anything; Electron
+ * reports a native creation or display failure later, on the `failed` event. So
+ * a synchronous "did it throw" answer was not an answer at all: the toast was
+ * recorded as announced, the failure arrived a moment later with nobody
+ * listening, and that confirmation was never mentioned again for the session.
+ *
+ * Measured by the auditor exactly this way — a delayed failure followed by the
+ * same critical confirmation produced one delivery attempt and then silence.
+ */
+describe('a notification that fails after it was shown', () => {
+	function delayedHarness(): {
+		notifier: ConfirmationNotifier;
+		attempts: () => number;
+		/** Report the outcome of every toast raised so far. */
+		settle: (delivered: boolean) => Promise<void>;
+	} {
+		let attempts = 0;
+		const pending: ((delivered: boolean) => void)[] = [];
+		const host: ToastHost = {
+			show: () => {
+				attempts += 1;
+				return new Promise<boolean>((resolve) => {
+					pending.push(resolve);
+				});
+			}
+		};
+		return {
+			notifier: new ConfirmationNotifier({ host }),
+			attempts: () => attempts,
+			settle: async (delivered) => {
+				for (const resolve of pending.splice(0)) {
+					resolve(delivered);
+				}
+				// Let the rollback attached to the promise run.
+				await Promise.resolve();
+				await Promise.resolve();
+			}
+		};
+	}
+
+	const critical = summary({
+		id: '9',
+		type: 6,
+		typeName: 'Account recovery',
+		securityCritical: true
+	});
+
+	it('says a critical confirmation again once the failure is known', async () => {
+		const h = delayedHarness();
+		h.notifier.pending(ID, 'trader', [critical], 0, 'type');
+		expect(h.attempts()).toBe(1);
+
+		await h.settle(false);
+		h.notifier.pending(ID, 'trader', [critical], 0, 'type');
+
+		expect(
+			h.attempts(),
+			'the toast was recorded as announced before the OS said it had failed, so an account ' +
+				'takeover attempt was never raised again'
+		).toBe(2);
+	});
+
+	it('says an ordinary confirmation again too', async () => {
+		const h = delayedHarness();
+		h.notifier.pending(ID, 'trader', [], 0, 'full');
+		h.notifier.pending(ID, 'trader', [summary()], 0, 'count');
+		expect(h.attempts()).toBe(1);
+
+		await h.settle(false);
+		h.notifier.pending(ID, 'trader', [summary()], 0, 'count');
+		expect(h.attempts()).toBe(2);
+	});
+
+	it('says sign in again once the failure is known', async () => {
+		const h = delayedHarness();
+		h.notifier.signInNeeded(ID, 'trader');
+		await h.settle(false);
+		h.notifier.signInNeeded(ID, 'trader');
+		expect(h.attempts()).toBe(2);
+	});
+
+	/* And a delivery that succeeds is still announced exactly once. */
+	it('does not repeat one the OS did show', async () => {
+		const h = delayedHarness();
+		h.notifier.pending(ID, 'trader', [], 0, 'full');
+		h.notifier.pending(ID, 'trader', [summary()], 0, 'count');
+		await h.settle(true);
+		h.notifier.pending(ID, 'trader', [summary()], 0, 'count');
+
+		expect(h.attempts(), 'a delivered toast was announced twice').toBe(1);
 	});
 });

@@ -60,8 +60,8 @@ import { EgressError, planProxy } from './egress';
  * user agreed to one of them.
  */
 function destinationKey(proxyUrl: string, endpoint: string): string {
-	let scheme = '';
-	let credentials = '';
+	let scheme: string;
+	let credentials: string;
 	try {
 		const url = new URL(proxyUrl);
 		scheme = url.protocol;

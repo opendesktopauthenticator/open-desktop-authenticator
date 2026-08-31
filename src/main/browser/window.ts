@@ -1110,7 +1110,6 @@ export class AccountBrowsers {
 		sinceEpoch: number,
 		wanted: string
 	): Promise<void> {
-
 		/*
 		 * **Captured before the first await, not after the last one.**
 		 *
@@ -1939,14 +1938,32 @@ async function signIn(
 	accessToken: string
 ): Promise<void> {
 	const value = `${steamId64}%7C%7C${accessToken}`;
-	for (const url of COOKIE_HOSTS) {
-		await session.cookies.set({
-			url,
-			name: 'steamLoginSecure',
-			value,
-			path: '/',
-			secure: true,
-			httpOnly: true
-		});
+	/*
+	 * **All or nothing.**
+	 *
+	 * This sets the cookie on each Steam host in turn. If the first succeeded and
+	 * the second rejected, the throw propagated with a live `steamLoginSecure`
+	 * already sitting in the partition — and the caller's refusal path closes a
+	 * window that does not exist yet, so nothing wiped it. It stayed until the
+	 * vault locked, and any later open on that partition inherited a signed-in
+	 * Steam session established by an attempt that failed.
+	 *
+	 * Cleared here rather than left to the caller, because this is the only place
+	 * that knows a partial seeding happened at all.
+	 */
+	try {
+		for (const url of COOKIE_HOSTS) {
+			await session.cookies.set({
+				url,
+				name: 'steamLoginSecure',
+				value,
+				path: '/',
+				secure: true,
+				httpOnly: true
+			});
+		}
+	} catch (cause) {
+		await clearSession(session);
+		throw cause;
 	}
 }
