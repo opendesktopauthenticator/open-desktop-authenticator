@@ -50,17 +50,22 @@ function tree(files: Record<string, string>): string {
 	return root;
 }
 
-/** The rules the installer really carries, so the cases below are not invented. */
-const REAL_FILES = [
-	'out/**/*',
-	'package.json',
-	'!**/*.map',
-	'!node_modules/**/{test,tests,__tests__,spec,example,examples,doc,docs,.github}/**',
-	'!node_modules/**/*.{ts,md,markdown,flow,coffee}',
-	'!node_modules/**/.*',
-	'!node_modules/**/*.d.{ts,cts,mts}',
-	'!node_modules/{react,react-dom,scheduler}/**'
-];
+/**
+ * The rules the installer really carries, imported rather than hand-copied.
+ *
+ * This was a literal copy of the `files` array, and it went stale the moment the
+ * real one changed: it still said `out/**` after the build trees were named
+ * individually, and knew nothing about the notices file or the two exclusions
+ * added since — while calling itself "the rules the installer really carries".
+ * Every case below was then measured against a configuration that does not ship.
+ */
+const REAL_FILES: unknown[] = [];
+
+beforeAll(async () => {
+	const config = await import('../electron-builder.config.mjs');
+	REAL_FILES.push(...(config.default.files ?? []));
+	expect(REAL_FILES.length, 'the builder config exports no files array').toBeGreaterThan(5);
+});
 
 describe('which extensions the packaging rules strip', () => {
 	it('reads a brace list', () => {

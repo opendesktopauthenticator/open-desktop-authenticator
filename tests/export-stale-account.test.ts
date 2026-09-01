@@ -106,6 +106,9 @@ let refusePublish = false;
  */
 let refuseReadOf: string | undefined;
 
+/** Paths the rollback actually read, to prove what it does not read. */
+let destinationsRead: string[] = [];
+
 vi.mock('node:fs/promises', async () => {
 	const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 	return {
@@ -135,6 +138,9 @@ vi.mock('node:fs/promises', async () => {
 			path: Parameters<typeof actual.readFile>[0],
 			options?: Parameters<typeof actual.readFile>[1]
 		) => {
+			if (typeof path === 'string' && path.endsWith('.maFile')) {
+				destinationsRead.push(path);
+			}
 			if (refuseReadOf !== undefined && typeof path === 'string' && path === refuseReadOf) {
 				throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
 			}
@@ -218,6 +224,7 @@ beforeEach(() => {
 	refuseRestore = false;
 	refusePublish = false;
 	refuseReadOf = undefined;
+	destinationsRead = [];
 	__resetRouterForTests();
 	setTrustedSender(() => true);
 });
@@ -1523,5 +1530,89 @@ describe('the name an export reports', () => {
 			fileName: string;
 		};
 		expect(result.fileName).toBe('my own name.maFile');
+	});
+});
+
+/**
+ * **The ownership check reads the destination, and the destination is whatever
+ * path a save dialog returned.**
+ *
+ * The comparison is against a maFile a few hundred bytes long. Reading the
+ * destination whole to find out it is not ours meant an arbitrarily large file —
+ * or a device that never ends — loaded into the Electron main process, which is
+ * the one that must not stop.
+ *
+ * A file of a different length cannot be this export's own, so the size answers
+ * it for nothing.
+ */
+describe('what the rollback reads before deleting', () => {
+	it('does not read a destination whose size already rules it out', async () => {
+		const destination = join(dir, 'out.maFile');
+		const accounts: Account[] = [account];
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		let renames = 0;
+		lockDuringRename = () => {
+			renames += 1;
+			if (renames !== 1) {
+				return;
+			}
+			accounts.length = 0;
+			// Far larger than any maFile: the shape a mistyped path into a video or
+			// a disk image produces.
+			writeFileSync(destination, 'x'.repeat(2_000_000));
+		};
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow();
+
+		expect(
+			destinationsRead,
+			'the rollback read a two-megabyte file into the main process to discover it was not the ' +
+				'few hundred bytes it had just written'
+		).toEqual([]);
+	});
+
+	/* And it still reads one whose size makes it a candidate. */
+	it('does read a destination of exactly the right size', async () => {
+		const destination = join(dir, 'out.maFile');
+		const accounts: Account[] = [account];
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		let renames = 0;
+		lockDuringRename = () => {
+			renames += 1;
+			if (renames !== 1) {
+				return;
+			}
+			accounts.length = 0;
+		};
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow();
+
+		expect(
+			destinationsRead.length,
+			'the file this export had just written was never compared, so ownership was decided on ' +
+				'the size alone'
+		).toBeGreaterThan(0);
 	});
 });

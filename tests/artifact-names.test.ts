@@ -255,10 +255,21 @@ describe('the build output the installer carries', () => {
 	});
 
 	it('does not sweep up everything under out', () => {
+		/*
+		 * Anything under `out` that is not one of the three trees. The first
+		 * version matched `out/` followed by a star, so a bare `'out'` entry — which
+		 * electron-builder treats as the whole directory — walked past it and past
+		 * every other assertion here.
+		 */
+		const trees = ['out/main/', 'out/preload/', 'out/renderer/'];
 		expect(
-			entries.filter((entry) => /^out\/\*/.test(entry)),
-			'the whole of out/ is included, so any bundle built there — the smoke and stress ' +
-				'harnesses among them — ships inside the signed application'
+			entries.filter(
+				(entry) =>
+					(entry === 'out' || entry.startsWith('out/')) &&
+					!trees.some((tree) => entry.startsWith(tree))
+			),
+			'an entry covers more of out/ than the three build trees, so any bundle built there — ' +
+				'the smoke and stress harnesses among them — ships inside the signed application'
 		).toEqual([]);
 	});
 

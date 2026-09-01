@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { chmod, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
@@ -680,13 +680,29 @@ export function registerEnrollmentHandlers(
 				 * Unknown has to behave like foreign, because that is the assumption
 				 * that cannot destroy anything.
 				 */
-				const atDestination: 'ours' | 'foreign' | 'absent' | 'unknown' = await readFile(
-					destination,
-					'utf8'
-				).then(
-					(found) => (found === written ? 'ours' : 'foreign'),
-					(err: NodeJS.ErrnoException) => (err.code === 'ENOENT' ? 'absent' : 'unknown')
-				);
+				/*
+				 * **Sized before it is read.** The comparison is against a maFile a few
+				 * hundred bytes long, and the destination is whatever path a save
+				 * dialog returned. Reading it whole to find out it is not ours meant an
+				 * arbitrarily large file — or a device that never ends — loaded into the
+				 * Electron main process, which is the one that must not stop.
+				 *
+				 * A file of a different length cannot be this export's own, so the stat
+				 * answers most of it for nothing. Only an exact-length match is worth
+				 * reading, and then it is bounded by construction.
+				 */
+				const atDestination: 'ours' | 'foreign' | 'absent' | 'unknown' = await stat(destination)
+					.then(async (info) => {
+						if (!info.isFile() || info.size !== Buffer.byteLength(written, 'utf8')) {
+							return 'foreign' as const;
+						}
+						return (await readFile(destination, 'utf8')) === written
+							? ('ours' as const)
+							: ('foreign' as const);
+					})
+					.catch((err: NodeJS.ErrnoException) =>
+						err.code === 'ENOENT' ? ('absent' as const) : ('unknown' as const)
+					);
 				const stillOurFile = atDestination === 'ours';
 
 				const tookItBack = stillOurFile ? await removed(destination) : false;
