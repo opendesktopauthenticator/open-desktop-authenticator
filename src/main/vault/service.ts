@@ -682,14 +682,42 @@ export class VaultService {
 			try {
 				restoreEnvelopeInPlace(this.file, priorEnvelope);
 			} catch {
-				// Both halves failed. Say so rather than implying the vault is back
-				// as it was — the file on disk is now under the new passphrase and
-				// the user needs to know that, because it is the one they must use.
-				wipe(newKey);
+				/*
+				 * **Both halves failed, so the rotation stands — and the session has to
+				 * be told, not just the user.**
+				 *
+				 * The file on disk is sealed under the new key and cannot be put back.
+				 * This used to wipe `newKey` and throw, leaving the still-unlocked
+				 * session holding the *retired* key and the pre-rotation contents. The
+				 * next ordinary save — a settings toggle, a refresh token stored by the
+				 * confirmation poller, anything at all — then sealed with the old key
+				 * and wrote it over the file, and `writeEnvelope` copied the new-key
+				 * file into `.bak` on its way past. Both halves of the message below
+				 * inverted: the vault opened with the OLD passphrase again and the
+				 * backup was the only thing the new one opened. A user who did exactly
+				 * what they were told — start using the new passphrase, delete the
+				 * backup — was left with neither.
+				 *
+				 * Two states also shipped as the same `seq`, which
+				 * `shared/vault-schema.ts` documents as detecting exactly a rolled-back
+				 * write.
+				 *
+				 * So the session adopts what is on disk. The main vault write
+				 * succeeded; only the backup did not, and only the backup is what the
+				 * error is about.
+				 */
+				this.generation += 1;
+				wipe(state.key);
+				state.key = newKey;
+				state.kdf = kdf;
+				state.contents = contents;
+				state.lastActivity = this.now();
+				state.lastActivityMono = this.monotonic();
+
 				throw new VaultServiceError(
-					'the passphrase was changed but the backup could not be rewritten, and the vault ' +
-						'could not be put back. Your vault now opens with the NEW passphrase; the backup ' +
-						'file still opens with the old one and should be deleted.'
+					'the passphrase was changed but the backup could not be rewritten, and the backup ' +
+						'could not be put back either. Your vault now opens with the NEW passphrase; the ' +
+						'backup file still opens with the old one and should be deleted.'
 				);
 			}
 			this.fileGeneration += 1;

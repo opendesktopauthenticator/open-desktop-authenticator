@@ -270,7 +270,19 @@ describe('an adoption that lands during a restore', () => {
  * the bump, so that is what is checked.
  */
 describe('the vault-file revision', () => {
-	const source = readFileSync(join(__dirname, '../src/main/vault/service.ts'), 'utf8');
+	/*
+	 * **Comments stripped, because both checks below measure distance.**
+	 *
+	 * They scan a fixed window of characters either side of a bump. That makes
+	 * the answer depend on how much prose happens to sit between the write and
+	 * the bump — and it did: a comment added above one of these pushed its
+	 * `writeEnvelope` outside the window and turned this red for a change that
+	 * moved no code at all. A guard that fails when somebody explains themselves
+	 * is a guard that gets widened until it means nothing.
+	 */
+	const source = readFileSync(join(__dirname, '../src/main/vault/service.ts'), 'utf8')
+		.replace(/\/\*[\s\S]*?\*\//g, ' ')
+		.replace(new RegExp('//[^' + String.fromCharCode(10) + ']*', 'g'), ' ');
 
 	it('advances after every write to the main vault file', () => {
 		const writes = [...source.matchAll(/writeEnvelope\(this\.file,[\s\S]{0,400}?\n/g)];

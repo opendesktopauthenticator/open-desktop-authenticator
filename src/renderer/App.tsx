@@ -887,65 +887,6 @@ export function App(): React.JSX.Element {
 			);
 		}
 
-		if (mayShowSignInPrompt(browserSignIn, view)) {
-			return (
-				<SteamSignIn
-					// Holds a typed password. Same reasoning as `Confirmations`: a
-					// different account must never inherit one.
-					key={browserSignIn.account.steamId64}
-					accountName={browserSignIn.account.accountName}
-					{...(browserSignIn.reason === undefined ? {} : { reason: browserSignIn.reason })}
-					onSignIn={async (password) => {
-						const result = await api.signInToSteam(
-							browserSignIn.account.steamId64,
-							password,
-							// The same route the window will use. Signing in through a proxy
-							// the user chose Direct to get past is the failure this whole
-							// screen exists downstream of.
-							browserSignIn.route
-						);
-						// **Only on success**, for the reason `Confirmations` records: a
-						// failure comes back rather than throwing, so advancing here would
-						// clear the form as though the sign-in had worked.
-						if (!result.ok) {
-							return result;
-						}
-
-						// Straight into the browser the user actually pressed for, rather
-						// than back to a list they would have to press again.
-						const opened = await api.openAccountBrowser(
-							browserSignIn.account.steamId64,
-							// The retry keeps the choice the user made when they pressed.
-							browserSignIn.route
-						);
-						if (opened.signInRequired) {
-							/*
-							 * A fresh sign-in that Steam still will not accept for browsing.
-							 *
-							 * `retryable: false` on purpose: another password cannot fix
-							 * this, and a form that keeps asking for one is how a person ends
-							 * up typing their Steam password over and over into a window an
-							 * application drew. The form withdraws and says so.
-							 */
-							return {
-								ok: false as const,
-								retryable: false,
-								reason:
-									opened.reason ??
-									'Steam accepted the sign-in but would not open a browsing session.'
-							};
-						}
-
-						setBrowserSignIn(undefined);
-						// The account now has a session, which the list shows.
-						void refresh();
-						return result;
-					}}
-					onCancel={() => setBrowserSignIn(undefined)}
-				/>
-			);
-		}
-
 		if (routingFor) {
 			// Re-read from the live list so the screen reflects a change made in it,
 			// rather than the snapshot taken when it was opened.
@@ -1143,6 +1084,79 @@ export function App(): React.JSX.Element {
 						// previous screen just said it imported reads as a failure.
 						void refresh();
 					}}
+				/>
+			);
+		}
+
+		/*
+		 * **Last, so it can outrank nothing.**
+		 *
+		 * This sat above `routingFor` and `backupFor`, which are overlays rendered
+		 * while the view is still `accounts` — so a stale answer took the window
+		 * from Account routing, and from Revocation backup, which is a passphrase
+		 * screen. `view === 'accounts'` is not the same question as "the account
+		 * list is what is on screen", and the fix that introduced it answered the
+		 * wrong one.
+		 *
+		 * Placed immediately before the account list rather than given a list of
+		 * overlays to check: every screen above returns before reaching here, so a
+		 * new one takes precedence by existing. A list is a thing to forget.
+		 */
+		if (mayShowSignInPrompt(browserSignIn, view)) {
+			return (
+				<SteamSignIn
+					// Holds a typed password. Same reasoning as `Confirmations`: a
+					// different account must never inherit one.
+					key={browserSignIn.account.steamId64}
+					accountName={browserSignIn.account.accountName}
+					{...(browserSignIn.reason === undefined ? {} : { reason: browserSignIn.reason })}
+					onSignIn={async (password) => {
+						const result = await api.signInToSteam(
+							browserSignIn.account.steamId64,
+							password,
+							// The same route the window will use. Signing in through a proxy
+							// the user chose Direct to get past is the failure this whole
+							// screen exists downstream of.
+							browserSignIn.route
+						);
+						// **Only on success**, for the reason `Confirmations` records: a
+						// failure comes back rather than throwing, so advancing here would
+						// clear the form as though the sign-in had worked.
+						if (!result.ok) {
+							return result;
+						}
+
+						// Straight into the browser the user actually pressed for, rather
+						// than back to a list they would have to press again.
+						const opened = await api.openAccountBrowser(
+							browserSignIn.account.steamId64,
+							// The retry keeps the choice the user made when they pressed.
+							browserSignIn.route
+						);
+						if (opened.signInRequired) {
+							/*
+							 * A fresh sign-in that Steam still will not accept for browsing.
+							 *
+							 * `retryable: false` on purpose: another password cannot fix
+							 * this, and a form that keeps asking for one is how a person ends
+							 * up typing their Steam password over and over into a window an
+							 * application drew. The form withdraws and says so.
+							 */
+							return {
+								ok: false as const,
+								retryable: false,
+								reason:
+									opened.reason ??
+									'Steam accepted the sign-in but would not open a browsing session.'
+							};
+						}
+
+						setBrowserSignIn(undefined);
+						// The account now has a session, which the list shows.
+						void refresh();
+						return result;
+					}}
+					onCancel={() => setBrowserSignIn(undefined)}
 				/>
 			);
 		}
