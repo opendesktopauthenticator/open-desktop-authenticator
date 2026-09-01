@@ -24,7 +24,12 @@ import { VaultService } from '../src/main/vault/service';
  * plaintext.
  */
 
-const state = vi.hoisted(() => ({ crashAfterVaultWrite: false, backupAttempted: false }));
+const state = vi.hoisted(() => ({
+	crashAfterVaultWrite: false,
+	backupAttempted: false,
+	refuseBackupWrite: false,
+	backupWrites: 0
+}));
 
 vi.mock('node:fs', async () => {
 	const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
@@ -42,6 +47,12 @@ vi.mock('node:fs', async () => {
 			 * survive it: this is the one path that does not clear it, for precisely
 			 * this reason.
 			 */
+			if (typeof path === 'string' && path.endsWith('.bak.tmp')) {
+				state.backupWrites += 1;
+				if (state.refuseBackupWrite) {
+					throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' });
+				}
+			}
 			if (state.crashAfterVaultWrite && typeof path === 'string') {
 				if (path.endsWith('.bak.tmp')) {
 					state.backupAttempted = true;
@@ -64,6 +75,8 @@ beforeEach(() => {
 	file = join(dir, 'vault.json');
 	state.crashAfterVaultWrite = false;
 	state.backupAttempted = false;
+	state.refuseBackupWrite = false;
+	state.backupWrites = 0;
 });
 
 afterEach(() => {
@@ -171,5 +184,53 @@ describe('a rotation interrupted between its two writes', () => {
 	it('does nothing to a vault with no rotation in its past', async () => {
 		await vaultWithAnAccount();
 		expect(service().reconcile()).toBe(false);
+	});
+});
+
+/**
+ * **A debt that cannot be paid is not retried once a second.**
+ *
+ * `reconcile` is called from `backupAvailable`, which the status poll asks every
+ * second. With a journal on disk and a backup write that cannot succeed — a
+ * read-only directory, a share that has gone — that meant a parse, a failed
+ * write and a log line every second for the life of the session.
+ *
+ * The journal stays on disk either way, so the next start still tries. What is
+ * dropped is retrying that was never going to help.
+ */
+describe('an interrupted rotation whose backup still cannot be written', () => {
+	it('is attempted once rather than on every poll', async () => {
+		await interruptedRotation();
+
+		const vault = service();
+		state.refuseBackupWrite = true;
+		state.backupWrites = 0;
+
+		// Five ticks of the status poll, which is what asks this.
+		for (let poll = 0; poll < 5; poll += 1) {
+			vault.backupAvailable();
+		}
+		state.refuseBackupWrite = false;
+
+		expect(
+			state.backupWrites,
+			'the status poll retried a backup write that cannot succeed, once per second, for the ' +
+				'life of the session'
+		).toBe(1);
+	});
+
+	it('leaves the journal for the next start', async () => {
+		await interruptedRotation();
+		const vault = service();
+		state.refuseBackupWrite = true;
+		vault.backupAvailable();
+		state.refuseBackupWrite = false;
+
+		expect(
+			existsSync(`${file}.rotating`),
+			'a failed attempt discarded the debt, so no later start can pay it'
+		).toBe(true);
+		// And a fresh process does try again.
+		expect(service().reconcile()).toBe(true);
 	});
 });

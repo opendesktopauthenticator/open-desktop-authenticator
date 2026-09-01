@@ -152,6 +152,16 @@ export class VaultService {
 	/** Guards `unlock` against a concurrent second unlock. */
 	private opening = false;
 
+	/**
+	 * Whether finishing an interrupted rotation has already been tried and failed.
+	 *
+	 * `reconcile` runs from `backupAvailable`, which the status poll asks every
+	 * second. Without this, a backup write that cannot succeed retried and logged
+	 * once a second for the whole session. Cleared by a rotation, which is the one
+	 * thing that can make the attempt worth repeating in the same process.
+	 */
+	private reconcileFailed = false;
+
 	constructor(options: VaultServiceOptions) {
 		this.file = options.file;
 		this.now = options.now ?? (() => Date.now());
@@ -195,6 +205,19 @@ export class VaultService {
 	 * @returns whether an interrupted rotation was finished.
 	 */
 	reconcile(): boolean {
+		/*
+		 * **Tried once, not once a second.**
+		 *
+		 * This is called from `backupAvailable`, which the status poll asks every
+		 * second. With a journal on disk and a backup write that keeps failing — a
+		 * read-only directory, a share that has gone — that meant a parse, a failed
+		 * write and a log line every second for the life of the session. The
+		 * journal stays on disk either way, so the next start still tries; what
+		 * this drops is retrying that was never going to help.
+		 */
+		if (this.reconcileFailed) {
+			return false;
+		}
 		const owed = readRotationJournal(this.file);
 		if (!owed) {
 			return false;
@@ -202,6 +225,7 @@ export class VaultService {
 		try {
 			writeBackupEnvelope(this.file, owed);
 		} catch (err) {
+			this.reconcileFailed = true;
 			// Left on disk deliberately: the backup is still readable with the
 			// retired passphrase and the next start must try again rather than
 			// forget. Nothing here is in a position to tell the user, and the vault
@@ -714,6 +738,9 @@ export class VaultService {
 		 * new key, so `reconcile` can complete the rotation on the next start
 		 * without the passphrase, the old key or the plaintext.
 		 */
+		// A new rotation is a new debt, so a previous failure to pay one is not a
+		// reason to skip this.
+		this.reconcileFailed = false;
 		try {
 			writeRotationJournal(this.file, rotatedBackup);
 		} catch (err) {
