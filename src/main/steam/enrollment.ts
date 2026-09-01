@@ -382,8 +382,18 @@ export class EnrollmentService {
 			return outcome;
 		}
 
-		await authenticated;
 		try {
+			/*
+			 * **Inside the try, because it is the step most likely to fail.**
+			 *
+			 * It sat above it, so a rejected authentication — a wrong password, a
+			 * refused Steam Guard code, a proxy that dropped — threw straight past the
+			 * `finally` and the live session was never released. It holds an open
+			 * connection to Steam and, on a routed account, a proxy socket; leaking
+			 * one per failed attempt is the shape a user retrying a mistyped password
+			 * produces.
+			 */
+			await authenticated;
 			return await this.enrol(session, accountName, route);
 		} finally {
 			// The sign-in is over either way; only the vault matters from here.

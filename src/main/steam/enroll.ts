@@ -234,9 +234,21 @@ function readJson(
 function describeStatus(status: number): string {
 	switch (status) {
 		case ERESULT.duplicateRequest:
+			/*
+			 * **Move, not remove.** This told people to detach the authenticator in
+			 * the Steam mobile app and come back, which is the expensive way round
+			 * and the one the rest of this application argues against: a
+			 * remove-and-add costs fifteen days of no trading and leaves the account
+			 * with no second factor in between, while a transfer carries a much
+			 * shorter restriction and never drops coverage. `MoveAuthenticator` says
+			 * exactly that, and `AddAuthenticator` offers "Move it here instead" on
+			 * the same screen this error lands on.
+			 */
 			return (
-				'This account already has an authenticator. Remove the existing one from the Steam ' +
-				'mobile app first — this app will not detach it for you.'
+				'This account already has an authenticator in the Steam mobile app. Use Move an ' +
+				'authenticator instead of removing it: a transfer keeps Steam Guard on the account ' +
+				'throughout and carries a much shorter trading restriction than removing and adding ' +
+				'again, which costs fifteen days.'
 			);
 		case ERESULT.noMatch:
 			return (

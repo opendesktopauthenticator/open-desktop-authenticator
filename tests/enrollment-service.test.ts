@@ -1633,3 +1633,89 @@ describe('forgetting an unrouted enrolment', () => {
 		expect(cancelled()).toBe(0);
 	});
 });
+
+/**
+ * **A sign-in that fails must still let go of the session.**
+ *
+ * `release(session)` sat in a `finally` around the enrolment, and `await
+ * authenticated` sat above it. So a rejected authentication — a wrong password,
+ * a refused Steam Guard code, a proxy that dropped — threw straight past the
+ * `finally` and the live session was never released. It holds an open connection
+ * to Steam and, on a routed account, a proxy socket; leaking one per failed
+ * attempt is the shape a user retrying a mistyped password produces.
+ */
+describe('a sign-in that fails to authenticate', () => {
+	/** A session that reports failure the way steam-session does, and records it. */
+	function failingSession(cancelled: { count: number }): LoginSessionLike {
+		const listeners: Record<string, ((arg?: unknown) => void)[]> = {};
+		return {
+			startWithCredentials: () => {
+				queueMicrotask(() => listeners.error?.forEach((fn) => fn(new Error('InvalidPassword'))));
+				return Promise.resolve({ actionRequired: false });
+			},
+			submitSteamGuardCode: () => Promise.resolve(),
+			on: (event: string, listener: (arg?: unknown) => void) => {
+				(listeners[event] ??= []).push(listener);
+			},
+			cancelLoginAttempt: () => {
+				cancelled.count += 1;
+			},
+			refreshToken: MOBILE,
+			accessToken: MOBILE,
+			steamID: { getSteamID64: () => STEAM_ID }
+		};
+	}
+
+	it('leaves nothing for the next lock to clean up', async () => {
+		const cancelled = { count: 0 };
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const { vault } = fakeVault();
+
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => failingSession(cancelled),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		await expect(service.begin('trader', 'wrong password')).rejects.toThrow();
+
+		/*
+		 * `release` untracks; it does not cancel. So the leak is only visible
+		 * through what still holds a reference — and `forget`, which the vault lock
+		 * calls, cancels every session in `liveSessions`. Nothing should be left
+		 * there: this sign-in is over.
+		 */
+		service.forget();
+
+		expect(
+			cancelled.count,
+			'a failed authentication left its Steam session tracked as live, holding an open ' +
+				'connection and, on a routed account, a proxy socket — until the next vault lock ' +
+				'happened to sweep it up'
+		).toBe(0);
+	});
+
+	/* And a second attempt is not refused as "one at a time" by a leaked first. */
+	it('lets the next attempt start', async () => {
+		const cancelled = { count: 0 };
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const { vault } = fakeVault();
+		let fail = true;
+
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => (fail ? failingSession(cancelled) : fakeSession()),
+			startEnrollment: () => Promise.resolve(STARTED),
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		});
+
+		await expect(service.begin('trader', 'wrong password')).rejects.toThrow();
+		fail = false;
+		await expect(service.begin('trader', 'the right one')).resolves.toBeDefined();
+	});
+});

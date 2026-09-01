@@ -202,8 +202,26 @@ export function parseMaFile(text: string, fileName: string, nowMs: number): Pars
 	try {
 		json = JSON.parse(raw);
 	} catch (err) {
+		/*
+		 * **The parser's message quotes the file, and the file is full of secrets.**
+		 *
+		 * V8 builds a `SyntaxError` like `Unexpected token 'x', ..."ret":"AAAA","x"...
+		 * is not valid JSON` — an excerpt of the source either side of the fault.
+		 * A maFile is `shared_secret` and `identity_secret` and little else, so a
+		 * truncated one faults somewhere inside them and the excerpt carries ten
+		 * characters of the seed every Steam Guard code for that account comes
+		 * from. Forwarded straight to the renderer, which displays it, and to
+		 * anything that logs it.
+		 *
+		 * Only the position survives. It is the whole of what a person can act on
+		 * — "the file is cut short here" — and it quotes nothing.
+		 */
+		const message = err instanceof Error ? err.message : String(err);
+		const where = /at position \d+(?: \(line \d+ column \d+\))?/.exec(message)?.[0];
 		throw new MaFileParseError(
-			`not valid JSON: ${err instanceof Error ? err.message : String(err)}`
+			where === undefined
+				? 'not valid JSON — the file is malformed or was cut short.'
+				: `not valid JSON — the file is malformed ${where}.`
 		);
 	}
 

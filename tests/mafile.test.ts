@@ -422,3 +422,64 @@ describe('a maFile carrying an authenticated SOCKS proxy', () => {
 		expect(parseMaFile(raw, 'b.maFile', Date.now()).proxyUrl).toBe('socks5://127.0.0.1:1080');
 	});
 });
+
+/**
+ * **A parser message that quotes the file is a parser message that leaks it.**
+ *
+ * V8 builds a `SyntaxError` like `Unexpected token 'x', ..."ret":"AAAA","x"...
+ * is not valid JSON` — an excerpt of the source either side of the fault. A
+ * maFile is `shared_secret` and `identity_secret` and little else, so a
+ * truncated one faults inside them and the excerpt carries ten characters of the
+ * seed every Steam Guard code for that account comes from. That message went
+ * straight to the renderer, which displays it, and to anything that logs it.
+ */
+describe('what a malformed maFile is allowed to say', () => {
+	/** A secret with a marker in it, so a leak is unmistakable in the message. */
+	const MARKER = 'ZZMARKERZZsecretbytesgohere';
+
+	/*
+	 * The shapes that make V8 quote the source. Not every malformed file does:
+	 * a truncated one reports only a position, which is why the first version of
+	 * this test passed against the unfixed parser. These are the ones that carry
+	 * an excerpt — a mangled quote character around a value, and a stray byte at
+	 * the start of the file, both of which a half-written or shell-redirected
+	 * maFile really produces.
+	 */
+	it.each([
+		['a value that lost its quotes', `{"shared_secret":${MARKER}}`],
+		['the same, later in the file', `{"steamid":"1","shared_secret":${MARKER}}`],
+		['a stray byte before the file', `${MARKER}{"steamid":"1"}`],
+		['cut off inside the shared secret', `{"shared_secret":"${MARKER}`]
+	])('does not quote the file when it has %s', (_what, raw) => {
+		let message = '';
+		try {
+			parseMaFile(raw, 'probe.maFile', 0);
+		} catch (err) {
+			message = err instanceof Error ? err.message : String(err);
+		}
+
+		expect(message, 'the file parsed, so this asserts nothing').not.toBe('');
+		expect(
+			message,
+			'the parser quoted the file back, and what it quoted was the shared secret'
+		).not.toContain('ZZMARKERZZ');
+		// Not even a fragment of it: the excerpt is about ten characters wide.
+		for (let start = 0; start + 6 <= MARKER.length; start += 1) {
+			expect(message, `a ${6}-character run of the secret survived`).not.toContain(
+				MARKER.slice(start, start + 6)
+			);
+		}
+	});
+
+	/* And it still says the one thing somebody can act on. */
+	it('still says where the file goes wrong', () => {
+		let message = '';
+		try {
+			parseMaFile('{"shared_secret":"abc" x}', 'probe.maFile', 0);
+		} catch (err) {
+			message = err instanceof Error ? err.message : String(err);
+		}
+		expect(message).toMatch(/not valid JSON/);
+		expect(message).toMatch(/position \d+/);
+	});
+});
