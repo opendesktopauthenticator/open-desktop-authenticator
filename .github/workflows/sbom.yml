@@ -140,5 +140,52 @@ jobs:
           fs.writeFileSync('selftest-no-electron.spdx.json', JSON.stringify(withoutElectron));
           MUTATE
 
-          expect_red 'an SBOM carrying the dev closure' selftest-dev-closure.spdx.json
-          expect_red 'an SBOM with no electron in it' selftest-no-electron.spdx.json
+          # And the two checks added since. A guard is worth nothing until it has
+          # been seen to go red for the right reason, and neither of these had
+          # been: the duplicate rule and the electron category shipped with
+          # nothing anywhere exercising them.
+          node - <<'MUTATE2'
+          const fs = require('node:fs');
+          const sbom = JSON.parse(fs.readFileSync('sbom.spdx.json', 'utf8'));
+
+          // What two catalogers answering about one tree produce: every npm
+          // record a second time. This is the document that was published.
+          const doubled = structuredClone(sbom);
+          const npm = sbom.packages.filter((entry) =>
+            (entry.externalRefs ?? []).some((ref) => String(ref.referenceLocator ?? '').startsWith('pkg:npm/'))
+          );
+          if (npm.length === 0) {
+            console.log('::error::the scan catalogued no npm packages, so this fixture would prove nothing');
+            process.exit(1);
+          }
+          doubled.packages = [
+            ...sbom.packages,
+            ...npm.map((entry, index) => ({ ...entry, SPDXID: `${entry.SPDXID}-selftest-${index}` }))
+          ];
+          fs.writeFileSync('selftest-doubled.spdx.json', JSON.stringify(doubled));
+          MUTATE2
+
+          expect_red 'an SBOM listing every package twice' selftest-doubled.spdx.json
+
+      # And that the report still says how each dependency reaches the user,
+      # which is the sentence the SBOM's readers act on. Asserted on the run
+      # that passed, because a shape check on a failing run proves nothing.
+      - name: The report must still classify every dependency
+        env:
+          SBOM: sbom.spdx.json
+          MANIFEST: package.json
+          LOCKFILE: package-lock.json
+          BUILDER_CONFIG: electron-builder.config.mjs
+          TREE: sbom-root
+        run: |
+          report="$(node .github/scripts/assert-sbom-is-the-shipping-tree.mjs)"
+          echo "$report"
+          for phrase in             'as package directories inside the asar'             'compiled into the renderer bundle'             'as the application runtime itself'; do
+            case "$report" in
+              *"$phrase"*) ;;
+              *)
+                echo "::error::the report no longer says \"$phrase\", so a group of dependencies has stopped being described"
+                exit 1
+                ;;
+            esac
+          done

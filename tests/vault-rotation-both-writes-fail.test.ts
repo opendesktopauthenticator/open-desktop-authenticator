@@ -167,3 +167,29 @@ describe('when the backup write and the rollback both fail', () => {
 		expect(reopened.read().seq).toBe(inMemory.seq);
 	});
 });
+
+/**
+ * **And a passphrase proof must not survive the rotation either.**
+ *
+ * `verifyPassphrase` proves a passphrase against the file, and its callers act
+ * on the answer: revealing a revocation code, deleting an account, detaching an
+ * authenticator. The file is under the new key after this branch, so the retired
+ * passphrase must stop proving anything — which it only does because the session
+ * adopted the rotation instead of throwing with the old key still installed.
+ */
+describe('a passphrase proof after a failed rotation', () => {
+	it('refuses the retired passphrase', async () => {
+		const vault = await rotateWithBothFailing();
+
+		await expect(
+			vault.verifyPassphrase(OLD),
+			'the retired passphrase still proves itself against a file it can no longer open, and the ' +
+				'caller goes on to reveal a revocation code on the strength of it'
+		).rejects.toThrow();
+	});
+
+	it('accepts the one the vault now uses', async () => {
+		const vault = await rotateWithBothFailing();
+		await expect(vault.verifyPassphrase(NEW)).resolves.not.toThrow();
+	});
+});
