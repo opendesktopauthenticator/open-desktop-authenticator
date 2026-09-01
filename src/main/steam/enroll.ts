@@ -62,11 +62,89 @@ export class EnrollmentError extends Error {
 	/** True when trying again with the same inputs cannot possibly work. */
 	readonly permanent: boolean;
 
-	constructor(message: string, permanent = true) {
+	/**
+	 * **The request reached Steam and the reply did not reach us.**
+	 *
+	 * Every call in this file changes the account, and each one sends its request
+	 * before anything can go wrong with the answer. So a timeout, a torn
+	 * connection, an HTTP error page or an unparseable body all mean the same
+	 * thing: Steam may have done it. The account may now carry an authenticator
+	 * whose secrets this application never received, or may have had one removed
+	 * while the vault still shows codes for it.
+	 *
+	 * It was reported as though nothing had happened — `startEnrollment` said
+	 * "Nothing was changed" in those words — and a timeout did not reach any of
+	 * these messages at all: `await transport(...)` threw a network error straight
+	 * past them, so the one case where the outcome is least knowable produced the
+	 * least guidance.
+	 *
+	 * `transfer.ts` has carried this distinction since it was written, under
+	 * `terminal`. This is the same idea for the three operations here, and it
+	 * exists to stop two things: telling the user nothing happened when something
+	 * may have, and retrying blindly on top of a change that may already be in
+	 * place.
+	 */
+	readonly committed: boolean;
+
+	constructor(message: string, permanent = true, committed = false) {
 		super(message);
 		this.name = 'EnrollmentError';
 		this.permanent = permanent;
+		this.committed = committed;
 	}
+}
+
+/**
+ * What to tell somebody whose request was sent and whose answer never arrived.
+ *
+ * One sentence per operation, because the account is in a different state after
+ * each and "check Steam" is not an instruction anybody can act on. None of them
+ * says what happened, because nothing here knows.
+ */
+const UNCERTAIN = {
+	add:
+		'Steam was asked to add an authenticator and did not answer, so this application cannot ' +
+		'tell whether it did. Open the Steam mobile app and look at Steam Guard on this account ' +
+		'before trying again: if an authenticator was attached, its secrets were in the reply that ' +
+		'never arrived and this application does not have them. Removing it there, or contacting ' +
+		'Steam Support, is the way out — adding another on top will not work.',
+	finalize:
+		'Steam was asked to activate the authenticator and did not answer, so this application ' +
+		'cannot tell whether it did. Check the Steam mobile app: if Steam Guard is now on, the ' +
+		'authenticator is active and the codes this application shows are the right ones. Do not ' +
+		'start again from the beginning until you have looked.',
+	remove:
+		'Steam was asked to remove the authenticator and did not answer, so this application cannot ' +
+		'tell whether it did. Check Steam Guard on the account before assuming either way — the ' +
+		'codes shown here may no longer be the ones Steam accepts.'
+} as const;
+
+/**
+ * Send a request that changes the account, and turn any failure to *get an
+ * answer* into the uncertainty it actually is.
+ *
+ * The throw is what was missing. `transport` rejects on a timeout, a DNS
+ * failure, a dropped connection or a refused proxy, and every one of those
+ * happens after the bytes have gone.
+ */
+async function commitRequest(
+	transport: SteamTransport,
+	request: Parameters<SteamTransport>[0],
+	uncertain: string
+): Promise<Awaited<ReturnType<SteamTransport>>> {
+	try {
+		return await transport(request);
+	} catch (err) {
+		// Not `permanent: false`. Trying again is exactly what must not happen
+		// until somebody has looked at the account.
+		throw new EnrollmentError(`${uncertain} (${describeCause(err)})`, true, true);
+	}
+}
+
+/** The transport's own words, kept short and never in place of the guidance. */
+function describeCause(err: unknown): string {
+	const message = err instanceof Error ? err.message : String(err);
+	return message.length > 120 ? `${message.slice(0, 119)}…` : message;
 }
 
 const addResponseSchema = z.object({
@@ -131,11 +209,19 @@ export interface StartedEnrollment {
  * nothing has changed and "try again" is true. After it starts, the account has
  * already been altered and the same words would be a guess.
  */
-function readJson(text: string, status: number, whenUnreadable: string): unknown {
+function readJson(
+	text: string,
+	status: number,
+	whenUnreadable: string,
+	committed = false
+): unknown {
 	try {
 		return JSON.parse(text);
 	} catch {
-		throw new EnrollmentError(`${whenUnreadable} (HTTP ${status})`, false);
+		// An HTTP error page, a proxy's captive portal, a truncated body: the
+		// request went either way, so `committed` decides whether the caller may
+		// be told to try again.
+		throw new EnrollmentError(`${whenUnreadable} (HTTP ${status})`, committed, committed);
 	}
 }
 
@@ -181,32 +267,31 @@ export async function startEnrollment(
 ): Promise<StartedEnrollment> {
 	const deviceId = deviceIdFor(options.steamId64);
 
-	const response = await transport({
-		method: 'POST',
-		url: `${BASE}/AddAuthenticator/v1/?access_token=${encodeURIComponent(options.accessToken)}`,
-		body: new URLSearchParams({
-			steamid: options.steamId64,
-			authenticator_time: String(options.unixSeconds),
-			authenticator_type: String(AUTHENTICATOR_TYPE),
-			device_identifier: deviceId,
-			// Use the phone already on the account. This app never manages one.
-			sms_phone_id: '1'
-		}),
-		cookie: ''
-	});
+	const response = await commitRequest(
+		transport,
+		{
+			method: 'POST',
+			url: `${BASE}/AddAuthenticator/v1/?access_token=${encodeURIComponent(options.accessToken)}`,
+			body: new URLSearchParams({
+				steamid: options.steamId64,
+				authenticator_time: String(options.unixSeconds),
+				authenticator_type: String(AUTHENTICATOR_TYPE),
+				device_identifier: deviceId,
+				// Use the phone already on the account. This app never manages one.
+				sms_phone_id: '1'
+			}),
+			cookie: ''
+		},
+		UNCERTAIN.add
+	);
 
 	const parsed = addResponseSchema.safeParse(
-		readJson(
-			response.text,
-			response.status,
-			'Steam answered with something unreadable. Nothing was changed — try again in a moment.'
-		)
+		readJson(response.text, response.status, UNCERTAIN.add, true)
 	);
 	if (!parsed.success) {
-		throw new EnrollmentError(
-			'Steam sent a reply this app could not read. Nothing was changed.',
-			false
-		);
+		// **Not "nothing was changed".** The request went before this reply came
+		// back, so an unreadable one says nothing about what Steam did with it.
+		throw new EnrollmentError(UNCERTAIN.add, true, true);
 	}
 
 	const body = parsed.data.response;
@@ -278,36 +363,31 @@ export async function finalizeEnrollment(
 ): Promise<FinalizeOutcome> {
 	const authenticatorCode = generateGuardCode(options.sharedSecret, options.unixSeconds);
 
-	const response = await transport({
-		method: 'POST',
-		url: `${BASE}/FinalizeAddAuthenticator/v1/?access_token=${encodeURIComponent(
-			options.accessToken
-		)}`,
-		body: new URLSearchParams({
-			steamid: options.steamId64,
-			authenticator_code: authenticatorCode,
-			authenticator_time: String(options.unixSeconds),
-			activation_code: options.activationCode,
-			// Only claimed when there is a phone to have texted.
-			...(options.validateSmsCode === false ? {} : { validate_sms_code: '1' })
-		}),
-		cookie: ''
-	});
+	const response = await commitRequest(
+		transport,
+		{
+			method: 'POST',
+			url: `${BASE}/FinalizeAddAuthenticator/v1/?access_token=${encodeURIComponent(
+				options.accessToken
+			)}`,
+			body: new URLSearchParams({
+				steamid: options.steamId64,
+				authenticator_code: authenticatorCode,
+				authenticator_time: String(options.unixSeconds),
+				activation_code: options.activationCode,
+				// Only claimed when there is a phone to have texted.
+				...(options.validateSmsCode === false ? {} : { validate_sms_code: '1' })
+			}),
+			cookie: ''
+		},
+		UNCERTAIN.finalize
+	);
 
 	const parsed = finalizeResponseSchema.safeParse(
-		readJson(
-			response.text,
-			response.status,
-			'Steam answered with something unreadable. Your authenticator may or may not be active — ' +
-				'check the Steam mobile app before trying again.'
-		)
+		readJson(response.text, response.status, UNCERTAIN.finalize, true)
 	);
 	if (!parsed.success) {
-		throw new EnrollmentError(
-			'Steam sent a reply this app could not read. Your authenticator may or may not be active — ' +
-				'check the Steam mobile app before trying again.',
-			false
-		);
+		throw new EnrollmentError(UNCERTAIN.finalize, true, true);
 	}
 
 	const body = parsed.data.response;
@@ -330,6 +410,20 @@ export async function finalizeEnrollment(
 				'by email rather than by text.',
 			false
 		);
+	}
+
+	/*
+	 * **A reply with none of the three fields is not a refusal.**
+	 *
+	 * Every optional field in the schema is optional because Steam omits it in
+	 * some answers, so `{}` and `{"response":{}}` parse cleanly and arrive here —
+	 * and they were reported as "Steam did not accept the activation code", a
+	 * definite claim about an account whose state nothing here knows. That is the
+	 * same defect as the unreadable-reply path, reached through the branch that
+	 * looked like it had already handled everything.
+	 */
+	if (body.success === undefined && body.status === undefined) {
+		throw new EnrollmentError(UNCERTAIN.finalize, true, true);
 	}
 
 	throw new EnrollmentError(
@@ -369,38 +463,44 @@ export async function removeAuthenticator(
 		revocationCode: string;
 	}
 ): Promise<void> {
-	const response = await transport({
-		method: 'POST',
-		url: `${BASE}/RemoveAuthenticator/v1/?access_token=${encodeURIComponent(options.accessToken)}`,
-		body: new URLSearchParams({
-			steamid: options.steamId64,
-			revocation_code: options.revocationCode.trim(),
-			// `1` is "remove the authenticator entirely", which is what this means.
-			// Steam also has a scheme for moving one to another device; that is a
-			// different operation and deliberately not offered here.
-			steamguard_scheme: '1'
-		}),
-		cookie: ''
-	});
+	const response = await commitRequest(
+		transport,
+		{
+			method: 'POST',
+			url: `${BASE}/RemoveAuthenticator/v1/?access_token=${encodeURIComponent(options.accessToken)}`,
+			body: new URLSearchParams({
+				steamid: options.steamId64,
+				revocation_code: options.revocationCode.trim(),
+				// `1` is "remove the authenticator entirely", which is what this means.
+				// Steam also has a scheme for moving one to another device; that is a
+				// different operation and deliberately not offered here.
+				steamguard_scheme: '1'
+			}),
+			cookie: ''
+		},
+		UNCERTAIN.remove
+	);
 
 	const parsed = removeResponseSchema.safeParse(
-		readJson(
-			response.text,
-			response.status,
-			'Steam answered with something unreadable. Check the Steam mobile app before assuming ' +
-				'the authenticator is still attached.'
-		)
+		readJson(response.text, response.status, UNCERTAIN.remove, true)
 	);
 	if (!parsed.success) {
-		throw new EnrollmentError(
-			'Steam sent a reply this app could not read. Check the account on Steam before trying again.',
-			false
-		);
+		throw new EnrollmentError(UNCERTAIN.remove, true, true);
 	}
 
 	const body = parsed.data.response;
 	if (body.success === true) {
 		return;
+	}
+
+	/*
+	 * **`success` absent is not `success: false`.** The field is optional because
+	 * Steam omits it in some answers, so `{}` parsed cleanly and was reported as a
+	 * rejected revocation code — a definite claim about an account that may well
+	 * have had its authenticator removed. Only an explicit `false` is a refusal.
+	 */
+	if (body.success === undefined && body.revocation_attempts_remaining === undefined) {
+		throw new EnrollmentError(UNCERTAIN.remove, true, true);
 	}
 
 	// A wrong revocation code is by far the likeliest cause, and it is worth

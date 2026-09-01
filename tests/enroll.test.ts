@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { EnrollmentError, finalizeEnrollment, startEnrollment } from '../src/main/steam/enroll';
+import {
+	EnrollmentError,
+	finalizeEnrollment,
+	removeAuthenticator,
+	startEnrollment
+} from '../src/main/steam/enroll';
 import { toMaFile, maFileName } from '../src/main/import/export';
 import { parseMaFile } from '../src/main/import/mafile';
 import type { SteamRequest, SteamResponse } from '../src/main/confirmations/client';
@@ -238,9 +243,16 @@ describe('finalising enrollment', () => {
 	it('warns that state is uncertain when the reply is unreadable', async () => {
 		// The authenticator may or may not be active. Saying either would be a
 		// guess about an account the user cannot afford guesses on.
+		//
+		// Asserted as `committed` rather than on a phrase: this used to match
+		// "may or may not", which pinned one sentence and said nothing about
+		// whether the caller was allowed to retry on top of it.
 		const { transport } = transportReturning(['not json']);
 
-		await expect(finalizeEnrollment(transport, options)).rejects.toThrow(/may or may not/);
+		await expect(finalizeEnrollment(transport, options)).rejects.toMatchObject({
+			committed: true,
+			permanent: true
+		});
 	});
 });
 
@@ -422,5 +434,119 @@ describe('an account with no phone number', () => {
 		await expect(
 			finalizeEnrollment(transport, { ...base, validateSmsCode: false })
 		).rejects.toThrow(/email/);
+	});
+});
+
+/**
+ * **Every call in this file changes the account before anything can go wrong
+ * with the answer.**
+ *
+ * `AddAuthenticator`, `FinalizeAddAuthenticator` and `RemoveAuthenticator` all
+ * send their request and then read a reply. A timeout, a torn connection, a
+ * refused proxy, an HTTP error page or an unparseable body all arrive *after*
+ * the bytes have gone, and every one of them means the same thing: Steam may
+ * have done it.
+ *
+ * Two ways that was wrong. `startEnrollment` reported an unreadable reply with
+ * the words "Nothing was changed", which is a claim about Steam's state that
+ * nothing here can make — the account may now carry an authenticator whose
+ * secrets were in the reply that never arrived. And a **timeout reached none of
+ * these messages at all**: `await transport(...)` rejected with a network error
+ * straight past them, so the case where the outcome is least knowable produced
+ * the least guidance and an offer to try again.
+ *
+ * `permanent: true` on all of them is the point rather than a side effect.
+ * Retrying is exactly what must not happen until somebody has looked at the
+ * account.
+ */
+describe('a request that was sent and never answered', () => {
+	/** A transport that fails the way a timeout does: after the request has gone. */
+	function transportFailing(sent: SteamRequest[] = []) {
+		return {
+			sent,
+			transport: (request: SteamRequest): Promise<SteamResponse> => {
+				sent.push(request);
+				return Promise.reject(new Error('ETIMEDOUT: the connection timed out'));
+			}
+		};
+	}
+
+	const START = { steamId64: STEAM_ID, accessToken: ACCESS, unixSeconds: NOW_SECONDS };
+	const FINALIZE = {
+		steamId64: STEAM_ID,
+		accessToken: ACCESS,
+		sharedSecret: SHARED,
+		activationCode: '55555',
+		unixSeconds: NOW_SECONDS
+	};
+	const REMOVE = { steamId64: STEAM_ID, accessToken: ACCESS, revocationCode: 'R12345' };
+
+	it.each([
+		[
+			'adding an authenticator',
+			(t: (request: SteamRequest) => Promise<SteamResponse>) => startEnrollment(t, START),
+			/add an authenticator and did not answer/
+		],
+		[
+			'activating one',
+			(t: (request: SteamRequest) => Promise<SteamResponse>) => finalizeEnrollment(t, FINALIZE),
+			/activate the authenticator and did not answer/
+		],
+		[
+			'removing one',
+			(t: (request: SteamRequest) => Promise<SteamResponse>) => removeAuthenticator(t, REMOVE),
+			/remove the authenticator and did not answer/
+		]
+	])('reports %s as uncertain rather than failed', async (_what, call, expected) => {
+		const { transport, sent } = transportFailing();
+
+		const thrown = await call(transport).then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		expect(sent, 'the request never went, so there is nothing uncertain about it').toHaveLength(1);
+		expect(thrown).toMatchObject({ committed: true, permanent: true });
+		expect(
+			(thrown as Error).message,
+			'the timeout surfaced as a raw network error, with nothing telling the user the account ' +
+				'may already have changed'
+		).toMatch(expected);
+	});
+
+	it.each([
+		[
+			'adding an authenticator',
+			(t: (r: SteamRequest) => Promise<SteamResponse>) => startEnrollment(t, START)
+		],
+		[
+			'activating one',
+			(t: (r: SteamRequest) => Promise<SteamResponse>) => finalizeEnrollment(t, FINALIZE)
+		],
+		[
+			'removing one',
+			(t: (r: SteamRequest) => Promise<SteamResponse>) => removeAuthenticator(t, REMOVE)
+		]
+	])('never claims nothing happened after %s', async (_what, call) => {
+		/*
+		 * The last two are valid JSON of the wrong shape, which is a different
+		 * branch: the first three fail at `JSON.parse` and never reach the schema
+		 * check. Without them this test passed while that branch still said
+		 * "Nothing was changed".
+		 */
+		for (const body of ['not json', '<html>502 Bad Gateway</html>', '', '{}', '{"response":{}}']) {
+			const { transport } = transportReturning([body]);
+			const thrown = (await call(transport).then(
+				() => undefined,
+				(err: unknown) => err
+			)) as Error & { committed?: boolean };
+
+			expect(
+				thrown.message,
+				`"${body}" was reported as though the account were untouched, and the request had ` +
+					'already been sent'
+			).not.toMatch(/nothing was changed/i);
+			expect(thrown.committed, 'the caller was left free to retry on top of it').toBe(true);
+		}
 	});
 });
