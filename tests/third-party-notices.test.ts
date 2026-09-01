@@ -90,14 +90,106 @@ describe('the third-party notices the installer carries', () => {
 		).toMatch(/Copyright|Permission is hereby granted|Licensed under/i);
 	});
 
-	/* And the three that ship no file are at least attributed. */
+	/**
+	 * **A declaration is not a licence, and this used to accept one.**
+	 *
+	 * The check here was a match on the word "declares" — it passed on the sentence
+	 * "Its package.json declares: MIT" and nothing else, for the three packages that
+	 * ship no licence file. That sentence carries neither the copyright notice nor
+	 * the permission, which are the two things MIT requires to travel with the
+	 * software. The guard was green while the obligation it is named for was unmet.
+	 *
+	 * It asks the property now, of every section rather than three: nothing in this
+	 * file may be an identifier where terms belong. A dependency added tomorrow
+	 * under a licence the generator has no text for fails here rather than shipping.
+	 */
+	const GRANTS = new RegExp(
+		[
+			'Permission is hereby granted',
+			'Permission to use, copy',
+			'Licensed under the Apache',
+			'Redistribution and use',
+			'GENERAL PUBLIC LICENSE',
+			'Mozilla Public License'
+		].join('|'),
+		'i'
+	);
+
+	const NL = String.fromCharCode(10);
+
+	/** The file split the way it is written: a rule, a title line, then the body. */
+	function sections(): { title: string; body: string }[] {
+		return text
+			.split('='.repeat(76))
+			.slice(1)
+			.map((chunk) => {
+				const trimmed = chunk.startsWith(NL) ? chunk.slice(1) : chunk;
+				const cut = trimmed.indexOf(NL);
+				return { title: trimmed.slice(0, cut).trim(), body: trimmed.slice(cut + 1) };
+			})
+			.filter((section) => section.title !== '');
+	}
+
+	it('leaves no section that names a licence without stating its terms', () => {
+		const bare = sections()
+			.filter((section) => !GRANTS.test(section.body))
+			.map((section) => section.title);
+
+		expect(
+			bare,
+			'these sections identify a licence and do not carry it. The installer ships their code, ' +
+				'and their licences require the notice to ship with it - a section that only says which ' +
+				'licence applies satisfies neither the licence nor a reader trying to comply'
+		).toEqual([]);
+	});
+
+	/**
+	 * **And it says where the words came from.**
+	 *
+	 * Text reconstructed from the manifest is the canonical wording for the
+	 * identifier the package declares, not a file that package ships. Printing it
+	 * unlabelled would put words in a maintainer's mouth, and would hide from anyone
+	 * auditing this that the package itself supplied nothing. Sections built from a
+	 * real file quote it under a marker naming the file, so the absence of one is
+	 * exactly the case that has to say so.
+	 */
+	it('says so in any section whose text is not from a file in the package', () => {
+		const quoted = new RegExp('--- .+ ---');
+		const admits = new RegExp('ships no licence file|No licence file is included');
+		const unlabelled = sections()
+			.filter((section) => !quoted.test(section.body) && !admits.test(section.body))
+			.map((section) => section.title);
+
+		expect(
+			unlabelled,
+			'these sections present licence text as though the package delivered it, when it was ' +
+				'reconstructed here from what package.json declares'
+		).toEqual([]);
+	});
+
+	/*
+	 * The three the finding was about, each still holding a copyright line naming
+	 * whoever their own manifest names. A template that dropped the holder would
+	 * pass every check above and produce a copyright notice addressed to nobody.
+	 */
 	it.each(['@doctormckay/stdlib', 'agent-base', 'socks-proxy-agent'])(
-		'names the declared licence for %s, which ships no licence file',
+		'carries the terms and a copyright holder for %s, which ships no licence file',
 		(name) => {
-			const start = text.indexOf(`\n${name} `);
+			const start = text.indexOf(NL + name + ' ');
 			expect(start, `${name} has no section at all`).toBeGreaterThan(-1);
 			const section = text.slice(start, text.indexOf('='.repeat(76), start + 1));
-			expect(section).toMatch(/declares: \w/);
+
+			const manifest = JSON.parse(
+				readFileSync(join(ROOT, 'node_modules', name, 'package.json'), 'utf8')
+			) as { author?: string | { name?: string } };
+			const holder =
+				typeof manifest.author === 'string' ? manifest.author : (manifest.author?.name ?? '');
+			expect(holder, `${name} names no author, so nothing can be attributed`).not.toBe('');
+
+			expect(section, `${name} is listed with no permission text`).toMatch(GRANTS);
+			expect(section, `${name} carries no copyright line naming ${holder}`).toContain(
+				'Copyright (c) ' + holder.split(' <')[0]
+			);
 		}
 	);
 

@@ -162,6 +162,105 @@ function electronEntry() {
 	};
 }
 
+/**
+ * **A bare identifier is not a notice.**
+ *
+ * MIT asks that "the above copyright notice and this permission notice shall be
+ * included in all copies" — the notice *is* the text. Three shipped packages had
+ * only the sentence "package.json declares: MIT", which supplies neither the
+ * copyright line nor the permission, and so satisfies neither the licence nor the
+ * reader.
+ *
+ * What goes in instead is reconstructed from the manifest and labelled as
+ * reconstructed, because that is exactly what it is. The identifier and the
+ * author are the package's own statements; the wording is the canonical text for
+ * the identifier they chose. No year is invented — the manifest does not state
+ * one, and a guessed year in a copyright line is worse than no year at all.
+ *
+ * Only the short, unambiguous licences. Apache-2.0 and the GPLs carry conditions
+ * and appendices a reconstruction should not paraphrase, so a package declaring
+ * one of those keeps the identifier and says plainly that the text is not here.
+ */
+const BLANK = String.fromCharCode(10) + String.fromCharCode(10);
+
+const RECONSTRUCTED = {
+	MIT: (holder) =>
+		`Copyright (c) ${holder}` +
+		BLANK +
+		'Permission is hereby granted, free of charge, to any person obtaining a copy of this ' +
+		'software and associated documentation files (the "Software"), to deal in the Software ' +
+		'without restriction, including without limitation the rights to use, copy, modify, merge, ' +
+		'publish, distribute, sublicense, and/or sell copies of the Software, and to permit ' +
+		'persons to whom the Software is furnished to do so, subject to the following conditions:' +
+		BLANK +
+		'The above copyright notice and this permission notice shall be included in all copies or ' +
+		'substantial portions of the Software.' +
+		BLANK +
+		'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, ' +
+		'INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR ' +
+		'PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE ' +
+		'LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT ' +
+		'OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR ' +
+		'OTHER DEALINGS IN THE SOFTWARE.',
+	ISC: (holder) =>
+		`Copyright (c) ${holder}` +
+		BLANK +
+		'Permission to use, copy, modify, and/or distribute this software for any purpose with or ' +
+		'without fee is hereby granted, provided that the above copyright notice and this ' +
+		'permission notice appear in all copies.' +
+		BLANK +
+		'THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO ' +
+		'THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO ' +
+		'EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL ' +
+		'DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER ' +
+		'IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN ' +
+		'CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.'
+};
+
+/**
+ * Whoever the manifest names as the author, in one line.
+ *
+ * A licence with no holder in it is the same empty gesture as the identifier
+ * alone, so a package that names nobody keeps the old sentence rather than
+ * getting a copyright line addressed to no one.
+ */
+function declaredAuthor(packagePath) {
+	const manifest = join(root, packagePath, 'package.json');
+	if (!existsSync(manifest)) {
+		return undefined;
+	}
+	const parsed = JSON.parse(readFileSync(manifest, 'utf8'));
+	const author = parsed.author;
+	if (typeof author === 'string' && author.trim() !== '') {
+		return author.trim();
+	}
+	if (author && typeof author.name === 'string' && author.name.trim() !== '') {
+		return typeof author.email === 'string' && author.email.trim() !== ''
+			? `${author.name.trim()} <${author.email.trim()}>`
+			: author.name.trim();
+	}
+	return undefined;
+}
+
+/** The terms for a package that declares a licence and ships no text. */
+function reconstructed(packagePath, declared) {
+	const template = RECONSTRUCTED[declared];
+	if (template === undefined) {
+		return undefined;
+	}
+	const holder = declaredAuthor(packagePath);
+	if (holder === undefined) {
+		return undefined;
+	}
+	return (
+		`This package ships no licence file. Its package.json declares ${declared} and names ` +
+		`${holder} as the author. The ${declared} terms follow, reproduced from the standard text ` +
+		'rather than from a file in the package.' +
+		BLANK +
+		template(holder)
+	);
+}
+
 const sections = [];
 const missing = [];
 
@@ -176,7 +275,9 @@ for (const entry of [...(electron ? [electron] : []), ...closure()]) {
 	}
 
 	const body =
-		text ?? `No licence file is included in this package. Its package.json declares: ${declared}.`;
+		text ??
+		reconstructed(entry.path, declared) ??
+		`No licence file is included in this package. Its package.json declares: ${declared}.`;
 
 	sections.push(
 		[

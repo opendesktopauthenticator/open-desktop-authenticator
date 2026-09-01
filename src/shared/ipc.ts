@@ -848,7 +848,11 @@ export const IPC_CONTRACT = {
 	},
 	[CHANNELS.enrollActivate]: {
 		request: z.object({ steamId64: z.string(), code: z.string().min(1).max(16) }).strict(),
-		response: z.object({ state: z.enum(['activated', 'wantMore']) })
+		response: z.object({
+			state: z.enum(['activated', 'wantMore', 'uncertain']),
+			/** Present only for `uncertain`. See `uncertainOutcome`. */
+			guidance: z.string().optional()
+		})
 	},
 
 	[CHANNELS.enrollCancel]: { request: emptyRequest, response: okResponse },
@@ -906,7 +910,16 @@ export const IPC_CONTRACT = {
 				acknowledgement: z.string()
 			})
 			.strict(),
-		response: okResponse
+		response: z.object({
+			ok: z.literal(true).optional(),
+			/*
+			 * A removal whose request reached Steam and whose reply did not. The
+			 * account may already have had its authenticator detached, so the screen
+			 * must not offer the same removal again.
+			 */
+			state: z.literal('uncertain').optional(),
+			guidance: z.string().optional()
+		})
 	},
 
 	[CHANNELS.accountRemove]: {
@@ -1178,7 +1191,14 @@ export interface RendererApi {
 		steamId64: string,
 		code: string
 	): Promise<{
-		state: 'activated' | 'wantMore';
+		state: 'activated' | 'wantMore' | 'uncertain';
+		/**
+		 * Present only for `uncertain`: what the user should do about a request
+		 * Steam may already have acted on. Carried across IPC because an error
+		 * crosses as a message alone, and the screens then re-offered the very
+		 * action the message told them not to repeat.
+		 */
+		guidance?: string;
 	}>;
 
 	/** Write an account out as a maFile. Opens the OS save dialog; returns a name. */
@@ -1202,7 +1222,7 @@ export interface RendererApi {
 		steamId64: string,
 		passphrase: string,
 		acknowledgement: string
-	): Promise<{ ok: true }>;
+	): Promise<{ ok?: true; state?: 'uncertain'; guidance?: string }>;
 	/** Set routing for one account, or pass `null` to remove it. */
 	setAccountProxy(steamId64: string, proxyUrl: string | null): Promise<{ ok: true }>;
 	/** Enable or disable automatic confirmation for one account, per type. */

@@ -152,6 +152,30 @@ async function exclusively<T>(rawPath: string, run: () => Promise<T>): Promise<T
 	}
 }
 
+/**
+ * Turn a request Steam may already have acted on into an outcome, not an error.
+ *
+ * **`committed` existed and never left the main process.** An error crosses IPC
+ * as a message and nothing else, so the screens received the sentence "do not
+ * try again until you have looked at the account", cleared `busy`, and enabled
+ * the very button that would send the request a second time. The text forbade
+ * the retry the application was offering.
+ *
+ * Returned rather than thrown for exactly that reason: a thrown error is a
+ * failure the screen recovers from by letting the user try again, and this is
+ * not one. The guidance travels with it so the screen can show what to do
+ * instead of what went wrong.
+ *
+ * Anything else is rethrown untouched — an ordinary failure is still an ordinary
+ * failure, and turning them all into a dead end would be its own defect.
+ */
+function uncertainOrRethrow(err: unknown): { state: 'uncertain'; guidance: string } {
+	if (err instanceof EnrollmentError && err.committed) {
+		return { state: 'uncertain', guidance: err.message };
+	}
+	throw err;
+}
+
 function stillOnDisk(names: readonly string[]): string {
 	if (names.length === 0) {
 		return '';
@@ -279,7 +303,11 @@ export function registerEnrollmentHandlers(
 
 	registerHandler(CHANNELS.enrollActivate, async ({ steamId64, code }) => {
 		requireUnlocked();
-		return { state: await enrollment.activate(steamId64, code) };
+		try {
+			return { state: await enrollment.activate(steamId64, code) };
+		} catch (err) {
+			return uncertainOrRethrow(err);
+		}
 	});
 
 	registerHandler(
@@ -294,7 +322,11 @@ export function registerEnrollmentHandlers(
 				throw new Error(`type "${DEACTIVATE_ACK}" to remove this authenticator from Steam`);
 			}
 
-			await enrollment.deactivate(steamId64, passphrase);
+			try {
+				await enrollment.deactivate(steamId64, passphrase);
+			} catch (err) {
+				return uncertainOrRethrow(err);
+			}
 
 			// The same cleanup a local removal does: cookie jar, cached session,
 			// pending list. An account whose authenticator is gone must not still have

@@ -49,7 +49,10 @@ export function AddAuthenticator({
 	requireProxies: boolean;
 	/** Drops the pending sign-in in the main process. Safe only before anything is attached. */
 	onCancel: () => Promise<unknown>;
-	onActivate: (steamId64: string, code: string) => Promise<{ state: 'activated' | 'wantMore' }>;
+	onActivate: (
+		steamId64: string,
+		code: string
+	) => Promise<{ state: 'activated' | 'wantMore' | 'uncertain'; guidance?: string }>;
 	/** Opens the revocation-code ceremony for the newly enrolled account. */
 	onBackup: (steamId64: string, accountName: string) => void;
 	onClose: () => void;
@@ -86,6 +89,15 @@ export function AddAuthenticator({
 	const [error, setError] = useState<string | undefined>();
 	/** A normal thing that happened, said in the ordinary voice rather than in red. */
 	const [notice, setNotice] = useState<string | undefined>();
+	/**
+	 * The request reached Steam and the reply did not.
+	 *
+	 * Its own state rather than an error, because the difference is what the
+	 * screen must *offer*: an error is something to try again, and this is the one
+	 * outcome where trying again may attach or detach a second time. The form goes
+	 * away and the guidance takes its place.
+	 */
+	const [uncertain, setUncertain] = useState<string | undefined>();
 	const [emailDomain, setEmailDomain] = useState<string | undefined>();
 	const [enrolled, setEnrolled] = useState<
 		{ steamId64: string; accountName: string; phoneNumberHint?: string } | undefined
@@ -157,6 +169,17 @@ export function AddAuthenticator({
 		}
 		run(async () => {
 			const result = await onActivate(enrolled.steamId64, code);
+			if (result.state === 'uncertain') {
+				/*
+				 * **A dead end on purpose.** The request reached Steam and the reply did
+				 * not, so the authenticator may already be active. Trying the same code
+				 * again is the one thing that must not happen, and this used to arrive
+				 * as an ordinary error — which cleared `busy` and re-enabled the button
+				 * that sends it, while the message said not to.
+				 */
+				setUncertain(result.guidance ?? 'Steam did not answer, so the outcome is unknown.');
+				return;
+			}
 			if (result.state === 'wantMore') {
 				// Not a failure, and it must not look like one. Steam accepted that code
 				// and wants one from a later window, which is an ordinary part of its
@@ -384,7 +407,23 @@ export function AddAuthenticator({
 				</form>
 			)}
 
-			{step === 'activate' && enrolled && (
+			{uncertain !== undefined && (
+				<section className="ceremony">
+					<h2>This may already have happened</h2>
+					<p>{uncertain}</p>
+					<p>
+						Nothing here can tell whether Steam acted on the last request, so this application will
+						not send it again. Check the Steam mobile app before doing anything else.
+					</p>
+					<div className="controls">
+						<button type="button" onClick={onClose}>
+							Close
+						</button>
+					</div>
+				</section>
+			)}
+
+			{uncertain === undefined && step === 'activate' && enrolled && (
 				<>
 					<div className="notice">
 						<strong>

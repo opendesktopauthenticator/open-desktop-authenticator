@@ -37,7 +37,10 @@ export function RemoveAccount({
 	 * no second factor at all. Putting them side by side is what makes the choice
 	 * legible.
 	 */
-	onDeactivate: (passphrase: string, acknowledgement: string) => Promise<unknown>;
+	onDeactivate: (
+		passphrase: string,
+		acknowledgement: string
+	) => Promise<{ state?: 'uncertain'; guidance?: string }>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [passphrase, setPassphrase] = useState('');
@@ -46,6 +49,8 @@ export function RemoveAccount({
 	const [detaching, setDetaching] = useState(false);
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
+	/** Steam was asked and did not answer. See the note in `submit`. */
+	const [uncertain, setUncertain] = useState<string | undefined>();
 
 	const submit = (event: React.FormEvent): void => {
 		event.preventDefault();
@@ -55,7 +60,18 @@ export function RemoveAccount({
 		setBusy(true);
 		setError(undefined);
 		(detaching ? onDeactivate(passphrase, acknowledgement) : onRemove(passphrase))
-			.then(() => {
+			.then((result: unknown) => {
+				/*
+				 * **A removal Steam may already have performed is not a failure to
+				 * retry.** It used to arrive as a thrown error, which cleared `busy` and
+				 * re-enabled the button that sends the detach again — while the message
+				 * said not to. The form is replaced by the guidance instead.
+				 */
+				const outcome = result as { state?: string; guidance?: string } | undefined;
+				if (outcome?.state === 'uncertain') {
+					setUncertain(outcome.guidance ?? 'Steam did not answer, so the outcome is unknown.');
+					return;
+				}
 				setPassphrase('');
 				setAcknowledgement('');
 				onClose();
@@ -63,6 +79,35 @@ export function RemoveAccount({
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => setBusy(false));
 	};
+
+	if (uncertain !== undefined) {
+		/*
+		 * The detach reached Steam and the reply did not, so the authenticator may
+		 * already be gone. The form is not offered again: sending it a second time
+		 * is the one thing that must not happen, and the codes this application
+		 * still shows may no longer be the ones Steam accepts.
+		 */
+		return (
+			<main className="shell">
+				<header className="row">
+					<h1>This may already have happened</h1>
+				</header>
+				<p className="muted">
+					{account.accountName} <span className="muted">{account.steamId64}</span>
+				</p>
+				<p className="error">{uncertain}</p>
+				<p>
+					Nothing here can tell whether Steam acted on the request, so this application will not
+					send it again. Check Steam Guard on the account before doing anything else.
+				</p>
+				<div className="controls">
+					<button type="button" onClick={onClose}>
+						Close
+					</button>
+				</div>
+			</main>
+		);
+	}
 
 	return (
 		<main className="shell">
