@@ -144,6 +144,19 @@ export const accountSummary = z.object({
 	status: z.enum(['pendingRevocationBackup', 'pendingActivation', 'active']),
 	/** Whether a revocation code is on file — not the code itself. */
 	hasRevocationCode: z.boolean(),
+	/**
+	 * An irreversible operation on this account whose outcome was never
+	 * established, carried so the screens keep refusing to repeat it across a
+	 * close and a restart rather than for the life of a React component.
+	 */
+	unresolvedOperation: z
+		.object({
+			kind: z.enum(['activate', 'deactivate']),
+			guidance: z.string(),
+			certain: z.boolean().optional(),
+			at: z.string()
+		})
+		.optional(),
 	/** Whether per-account routing is configured — not the URL, which has credentials. */
 	hasProxy: z.boolean(),
 	/**
@@ -879,6 +892,11 @@ export const IPC_CONTRACT = {
 
 	[CHANNELS.enrollCancel]: { request: emptyRequest, response: okResponse },
 
+	[CHANNELS.accountResolveOperation]: {
+		request: z.object({ steamId64: z.string() }).strict(),
+		response: okResponse
+	},
+
 	[CHANNELS.accountExport]: {
 		request: z.object({ steamId64: z.string() }).strict(),
 		response: exportResponse
@@ -1209,6 +1227,11 @@ export interface RendererApi {
 	cancelTransfer(): Promise<object>;
 	beginEnrollment(accountName: string, password: string, proxyUrl?: string): Promise<EnrollBegin>;
 	submitEnrollmentEmailCode(code: string): Promise<EnrollBegin>;
+	/**
+	 * Say the account has been checked, clearing the refusal to repeat an
+	 * operation whose outcome was never established.
+	 */
+	resolveAccountOperation(steamId64: string): Promise<{ ok: true }>;
 	/** Abandon a sign-in that has not attached an authenticator yet. */
 	cancelEnrollment(): Promise<{ ok: true }>;
 	activateAuthenticator(

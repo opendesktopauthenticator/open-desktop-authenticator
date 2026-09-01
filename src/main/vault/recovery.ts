@@ -10,6 +10,7 @@ import {
 	readdirSync,
 	readFileSync,
 	renameSync,
+	statSync,
 	rmSync,
 	unlinkSync,
 	writeFileSync,
@@ -19,6 +20,7 @@ import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { open } from './crypto';
 import { accountSchema, type Account } from '../../shared/vault-schema';
+import { envelopeSchema } from '../../shared/vault-format';
 
 /**
  * A per-account recovery file, written the moment an authenticator is created.
@@ -454,6 +456,74 @@ export function createRecoveryHooks(options: {
  * previous enrollment for the same SteamID left a file behind, and nothing here
  * can tell which of them the current account owns.
  */
+/** The staging suffix, so the reconciliation below can recognise its own work. */
+const STAGING = '.tmp';
+
+/**
+ * **Finish a recovery write that was interrupted between claiming the name and
+ * filling it.**
+ *
+ * On a filesystem with no hard links, `durably` claims the destination with `wx`
+ * - which is the only atomic way to refuse to overwrite there - and then renames
+ * the completed staging file over it. A hard stop between those two syscalls
+ * leaves a nought-byte file at the name a restore reads and the whole, fsynced
+ * document beside it under a name nothing looks at. The bytes are not lost; they
+ * are unreachable, which for a file whose entire purpose is to be found later is
+ * close enough to the same thing.
+ *
+ * It is the same shape as the vault's rotation journal and it gets the same
+ * treatment: on the next start, look for the work that was left half done and
+ * finish it.
+ *
+ * **Deliberately narrow.** A staging file is only ever promoted over a
+ * destination that is missing or empty, and only when what it holds parses as a
+ * sealed envelope. An unreadable-but-non-empty destination is left exactly
+ * where it is: this must never be able to overwrite a recovery file that is
+ * merely damaged, because that file may be the only copy of a different
+ * enrollment's secrets.
+ */
+export function reconcileRecoveryFiles(userDataPath: string): string[] {
+	const directory = recoveryDirectory(userDataPath);
+	let names: string[];
+	try {
+		names = readdirSync(directory);
+	} catch {
+		return [];
+	}
+
+	const finished: string[] = [];
+	for (const name of names) {
+		if (!name.endsWith(STAGING) || !name.includes(RECOVERY_EXTENSION)) {
+			continue;
+		}
+		// `<id>.oda-recovery.<uuid>.tmp` was staged for `<id>.oda-recovery`.
+		const target = join(
+			directory,
+			name.slice(0, name.indexOf(RECOVERY_EXTENSION) + RECOVERY_EXTENSION.length)
+		);
+		const staged = join(directory, name);
+
+		try {
+			if (existsSync(target) && statSync(target).size > 0) {
+				continue;
+			}
+			// Whole and well formed, or it is not a recovery file and promoting it
+			// would put a broken one where a restore expects to find the real thing.
+			envelopeSchema.parse(JSON.parse(readFileSync(staged, 'utf8')));
+			renameSync(staged, target);
+			syncDirectory(directory);
+			finished.push(target);
+		} catch {
+			/*
+			 * A staging file from a write still in flight, a partial one, or a
+			 * destination this process cannot read. Left alone: nothing here is worth
+			 * failing a start over, and the next start looks again.
+			 */
+		}
+	}
+	return finished;
+}
+
 export function recoveryFilesFor(userDataPath: string, steamId64: string): string[] {
 	const directory = recoveryDirectory(userDataPath);
 	let names: string[];

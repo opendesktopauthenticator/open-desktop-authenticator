@@ -525,6 +525,9 @@ export function toSummary(
 		status: string;
 		revocationCode?: string | undefined;
 		proxyUrl?: string | undefined;
+		unresolvedOperation?:
+			| { kind: 'activate' | 'deactivate'; guidance: string; certain?: boolean; at: string }
+			| undefined;
 		autoConfirm: {
 			marketListings: boolean;
 			trades: boolean;
@@ -540,6 +543,20 @@ export function toSummary(
 		status: account.status as AccountSummary['status'],
 		// Whether one exists — never the value.
 		hasRevocationCode: account.revocationCode !== undefined,
+		// A fresh object rather than the stored reference, like everything else
+		// that crosses to the renderer here.
+		...(account.unresolvedOperation !== undefined
+			? {
+					unresolvedOperation: {
+						kind: account.unresolvedOperation.kind,
+						guidance: account.unresolvedOperation.guidance,
+						at: account.unresolvedOperation.at,
+						...(account.unresolvedOperation.certain !== undefined
+							? { certain: account.unresolvedOperation.certain }
+							: {})
+					}
+				}
+			: {}),
 		// Whether routing is configured — never the URL, which carries credentials.
 		hasProxy: account.proxyUrl !== undefined,
 		// What is *known*, which is deliberately not the same question. An account

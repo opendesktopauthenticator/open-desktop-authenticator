@@ -33,6 +33,8 @@ export function AddAuthenticator({
 	onBackup,
 	onClose,
 	onMove,
+	onResolve,
+	unresolved,
 	resume,
 	requireProxies
 }: {
@@ -81,6 +83,13 @@ export function AddAuthenticator({
 	 * survive that, which it has to: the account already has an authenticator.
 	 */
 	resume?: { steamId64: string; accountName: string } | undefined;
+	/**
+	 * An activation on this account whose outcome was never established, read
+	 * from the vault so it outlives this screen and a restart.
+	 */
+	unresolved?: { guidance: string; certain?: boolean } | undefined;
+	/** Say the account has been checked, clearing the record above. */
+	onResolve: (steamId64: string) => Promise<unknown>;
 }): React.JSX.Element {
 	const [step, setStep] = useState<'credentials' | 'emailCode' | 'activate' | 'done'>(
 		resume ? 'activate' : 'credentials'
@@ -101,7 +110,19 @@ export function AddAuthenticator({
 	 * outcome where trying again may attach or detach a second time. The form goes
 	 * away and the guidance takes its place.
 	 */
-	const [uncertain, setUncertain] = useState<{ guidance: string; certain: boolean } | undefined>();
+	/*
+	 * **Seeded from the account, not only from this session.** The refusal to
+	 * repeat an activation whose outcome is unknown lived here and nowhere else,
+	 * so closing the screen and coming back through "Finish activation" offered
+	 * the form again — after the application had said it would not send the
+	 * request a second time.
+	 */
+	const [uncertain, setUncertain] = useState<{ guidance: string; certain: boolean } | undefined>(
+		unresolved === undefined
+			? undefined
+			: { guidance: unresolved.guidance, certain: unresolved.certain === true }
+	);
+	const [resolving, setResolving] = useState(false);
 	const [emailDomain, setEmailDomain] = useState<string | undefined>();
 	const [enrolled, setEnrolled] = useState<
 		{ steamId64: string; accountName: string; phoneNumberHint?: string } | undefined
@@ -456,6 +477,26 @@ export function AddAuthenticator({
 						<button type="button" onClick={onClose}>
 							Close
 						</button>
+						{/*
+						 * Only the user can settle this: nothing here knows what Steam did.
+						 * Without an explicit way out the account carries the warning for
+						 * ever, and a warning that never clears is one people learn to
+						 * ignore.
+						 */}
+						{enrolled !== undefined && (
+							<button
+								type="button"
+								disabled={resolving}
+								onClick={() => {
+									setResolving(true);
+									void onResolve(enrolled.steamId64)
+										.then(onClose)
+										.finally(() => setResolving(false));
+								}}
+							>
+								I have checked this account
+							</button>
+						)}
 					</div>
 				</section>
 			)}

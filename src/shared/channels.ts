@@ -112,6 +112,12 @@ export const CHANNELS = {
 	 * alongside the passphrase.
 	 */
 	accountRemove: 'account:remove',
+	/**
+	 * Clear the record of an irreversible operation whose outcome was never
+	 * established. The user saying they have checked the account is the only
+	 * thing that can settle it; nothing local can.
+	 */
+	accountResolveOperation: 'account:resolveOperation',
 
 	/**
 	 * Import (§12 F2). Three channels, because the secrets stay in the main

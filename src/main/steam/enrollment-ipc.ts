@@ -361,12 +361,67 @@ export function registerEnrollmentHandlers(
 		return { ok: true as const };
 	});
 
+	/**
+	 * **The same refusal, written down where it outlives the screen.**
+	 *
+	 * Returning the outcome stops the screen offering the action again for as
+	 * long as that component is mounted, which is not very long: close it, or
+	 * restart, and the application offered "Finish activation" or "Remove" again
+	 * — having just said, in as many words, that it would not send the request a
+	 * second time. A promise that survives only until a re-render is not a
+	 * promise.
+	 *
+	 * Best effort on purpose. The vault write can fail, and if it does the
+	 * outcome still has to reach the user: a lost latch costs the durability, and
+	 * refusing to answer would cost them the guidance as well.
+	 */
+	async function latch(
+		steamId64: string,
+		kind: 'activate' | 'deactivate',
+		outcome: { guidance: string; certain?: boolean }
+	): Promise<void> {
+		try {
+			await vault.mutate((draft) => {
+				const account = draft.accounts.find((entry) => entry.steamId64 === steamId64);
+				if (account === undefined) {
+					return;
+				}
+				account.unresolvedOperation = {
+					kind,
+					guidance: outcome.guidance,
+					at: new Date().toISOString(),
+					...(outcome.certain === true ? { certain: true } : {})
+				};
+			});
+		} catch (err) {
+			console.error('an unresolved Steam operation could not be recorded in the vault', err);
+		}
+	}
+
+	/*
+	 * **Only the user can settle this.** Nothing local knows what Steam did, so
+	 * the latch is cleared by the person saying they have been and looked -
+	 * which is also the moment the guidance stops being useful to them.
+	 */
+	registerHandler(CHANNELS.accountResolveOperation, async ({ steamId64 }) => {
+		requireUnlocked();
+		await vault.mutate((draft) => {
+			const account = draft.accounts.find((entry) => entry.steamId64 === steamId64);
+			if (account !== undefined) {
+				delete account.unresolvedOperation;
+			}
+		});
+		return { ok: true as const };
+	});
+
 	registerHandler(CHANNELS.enrollActivate, async ({ steamId64, code }) => {
 		requireUnlocked();
 		try {
 			return { state: await enrollment.activate(steamId64, code) };
 		} catch (err) {
-			return uncertainOrRethrow(err);
+			const outcome = uncertainOrRethrow(err);
+			await latch(steamId64, 'activate', outcome);
+			return outcome;
 		}
 	});
 
@@ -385,7 +440,14 @@ export function registerEnrollmentHandlers(
 			try {
 				await enrollment.deactivate(steamId64, passphrase);
 			} catch (err) {
-				return uncertainOrRethrow(err);
+				const outcome = uncertainOrRethrow(err);
+				/*
+				 * The account is still in the vault — a removal whose outcome is
+				 * unknown does not get to delete the secrets that might still be the
+				 * live ones — so there is a row to write this on.
+				 */
+				await latch(steamId64, 'deactivate', outcome);
+				return outcome;
 			}
 
 			// The same cleanup a local removal does: cookie jar, cached session,

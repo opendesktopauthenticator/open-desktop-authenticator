@@ -1,0 +1,220 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { CHANNELS } from '../src/shared/channels';
+import { EnrollmentError } from '../src/main/steam/enroll';
+
+/**
+ * **A promise that lasted exactly as long as a React component.**
+ *
+ * An activation or a removal whose reply never arrived comes back as an outcome
+ * rather than an error, so the screen stops offering the action and says the
+ * application will not send the request again. That refusal lived in component
+ * state. Close the screen — or restart — and "Finish activation" and "Remove"
+ * were offered again, by an application that had just said in as many words that
+ * they would not be.
+ *
+ * It is written to the account now, because the vault is the only thing here
+ * that outlives both, and it is cleared by the user saying they have checked the
+ * account: nothing local can settle what Steam did, and pretending otherwise is
+ * how the first version of this went wrong.
+ *
+ * These drive the real handlers against a vault that records what was written,
+ * so what is asserted is the durable record rather than a screen's state.
+ */
+
+const handlers = new Map<string, (event: unknown, request: unknown) => Promise<unknown>>();
+
+vi.mock('electron', () => ({
+	ipcMain: {
+		handle: (channel: string, handler: (event: unknown, request: unknown) => Promise<unknown>) =>
+			handlers.set(channel, handler),
+		removeHandler: (channel: string) => handlers.delete(channel)
+	},
+	dialog: {},
+	BrowserWindow: { getFocusedWindow: () => undefined, getAllWindows: () => [] }
+}));
+
+import { registerEnrollmentHandlers } from '../src/main/steam/enrollment-ipc';
+import { setTrustedSender, __resetRouterForTests } from '../src/main/ipc/router';
+import type { EnrollmentService } from '../src/main/steam/enrollment';
+import type { VaultService } from '../src/main/vault/service';
+import type { Account } from '../src/shared/vault-schema';
+
+const EVENT = { senderFrame: { url: 'app://renderer' } };
+const STEAM_ID = '76561198000000001';
+const GUIDANCE = 'Steam was asked to remove the authenticator and did not answer.';
+
+/** An account row the handlers can find and write to, as the vault holds it. */
+function account(): Account {
+	return {
+		steamId64: STEAM_ID,
+		accountName: 'trader',
+		sharedSecret: 'c2hhcmVkLXNlY3JldC1ieXRlcw==',
+		identitySecret: 'aWRlbnRpdHktc2VjcmV0LWJ5dGVz',
+		status: 'pendingActivation',
+		addedAt: '2026-01-01T00:00:00.000Z'
+	} as unknown as Account;
+}
+
+/** A vault that keeps what a mutate wrote, which is the whole point here. */
+function vaultHolding(accounts: Account[]): VaultService {
+	return {
+		isUnlocked: () => true,
+		touch: () => undefined,
+		read: () => ({ accounts }),
+		mutate: (apply: (draft: { accounts: Account[] }) => void) => {
+			apply({ accounts });
+			return Promise.resolve();
+		},
+		settings: () => ({ requireProxies: false })
+	} as unknown as VaultService;
+}
+
+beforeEach(() => {
+	handlers.clear();
+	__resetRouterForTests();
+	setTrustedSender(() => true);
+});
+
+function register(vault: VaultService, overrides: Partial<EnrollmentService>): void {
+	registerEnrollmentHandlers(overrides as EnrollmentService, vault, {
+		show: () => Promise.resolve(undefined)
+	});
+}
+
+const REMOVE = {
+	steamId64: STEAM_ID,
+	passphrase: 'a passphrase long enough',
+	acknowledgement: 'REMOVE STEAM GUARD'
+};
+
+describe('a removal whose outcome was never established', () => {
+	it('is written to the account, not only to the screen', async () => {
+		const accounts = [account()];
+		register(vaultHolding(accounts), {
+			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		await handler(EVENT, REMOVE);
+
+		expect(
+			accounts[0]?.unresolvedOperation,
+			'nothing outside the screen recorded it, so closing the screen or restarting offered ' +
+				'the removal again — after the application said it would not send it a second time'
+		).toMatchObject({ kind: 'deactivate', guidance: GUIDANCE });
+	});
+
+	it('records when Steam is known to have acted', async () => {
+		const accounts = [account()];
+		register(vaultHolding(accounts), {
+			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true, true))
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		await handler(EVENT, REMOVE);
+
+		expect(accounts[0]?.unresolvedOperation?.certain).toBe(true);
+	});
+
+	/* An ordinary failure is not an unresolved operation. */
+	it('is not recorded when the request never went', async () => {
+		const accounts = [account()];
+		register(vaultHolding(accounts), {
+			deactivate: () => Promise.reject(new EnrollmentError('that code is wrong', false, false))
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		await expect(handler(EVENT, REMOVE)).rejects.toThrow();
+
+		expect(
+			accounts[0]?.unresolvedOperation,
+			'a refusal Steam never received left the account carrying a warning for ever'
+		).toBeUndefined();
+	});
+
+	it('is not recorded by a successful removal', async () => {
+		const accounts = [account()];
+		register(vaultHolding(accounts), { deactivate: () => Promise.resolve() });
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		await handler(EVENT, REMOVE);
+
+		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
+	});
+});
+
+describe('an activation whose outcome was never established', () => {
+	it('is written to the account', async () => {
+		const accounts = [account()];
+		register(vaultHolding(accounts), {
+			activate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.enrollActivate);
+		if (!handler) throw new Error('enrollActivate was not registered');
+
+		await handler(EVENT, { steamId64: STEAM_ID, code: '12345' });
+
+		expect(accounts[0]?.unresolvedOperation).toMatchObject({ kind: 'activate' });
+	});
+
+	it('is not recorded by an ordinary activation', async () => {
+		const accounts = [account()];
+		register(vaultHolding(accounts), { activate: () => Promise.resolve('activated' as const) });
+		const handler = handlers.get(CHANNELS.enrollActivate);
+		if (!handler) throw new Error('enrollActivate was not registered');
+
+		await handler(EVENT, { steamId64: STEAM_ID, code: '12345' });
+
+		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
+	});
+});
+
+/**
+ * **And only the user can clear it.**
+ *
+ * Nothing in this process knows what Steam did, so there is no local event that
+ * settles the record — which means without an explicit way out the account
+ * carries the warning for ever, and a warning that never clears is one people
+ * learn to ignore.
+ */
+describe('resolving an unresolved operation', () => {
+	it('clears the record', async () => {
+		const accounts = [account()];
+		accounts[0]!.unresolvedOperation = {
+			kind: 'deactivate',
+			guidance: GUIDANCE,
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		register(vaultHolding(accounts), {});
+		const handler = handlers.get(CHANNELS.accountResolveOperation);
+		if (!handler) throw new Error('accountResolveOperation was not registered');
+
+		expect(await handler(EVENT, { steamId64: STEAM_ID })).toEqual({ ok: true });
+		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
+	});
+
+	it('leaves other accounts alone', async () => {
+		const other = account();
+		other.steamId64 = '76561198000000002';
+		other.unresolvedOperation = {
+			kind: 'activate',
+			guidance: GUIDANCE,
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		const accounts = [account(), other];
+		register(vaultHolding(accounts), {});
+		const handler = handlers.get(CHANNELS.accountResolveOperation);
+		if (!handler) throw new Error('accountResolveOperation was not registered');
+
+		await handler(EVENT, { steamId64: STEAM_ID });
+
+		expect(
+			accounts[1]?.unresolvedOperation,
+			'clearing one account cleared another account/s record'
+		).toBeDefined();
+	});
+});

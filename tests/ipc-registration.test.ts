@@ -141,6 +141,9 @@ describe('IPC registration', () => {
 			// Declared beside `accountSetProxy`, so it sorts ahead of the rest by
 			// declaration order rather than by anything meaningful.
 			CHANNELS.accountOpenBrowser,
+			// Answered by the enrollment handlers, which this case deliberately does
+			// not register.
+			CHANNELS.accountResolveOperation,
 			CHANNELS.activityList,
 			CHANNELS.activityAcknowledge,
 			CHANNELS.confirmationsList,

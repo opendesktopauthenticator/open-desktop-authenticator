@@ -322,6 +322,7 @@ describe('the enrolment and transfer forms under Require proxies', () => {
 				onBegin={() => Promise.resolve({ state: 'needsEmailCode' as const })}
 				onEmailCode={() => Promise.resolve({ state: 'needsEmailCode' as const })}
 				onCancel={() => Promise.resolve()}
+				onResolve={() => Promise.resolve()}
 				onActivate={() => Promise.resolve({} as never)}
 				onBackup={noop}
 				onClose={noop}

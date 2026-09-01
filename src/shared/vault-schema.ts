@@ -210,7 +210,32 @@ export const accountSchema = z
 
 		addedAt: z.string(),
 		/** Set when the forced revocation-code ceremony completed (§11 S12). */
-		revocationBackedUpAt: z.string().optional()
+		revocationBackedUpAt: z.string().optional(),
+		/**
+		 * **An irreversible Steam operation whose outcome was never established.**
+		 *
+		 * Activation and removal both reach Steam before anything can go wrong with
+		 * the answer, so a lost reply leaves the account in a state only Steam can
+		 * report. The screens learned to stop offering the action again — and they
+		 * learned it in React state, which lives exactly as long as the component.
+		 * Close the screen, or restart, and the application offered "Finish
+		 * activation" or "Remove" again, having just said in as many words that it
+		 * would not send the request a second time.
+		 *
+		 * Written here because this is the only place that outlives both. It is
+		 * cleared by the user saying they have checked the account, which is the
+		 * one thing that can actually settle it — nothing local can.
+		 */
+		unresolvedOperation: z
+			.object({
+				kind: z.enum(['activate', 'deactivate']),
+				/** What the user was told to do, kept so the screen says it again. */
+				guidance: z.string(),
+				/** `true` when Steam is known to have acted, rather than may have. */
+				certain: z.boolean().optional(),
+				at: z.string()
+			})
+			.optional()
 	})
 	// Preserve fields written by a newer build rather than dropping them on the
 	// next save. Losing an unrecognised field could mean losing a secret.

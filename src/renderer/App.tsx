@@ -899,6 +899,7 @@ export function App(): React.JSX.Element {
 					onDeactivate={(passphrase, acknowledgement) =>
 						api.deactivateAuthenticator(removingFor.steamId64, passphrase, acknowledgement)
 					}
+					onResolve={() => api.resolveAccountOperation(removingFor.steamId64)}
 					onClose={() => {
 						setRemovingFor(undefined);
 						void refresh();
@@ -1077,6 +1078,17 @@ export function App(): React.JSX.Element {
 								}
 							}
 						: {})}
+					{
+						// **The refusal to repeat an activation, read from the account.** It
+						// lived in that screen's own state, which lasts as long as the
+						// screen: closing it and coming back through "Finish activation"
+						// offered the form again, after the application had said it would
+						// not send the request a second time. The vault holds it now.
+						...(resumeEnrollment?.unresolvedOperation?.kind === 'activate'
+							? { unresolved: resumeEnrollment.unresolvedOperation }
+							: {})
+					}
+					onResolve={(steamId64) => api.resolveAccountOperation(steamId64)}
 					onBegin={(accountName, password, proxyUrl) =>
 						api.beginEnrollment(accountName, password, proxyUrl)
 					}

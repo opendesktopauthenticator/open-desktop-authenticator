@@ -36,7 +36,7 @@ import { EnrollmentService } from './steam/enrollment';
 import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
 import { TransferService } from './steam/transfer';
 import { registerTransferHandlers } from './steam/transfer-ipc';
-import { createRecoveryHooks, RECOVERY_EXTENSION } from './vault/recovery';
+import { createRecoveryHooks, reconcileRecoveryFiles, RECOVERY_EXTENSION } from './vault/recovery';
 import { SteamTransportFactory, type ElectronNetworking } from './net/transport';
 import { ConfirmationsService } from './confirmations/service';
 import { AutoConfirmEngine } from './confirmations/auto';
@@ -407,6 +407,23 @@ function start(): void {
 	 */
 	if (vault.reconcile()) {
 		console.log('finished a passphrase rotation that was interrupted before it could complete');
+	}
+
+	/*
+	 * **And the same for a recovery file caught between its two syscalls.**
+	 *
+	 * On a filesystem with no hard links, publishing one is a `wx` claim on the
+	 * destination followed by a rename of the completed staging file over it. A
+	 * hard stop in between leaves a nought-byte file at the name a restore reads
+	 * and the whole document beside it, under a name nothing looks at - and that
+	 * window sits after Steam may have attached the authenticator and before the
+	 * vault has stored it, which is the one stretch this file exists for.
+	 *
+	 * Beside the vault's own reconciliation because it is the same idea, and
+	 * before any screen can offer to restore from a file.
+	 */
+	for (const finished of reconcileRecoveryFiles(app.getPath('userData'))) {
+		console.log(`finished writing a recovery file that was interrupted: ${finished}`);
 	}
 
 	const codes = new CodeService(vault);

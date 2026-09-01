@@ -24,6 +24,7 @@ export function RemoveAccount({
 	account,
 	onRemove,
 	onDeactivate,
+	onResolve,
 	onClose
 }: {
 	account: AccountSummary;
@@ -41,6 +42,11 @@ export function RemoveAccount({
 		passphrase: string,
 		acknowledgement: string
 	) => Promise<{ state?: 'uncertain'; guidance?: string }>;
+	/**
+	 * Clear the vault's record that an irreversible operation on this account was
+	 * left unresolved. Called only when the user says they have checked it.
+	 */
+	onResolve: () => Promise<unknown>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [passphrase, setPassphrase] = useState('');
@@ -50,7 +56,21 @@ export function RemoveAccount({
 	const [busy, setBusy] = useState(false);
 	const [error, setError] = useState<string | undefined>();
 	/** Steam was asked and did not answer. See the note in `submit`. */
-	const [uncertain, setUncertain] = useState<string | undefined>();
+	/*
+	 * **Seeded from the account, not only from this session.**
+	 *
+	 * The refusal to repeat a removal whose outcome is unknown lived in this
+	 * component's state, which lasts exactly as long as the component. Closing
+	 * the screen, or restarting, offered the form again — after the application
+	 * had said in as many words that it would not send the request a second time.
+	 * The vault remembers it now, and this is where that record is read.
+	 */
+	const [uncertain, setUncertain] = useState<string | undefined>(
+		account.unresolvedOperation?.kind === 'deactivate'
+			? account.unresolvedOperation.guidance
+			: undefined
+	);
+	const [resolving, setResolving] = useState(false);
 
 	const submit = (event: React.FormEvent): void => {
 		event.preventDefault();
@@ -103,6 +123,25 @@ export function RemoveAccount({
 				<div className="controls">
 					<button type="button" onClick={onClose}>
 						Close
+					</button>
+					{/*
+					 * **The only thing that can settle this is the user.** Nothing local
+					 * knows what Steam did, so the record is cleared by the person
+					 * saying they have been and looked — which is also the moment the
+					 * guidance above stops being useful to them. Without it the account
+					 * carries the warning for ever.
+					 */}
+					<button
+						type="button"
+						disabled={resolving}
+						onClick={() => {
+							setResolving(true);
+							void onResolve()
+								.then(onClose)
+								.finally(() => setResolving(false));
+						}}
+					>
+						I have checked this account
 					</button>
 				</div>
 			</main>
