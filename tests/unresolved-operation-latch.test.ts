@@ -218,3 +218,122 @@ describe('resolving an unresolved operation', () => {
 		).toBeDefined();
 	});
 });
+
+/**
+ * **A refusal the renderer honours is a convention; one the handler honours is
+ * a rule.**
+ *
+ * Writing the unresolved operation to the vault made it outlive the screen, and
+ * both screens read it and stop offering the action. That is not the same as
+ * the request being refused: the handler went on accepting it from anything
+ * that asked, and a stale account list is enough to get past a renderer-side
+ * check — as is a renderer compromised by the Steam content it renders, which
+ * is the threat the process boundary exists for.
+ *
+ * This file already argues the point about the removal acknowledgement, in its
+ * own words: a phrase enforced only in the renderer is a convention.
+ */
+describe('an operation attempted while one is still unresolved', () => {
+	function withLatch(kind: 'activate' | 'deactivate'): {
+		accounts: Account[];
+		calls: { activate: number; deactivate: number };
+	} {
+		const accounts = [account()];
+		accounts[0]!.unresolvedOperation = {
+			kind,
+			guidance: GUIDANCE,
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		const calls = { activate: 0, deactivate: 0 };
+		register(vaultHolding(accounts), {
+			activate: () => {
+				calls.activate += 1;
+				return Promise.resolve('activated' as const);
+			},
+			deactivate: () => {
+				calls.deactivate += 1;
+				return Promise.resolve();
+			}
+		});
+		return { accounts, calls };
+	}
+
+	it('is refused rather than sent to Steam', async () => {
+		const { calls } = withLatch('activate');
+		const handler = handlers.get(CHANNELS.enrollActivate);
+		if (!handler) throw new Error('enrollActivate was not registered');
+
+		const result = (await handler(EVENT, { steamId64: STEAM_ID, code: '12345' })) as {
+			state: string;
+			guidance?: string;
+		};
+
+		expect(
+			calls.activate,
+			'the handler sent an irreversible request for an account whose last one was never ' +
+				'resolved, because the only thing refusing was the screen'
+		).toBe(0);
+		expect(result.state).toBe('uncertain');
+		expect(result.guidance, 'and the reason was not repeated back').toBe(GUIDANCE);
+	});
+
+	it('refuses a removal the same way', async () => {
+		const { calls } = withLatch('deactivate');
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		const result = (await handler(EVENT, REMOVE)) as { state?: string };
+
+		expect(calls.deactivate, 'the most destructive operation here was sent anyway').toBe(0);
+		expect(result.state).toBe('uncertain');
+	});
+
+	/*
+	 * What is unknown is the account's state on Steam, not one verb's outcome:
+	 * "should I detach this?" is not answerable while "did the activation land?"
+	 * is still open.
+	 */
+	it('refuses the other operation too', async () => {
+		const { calls } = withLatch('activate');
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		await handler(EVENT, REMOVE);
+
+		expect(calls.deactivate).toBe(0);
+	});
+
+	/* And once the user has said they checked, the account works normally again. */
+	it('lets the operation through once it has been resolved', async () => {
+		const { calls } = withLatch('activate');
+		const resolve = handlers.get(CHANNELS.accountResolveOperation);
+		const activate = handlers.get(CHANNELS.enrollActivate);
+		if (!resolve || !activate) throw new Error('handlers were not registered');
+
+		await resolve(EVENT, { steamId64: STEAM_ID });
+		const result = (await activate(EVENT, { steamId64: STEAM_ID, code: '12345' })) as {
+			state: string;
+		};
+
+		expect(calls.activate, 'the account was left permanently unusable').toBe(1);
+		expect(result.state).toBe('activated');
+	});
+
+	/* And an account with nothing outstanding is untouched by any of this. */
+	it('does not refuse an account with no unresolved operation', async () => {
+		const accounts = [account()];
+		const calls = { activate: 0 };
+		register(vaultHolding(accounts), {
+			activate: () => {
+				calls.activate += 1;
+				return Promise.resolve('activated' as const);
+			}
+		});
+		const handler = handlers.get(CHANNELS.enrollActivate);
+		if (!handler) throw new Error('enrollActivate was not registered');
+
+		await handler(EVENT, { steamId64: STEAM_ID, code: '12345' });
+
+		expect(calls.activate).toBe(1);
+	});
+});

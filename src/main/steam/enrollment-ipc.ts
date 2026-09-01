@@ -414,8 +414,46 @@ export function registerEnrollmentHandlers(
 		return { ok: true as const };
 	});
 
+	/**
+	 * **The stored refusal, enforced rather than displayed.**
+	 *
+	 * Writing the unresolved operation to the vault made it outlive the screen.
+	 * It did not make it binding: both screens read it and stop offering the
+	 * action, and the main process went on accepting the request from anything
+	 * that asked. This file already argues the other way, three handlers down —
+	 * "Checked here, not by the screen. The auto-confirm gate taught this lesson
+	 * the expensive way: a phrase enforced only in the renderer is a convention"
+	 * — and these are the two operations that convention is least survivable on.
+	 *
+	 * A stale account list is enough to get past a renderer-side check. So is a
+	 * renderer that has been compromised by the Steam content it renders, which
+	 * is the threat the whole process boundary exists for.
+	 *
+	 * **Either operation is refused while either is unresolved.** What is unknown
+	 * is the account's state on Steam, not one verb's outcome, and the answer to
+	 * "should I detach this?" is not knowable while "did the activation land?"
+	 * is open.
+	 */
+	function heldBack(
+		steamId64: string
+	): { state: 'uncertain'; guidance: string; certain?: boolean } | undefined {
+		const held = vault
+			.read()
+			.accounts.find((entry) => entry.steamId64 === steamId64)?.unresolvedOperation;
+		if (held === undefined) {
+			return undefined;
+		}
+		return held.certain === true
+			? { state: 'uncertain', guidance: held.guidance, certain: true }
+			: { state: 'uncertain', guidance: held.guidance };
+	}
+
 	registerHandler(CHANNELS.enrollActivate, async ({ steamId64, code }) => {
 		requireUnlocked();
+		const blocked = heldBack(steamId64);
+		if (blocked !== undefined) {
+			return blocked;
+		}
 		try {
 			return { state: await enrollment.activate(steamId64, code) };
 		} catch (err) {
@@ -435,6 +473,11 @@ export function registerEnrollmentHandlers(
 			// and this is the one operation more destructive than switching trades on.
 			if (!matchesDeactivateAck(acknowledgement)) {
 				throw new Error(`type "${DEACTIVATE_ACK}" to remove this authenticator from Steam`);
+			}
+
+			const blocked = heldBack(steamId64);
+			if (blocked !== undefined) {
+				return blocked;
 			}
 
 			try {
