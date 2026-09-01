@@ -195,6 +195,21 @@ export function createTray(host: TrayHost): Tray {
 	 */
 	const reassign = (): void => {
 		if (!buildsOnDemand) {
+			/*
+			 * **Shutdown destroys the tray and then locks the vault.**
+			 *
+			 * The lock is announced now, and the announcement reaches this - so on
+			 * Linux the quit path called `setContextMenu` on a `Tray` that had been
+			 * destroyed three lines earlier and threw on the way out. The beat below
+			 * has always checked this; the path that was added to make the menu
+			 * fresher did not, which is the whole shape of that regression.
+			 *
+			 * Checked here rather than at the call sites because every path into a
+			 * reassign has the same problem, including the ones added next.
+			 */
+			if (tray.isDestroyed()) {
+				return;
+			}
 			tray.setContextMenu(menu());
 			// So the beat below agrees about what is on screen. Without this a
 			// reassign from a menu click leaves the recorded state behind and the

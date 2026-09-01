@@ -988,7 +988,13 @@ export class EnrollmentService {
 							'finish activating. Do not remove the authenticator on Steam before you do.'
 						: 'here, and the recovery file could not be written either. Write this down now, ' +
 							'before you close this window — it is the only way to detach the authenticator ' +
-							`yourself: revocation code ${account.revocationCode ?? '(not issued)'}.`)
+							`yourself: revocation code ${account.revocationCode ?? '(not issued)'}.`),
+				true,
+				// Steam attached it — this is not a "may have". The screen must offer
+				// no way to send a second `AddAuthenticator`, because the message above
+				// is telling the user to go and recover the one that exists.
+				true,
+				true
 			);
 		}
 

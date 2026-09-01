@@ -204,9 +204,15 @@ async function exclusively<T>(rawPath: string, run: () => Promise<T>): Promise<T
  * Anything else is rethrown untouched — an ordinary failure is still an ordinary
  * failure, and turning them all into a dead end would be its own defect.
  */
-function uncertainOrRethrow(err: unknown): { state: 'uncertain'; guidance: string } {
+function uncertainOrRethrow(err: unknown): {
+	state: 'uncertain';
+	guidance: string;
+	certain?: boolean;
+} {
 	if (err instanceof EnrollmentError && err.committed) {
-		return { state: 'uncertain', guidance: err.message };
+		return err.certain
+			? { state: 'uncertain', guidance: err.message, certain: true }
+			: { state: 'uncertain', guidance: err.message };
 	}
 	throw err;
 }
@@ -320,12 +326,31 @@ export function registerEnrollmentHandlers(
 				throw new EnrollmentError(PROXY_REQUIRED);
 			}
 		}
-		return enrollment.begin(accountName, password, proxyUrl);
+		/*
+		 * **The add is irreversible too, and it was the one left out.**
+		 *
+		 * `enrollActivate` and `accountDeactivate` return their committed failures
+		 * as outcomes; this handler returned `enrollment.begin(...)` bare, so a
+		 * timeout on `AddAuthenticator` — sent, unanswered — crossed IPC as an
+		 * ordinary error and the screen put the form back with the button live. So
+		 * did the two branches where Steam is *known* to have attached one.
+		 */
+		try {
+			return await enrollment.begin(accountName, password, proxyUrl);
+		} catch (err) {
+			return uncertainOrRethrow(err);
+		}
 	});
 
 	registerHandler(CHANNELS.enrollEmailCode, async ({ code }) => {
 		requireUnlocked();
-		return enrollment.submitEmailCode(code);
+		// The same path: this call finishes the sign-in and goes straight on to
+		// `AddAuthenticator`, so every outcome above reaches here too.
+		try {
+			return await enrollment.submitEmailCode(code);
+		} catch (err) {
+			return uncertainOrRethrow(err);
+		}
 	});
 
 	// No `requireUnlocked` here, and that is deliberate: this only drops state we

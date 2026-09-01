@@ -87,11 +87,25 @@ export class EnrollmentError extends Error {
 	 */
 	readonly committed: boolean;
 
-	constructor(message: string, permanent = true, committed = false) {
+	/**
+	 * **Steam definitely acted**, as opposed to may have.
+	 *
+	 * `committed` covers both, because for a lost reply they need the same
+	 * treatment: stop, and go and look. They do not need the same words. Two
+	 * branches here know exactly what Steam did — it answered `ok` without the
+	 * secrets, or it returned them and the vault write failed — and telling those
+	 * users "nothing here can tell whether Steam acted" would be false at the
+	 * moment they most need a true sentence. The second of them is carrying the
+	 * only copy of a revocation code that exists.
+	 */
+	readonly certain: boolean;
+
+	constructor(message: string, permanent = true, committed = false, certain = false) {
 		super(message);
 		this.name = 'EnrollmentError';
 		this.permanent = permanent;
 		this.committed = committed;
+		this.certain = certain;
 	}
 }
 
@@ -395,10 +409,18 @@ export async function startEnrollment(
 	// field means the account is now protected by a secret nobody holds.
 	const { shared_secret, identity_secret, revocation_code } = body;
 	if (!shared_secret || !identity_secret || !revocation_code) {
+		/*
+		 * **Certainly committed.** Steam answered `ok` — it attached one — and the
+		 * fields this application needs are not in the reply. Retrying cannot help
+		 * and must not be offered, which is what the last two arguments are for.
+		 */
 		throw new EnrollmentError(
 			'Steam accepted the request but did not return the secrets. This account may now have an ' +
 				'authenticator nobody can use — contact Steam Support with your account details before ' +
-				'trying again.'
+				'trying again.',
+			true,
+			true,
+			true
 		);
 	}
 
@@ -512,8 +534,19 @@ export async function finalizeEnrollment(
 		throw new EnrollmentError(UNCERTAIN.finalize, true, true);
 	}
 
+	/*
+	 * **And a refusal with no status names no cause either.**
+	 *
+	 * The status branch above was corrected and this one was not, so the reply
+	 * that says least — a bare `success: false`, with nothing else in it — still
+	 * produced the most specific sentence in the file. Steam supplied no reason;
+	 * the code is the likeliest one and it is worth naming, in the same words the
+	 * removal path uses for the same shape of answer.
+	 */
 	throw new EnrollmentError(
-		'Steam did not accept the activation code. Check it and try again — it expires quickly.',
+		'Steam refused the activation and did not say why. The likeliest cause is a mistyped or ' +
+			'expired code — try the newest one — and if that does not help, wait a few minutes ' +
+			'before trying again.',
 		false
 	);
 }

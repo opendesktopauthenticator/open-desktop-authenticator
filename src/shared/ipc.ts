@@ -370,7 +370,27 @@ export type TransferStatus = z.infer<typeof transferStatusResponse>;
 export type TransferStartChallenge = z.infer<typeof transferStartChallengeResponse>;
 export type TransferComplete = z.infer<typeof transferCompleteResponse>;
 
+/**
+ * **An enrollment that must not be retried, carried as an outcome.**
+ *
+ * `AddAuthenticator` is irreversible and it is sent before anything can go wrong
+ * with the answer, so a lost reply, a reply without the secrets, or a vault
+ * write that fails afterwards all end with the account possibly — or definitely
+ * — carrying an authenticator this machine cannot use. Those crossed IPC as
+ * ordinary errors, which is a shape the screen recovers from by clearing `busy`
+ * and re-enabling the control that sends the request again.
+ *
+ * `certain` separates "Steam definitely did this" from "nobody can tell", which
+ * is the difference between two true sentences and one false one.
+ */
+const haltedOutcome = z.object({
+	state: z.literal('uncertain'),
+	guidance: z.string(),
+	certain: z.boolean().optional()
+});
+
 export const enrollBeginResponse = z.discriminatedUnion('state', [
+	haltedOutcome,
 	z.object({ state: z.literal('needsEmailCode'), emailDomain: z.string().optional() }),
 	z.object({
 		state: z.literal('enrolled'),
@@ -851,7 +871,9 @@ export const IPC_CONTRACT = {
 		response: z.object({
 			state: z.enum(['activated', 'wantMore', 'uncertain']),
 			/** Present only for `uncertain`. See `uncertainOutcome`. */
-			guidance: z.string().optional()
+			guidance: z.string().optional(),
+			/** `true` when Steam is known to have acted, rather than may have. */
+			certain: z.boolean().optional()
 		})
 	},
 
@@ -918,7 +940,9 @@ export const IPC_CONTRACT = {
 			 * must not offer the same removal again.
 			 */
 			state: z.literal('uncertain').optional(),
-			guidance: z.string().optional()
+			guidance: z.string().optional(),
+			/** `true` when Steam is known to have acted, rather than may have. */
+			certain: z.boolean().optional()
 		})
 	},
 
@@ -1199,6 +1223,8 @@ export interface RendererApi {
 		 * action the message told them not to repeat.
 		 */
 		guidance?: string;
+		/** `true` when Steam is known to have acted, rather than may have. */
+		certain?: boolean;
 	}>;
 
 	/** Write an account out as a maFile. Opens the OS save dialog; returns a name. */
@@ -1222,7 +1248,7 @@ export interface RendererApi {
 		steamId64: string,
 		passphrase: string,
 		acknowledgement: string
-	): Promise<{ ok?: true; state?: 'uncertain'; guidance?: string }>;
+	): Promise<{ ok?: true; state?: 'uncertain'; guidance?: string; certain?: boolean }>;
 	/** Set routing for one account, or pass `null` to remove it. */
 	setAccountProxy(steamId64: string, proxyUrl: string | null): Promise<{ ok: true }>;
 	/** Enable or disable automatic confirmation for one account, per type. */

@@ -52,7 +52,11 @@ export function AddAuthenticator({
 	onActivate: (
 		steamId64: string,
 		code: string
-	) => Promise<{ state: 'activated' | 'wantMore' | 'uncertain'; guidance?: string }>;
+	) => Promise<{
+		state: 'activated' | 'wantMore' | 'uncertain';
+		guidance?: string;
+		certain?: boolean;
+	}>;
 	/** Opens the revocation-code ceremony for the newly enrolled account. */
 	onBackup: (steamId64: string, accountName: string) => void;
 	onClose: () => void;
@@ -97,7 +101,7 @@ export function AddAuthenticator({
 	 * outcome where trying again may attach or detach a second time. The form goes
 	 * away and the guidance takes its place.
 	 */
-	const [uncertain, setUncertain] = useState<string | undefined>();
+	const [uncertain, setUncertain] = useState<{ guidance: string; certain: boolean } | undefined>();
 	const [emailDomain, setEmailDomain] = useState<string | undefined>();
 	const [enrolled, setEnrolled] = useState<
 		{ steamId64: string; accountName: string; phoneNumberHint?: string } | undefined
@@ -105,6 +109,20 @@ export function AddAuthenticator({
 
 	/** Both entry points land here, because both can finish the enrollment. */
 	const applyOutcome = (outcome: EnrollBegin): void => {
+		/*
+		 * **The end of the flow, not a failure it can retry from.**
+		 *
+		 * `AddAuthenticator` is sent before anything can go wrong with the answer,
+		 * so a lost reply — or a reply Steam answered `ok` without the secrets, or a
+		 * vault write that failed after it — leaves the account possibly or
+		 * definitely carrying an authenticator this machine cannot use. All of those
+		 * arrived here as thrown errors, which `run` handles by clearing `busy` and
+		 * putting the form back, live, under a message saying not to try again.
+		 */
+		if (outcome.state === 'uncertain') {
+			setUncertain({ guidance: outcome.guidance, certain: outcome.certain === true });
+			return;
+		}
 		if (outcome.state === 'needsEmailCode') {
 			setEmailDomain(outcome.emailDomain);
 			setCode('');
@@ -177,7 +195,10 @@ export function AddAuthenticator({
 				 * as an ordinary error — which cleared `busy` and re-enabled the button
 				 * that sends it, while the message said not to.
 				 */
-				setUncertain(result.guidance ?? 'Steam did not answer, so the outcome is unknown.');
+				setUncertain({
+					guidance: result.guidance ?? 'Steam did not answer, so the outcome is unknown.',
+					certain: result.certain === true
+				});
 				return;
 			}
 			if (result.state === 'wantMore') {
@@ -409,11 +430,27 @@ export function AddAuthenticator({
 
 			{uncertain !== undefined && (
 				<section className="ceremony">
-					<h2>This may already have happened</h2>
-					<p>{uncertain}</p>
+					{/*
+					 * **Two true headings rather than one that fits both.**
+					 *
+					 * This said "This may already have happened" for every case. Two of
+					 * them are not maybes: Steam answered `ok` without the secrets, or it
+					 * returned them and the vault write failed. Telling someone nothing
+					 * can tell whether Steam acted, when it certainly did — and when the
+					 * text below may be carrying the only copy of their revocation code —
+					 * is false at the moment they most need a true sentence.
+					 */}
+					<h2>
+						{uncertain.certain ? 'Steam has already done this' : 'This may already have happened'}
+					</h2>
+					<p>{uncertain.guidance}</p>
 					<p>
-						Nothing here can tell whether Steam acted on the last request, so this application will
-						not send it again. Check the Steam mobile app before doing anything else.
+						{uncertain.certain
+							? 'This application will not send the request again. Follow the steps above before ' +
+								'starting another enrollment for this account.'
+							: 'Nothing here can tell whether Steam acted on the last request, so this ' +
+								'application will not send it again. Check the Steam mobile app before doing ' +
+								'anything else.'}
 					</p>
 					<div className="controls">
 						<button type="button" onClick={onClose}>

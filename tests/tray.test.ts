@@ -83,6 +83,15 @@ vi.mock('electron', () => ({
 	Tray: class {
 		setToolTip(): void {}
 		setContextMenu(menu: FakeMenu): void {
+			/*
+			 * **Electron throws on a destroyed Tray**, and this fake did not - so a
+			 * shutdown that reassigned the menu after `destroy()` passed here and
+			 * threw in the real application. A fake that is more forgiving than the
+			 * thing it stands in for is a test that cannot see the bug.
+			 */
+			if (record.destroyed) {
+				throw new Error('Object has been destroyed');
+			}
 			record.assigned.push(menu);
 		}
 		popUpContextMenu(menu: FakeMenu): void {
@@ -626,5 +635,43 @@ describe('a tray told about a change rather than polling for it', () => {
 		const { world } = harness(platform, { visible: true, unlocked: false });
 
 		expect(world.announce).toBeUndefined();
+	});
+});
+
+/**
+ * **Shutdown destroys the tray and then locks the vault.**
+ *
+ * `before-quit` calls `tray?.destroy()` and, four lines later,
+ * `vault.lock('shutdown')`. Announcing the lock to the tray - which is what
+ * made the menu fresh after an unlock - therefore reached a `Tray` that had
+ * already been destroyed, and Electron throws on that. The quit path threw on
+ * its way out, on Linux, in the packaged application.
+ *
+ * The beat has always checked `isDestroyed`; the reassign added beside it did
+ * not. Guarded where every path into it goes through, rather than at the one
+ * call site that happened to be found.
+ */
+describe('a tray told about a change after it has been destroyed', () => {
+	it('does not throw', () => {
+		const { world } = harness('linux', { visible: true, unlocked: true });
+
+		// What `before-quit` does, in the order it does it.
+		record.destroyed = true;
+
+		expect(
+			() => world.announce?.(),
+			'locking the vault during shutdown reassigned the menu of a destroyed tray, and Electron ' +
+				'throws on that - so quitting threw on the way out'
+		).not.toThrow();
+	});
+
+	it('still refuses to assign anything', () => {
+		const { world } = harness('linux', { visible: true, unlocked: true });
+		const before = record.assigned.length;
+		record.destroyed = true;
+
+		world.announce?.();
+
+		expect(record.assigned.length, 'a menu was handed to a destroyed tray').toBe(before);
 	});
 });

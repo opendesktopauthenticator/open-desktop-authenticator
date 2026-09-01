@@ -348,3 +348,60 @@ describe('a click for an account that has been removed', () => {
 		});
 	});
 });
+
+/**
+ * **The clock the expiry measures against must not be adjustable.**
+ *
+ * It was `Date.now()`. A wall clock moves backwards - an NTP correction, a
+ * timezone change, somebody setting it by hand - and the subtraction was then
+ * measuring an adjustment rather than a duration: move the clock back ten
+ * minutes and a click stayed collectable through ten real minutes of elapsed
+ * time.
+ *
+ * Dropping the value on the way out, which is what the case above covers, only
+ * helps once an expiry has been *observed*. A clock that moves back before the
+ * lifetime elapses is never observed at all, so that fix could not reach this.
+ *
+ * `performance.now()` cannot be adjusted, which is why `VaultService` already
+ * measures its idle timeout with it. This drives the default clock rather than
+ * an injected one, because the defect was the choice of default.
+ */
+describe('the clock a pending click is aged against', () => {
+	it('is not the one a user can change', () => {
+		const router = new ToastClickRouter({ reveal: vi.fn(), push: vi.fn() });
+		router.activate(ID);
+
+		/*
+		 * The wall clock jumps forward past the lifetime while no real time passes.
+		 * A router reading `Date.now()` calls the click expired; one reading a
+		 * monotonic source is unmoved - and the same insensitivity is what stops a
+		 * backwards jump extending it.
+		 */
+		const real = Date.now();
+		const clock = vi.spyOn(Date, 'now').mockReturnValue(real + 60 * 60_000);
+		try {
+			expect(
+				router.peek(),
+				'the expiry is measured against the system clock, so moving that clock moves the ' +
+					'deadline - forwards here, and backwards is the case that keeps a click alive ' +
+					'past ten real minutes'
+			).toEqual({ steamId64: ID });
+		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	/* And it still expires on elapsed time, which is the point of having one. */
+	it('still expires once the monotonic clock has moved', () => {
+		let ticks = 0;
+		const router = new ToastClickRouter({
+			reveal: vi.fn(),
+			push: vi.fn(),
+			now: () => ticks
+		});
+		router.activate(ID);
+		ticks += 60 * 60_000;
+
+		expect(router.peek()).toEqual({});
+	});
+});

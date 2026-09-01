@@ -35,12 +35,34 @@ import { envelopeSchema, type Envelope } from '../../shared/vault-format';
  */
 
 export class VaultStorageError extends Error {
+	/**
+	 * **Whether the file on disk is still what it was before the call.**
+	 *
+	 * `writeEnvelope` publishes by rename and verifies afterwards, so a failure
+	 * that happens after the rename has already replaced the file - and when the
+	 * rollback cannot put the old one back, the caller is holding a failure whose
+	 * message says "write failed" over a file that was, in fact, written.
+	 *
+	 * That distinction only existed in the wording of two error messages. A
+	 * rotation read the exception, concluded nothing had been replaced, and kept
+	 * the live session on the retired key while the file was under the new one -
+	 * so the next ordinary save re-sealed it backwards and the new passphrase
+	 * stopped working. The information was there; it was just not in a form
+	 * anything could act on.
+	 *
+	 * True for every refusal that happens before a byte moves, which is the
+	 * default because most of them are.
+	 */
+	readonly unchanged: boolean;
+
 	constructor(
 		message: string,
-		override readonly cause?: unknown
+		override readonly cause?: unknown,
+		unchanged = true
 	) {
 		super(message);
 		this.name = 'VaultStorageError';
+		this.unchanged = unchanged;
 	}
 }
 
@@ -168,7 +190,8 @@ export function writeEnvelope(file: string, envelope: Envelope): void {
 				: 'the vault write failed and the previous file could NOT be put back. The file on ' +
 						'disk may be incomplete. The last good copy is beside it, named vault.json.bak — ' +
 						'do not delete it, and use Restore from backup in Settings.',
-			err
+			err,
+			putBack
 		);
 	}
 }
@@ -415,25 +438,67 @@ export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 				throw new Error('the backup on disk does not match what was written');
 			}
 		} catch (err) {
+			/*
+			 * **The set-aside copy is only disposable once it is no longer the only
+			 * one.**
+			 *
+			 * This restored and then dropped `.previous` in a `finally`, which ran
+			 * whether or not the restore worked - and the restore is a `copyFileSync`
+			 * that can fail for every reason the write above just failed for. A
+			 * destination that would not verify, a restore that could not run, and
+			 * then the deletion of the only remaining good copy: the exact loss the
+			 * set-aside exists to prevent, moved one level down.
+			 *
+			 * So it is kept unless the backup it guards is known to be good, and
+			 * where it is kept is in the message. A path in an error is worth more
+			 * than a file nobody knows about.
+			 */
+			let restored = false;
 			if (previous !== undefined && existsSync(previous)) {
 				try {
 					copyFileSync(previous, paths.backup);
 					tighten(paths.backup);
 					syncDirectory(dirname(file));
+					// Verified, not assumed: this is the copy everything else now
+					// depends on, and it is being made under whatever conditions broke
+					// the write above.
+					restored = readFileSync(paths.backup, 'utf8') === readFileSync(previous, 'utf8');
 				} catch {
-					/* the throw below is what the caller acts on either way */
+					restored = false;
 				}
 			}
-			throw err;
-		} finally {
-			if (previous !== undefined) {
+
+			if (previous !== undefined && restored) {
 				try {
-					if (existsSync(previous)) {
-						unlinkSync(previous);
-					}
+					unlinkSync(previous);
 				} catch {
-					/* best effort: a stray copy of the old backup is overwritten next time */
+					/* best effort: a stray copy is overwritten by the next write */
 				}
+			}
+
+			if (previous !== undefined && !restored) {
+				throw new VaultStorageError(
+					'the vault backup could not be rewritten, and the previous backup could not be put ' +
+						`back. The last good copy is still on disk at ${previous} - do not delete it.`,
+					err
+				);
+			}
+			throw err;
+		}
+
+		/*
+		 * The new backup is in place and verified, so the set-aside copy has stopped
+		 * being the only good one and can go. On the success path rather than in a
+		 * `finally`, because a `finally` is exactly what deleted it after a failed
+		 * restore.
+		 */
+		if (previous !== undefined) {
+			try {
+				if (existsSync(previous)) {
+					unlinkSync(previous);
+				}
+			} catch {
+				/* best effort: a stray copy is overwritten by the next write */
 			}
 		}
 	} catch (err) {
@@ -443,6 +508,15 @@ export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 			}
 		} catch {
 			/* best effort */
+		}
+		/*
+		 * A storage error from inside already says the specific thing that went
+		 * wrong - including, on the failed-restore path, where the last good copy
+		 * is. Re-wrapping it replaced that with the generic sentence and threw the
+		 * path away, which is the one detail the user needs from that branch.
+		 */
+		if (err instanceof VaultStorageError) {
+			throw err;
 		}
 		throw new VaultStorageError('the vault backup could not be rewritten', err);
 	}

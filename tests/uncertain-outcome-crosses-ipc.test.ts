@@ -52,7 +52,10 @@ const GUIDANCE =
 const vault = {
 	isUnlocked: () => true,
 	touch: () => undefined,
-	read: () => ({ accounts: [] })
+	read: () => ({ accounts: [] }),
+	// `enrollBegin` reads this before it does anything: an enrolment with no
+	// proxy is refused outright when the vault demands one.
+	settings: () => ({ requireProxies: false })
 } as unknown as VaultService;
 
 beforeEach(() => {
@@ -145,5 +148,123 @@ describe('a removal Steam may already have performed', () => {
 		if (!handler) throw new Error('accountDeactivate was not registered');
 
 		await expect(handler(EVENT, request)).rejects.toThrow(/revocation code/);
+	});
+});
+
+/**
+ * **And the add itself, which was the one left out.**
+ *
+ * `enrollActivate` and `accountDeactivate` were wired to return their committed
+ * failures as outcomes. `enrollBegin` and `enrollEmailCode` were not — they
+ * returned the service call bare — so the irreversible operation at the front of
+ * the flow kept the behaviour the other two had fixed: a timeout on
+ * `AddAuthenticator`, which is sent before anything can go wrong with the
+ * answer, crossed IPC as an ordinary error and the screen put the form back with
+ * the submit live under a message saying not to try again.
+ *
+ * The response schema could not have carried it either: `enrollBeginResponse`
+ * was a two-member union and the router validates what a handler returns, so
+ * returning an outcome would have been refused as a contract violation.
+ */
+describe('an AddAuthenticator that may already have attached one', () => {
+	const CREDENTIALS = { accountName: 'trader', password: 'a password' };
+
+	it('comes back from enrollBegin as an outcome rather than a thrown error', async () => {
+		withEnrollment({
+			begin: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.enrollBegin);
+		if (!handler) throw new Error('enrollBegin was not registered');
+
+		const result = (await handler(EVENT, CREDENTIALS)) as { state: string; guidance?: string };
+
+		expect(
+			result.state,
+			'the outcome was thrown, so the screen cleared busy and re-enabled the control that sends ' +
+				'AddAuthenticator a second time'
+		).toBe('uncertain');
+		expect(result.guidance).toBe(GUIDANCE);
+	});
+
+	it('comes back from enrollEmailCode too', async () => {
+		withEnrollment({
+			submitEmailCode: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.enrollEmailCode);
+		if (!handler) throw new Error('enrollEmailCode was not registered');
+
+		const result = (await handler(EVENT, { code: '12345' })) as { state: string };
+
+		expect(result.state, 'the email-code path reaches the same irreversible call').toBe(
+			'uncertain'
+		);
+	});
+
+	/**
+	 * **And "Steam definitely did this" is not the same sentence as "nobody can
+	 * tell".**
+	 *
+	 * Two branches know exactly what happened: Steam answered `ok` without the
+	 * secrets, and Steam returned them and the vault write failed. The screen's
+	 * panel said "Nothing here can tell whether Steam acted" for every case, which
+	 * would be false for both — and the second is carrying the only copy of a
+	 * revocation code that exists.
+	 */
+	it('says so when Steam is known to have acted', async () => {
+		withEnrollment({
+			begin: () =>
+				Promise.reject(
+					new EnrollmentError(
+						'Steam attached the authenticator, but it could not be saved',
+						true,
+						true,
+						true
+					)
+				)
+		});
+		const handler = handlers.get(CHANNELS.enrollBegin);
+		if (!handler) throw new Error('enrollBegin was not registered');
+
+		const result = (await handler(EVENT, CREDENTIALS)) as { state: string; certain?: boolean };
+
+		expect(result.state).toBe('uncertain');
+		expect(
+			result.certain,
+			'a certainty was flattened into a maybe, so the screen tells someone whose authenticator ' +
+				'Steam definitely attached that nothing can tell whether it did'
+		).toBe(true);
+	});
+
+	it('does not claim certainty for a lost reply', async () => {
+		withEnrollment({
+			begin: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.enrollBegin);
+		if (!handler) throw new Error('enrollBegin was not registered');
+
+		const result = (await handler(EVENT, CREDENTIALS)) as { certain?: boolean };
+
+		expect(result.certain, 'a lost reply was reported as a known outcome').not.toBe(true);
+	});
+
+	/* An ordinary refusal is still an ordinary refusal. */
+	it('still throws when the request never went', async () => {
+		withEnrollment({
+			begin: () => Promise.reject(new EnrollmentError('that password is wrong', false, false))
+		});
+		const handler = handlers.get(CHANNELS.enrollBegin);
+		if (!handler) throw new Error('enrollBegin was not registered');
+
+		await expect(handler(EVENT, CREDENTIALS)).rejects.toThrow(/password is wrong/);
+	});
+
+	it('still reports an ordinary success', async () => {
+		withEnrollment({
+			begin: () => Promise.resolve({ state: 'needsEmailCode' as const })
+		});
+		const handler = handlers.get(CHANNELS.enrollBegin);
+		if (!handler) throw new Error('enrollBegin was not registered');
+
+		expect(await handler(EVENT, CREDENTIALS)).toEqual({ state: 'needsEmailCode' });
 	});
 });

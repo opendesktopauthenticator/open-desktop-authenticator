@@ -34,6 +34,7 @@ const state = vi.hoisted(() => ({
 	corruptStaged: false,
 	corruptMain: false,
 	corruptDestination: false,
+	corruptDestinationOnce: 0,
 	failRestore: false
 }));
 
@@ -51,6 +52,16 @@ vi.mock('node:fs', async () => {
 		readFileSync: (path: unknown, ...rest: unknown[]) => {
 			if (state.corruptMain && typeof path === 'string' && path.endsWith('vault.json')) {
 				return '{"not":"what was written"}';
+			}
+			if (state.corruptDestinationOnce > 0 && typeof path === 'string' && path.endsWith('.bak')) {
+				/*
+				 * Corrupt for the write's own verification and honest afterwards, so
+				 * the restore that follows can be checked. The other flag stays wrong
+				 * for every read, which is the case where nothing can vouch for the
+				 * restore at all.
+				 */
+				state.corruptDestinationOnce -= 1;
+				return '{"not":"what the rename was supposed to publish"}';
 			}
 			if (state.corruptDestination && typeof path === 'string' && path.endsWith('.bak')) {
 				/*
@@ -81,6 +92,7 @@ beforeEach(() => {
 	state.corruptStaged = false;
 	state.corruptMain = false;
 	state.corruptDestination = false;
+	state.corruptDestinationOnce = 0;
 	state.failRestore = false;
 });
 
@@ -88,6 +100,7 @@ afterEach(() => {
 	state.corruptStaged = false;
 	state.corruptMain = false;
 	state.corruptDestination = false;
+	state.corruptDestinationOnce = 0;
 	state.failRestore = false;
 	rmSync(dir, { recursive: true, force: true });
 });
@@ -225,21 +238,65 @@ describe('replacing the backup when the published file does not verify', () => {
 		expect(readBackupEnvelope(file), 'and it no longer opens').toBeDefined();
 	});
 
-	it('leaves no copy of the old backup lying beside it', async () => {
+	it('drops the set-aside copy once the restore is confirmed', async () => {
 		writeEnvelope(file, await envelope('{"seq":1}'));
 		writeEnvelope(file, await envelope('{"seq":2}'));
 		const paths = vaultPaths(file);
+		const before = readFileSync(paths.backup, 'utf8');
+
+		const replacement = await envelope('{"seq":3}');
+
+		// Wrong for the write's own verification and honest afterwards, so the
+		// restore that follows can be checked and confirmed.
+		state.corruptDestinationOnce = 1;
+		expect(() => writeBackupEnvelope(file, replacement)).toThrow(VaultStorageError);
+		state.corruptDestinationOnce = 0;
+
+		expect(readFileSync(paths.backup, 'utf8')).toBe(before);
+		expect(
+			existsSync(`${paths.backup}.previous`),
+			'a second copy of the vault was left on disk after a restore that worked'
+		).toBe(false);
+	});
+
+	/**
+	 * **And it is kept when nothing can vouch for the restore.**
+	 *
+	 * The set-aside copy was restored and then dropped in a `finally`, which runs
+	 * whether or not the restore worked - and the restore is a copy that can fail
+	 * for every reason the write just failed for. A destination that would not
+	 * verify, a restore that could not be confirmed, and then the deletion of the
+	 * only remaining good copy: the exact loss the set-aside exists to prevent,
+	 * moved one level down.
+	 */
+	it('keeps the set-aside copy when the restore cannot be confirmed', async () => {
+		writeEnvelope(file, await envelope('{"seq":1}'));
+		writeEnvelope(file, await envelope('{"seq":2}'));
+		const paths = vaultPaths(file);
+		const previous = `${paths.backup}.previous`;
+		const good = readFileSync(paths.backup, 'utf8');
 
 		const replacement = await envelope('{"seq":3}');
 
 		state.corruptDestination = true;
-		expect(() => writeBackupEnvelope(file, replacement)).toThrow(VaultStorageError);
+		let thrown;
+		try {
+			writeBackupEnvelope(file, replacement);
+		} catch (err) {
+			thrown = err;
+		}
 		state.corruptDestination = false;
 
 		expect(
-			existsSync(`${paths.backup}.previous`),
-			'a second copy of the vault was left on disk after the write that failed'
-		).toBe(false);
+			existsSync(previous),
+			'the only remaining good copy of the vault was deleted by the cleanup that runs after a ' +
+				'restore nobody checked'
+		).toBe(true);
+		expect(readFileSync(previous, 'utf8'), 'and what survived is not the good copy').toBe(good);
+		expect(
+			(thrown as Error | undefined)?.message,
+			'the file that has to be kept is not named anywhere the user will see it'
+		).toContain(previous);
 	});
 
 	/* And the ordinary path leaves nothing behind either. */

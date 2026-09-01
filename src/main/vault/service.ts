@@ -10,6 +10,7 @@ import {
 	restoreEnvelopeInPlace,
 	setAside,
 	vaultExists,
+	VaultStorageError,
 	writeBackupEnvelope,
 	writeEnvelope,
 	writeRotationJournal
@@ -268,6 +269,33 @@ export class VaultService {
 		if (vaultKdf.salt !== journal.backup.kdf.salt) {
 			// The rotation never reached the vault. Nothing is owed, and the backup
 			// beside it is the one that belongs to the key still in use.
+			clearRotationJournal(this.file);
+			this.backupSuspect = false;
+			return false;
+		}
+
+		/*
+		 * **A journal that outlived the rotation it recorded.**
+		 *
+		 * `clearRotationJournal` unlinks and swallows the failure, which is right -
+		 * a stale journal was supposed to be re-applied harmlessly. It is not
+		 * harmless. The salt check above cannot see the difference, because a
+		 * *finished* rotation leaves the vault carrying exactly the salt the journal
+		 * names; so after one failed unlink the debt looked owed forever, and the
+		 * next start wrote the rotation-era backup over a `.bak` that later saves
+		 * had moved on. Measured: two saves after the rotation, and the restorable
+		 * backup went from both accounts back to one.
+		 *
+		 * The backup on disk settles it, and no new bookkeeping is needed to ask.
+		 * An unfinished rotation leaves `.bak` holding the copy `writeEnvelope` made
+		 * on its way past - the pre-rotation vault, under the RETIRED key, whose
+		 * salt is not this one. A finished rotation leaves it under the new key, and
+		 * so does every ordinary save after it. So a backup already carrying the
+		 * vault's own salt is the statement "this debt was paid", whatever the
+		 * journal is still saying.
+		 */
+		const backupOnDisk = readBackupEnvelope(this.file);
+		if (backupOnDisk !== undefined && backupOnDisk.kdf.salt === vaultKdf.salt) {
 			clearRotationJournal(this.file);
 			this.backupSuspect = false;
 			return false;
@@ -825,6 +853,43 @@ export class VaultService {
 			// restore most needs to notice: the backup it holds cannot open it.
 			this.fileGeneration += 1;
 		} catch (err) {
+			/*
+			 * **"The write failed" does not always mean the file is unchanged.**
+			 *
+			 * `writeEnvelope` publishes by rename and verifies afterwards, so a
+			 * failure can land with the new-key file already in place; it only tries
+			 * to put the old one back, and that can fail too. This branch assumed the
+			 * happy version of that in a one-line comment - "Nothing was replaced" -
+			 * cleared the journal, wiped the new key, and left the live session
+			 * holding the retired one.
+			 *
+			 * What followed was measured: the file opened only with the NEW
+			 * passphrase; one ordinary save from that session re-sealed it with the
+			 * OLD key and wrote it back; the new passphrase then stopped working, and
+			 * `writeEnvelope` copied the new-key file into `.bak` on its way past. It
+			 * is the same defect the backup branch below already carries a long
+			 * comment about, in the one place the reasoning was never repeated.
+			 *
+			 * The session locks rather than adopting anything. Adopting would be a
+			 * claim about a file whose write just failed verification, and this is
+			 * the one moment in the class where nothing in memory can be trusted
+			 * against what is on disk. Locking drops every key, so nothing can write
+			 * over it with the wrong one, and the next unlock reads the file and
+			 * settles which passphrase it is - which is the question the user
+			 * actually has.
+			 *
+			 * The journal stays. The rotation may be half done, and that is exactly
+			 * the debt it exists to record.
+			 */
+			if (err instanceof VaultStorageError && !err.unchanged) {
+				wipe(newKey);
+				this.lock('manual');
+				throw new VaultServiceError(
+					'the passphrase change failed part way through and the previous vault could not be ' +
+						'put back, so the vault has been locked. Unlock it with the NEW passphrase; if ' +
+						'that is refused, use the old one. Do not delete vault.json.bak.'
+				);
+			}
 			// Nothing was replaced, so there is nothing to finish.
 			clearRotationJournal(this.file);
 			wipe(newKey);

@@ -160,6 +160,33 @@ describe('an activation Steam declined for a reason other than the code', () => 
 		expect(message).toMatch(/bug in this app/i);
 	});
 
+	/**
+	 * **The reply that says least produced the most specific sentence.**
+	 *
+	 * The status branch was corrected and this one was not: a bare
+	 * `{"success": false}`, with no status and no counter, still produced "Steam
+	 * did not accept the activation code. Check it and try again." Steam supplied
+	 * nothing that supports naming the code, and the removal path was already
+	 * saying so properly for exactly this shape of answer.
+	 */
+	it('does not blame the code when Steam gave no reason at all', async () => {
+		const message = await messageFrom(() =>
+			finalizeEnrollment(transportReturning({ response: { success: false } }), {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				sharedSecret: 'ASNFZ4mrze8BI0VniavN7wEjRWc=',
+				activationCode: '12345',
+				unixSeconds: 1_800_000_000
+			})
+		);
+
+		expect(
+			message.includes('did not accept the activation code'),
+			'Steam returned a refusal with no cause in it, and the app named one anyway'
+		).toBe(false);
+		expect(message, 'and the likeliest cause is still named').toMatch(/likeliest cause/i);
+	});
+
 	/* And an unrecognised status still gives the user the one thing they can try. */
 	it('names the code as a possibility for a status it does not recognise', async () => {
 		const message = await activate(84_211);

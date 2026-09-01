@@ -54,11 +54,25 @@ export class ToastClickRouter {
 	constructor(options: {
 		reveal: () => void;
 		push: (steamId64: string) => void;
+		/**
+		 * **Monotonic, not wall-clock.**
+		 *
+		 * This was `Date.now()`, and a wall clock is adjustable: an NTP correction,
+		 * a timezone change, somebody setting it by hand. Moved backwards by ten
+		 * minutes, a click stayed collectable through ten real minutes of elapsed
+		 * time, because the subtraction was measuring an adjustment rather than a
+		 * duration. Dropping the value on the way out - which is what the test
+		 * covered - only helps once an expiry has actually been observed, and a
+		 * clock that moves back before that is never observed at all.
+		 *
+		 * `performance.now()` cannot be adjusted, which is exactly why
+		 * `VaultService` measures its idle timeout with it.
+		 */
 		now?: () => number;
 	}) {
 		this.reveal = options.reveal;
 		this.push = options.push;
-		this.now = options.now ?? (() => Date.now());
+		this.now = options.now ?? (() => performance.now());
 	}
 
 	/**
