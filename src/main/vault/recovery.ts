@@ -1,12 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import {
 	chmodSync,
+	closeSync,
+	existsSync,
+	fsyncSync,
 	mkdirSync,
+	openSync,
 	readdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
-	writeFileSync
+	unlinkSync,
+	writeFileSync,
+	writeSync
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
@@ -98,6 +104,64 @@ export function recoveryContents(account: Account, nowIso: string): string {
 }
 
 /**
+ * Write a file so that what is on disk is either all of it or none of it.
+ *
+ * **The recovery file was written straight to its final name**, with no temp, no
+ * rename and no sync. An injected ENOSPC left a truncated file at exactly the
+ * path the restore path reads — the single file in this application whose entire
+ * purpose is to still be there, and to be readable, after everything else has
+ * gone wrong. A short JSON document is not a recovery file; it is a file that
+ * looks like one until somebody needs it.
+ *
+ * The vault itself has been written this way since it was written. This is the
+ * same sequence: a temp file in the same directory, flushed, renamed over the
+ * destination, and the directory entry itself flushed so the rename survives a
+ * power cut rather than only a crash.
+ */
+function durably(path: string, body: string): void {
+	const temp = `${path}.${randomUUID()}.tmp`;
+	try {
+		const fd = openSync(temp, 'wx', 0o600);
+		try {
+			writeSync(fd, body, 0, 'utf8');
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(temp, path);
+		syncDirectory(dirname(path));
+	} catch (err) {
+		try {
+			if (existsSync(temp)) {
+				unlinkSync(temp);
+			}
+		} catch {
+			/* best effort: a stray temp is not what the caller is told about */
+		}
+		throw err;
+	}
+}
+
+/**
+ * Flush the directory entry, so a rename survives a power cut.
+ *
+ * Best effort: Windows has no equivalent and rejects the open, and a recovery
+ * file that is written but not durably indexed is still better than none.
+ */
+function syncDirectory(dir: string): void {
+	try {
+		const fd = openSync(dir, 'r');
+		try {
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		/* not supported here */
+	}
+}
+
+/**
  * Write one, creating the directory if needed.
  *
  * `mode: 0o600` — owner-only. It is encrypted, so this is defence in depth rather
@@ -117,14 +181,23 @@ export function writeRecoveryFile(path: string, envelope: unknown): string {
 	// Keeping both and leaving the user one file too many is much cheaper than
 	// destroying the one they turn out to need.
 	try {
-		writeFileSync(path, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+		// `wx` on the destination is what makes the refusal above real, so the
+		// existence check and the durable write are kept together: staging first
+		// and renaming would replace an existing file, which is the one thing this
+		// must never do.
+		if (existsSync(path)) {
+			const err: NodeJS.ErrnoException = new Error('EEXIST: file already exists');
+			err.code = 'EEXIST';
+			throw err;
+		}
+		durably(path, body);
 		return path;
 	} catch (err) {
 		if ((err as NodeJS.ErrnoException | undefined)?.code !== 'EEXIST') {
 			throw err;
 		}
 		const beside = supersededPath(path);
-		writeFileSync(beside, body, { encoding: 'utf8', mode: 0o600 });
+		durably(beside, body);
 		// **The path actually used**, which is not always the one asked for. A
 		// caller that wants to correct this file later needs to know where it went;
 		// updating the primary path when the write landed beside it would overwrite

@@ -168,7 +168,23 @@ export default {
 	// packages are entered through their compiled entry point, and `.d.ts` is a
 	// compile-time artifact that Electron never loads.
 	files: [
-		'out/**/*',
+		/*
+		 * **The three trees `electron-vite` builds, named rather than swept up.**
+		 *
+		 * This was `out/**` + `/*`, and `out/` is where every bundle lands — including
+		 * `out/smoke/` and `out/stress/`, the harnesses that drive a real Electron
+		 * window in CI. They are built by separate scripts and never cleaned, so a
+		 * package built on a machine that had run them shipped them: test code with
+		 * a different threat model, inside a signed application, reachable by
+		 * anything that can name a path in the asar.
+		 *
+		 * Naming the three keeps that shut by default. A fourth build target added
+		 * later has to be added here on purpose, which is the right way round for
+		 * something that decides what goes inside the installer.
+		 */
+		'out/main/**/*',
+		'out/preload/**/*',
+		'out/renderer/**/*',
 		'package.json',
 		'!**/*.map',
 		'!node_modules/**/{test,tests,__tests__,spec,example,examples,doc,docs,.github}/**',

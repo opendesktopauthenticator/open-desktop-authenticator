@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -223,5 +223,72 @@ describe('the Store tile art', () => {
 			// PNG IHDR: width and height are big-endian 32-bit at offsets 16 and 20.
 			expect([name, png.readUInt32BE(16), png.readUInt32BE(20)]).toEqual([name, width, height]);
 		}
+	});
+});
+
+/**
+ * **What of `out/` goes into the installer.**
+ *
+ * `out/` is where every bundle lands, including `out/smoke/` and `out/stress/` —
+ * the harnesses that drive a real Electron window in CI. They are built by
+ * separate scripts and never cleaned, so `out/**` shipped them: test code with a
+ * different threat model, inside a signed application, reachable by anything
+ * that can name a path in the asar. A built package really contained them.
+ *
+ * The three trees `electron-vite` produces are named individually now, so a
+ * fourth build target has to be added on purpose.
+ */
+describe('the build output the installer carries', () => {
+	const config = readFileSync(join(__dirname, '..', 'electron-builder.config.mjs'), 'utf8');
+	/*
+	 * Sliced rather than matched. The `files` array spans lines and contains
+	 * both kinds of comment, and every attempt to express that as a regex in this
+	 * file has been mangled on the way to disk — twice into a literal newline
+	 * inside a regex literal, which is a parse error rather than a wrong answer.
+	 */
+	const start = config.indexOf('files: [');
+	const files = start === -1 ? '' : config.slice(start, config.indexOf(']', start));
+	const entries = [...files.matchAll(/'([^']*)'/g)].map((hit) => hit[1] as string);
+
+	it('parsed the files list, or this asserts nothing', () => {
+		expect(entries.length).toBeGreaterThan(5);
+	});
+
+	it('does not sweep up everything under out', () => {
+		expect(
+			entries.filter((entry) => /^out\/\*/.test(entry)),
+			'the whole of out/ is included, so any bundle built there — the smoke and stress ' +
+				'harnesses among them — ships inside the signed application'
+		).toEqual([]);
+	});
+
+	it.each(['out/main', 'out/preload', 'out/renderer'])('includes %s', (tree) => {
+		expect(entries.some((entry) => entry.startsWith(`${tree}/`))).toBe(true);
+	});
+
+	/*
+	 * And the harnesses that exist today are not reachable by any entry. Checked
+	 * against the directory on disk rather than a remembered list, so a new one
+	 * appearing is a failure rather than a silent inclusion.
+	 */
+	it('carries nothing the harness scripts build', () => {
+		const shipped = new Set(
+			entries.filter((entry) => entry.startsWith('out/')).map((entry) => entry.split('/')[1] ?? '')
+		);
+		const built = existsSync(join(__dirname, '..', 'out'))
+			? readdirSync(join(__dirname, '..', 'out'), { withFileTypes: true })
+					.filter((entry) => entry.isDirectory())
+					.map((entry) => entry.name)
+			: [];
+		if (built.length === 0) {
+			// Nothing has been built here, so there is nothing to compare against.
+			return;
+		}
+		const unexpected = built.filter((name) => !shipped.has(name));
+		expect(
+			unexpected.every((name) => name === 'smoke' || name === 'stress'),
+			`out/ contains ${unexpected.join(', ')}, which the installer does not carry — if one of ` +
+				'those is meant to ship, name it in the files list'
+		).toBe(true);
 	});
 });
