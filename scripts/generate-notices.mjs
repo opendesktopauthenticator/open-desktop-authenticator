@@ -73,7 +73,7 @@ const normalise = (text) =>
 		.trim();
 
 /** Anything a package might call its licence, in any spelling or extension. */
-const LICENCE_FILE = /^(licen[sc]e|copying|notice|unlicense)(\.|$)/i;
+const LICENCE_FILE = /^(.*[-_.])?(licen[sc]e|copying|notice|unlicense|copyright)([-_.].*)?$/i;
 
 /**
  * The licence text a package ships, or nothing.
@@ -108,6 +108,18 @@ function declaredLicence(packagePath) {
 	if (typeof parsed.license === 'string') {
 		return parsed.license;
 	}
+	/*
+	 * The two legacy forms, both still in the wild. `{ type, url }` reached the
+	 * `missing` list and stopped the build with a message saying the package
+	 * declares no licence, about a manifest that declares one plainly.
+	 */
+	if (
+		parsed.license &&
+		typeof parsed.license === 'object' &&
+		typeof parsed.license.type === 'string'
+	) {
+		return parsed.license.type;
+	}
 	// The old array form, still in the wild.
 	if (Array.isArray(parsed.licenses)) {
 		return parsed.licenses
@@ -118,10 +130,43 @@ function declaredLicence(packagePath) {
 	return undefined;
 }
 
+/** Said before Electron's own licence, because its own is not the whole of it. */
+const ELECTRON_PREAMBLE =
+	'Electron is the application runtime, shipped alongside the code above rather than inside ' +
+	'it. Its own licence follows. The licences of Chromium, Node.js and their dependencies are ' +
+	'placed beside the executable by the installer, as LICENSE.electron.txt and ' +
+	'LICENSES.chromium.html.' +
+	String.fromCharCode(10) +
+	String.fromCharCode(10);
+
+/**
+ * **Electron, the largest third-party body in the installer.**
+ *
+ * It sits in `devDependencies` because at build time it is a build tool, so the
+ * closure walk — which filters `dev` — left it out while the header claimed the
+ * file listed everything the application includes. It ships as the runtime.
+ *
+ * Named from the pin in `package.json`, the same source the SBOM guard uses, so
+ * the notices cannot describe a different runtime than the one packaged.
+ */
+function electronEntry() {
+	const manifest = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+	const pinned = (manifest.devDependencies ?? {}).electron;
+	if (typeof pinned !== 'string') {
+		return undefined;
+	}
+	return {
+		path: 'node_modules/electron',
+		name: 'electron',
+		version: pinned.replace(/^[^0-9]*/, '')
+	};
+}
+
 const sections = [];
 const missing = [];
 
-for (const entry of closure()) {
+const electron = electronEntry();
+for (const entry of [...(electron ? [electron] : []), ...closure()]) {
 	const text = licenceText(entry.path);
 	const declared = declaredLicence(entry.path);
 
@@ -130,15 +175,17 @@ for (const entry of closure()) {
 		continue;
 	}
 
+	const body =
+		text ?? `No licence file is included in this package. Its package.json declares: ${declared}.`;
+
 	sections.push(
 		[
 			`${'='.repeat(76)}`,
 			`${entry.name} ${entry.version}`,
 			'',
-			text ??
-				`No licence file is included in this package. Its package.json declares: ${declared}.`,
+			entry.name === 'electron' ? `${ELECTRON_PREAMBLE}${body}` : body,
 			''
-		].join('\n')
+		].join(String.fromCharCode(10))
 	);
 }
 

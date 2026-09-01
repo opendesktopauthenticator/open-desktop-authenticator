@@ -148,13 +148,64 @@ describe('the third-party notices the installer carries', () => {
 		).toBe(0);
 	});
 
-	/* And the installer actually includes it. */
-	it('is named in the packaging rules', () => {
-		const config = readFileSync(join(ROOT, 'electron-builder.config.mjs'), 'utf8');
+	/**
+	 * **The installer actually includes it — read from the array, not the text.**
+	 *
+	 * This asserted the string appeared anywhere in the config source, so
+	 * commenting the entry out kept it green while the file stopped shipping. The
+	 * comment explaining why it is there would have satisfied it on its own.
+	 */
+	it('is in the packaging rules', async () => {
+		const config = await import('../electron-builder.config.mjs');
 		expect(
-			config,
+			config.default.files,
+			'electron-builder.config.mjs exports no files array'
+		).toBeInstanceOf(Array);
+		expect(
+			config.default.files,
 			'the notices file is generated and then left out of the installer, which is the same as ' +
 				'not having one'
 		).toContain('THIRD_PARTY_NOTICES.txt');
+	});
+
+	/**
+	 * **Every licence file a package ships is read, whatever it is called.**
+	 *
+	 * The match anchored on the word and required a dot or the end of the name
+	 * after it, so `LICENSE-MIT.txt` did not match — and `punycode`, which ships
+	 * exactly that and nothing else, was written up as "No licence file is
+	 * included in this package". A false statement, in a legal notice, about a
+	 * file sitting in the directory being read.
+	 */
+	it('reads a licence whose name carries a suffix', () => {
+		const start = text.indexOf(String.fromCharCode(10) + 'punycode ');
+		expect(start, 'punycode has no section').toBeGreaterThan(-1);
+		const section = text.slice(start, text.indexOf('='.repeat(76), start + 1));
+
+		expect(
+			section,
+			'punycode ships LICENSE-MIT.txt and the notices say it ships no licence file'
+		).not.toMatch(/No licence file is included/);
+		expect(section).toMatch(/Permission is hereby granted|Copyright/i);
+	});
+
+	/**
+	 * **And the runtime, which is the largest third-party body in the installer.**
+	 *
+	 * Electron is a devDependency because at build time it is a build tool, so the
+	 * closure walk left it out — while the header claimed the file lists
+	 * everything the application includes.
+	 */
+	it('names the Electron runtime and where the rest of its licences are', () => {
+		const start = text.indexOf(String.fromCharCode(10) + 'electron ');
+		expect(start, 'the runtime is not in the notices at all').toBeGreaterThan(-1);
+		const section = text.slice(start, text.indexOf('='.repeat(76), start + 1));
+
+		expect(section, 'the version is not the one package.json pins').toMatch(/electron \d+\./);
+		expect(
+			section,
+			'nothing says where Chromium and Node.js licences are, and they are not in this file'
+		).toMatch(/LICENSES\.chromium\.html/);
+		expect(section).toMatch(/Copyright/i);
 	});
 });
