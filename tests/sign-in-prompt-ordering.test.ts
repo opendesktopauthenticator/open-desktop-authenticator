@@ -69,3 +69,112 @@ describe('the sign-in prompt among the other screens', () => {
 		).toBe(0);
 	});
 });
+
+/**
+ * **The two lists of overlays, held to each other.**
+ *
+ * `openConfirmationsFor` clears every screen that can be covering the account
+ * list, so that a clicked notification lands on the list rather than behind
+ * something. `overlayOpen` asks the same question the other way round — is
+ * anything covering it — to decide whether a browser answer may be kept.
+ *
+ * They are the same set and there is nothing making them stay the same set. A
+ * sixth overlay added to one and forgotten in the other is a sign-in prompt that
+ * waits behind a screen and takes the window when the user presses Back, which is
+ * the defect `overlayOpen` was added to remove.
+ */
+describe('the screens that count as covering the account list', () => {
+	const source = readFileSync(join(__dirname, '..', 'src', 'renderer', 'App.tsx'), 'utf8');
+
+	/*
+	 * Both helpers scan by hand rather than by regular expression. Every attempt
+	 * to write one in this file has been mangled on the way to disk — a word
+	 * boundary arrived as a literal backspace byte, which matches nothing and
+	 * makes the helper quietly return an empty list.
+	 */
+
+	/** The `setX(undefined)` calls inside `openConfirmationsFor`. */
+	function clearedByNavigation(): string[] {
+		const start = source.indexOf('const openConfirmationsFor = useCallback(');
+		expect(start, 'openConfirmationsFor is gone').toBeGreaterThan(-1);
+		const body = source.slice(start, source.indexOf('setConfirmingFor(account);', start));
+		return body
+			.split(String.fromCharCode(10))
+			.map((line) => line.trim())
+			.filter((line) => line.startsWith('set') && line.includes('(undefined)'))
+			.map((line) => line.slice(3, line.indexOf('(')))
+			.map((name) => name.charAt(0).toLowerCase() + name.slice(1))
+			.sort();
+	}
+
+	/** The state names inside the `overlayOpen` expression. */
+	function countedAsCovering(): string[] {
+		const start = source.indexOf('const overlayOpen = Boolean(');
+		expect(start, 'overlayOpen is gone').toBeGreaterThan(-1);
+		const body = source.slice(start, source.indexOf(');', start));
+		return body
+			.split(/[^A-Za-z]+/)
+			.filter((token) => token.endsWith('For') && token !== 'For')
+			.sort();
+	}
+	it('finds both lists, or this asserts nothing', () => {
+		expect(clearedByNavigation().length).toBeGreaterThan(3);
+		expect(countedAsCovering().length).toBeGreaterThan(3);
+	});
+
+	it('are the same set', () => {
+		/*
+		 * `confirmingFor` is the one that differs, and legitimately: navigating to a
+		 * confirmation *sets* it rather than clearing it, so it cannot appear among
+		 * the things that get cleared. It certainly covers the account list.
+		 */
+		const cleared = [...clearedByNavigation(), 'confirmingFor'].sort();
+		const covering = countedAsCovering();
+		expect(
+			covering.filter((name) => !cleared.includes(name)),
+			'overlayOpen counts a screen that navigating neither sets nor clears'
+		).toEqual([]);
+		expect(
+			cleared.filter((name) => !covering.includes(name)),
+			'a screen that covers the account list is not counted by overlayOpen, so a browser answer ' +
+				'arriving behind it waits and takes the window when the user presses Back'
+		).toEqual([]);
+	});
+
+	/*
+	 * And `confirmingFor` belongs to both: navigation sets it rather than clearing
+	 * it, so it does not appear in the clear list, and it certainly covers the
+	 * account list.
+	 */
+	it('counts the confirmations screen as covering', () => {
+		expect(countedAsCovering()).toContain('confirmingFor');
+	});
+});
+
+/**
+ * And the answer is discarded rather than held, which is the half moving the
+ * check down the render could not do.
+ */
+describe('an answer arriving behind an overlay', () => {
+	const source = readFileSync(join(__dirname, '..', 'src', 'renderer', 'App.tsx'), 'utf8');
+
+	it('is not installed at all', () => {
+		const install = source.indexOf('setBrowserSignIn(prompt);');
+		expect(install, 'nothing installs the prompt any more').toBeGreaterThan(-1);
+
+		// The guard immediately above it, whatever its exact spelling.
+		const guard = source.slice(source.lastIndexOf('if (', install), install);
+		expect(
+			guard,
+			'the prompt is installed without asking whether a screen is already covering the account ' +
+				'list, so it waits behind that screen and takes the window when the user presses Back'
+		).toContain('overlayOpenRef.current');
+	});
+
+	it('reads the overlay state through a ref, not a closure', () => {
+		// The installing callback belongs to the account list and is rebuilt when
+		// its props change, so closing over the boolean would capture whatever was
+		// true when it was last built rather than when the answer arrived.
+		expect(source).toContain('const overlayOpenRef = useRef(overlayOpen);');
+	});
+});

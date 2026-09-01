@@ -83,6 +83,17 @@ export interface TrayHost {
  */
 const trayIcon = (): NativeImage => trayImage();
 
+/**
+ * How often Linux re-reads the state its kept menu describes.
+ *
+ * A quarter second rather than one, because the gap is the whole of what is
+ * wrong on that platform: for its length the menu can offer to lock a vault that
+ * is already locked, and the label can disagree with the window. Four boolean
+ * reads a second is not a cost — the menu is only rebuilt when one of them has
+ * actually moved, which is a handful of times in a session.
+ */
+const TRAY_BEAT_MS = 250;
+
 export function createTray(host: TrayHost): Tray {
 	const tray = new Tray(trayIcon());
 	tray.setToolTip(branding.productName);
@@ -117,17 +128,33 @@ export function createTray(host: TrayHost): Tray {
 	 */
 	const menu = (): Menu =>
 		Menu.buildFromTemplate([
-			{
-				label: host.isVisible() ? `Hide ${branding.shortName}` : `Show ${branding.shortName}`,
-				click: () => {
-					if (host.isVisible()) {
-						host.hide();
-					} else {
-						host.show();
+			(() => {
+				/*
+				 * **The item does what its label says, not what the live state implies.**
+				 *
+				 * The handler used to re-read `isVisible()` and toggle. On Windows and
+				 * macOS the menu is built at the instant of the click, so the two always
+				 * agreed. On Linux the assigned menu can be up to one beat old — and a
+				 * stale "Hide" clicked on a window that had already been closed then
+				 * *showed* it. The label was wrong for a moment; the action turned that
+				 * into the opposite of what the user asked for.
+				 *
+				 * Deciding once, here, makes the worst case a click that does nothing
+				 * — hiding a hidden window — instead of one that does the reverse.
+				 */
+				const hiding = host.isVisible();
+				return {
+					label: hiding ? `Hide ${branding.shortName}` : `Show ${branding.shortName}`,
+					click: () => {
+						if (hiding) {
+							host.hide();
+						} else {
+							host.show();
+						}
+						reassign();
 					}
-					reassign();
-				}
-			},
+				};
+			})(),
 			{ type: 'separator' },
 			{
 				label: 'Lock now',
@@ -206,7 +233,7 @@ export function createTray(host: TrayHost): Tray {
 			}
 			shown = now;
 			reassign();
-		}, 1000);
+		}, TRAY_BEAT_MS);
 		// Never a reason to hold the process open: if this is the only thing left
 		// running, there is nothing for the menu to describe.
 		beat.unref?.();

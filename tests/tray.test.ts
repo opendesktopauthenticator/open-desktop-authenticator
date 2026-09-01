@@ -501,3 +501,67 @@ describe('the Linux menu after a change the tray was not told about', () => {
 		).toEqual([]);
 	});
 });
+
+/**
+ * **A label the action agrees with, even when the label is a beat old.**
+ *
+ * The handler used to re-read `isVisible()` and toggle. On Windows and macOS the
+ * menu is built at the instant of the click, so the two always agreed. On Linux
+ * the kept menu can be up to one beat behind — and a stale "Hide" clicked on a
+ * window that had already been closed then *showed* it, which is the opposite of
+ * what the user asked for.
+ *
+ * Deciding once, when the item is built, makes the worst case a click that does
+ * nothing instead of one that does the reverse.
+ */
+describe('the show/hide item when the menu is behind the world', () => {
+	it('does not show a window when it says Hide', () => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+
+		const { world } = harness('linux', { visible: true, unlocked: true });
+		const item = windowItem(openMenu());
+		expect(item.label).toBe(`Hide ${branding.shortName}`);
+
+		// Closed by its own button, before the beat has come round.
+		world.visible = false;
+
+		item.click?.();
+
+		expect(
+			world.visible,
+			'the tray offered to hide a window that was already hidden, and hiding it showed it'
+		).toBe(false);
+	});
+
+	it('does not hide a window when it says Show', () => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+
+		const { world } = harness('linux', { visible: false, unlocked: true });
+		const item = windowItem(openMenu());
+		expect(item.label).toBe(`Show ${branding.shortName}`);
+
+		world.visible = true;
+		item.click?.();
+
+		expect(world.visible).toBe(true);
+	});
+
+	/* And it still does the thing when the label is current. */
+	it('hides when it says Hide and the window is there', () => {
+		const { world } = harness('linux', { visible: true, unlocked: true });
+		windowItem(openMenu()).click?.();
+		expect(world.visible).toBe(false);
+	});
+
+	it('shows when it says Show and the window is not', () => {
+		const { world } = harness('linux', { visible: false, unlocked: true });
+		windowItem(openMenu()).click?.();
+		expect(world.visible).toBe(true);
+	});
+});

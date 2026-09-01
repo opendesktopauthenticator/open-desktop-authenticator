@@ -216,3 +216,45 @@ describe('a halt notice for an account that is gone', () => {
 		).toHaveLength(1);
 	});
 });
+
+/**
+ * **A halt that failed, followed by one that did not.**
+ *
+ * The ownership guards stop a *late* failure from recording over a newer halt.
+ * They do nothing about a record that is already in the queue: an earlier halt
+ * whose toast failed, then a second halt that was delivered, left the first
+ * sitting there — and the beat delivered it afterwards, an obsolete duplicate of
+ * something the user had just been told.
+ */
+describe('an undelivered halt overtaken by a newer one', () => {
+	it('is not delivered afterwards', () => {
+		const h = harness();
+
+		// The first halt fails.
+		h.notifier.halted(ID, 'trader', 'confirm');
+		expect(h.toasts).toHaveLength(0);
+
+		// The account is polled again, halts again, and this time it is delivered.
+		h.recover();
+		h.notifier.halted(ID, 'trader', 'confirm');
+		expect(h.toasts).toHaveLength(1);
+
+		// The beat comes round for an account that is still halted.
+		h.notifier.stillHalted(ID);
+
+		expect(
+			h.toasts,
+			'the halt whose toast failed was still queued behind one that had been delivered, and the ' +
+				'beat sent it as well'
+		).toHaveLength(1);
+	});
+
+	/* And a halt that failed with nothing after it is still retried. */
+	it('still retries when nothing overtook it', () => {
+		const h = harness();
+		h.notifier.halted(ID, 'trader', 'confirm');
+		h.recover();
+		h.notifier.stillHalted(ID);
+		expect(h.toasts).toHaveLength(1);
+	});
+});

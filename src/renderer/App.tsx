@@ -260,6 +260,42 @@ export function App(): React.JSX.Element {
 	 * the same thing for the same reason.
 	 */
 	const [browserSignIn, setBrowserSignIn] = useState<BrowserSignInPrompt | undefined>();
+
+	/**
+	 * **Discarded rather than deferred.**
+	 *
+	 * Moving the prompt below the overlays stopped it *replacing* Account routing
+	 * or Revocation backup. It did not stop it waiting: the answer stayed in state
+	 * while one of those screens was open, and the moment the user pressed Back it
+	 * took the window — a sign-in for a request they had started before, arriving
+	 * as a surprise on a screen they had navigated to themselves.
+	 *
+	 * The same rule as leaving the screen, and the same reason: an open belongs to
+	 * the screen it was started from, and that screen is the plain account list.
+	 * The set here is the one `openConfirmationsFor` clears, which is the same
+	 * question asked the other way round — "what is covering the list" — and
+	 * `tests/sign-in-prompt-ordering.test.ts` holds the two lists to each other so
+	 * a sixth overlay cannot be added to one and forgotten in the other.
+	 */
+	const overlayOpen = Boolean(
+		autoConfirmFor || removingFor || confirmingFor || routingFor || backupFor
+	);
+	useEffect(() => {
+		if (overlayOpen) {
+			abandonPendingSignIns();
+		}
+	}, [overlayOpen]);
+
+	/*
+	 * Read at the moment an answer arrives, which is the moment the question is
+	 * asked. A ref rather than the value itself: the handler that installs the
+	 * prompt is a callback on the account list, and closing over `overlayOpen`
+	 * would give it whatever was true when that callback was last built.
+	 */
+	const overlayOpenRef = useRef(overlayOpen);
+	useEffect(() => {
+		overlayOpenRef.current = overlayOpen;
+	}, [overlayOpen]);
 	/**
 	 * Unrecoverable, and only ever one thing: the bridge to the main process does
 	 * not exist, so no screen in this app can function.
@@ -1205,7 +1241,19 @@ export function App(): React.JSX.Element {
 					// `undefined` straight through would take down the sign-in screen a
 					// newer open put up, and the password already typed into it, which is
 					// the erasure this whole mechanism exists to stop.
-					if (prompt) {
+					/*
+					 * **And nothing is installed behind a screen that is already open.**
+					 *
+					 * Putting the prompt below the overlays stopped it replacing Account
+					 * routing or Revocation backup. It did not stop it waiting: the answer
+					 * sat in state until the user pressed Back, and then took the window —
+					 * a sign-in for a request they had started before, arriving as a
+					 * surprise on a screen they had navigated to themselves.
+					 *
+					 * Discarded rather than deferred, for the same reason leaving the
+					 * screen discards one: the open belonged to the account list.
+					 */
+					if (prompt && !overlayOpenRef.current) {
 						setBrowserSignIn(prompt);
 					}
 					return result;

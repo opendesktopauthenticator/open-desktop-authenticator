@@ -639,6 +639,16 @@ export class ConfirmationNotifier {
 					'Stopped checking after 10 failures.';
 		const generation = ++this.halts;
 		this.latestHalt.set(steamId64, generation);
+		/*
+		 * **Any halt still waiting to be delivered is superseded by this one.**
+		 *
+		 * The guards below stop a *late* failure from recording over a newer halt,
+		 * and do nothing about a record that was already there. So an earlier halt
+		 * whose toast failed, followed by a second halt that was delivered, left the
+		 * first one sitting in the queue — and the beat then delivered it, an
+		 * obsolete duplicate of something the user had just been told.
+		 */
+		this.undeliveredHalts.delete(steamId64);
 		this.toast(steamId64, accountName, body, () => {
 			/*
 			 * **Kept, because nothing will call this again.**
