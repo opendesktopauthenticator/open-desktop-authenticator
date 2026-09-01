@@ -1,6 +1,6 @@
 import { mkdtempSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { toMaFile } from '../src/main/import/export';
 import { CHANNELS } from '../src/shared/channels';
@@ -98,6 +98,14 @@ let refuseRestore = false;
  */
 let refusePublish = false;
 
+/**
+ * When set, reading exactly this path fails with something other than ENOENT.
+ *
+ * The ownership check folded "could not look" in with "nothing is there", so an
+ * unreadable destination read as an empty path and the rollback wrote over it.
+ */
+let refuseReadOf: string | undefined;
+
 vi.mock('node:fs/promises', async () => {
 	const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 	return {
@@ -122,6 +130,15 @@ vi.mock('node:fs/promises', async () => {
 			const written = await actual.writeFile(path, data, options);
 			lockDuringWrite?.();
 			return written;
+		},
+		readFile: async (
+			path: Parameters<typeof actual.readFile>[0],
+			options?: Parameters<typeof actual.readFile>[1]
+		) => {
+			if (refuseReadOf !== undefined && typeof path === 'string' && path === refuseReadOf) {
+				throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+			}
+			return actual.readFile(path, options);
 		},
 		rm: async (
 			path: Parameters<typeof actual.rm>[0],
@@ -200,6 +217,7 @@ beforeEach(() => {
 	refuseTempRemoval = false;
 	refuseRestore = false;
 	refusePublish = false;
+	refuseReadOf = undefined;
 	__resetRouterForTests();
 	setTrustedSender(() => true);
 });
@@ -1335,5 +1353,175 @@ describe('two exports aimed at the same file', () => {
 			existsSync(destination) && readFileSync(destination, 'utf8'),
 			'the rollback deleted a file the export had not written'
 		).toBe('a file this export did not write');
+	});
+});
+
+/**
+ * **What makes a file at the destination this export's own.**
+ *
+ * It was size plus modification time, and neither carries any identity worth the
+ * name: every maFile this application writes is within a few bytes of every
+ * other, and two files created in the same millisecond share an mtime. And a
+ * read that failed for any reason was folded in with "nothing is there", so an
+ * unreadable destination looked empty and the rollback wrote straight over it.
+ */
+describe('deciding whether the destination is still ours', () => {
+	function vaultThatLoses(accounts: Account[]) {
+		return {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+	}
+
+	it('does not delete a foreign file that happens to be the same size', async () => {
+		const destination = join(dir, 'out.maFile');
+		const accounts: Account[] = [account];
+		registerEnrollmentHandlers({} as EnrollmentService, vaultThatLoses(accounts), {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		let decoy = '';
+		lockDuringRename = () => {
+			accounts.length = 0;
+			// Exactly as many bytes as the maFile that was just published, written
+			// in the same tick — which is what the old check called "ours".
+			decoy = 'x'.repeat(readFileSync(destination, 'utf8').length);
+			writeFileSync(destination, decoy);
+		};
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow();
+
+		expect(
+			existsSync(destination) && readFileSync(destination, 'utf8'),
+			'a file of the same size, written in the same millisecond, was taken for this export and ' +
+				'deleted'
+		).toBe(decoy);
+	});
+
+	it('does not overwrite a destination it could not read', async () => {
+		const destination = join(dir, 'out.maFile');
+		/*
+		 * Something has to be there before the export starts, or there is nothing to
+		 * set aside and the restore never runs — which is how the first version of
+		 * this test passed with the unreadable case mutated back to "absent".
+		 */
+		writeFileSync(destination, 'an earlier export');
+		const accounts: Account[] = [account];
+		registerEnrollmentHandlers({} as EnrollmentService, vaultThatLoses(accounts), {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		// Fires on the set-aside as well as the publish; only the publish matters.
+		let renames = 0;
+		lockDuringRename = () => {
+			renames += 1;
+			if (renames !== 2) {
+				return;
+			}
+			accounts.length = 0;
+			writeFileSync(destination, 'somebody else, and this export cannot read it');
+			// A read that fails with anything but ENOENT. `undefined` used to mean
+			// both "absent" and "could not look".
+			refuseReadOf = destination;
+		};
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow();
+
+		expect(
+			readFileSync(destination, 'utf8'),
+			'a destination this export could not read was treated as empty, and the rollback wrote ' +
+				'over it'
+		).toBe('somebody else, and this export cannot read it');
+	});
+});
+
+/**
+ * **Two spellings of one path took two different locks.**
+ *
+ * On Windows `out.maFile` and `OUT.MAFILE` are one NTFS entry, as are a trailing
+ * separator and a `.` segment. Keying the mutex on the raw dialog string let two
+ * exports of one file run concurrently, both answer `saved`, and one silently
+ * replace the other — which is the whole of what the lock exists to prevent.
+ */
+describe('two exports whose destinations are spelled differently', () => {
+	const other: Account = { ...account, steamId64: '76561198000000002', accountName: 'second' };
+
+	it('serialises them anyway', async () => {
+		const accounts: Account[] = [account, other];
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+
+		/*
+		 * The same file, written two ways. `join` normalises a bare `.` segment away
+		 * before the handler ever sees it, so the first version of this test handed
+		 * over one identical string twice and passed with the lock key mutated back
+		 * to the raw value. Built by concatenation instead, so what the dialog
+		 * returns really is two different strings that `resolve` collapses to one.
+		 */
+		const spellings = [
+			join(dir, 'shared.maFile'),
+			`${join(dir, 'elsewhere')}${sep}..${sep}shared.maFile`
+		];
+		let next = 0;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(spellings[next++] ?? spellings[0] ?? '')
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		let renames = 0;
+		lockDuringRename = () => {
+			renames += 1;
+			if (renames === 1) {
+				const index = accounts.findIndex((entry) => entry.steamId64 === account.steamId64);
+				if (index !== -1) accounts.splice(index, 1);
+			}
+		};
+
+		const first = handler(EVENT, { steamId64: account.steamId64 });
+		const second = handler(EVENT, { steamId64: other.steamId64 });
+
+		await expect(first).rejects.toThrow();
+		expect(((await second) as { state: string }).state).toBe('saved');
+
+		expect(
+			existsSync(join(dir, 'shared.maFile')),
+			'the two spellings took two locks, ran together, and the failing export deleted the ' +
+				'successful one on its way out'
+		).toBe(true);
+	});
+});
+
+/**
+ * The name reported back is the one on disk, not the one this application
+ * proposed: the dialog lets somebody type whatever they like, and reporting the
+ * suggestion sent a user who had renamed it to look for a file that is not there.
+ */
+describe('the name an export reports', () => {
+	it('is the one the user chose', async () => {
+		const destination = join(dir, 'my own name.maFile');
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		const result = (await handler(EVENT, { steamId64: account.steamId64 })) as {
+			fileName: string;
+		};
+		expect(result.fileName).toBe('my own name.maFile');
 	});
 });

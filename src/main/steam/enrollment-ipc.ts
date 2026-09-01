@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { chmod, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { basename, resolve } from 'node:path';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { maFileName, toMaFile } from '../import/export';
@@ -105,7 +105,35 @@ async function removed(path: string): Promise<boolean> {
  */
 const exportsInFlight = new Map<string, Promise<unknown>>();
 
-async function exclusively<T>(path: string, run: () => Promise<T>): Promise<T> {
+/**
+ * One key per file, whatever the caller spelled.
+ *
+ * The key was the string the dialog returned, and on Windows one file has many
+ * of those: `out.maFile` and `OUT.MAFILE` are the same NTFS entry, as are a
+ * mapped drive and its UNC form, and a path with a trailing separator. Two
+ * exports aimed at one file through two spellings took two different locks, ran
+ * concurrently, both answered `saved`, and one silently replaced the other —
+ * which is the whole of the defect the lock exists to prevent, reached by typing
+ * the same thing differently.
+ *
+ * `resolve` settles separators, `.`, `..` and the trailing slash. The case fold
+ * is applied only where the filesystem is case-insensitive: doing it on Linux
+ * would merge two genuinely different files into one lock, which is slower than
+ * necessary but not wrong — and doing it there is still wrong, because it would
+ * make this code claim something about the filesystem that is false.
+ *
+ * `realpath` is deliberately not used. It resolves symlinks, which is the last
+ * step of a true identity, and it fails outright when the file does not exist —
+ * which is the ordinary case for an export, so it would leave the common path
+ * unlocked.
+ */
+function lockKey(path: string): string {
+	const full = resolve(path);
+	return process.platform === 'win32' || process.platform === 'darwin' ? full.toLowerCase() : full;
+}
+
+async function exclusively<T>(rawPath: string, run: () => Promise<T>): Promise<T> {
+	const path = lockKey(rawPath);
 	const queued = exportsInFlight.get(path) ?? Promise.resolve();
 	// Settled either way: a failed export must not wedge the path forever.
 	const mine = queued.then(run, run);
@@ -434,8 +462,14 @@ export function registerEnrollmentHandlers(
 				);
 			};
 
+			/*
+			 * Kept beyond the write: it is what makes the file at the destination
+			 * this export's own, and the rollback below has no other way to tell.
+			 */
+			const contents = toMaFile(current);
+
 			try {
-				await writeFile(temp, toMaFile(current), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+				await writeFile(temp, contents, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
 			} catch {
 				await giveUp();
 			}
@@ -542,22 +576,23 @@ export function registerEnrollmentHandlers(
 			 * `ino` as 0 and a check that is inert on the platform most of these
 			 * installs run on is not a check.
 			 */
-			const staged = await stat(temp).then(
-				(info) => ({ size: info.size, mtimeMs: info.mtimeMs }),
-				() => undefined
-			);
-			let written: { size: number; mtimeMs: number } | undefined;
+			/**
+			 * **What this export wrote, byte for byte.**
+			 *
+			 * Ownership was size plus modification time, and neither carries any
+			 * identity worth the name: every maFile this application writes is within
+			 * a few bytes of every other, and two files created in the same
+			 * millisecond share an mtime. A foreign file of the same size written in
+			 * the same tick was classified as ours and deleted.
+			 *
+			 * The content is what makes a file this export's own, it is already in
+			 * memory, and a maFile is a few hundred bytes — so it is compared
+			 * directly. There is no cheaper check that means anything.
+			 */
+			const written = contents;
 
 			try {
 				await rename(temp, destination);
-				/*
-				 * The staged file's identity, taken **before** the rename rather than
-				 * read back after it. A rename carries size and modification time across
-				 * unchanged, and statting the destination afterwards leaves a window in
-				 * which something else has already replaced the file — the check would
-				 * then record the intruder's identity and go on to delete it as its own.
-				 */
-				written = staged;
 			} catch {
 				// Put back whatever was there before saying the export failed — and when
 				// it cannot go back, name it. It is the user's own previous export,
@@ -634,15 +669,25 @@ export function registerEnrollmentHandlers(
 				 * written. Unknown counts as not ours: `written` is undefined only when
 				 * the stat failed, and guessing from there is what this avoids.
 				 */
-				const atDestination = await stat(destination).then(
-					(info) => ({ size: info.size, mtimeMs: info.mtimeMs }),
-					() => undefined
+				/**
+				 * Three answers, not two: it is ours, it is not ours, or nothing here
+				 * can tell.
+				 *
+				 * A read that fails with anything but "no such file" is the third. It
+				 * was folded into the second — `undefined` meant both "absent" and
+				 * "could not look" — so an `EACCES` on the destination read as an empty
+				 * path and the restore below renamed straight over whatever was there.
+				 * Unknown has to behave like foreign, because that is the assumption
+				 * that cannot destroy anything.
+				 */
+				const atDestination: 'ours' | 'foreign' | 'absent' | 'unknown' = await readFile(
+					destination,
+					'utf8'
+				).then(
+					(found) => (found === written ? 'ours' : 'foreign'),
+					(err: NodeJS.ErrnoException) => (err.code === 'ENOENT' ? 'absent' : 'unknown')
 				);
-				const stillOurFile =
-					written !== undefined &&
-					atDestination !== undefined &&
-					atDestination.size === written.size &&
-					atDestination.mtimeMs === written.mtimeMs;
+				const stillOurFile = atDestination === 'ours';
 
 				const tookItBack = stillOurFile ? await removed(destination) : false;
 				/*
@@ -659,7 +704,8 @@ export function registerEnrollmentHandlers(
 				 * something is at the destination and it is not ours, and the set-aside
 				 * copy is then named as stranded, which is exactly what it is.
 				 */
-				const foreignAtDestination = atDestination !== undefined && !stillOurFile;
+				// `absent` is the only state the restore may write into besides `ours`.
+				const foreignAtDestination = atDestination === 'foreign' || atDestination === 'unknown';
 				const putBack =
 					replacing && !foreignAtDestination
 						? await rename(kept, destination).then(
@@ -726,7 +772,13 @@ export function registerEnrollmentHandlers(
 
 			return {
 				state: 'saved' as const,
-				fileName: suggested,
+				/*
+				 * The name on disk, not the one this application proposed. The save
+				 * dialog lets somebody type whatever they like, and reporting
+				 * `suggested` told a user who had renamed it to look for a file that is
+				 * not there.
+				 */
+				fileName: basename(destination),
 				...(staleCopy ? { staleCopy } : {})
 			};
 		});
