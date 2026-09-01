@@ -1162,16 +1162,43 @@ function start(): void {
 		 * live Steam Guard code still on the clipboard, which the next session
 		 * pastes.
 		 *
-		 * `powerMonitor` reports the session ending in time to do something about
-		 * it. The same work runs, and it is idempotent — if `before-quit` does fire
+		 * The same work runs, and it is idempotent — if `before-quit` does fire
 		 * afterwards, clearing an already-cleared clipboard and locking an already
 		 * locked vault costs nothing.
+		 *
+		 * **And it has to be listened for twice, because no one event covers both
+		 * platforms.** `powerMonitor`'s `shutdown` is documented `linux,darwin`;
+		 * Electron does not emit it on Windows at all. So the handler written to
+		 * rescue the Windows shutdown ran on the two platforms that did not need
+		 * rescuing and never once on the platform that did — a Windows shutdown
+		 * still went down with a live Steam Guard code on the clipboard, which the
+		 * next session pastes.
+		 *
+		 * Windows announces it on the window instead, as `session-end`. Registered
+		 * through `browser-window-created` rather than at the one place a window is
+		 * built, so a second window — or a rebuilt one after a lock — cannot be the
+		 * one nobody subscribed to.
 		 */
-		powerMonitor.on('shutdown', () => {
+		const endOfSession = (): void => {
+			// Everything `before-quit` does, because a session end is a quit that
+			// does not run it. Stopping the timers first: a poll that fires while
+			// the vault is being locked has nothing useful left to do.
+			quitting = true;
+			clearInterval(autoLockPoll);
+			autoConfirm.stop();
+			activity.clear();
+			tray?.destroy();
 			clipboard.clearIfOurs();
 			vault.lock('shutdown');
-			tray?.destroy();
+		};
+
+		powerMonitor.on('shutdown', endOfSession);
+		app.on('browser-window-created', (_event, created) => {
+			created.on('session-end', endOfSession);
 		});
+		for (const existing of BrowserWindow.getAllWindows()) {
+			existing.on('session-end', endOfSession);
+		}
 
 		// Lock on suspend and on the OS lock screen (§10.3). Leaving a vault
 		// unlocked across a closed lid is the most common way one stays open.

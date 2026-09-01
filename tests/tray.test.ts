@@ -61,10 +61,13 @@ const record = vi.hoisted(() => ({
 	assigned: [] as FakeMenu[],
 	/** Menus handed to `popUpContextMenu` — the ones built for one showing. */
 	poppedUp: [] as FakeMenu[],
+	/** Whether `destroy()` has been called, which `isDestroyed` reports back. */
+	destroyed: false,
 	clear(): void {
 		this.listeners.clear();
 		this.assigned.length = 0;
 		this.poppedUp.length = 0;
+		this.destroyed = false;
 	}
 }));
 
@@ -91,7 +94,12 @@ vi.mock('electron', () => ({
 			record.listeners.set(event, existing);
 			return this;
 		}
-		destroy(): void {}
+		destroy(): void {
+			record.destroyed = true;
+		}
+		isDestroyed(): boolean {
+			return record.destroyed;
+		}
 	}
 }));
 
@@ -375,5 +383,121 @@ describe('a menu the tray keeps, after its own items are used', () => {
 			lockItem(openMenu()).enabled,
 			'the kept menu still offers Lock now for a vault it has already locked'
 		).toBe(false);
+	});
+});
+
+/**
+ * **Changes the tray does not cause, which is most of them.**
+ *
+ * `reassign` runs from the menu's own items and from a click on the icon: every
+ * path where the tray is the thing that changed something. The changes that
+ * matter most come from somewhere else — the window hidden by its close button,
+ * the vault locked by the idle timer or a suspend, and the vault *unlocked*,
+ * which happens in the renderer and this process only learns about indirectly.
+ *
+ * On Windows and macOS none of that matters: the menu is built at the instant of
+ * the click. On Linux the assigned menu is the only menu there will ever be, so
+ * after any of those the tray went on saying `Hide` for a hidden window and kept
+ * `Lock now` greyed for a vault that was open — dead in exactly the emergency it
+ * exists for.
+ *
+ * Driven through the real interval with fake timers, so what is asserted is the
+ * menu Electron was handed rather than the shape of the code that handed it over.
+ */
+describe('the Linux menu after a change the tray was not told about', () => {
+	it('follows a window hidden by something other than the menu', () => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+
+		const { world } = harness('linux', { visible: true, unlocked: true });
+		expect(windowItem(openMenu()).label).toBe(`Hide ${branding.shortName}`);
+
+		// The user presses the window's own close button.
+		world.visible = false;
+		vi.advanceTimersByTime(1000);
+
+		expect(
+			windowItem(openMenu()).label,
+			'the tray offered to hide a window that was already hidden, and hiding it showed it'
+		).toBe(`Show ${branding.shortName}`);
+	});
+
+	it('follows a vault unlocked in the renderer', () => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+
+		// How the application starts: locked, so `Lock now` is built greyed.
+		const { world } = harness('linux', { visible: true, unlocked: false });
+		expect(lockItem(openMenu()).enabled).toBe(false);
+
+		world.unlocked = true;
+		vi.advanceTimersByTime(1000);
+
+		expect(
+			lockItem(openMenu()).enabled,
+			'Lock now stayed greyed for an unlocked vault, which is the one state it is for'
+		).toBe(true);
+	});
+
+	it('follows a vault locked by the idle timer', () => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+
+		const { world } = harness('linux', { visible: true, unlocked: true });
+		expect(lockItem(openMenu()).enabled).toBe(true);
+
+		world.unlocked = false;
+		vi.advanceTimersByTime(1000);
+
+		expect(lockItem(openMenu()).enabled).toBe(false);
+	});
+
+	/*
+	 * A beat that reassigns every second would have the desktop rebuilding the
+	 * menu forever for nothing. Only a change may cost anything.
+	 */
+	it('leaves the menu alone while nothing changes', () => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+
+		harness('linux', { visible: true, unlocked: true });
+		const assignedAfterStartup = record.assigned.length;
+
+		vi.advanceTimersByTime(10_000);
+
+		expect(
+			record.assigned.length,
+			'the tray rebuilt its menu on a beat with nothing to report'
+		).toBe(assignedAfterStartup);
+	});
+
+	/*
+	 * And the platforms that build on demand must not grow a timer at all: there
+	 * is no kept menu for it to refresh, and reassigning on Windows is the defect
+	 * this module was written to remove.
+	 */
+	it.each<NodeJS.Platform>(['win32', 'darwin'])('assigns nothing on %s, ever', (platform) => {
+		vi.useFakeTimers();
+		onTestFinished(() => {
+			vi.useRealTimers();
+		});
+
+		const { world } = harness(platform, { visible: true, unlocked: true });
+		world.visible = false;
+		world.unlocked = false;
+		vi.advanceTimersByTime(10_000);
+
+		expect(
+			record.assigned,
+			'a menu was assigned on a platform that pops one up, so the stale copy is what opens'
+		).toEqual([]);
 	});
 });

@@ -104,6 +104,9 @@ export function createTray(host: TrayHost): Tray {
 	 */
 	const buildsOnDemand = process.platform === 'darwin' || process.platform === 'win32';
 
+	/** What the menu Linux is currently holding was built from. See the beat below. */
+	let shown = { visible: false, unlocked: false };
+
 	/**
 	 * The menu as it should read *right now*.
 	 *
@@ -157,6 +160,10 @@ export function createTray(host: TrayHost): Tray {
 	const reassign = (): void => {
 		if (!buildsOnDemand) {
 			tray.setContextMenu(menu());
+			// So the beat below agrees about what is on screen. Without this a
+			// reassign from a menu click leaves the recorded state behind and the
+			// next tick rebuilds an identical menu for no reason.
+			shown = { visible: host.isVisible(), unlocked: host.isUnlocked() };
 		}
 	};
 
@@ -164,6 +171,45 @@ export function createTray(host: TrayHost): Tray {
 		tray.on('right-click', () => tray.popUpContextMenu(menu()));
 	} else {
 		reassign();
+
+		/*
+		 * **And whenever the answers change, which is mostly not because of this
+		 * file.**
+		 *
+		 * `reassign` is called from the menu's own items and from a click on the
+		 * icon — every path where the tray is the thing that caused the change. The
+		 * changes that matter most come from somewhere else entirely: the window
+		 * hidden by its close button, the vault locked by the idle timer or a
+		 * suspend, the vault *unlocked*, which happens in the renderer and this
+		 * process only learns about indirectly.
+		 *
+		 * After any of those the assigned menu still read `Hide` for a hidden
+		 * window, and still had `Lock now` greyed for a vault that was open — dead
+		 * in precisely the emergency it exists for.
+		 *
+		 * Polled here rather than pushed from `index.ts` for the reason the label
+		 * bug had in the first place: a signal somebody has to remember to send is
+		 * a signal somebody forgets. Two boolean reads a second, and a menu rebuilt
+		 * only when one of them has actually moved, so the common case costs
+		 * nothing and there is no per-second churn for the desktop to notice.
+		 */
+		const beat = setInterval(() => {
+			// A destroyed tray throws on `setContextMenu`, and the beat outlives it
+			// on quit. `Tray` has no `destroyed` event to hang this on.
+			if (tray.isDestroyed()) {
+				clearInterval(beat);
+				return;
+			}
+			const now = { visible: host.isVisible(), unlocked: host.isUnlocked() };
+			if (now.visible === shown.visible && now.unlocked === shown.unlocked) {
+				return;
+			}
+			shown = now;
+			reassign();
+		}, 1000);
+		// Never a reason to hold the process open: if this is the only thing left
+		// running, there is nothing for the menu to describe.
+		beat.unref?.();
 	}
 
 	// Clicking the icon is the fastest path back to the window, which is what

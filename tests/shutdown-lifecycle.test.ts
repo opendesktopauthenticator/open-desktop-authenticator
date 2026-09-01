@@ -82,13 +82,66 @@ describe('the machine shutting down', () => {
 		).toContain("powerMonitor.on('shutdown'");
 	});
 
+	/**
+	 * **And the platform each of those events actually reaches.**
+	 *
+	 * The case above is the one that was here before, and it passed for a release
+	 * while the thing it describes did not work at all. `powerMonitor`'s
+	 * `shutdown` is documented `linux,darwin`; Electron never emits it on Windows.
+	 * So the handler written to rescue the Windows shutdown ran on the two
+	 * platforms that did not need rescuing and never once on the platform that
+	 * did, and a source check for its presence could not tell the difference.
+	 *
+	 * That is the knowledge that was missing rather than the code, so it is
+	 * written down here: which event covers which platform, and every supported
+	 * platform covered by one of them. Windows announces a session end on the
+	 * window, as `session-end`.
+	 */
+	const SESSION_END = [
+		{ platforms: ['linux', 'darwin'], listener: "powerMonitor.on('shutdown'" },
+		{ platforms: ['win32'], listener: "created.on('session-end'" }
+	];
+
+	it.each(SESSION_END)('is handled on $platforms', ({ platforms, listener }) => {
+		expect(
+			source,
+			`nothing handles the session ending on ${platforms.join(' or ')}, so a shutdown there ` +
+				'skips every bit of cleanup that lives in before-quit'
+		).toContain(listener);
+	});
+
+	it('covers every platform this application ships to', () => {
+		const covered = new Set(SESSION_END.flatMap((entry) => entry.platforms));
+		expect(
+			[...covered].sort(),
+			'a platform has no session-end handler at all, so it shuts down with whatever the ' +
+				'clipboard was holding'
+		).toEqual(['darwin', 'linux', 'win32']);
+	});
+
+	/*
+	 * Both paths run the same work, and they do it by *being* the same function:
+	 * two copies is how one of them comes to be missing a line.
+	 */
+	it('runs one body from both, rather than two that can drift', () => {
+		expect(source).toContain("powerMonitor.on('shutdown', endOfSession)");
+		expect(source).toContain("created.on('session-end', endOfSession)");
+	});
+
 	it.each([
 		['the clipboard, which may be holding a live code', 'clipboard.clearIfOurs()'],
-		['the vault', "vault.lock('shutdown')"]
+		['the vault', "vault.lock('shutdown')"],
+		['the tray icon', 'tray?.destroy()'],
+		['the auto-lock poll', 'clearInterval(autoLockPoll)'],
+		['the confirmation scheduler', 'autoConfirm.stop()']
 	])('clears %s', (_what, call) => {
+		const body = source.slice(
+			source.indexOf('const endOfSession = (): void => {'),
+			source.indexOf("powerMonitor.on('shutdown', endOfSession)")
+		);
 		expect(
-			handlerBody('powerMonitor', 'shutdown'),
-			`${call} does not run on an OS shutdown, so it is skipped entirely on Windows`
+			body,
+			`${call} does not run on an OS shutdown, so it is skipped on every platform's session end`
 		).toContain(call);
 	});
 });
