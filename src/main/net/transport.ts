@@ -915,7 +915,7 @@ export class SteamTransportFactory {
 			timer.unref?.();
 
 			handle.on('error', (error) =>
-				finish(() => reject(new EgressError(describeNetworkError(error, routedThrough))))
+				finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), true)))
 			);
 
 			handle.on('response', (response) => {
@@ -951,13 +951,15 @@ export class SteamTransportFactory {
 						} catch {
 							// Already finished or never connected. Nothing to stop.
 						}
-						finish(() => reject(new EgressError('Steam sent an implausibly large response.')));
+						finish(() =>
+							reject(new EgressError('Steam sent an implausibly large response.', true))
+						);
 						return;
 					}
 					chunks.push(bytes);
 				});
 				response.on('error', (error) =>
-					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough))))
+					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), true)))
 				);
 				response.on('end', () =>
 					finish(() => {

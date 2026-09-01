@@ -21,13 +21,35 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
  * found it, and leaves no staged copy of the secrets lying beside it either.
  */
 
-const state = vi.hoisted(() => ({ shortWrite: false, hideDestination: false }));
+const state = vi.hoisted(() => ({
+	shortWrite: false,
+	hideDestination: false,
+	silentShortWrite: false,
+	noProgress: false
+}));
 
 vi.mock('node:fs', async () => {
 	const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
 	return {
 		...actual,
 		writeSync: (fd: number, data: unknown, ...rest: unknown[]) => {
+			if (state.silentShortWrite || state.noProgress) {
+				/*
+				 * **A short write that does not throw.** `writeSync` may write fewer
+				 * bytes than it was given and return the count — a full disk, a pipe,
+				 * a network filesystem under pressure. Ignoring the count means the
+				 * caller fsyncs and publishes a truncated file, reporting success.
+				 *
+				 * The offset and length are honoured, so a caller that loops really
+				 * does finish; a caller that does not really does truncate.
+				 */
+				const [offset, length] = rest as [number, number];
+				const chunk = state.noProgress ? 0 : Math.min(16, length);
+				if (chunk === 0) {
+					return 0;
+				}
+				return (actual.writeSync as (...args: unknown[]) => number)(fd, data, offset, chunk);
+			}
 			if (state.shortWrite) {
 				// What a full disk does: some of it lands, then the write fails.
 				(actual.writeSync as (...args: unknown[]) => number)(
@@ -79,6 +101,8 @@ beforeEach(() => {
 	path = join(dir, 'recovery', '76561199000000001.json');
 	state.shortWrite = false;
 	state.hideDestination = false;
+	state.silentShortWrite = false;
+	state.noProgress = false;
 });
 
 afterEach(() => {
@@ -184,5 +208,52 @@ describe('a recovery file that already exists', () => {
 				'replaced was a previous authenticator backup'
 		).toBe(first);
 		expect(second, 'the second write went to the destination anyway').not.toBe(path);
+	});
+});
+
+/**
+ * **A write that stops early without saying so.**
+ *
+ * `writeSync` may write fewer bytes than it was given and return the count.
+ * Every call in the vault and recovery writers ignored it, so a short write was
+ * followed by an `fsync` and a publish that reported success — and for the
+ * recovery file, which nothing reads back afterwards, the result is a truncated
+ * document sitting at exactly the path the restore reads.
+ */
+describe('a write that lands short without throwing', () => {
+	/**
+	 * `writeSync` may write fewer bytes than it was given and return the count.
+	 * Every call in the vault and recovery writers ignored it, so a short write
+	 * was followed by an `fsync` and a publish that reported success — and for
+	 * the recovery file, which nothing reads back afterwards, the result is a
+	 * truncated document at exactly the path the restore reads.
+	 */
+	it('is carried on until the file is whole', () => {
+		state.silentShortWrite = true;
+		const written = writeRecoveryFile(path, envelope);
+		state.silentShortWrite = false;
+
+		expect(written).toBe(path);
+		expect(
+			JSON.parse(readFileSync(path, 'utf8')),
+			'the file was published after a write that stopped early, so what is on disk is a ' +
+				'fragment of the only copy of an authenticator'
+		).toEqual(envelope);
+	});
+
+	/* And a write that makes no progress at all is a failure, not a loop. */
+	it('gives up rather than spinning when nothing can be written', () => {
+		state.noProgress = true;
+		let threw = false;
+		try {
+			writeRecoveryFile(path, envelope);
+		} catch {
+			threw = true;
+		}
+		state.noProgress = false;
+
+		expect(threw, 'a write that never advances was treated as success').toBe(true);
+		expect(existsSync(path)).toBe(false);
+		expect(readdirSync(join(dir, 'recovery')), 'a staged fragment was left behind').toEqual([]);
 	});
 });

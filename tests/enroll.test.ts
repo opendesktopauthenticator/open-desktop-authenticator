@@ -8,6 +8,7 @@ import {
 import { toMaFile, maFileName } from '../src/main/import/export';
 import { parseMaFile } from '../src/main/import/mafile';
 import type { SteamRequest, SteamResponse } from '../src/main/confirmations/client';
+import { EgressError } from '../src/main/net/egress';
 import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
@@ -548,5 +549,89 @@ describe('a request that was sent and never answered', () => {
 			).not.toMatch(/nothing was changed/i);
 			expect(thrown.committed, 'the caller was left free to retry on top of it').toBe(true);
 		}
+	});
+});
+
+/**
+ * **A refusal in which nothing was sent must not be reported as one that may
+ * have happened.**
+ *
+ * The uncertainty wrapper was applied to every rejection, on the reasoning that
+ * a transport rejects after the bytes have gone. Most of this transport's
+ * refusals are the opposite: the routing check that finds Chromium would connect
+ * directly, an account closed while a transport was held, a scheme that cannot
+ * be carried. Nothing leaves the machine.
+ *
+ * Those were being reported as "Steam was asked to add an authenticator and did
+ * not answer ... if an authenticator was attached, its secrets were in the reply
+ * that never arrived ... removing it there, or contacting Steam Support, is the
+ * way out". For a proxy the user could fix in ten seconds. And the real cause
+ * was appended, then truncated before the sentence naming it.
+ *
+ * `EgressError` now says whether the request went. Anything that cannot say is
+ * treated as sent, because that is the assumption which cannot lose an
+ * authenticator.
+ */
+describe('a refusal that happened before the request was sent', () => {
+	const START = { steamId64: STEAM_ID, accessToken: ACCESS, unixSeconds: NOW_SECONDS };
+
+	function transportRefusing(error: Error) {
+		let reached = 0;
+		return {
+			reached: () => reached,
+			transport: (): Promise<SteamResponse> => {
+				reached += 1;
+				return Promise.reject(error);
+			}
+		};
+	}
+
+	it.each([
+		[
+			'the routing check refuses a direct connection',
+			new EgressError(
+				'this account is set to route through http://***:***@proxy.example:8080, but this ' +
+					'connection would be made directly instead. Refusing to connect.'
+			)
+		],
+		[
+			'the account was closed while the transport was held',
+			new EgressError('this account was closed before the request was sent')
+		]
+	])('is passed through unchanged when %s', async (_what, error) => {
+		const { transport } = transportRefusing(error);
+
+		const thrown = (await startEnrollment(transport, START).then(
+			() => undefined,
+			(err: unknown) => err
+		)) as Error & { committed?: boolean };
+
+		expect(
+			thrown.message,
+			'a refusal in which no byte left the machine was reported as one where Steam may have ' +
+				'attached an authenticator'
+		).toBe(error.message);
+		expect(thrown, 'and it was marked as committed').not.toHaveProperty('committed', true);
+	});
+
+	/*
+	 * And the property the wrapper exists for survives: an error that cannot say
+	 * whether the request went is still treated as though it did.
+	 */
+	it('still reports an ordinary network failure as uncertain', async () => {
+		const { transport } = transportRefusing(new Error('ETIMEDOUT: the connection timed out'));
+
+		await expect(startEnrollment(transport, START)).rejects.toMatchObject({
+			committed: true,
+			permanent: true
+		});
+	});
+
+	it('reports a failure that says the request went as uncertain', async () => {
+		const { transport } = transportRefusing(
+			new EgressError('the connection to Steam failed (ERR_CONNECTION_RESET)', true)
+		);
+
+		await expect(startEnrollment(transport, START)).rejects.toMatchObject({ committed: true });
 	});
 });

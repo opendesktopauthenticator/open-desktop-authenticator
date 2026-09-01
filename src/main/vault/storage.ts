@@ -136,7 +136,7 @@ export function writeEnvelope(file: string, envelope: Envelope): void {
 		// `renameSync` carries the mode across, so the vault inherits it.
 		const fd = openSync(paths.temp, 'w', 0o600);
 		try {
-			writeSync(fd, serialised, 0, 'utf8');
+			writeAll(fd, serialised);
 			// Durable before the rename, or "atomic" is a claim rather than a fact.
 			fsyncSync(fd);
 		} finally {
@@ -247,7 +247,7 @@ export function writeRotationJournal(file: string, envelope: Envelope): void {
 	try {
 		const fd = openSync(temp, 'w', 0o600);
 		try {
-			writeSync(fd, serialised, 0, 'utf8');
+			writeAll(fd, serialised);
 			fsyncSync(fd);
 		} finally {
 			closeSync(fd);
@@ -313,7 +313,7 @@ export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 		}
 		const fd = openSync(temp, 'w', 0o600);
 		try {
-			writeSync(fd, serialised, 0, 'utf8');
+			writeAll(fd, serialised);
 			fsyncSync(fd);
 		} finally {
 			closeSync(fd);
@@ -373,7 +373,7 @@ export function restoreEnvelopeInPlace(file: string, envelope: Envelope): void {
 	try {
 		const fd = openSync(paths.temp, 'w', 0o600);
 		try {
-			writeSync(fd, serialised, 0, 'utf8');
+			writeAll(fd, serialised);
 			fsyncSync(fd);
 		} finally {
 			closeSync(fd);
@@ -390,6 +390,32 @@ export function restoreEnvelopeInPlace(file: string, envelope: Envelope): void {
 			/* best effort */
 		}
 		throw new VaultStorageError('the vault could not be put back after a failed rotation', err);
+	}
+}
+
+/**
+ * Write the whole string, or throw.
+ *
+ * `writeSync` may write fewer bytes than it was given and return normally — a
+ * full disk, a pipe, a network filesystem under pressure. Every call here
+ * ignored the count, so a short write was followed by an `fsync` and a rename
+ * that published the truncated result as though it were complete. For the
+ * recovery file, which nothing reads back, that is a file that looks like a
+ * backup until somebody needs it.
+ *
+ * The loop is over a Buffer rather than the string, because a partial write
+ * lands on a byte boundary and slicing UTF-8 by character would resume in the
+ * wrong place.
+ */
+function writeAll(fd: number, text: string): void {
+	const bytes = Buffer.from(text, 'utf8');
+	let written = 0;
+	while (written < bytes.length) {
+		const wrote = writeSync(fd, bytes, written, bytes.length - written);
+		if (wrote <= 0) {
+			throw new Error('the write stopped making progress before the file was complete');
+		}
+		written += wrote;
 	}
 }
 

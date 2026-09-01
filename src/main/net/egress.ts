@@ -127,9 +127,32 @@ export const PROXY_REQUIRED =
 	'account a proxy, or turn off "Require proxies" in Settings.';
 
 export class EgressError extends Error {
-	constructor(message: string) {
+	/**
+	 * Whether any of the request reached the network before this was thrown.
+	 *
+	 * **Most of the refusals in this module happen before a byte leaves the
+	 * machine**, and they are the point: a routing check that finds Chromium
+	 * would go direct, an account closed while a transport was held, a scheme
+	 * this cannot carry. Nothing is sent, and the caller can say so.
+	 *
+	 * The callers could not tell. `enroll.ts` wraps a failed request in "Steam
+	 * may have attached an authenticator — check the mobile app, contact Steam
+	 * Support, do not try again", which is right for a timeout and alarming
+	 * nonsense for a proxy that refused to be used. It had no way to know which
+	 * it had, so it assumed the worse one for all of them.
+	 *
+	 * `false` is the default because the refusals in this file are all
+	 * before-the-send; the transport marks the two paths that follow a real
+	 * request. An error that is not an `EgressError` says nothing either way, and
+	 * a caller with no information should assume the request went — that is the
+	 * assumption that cannot lose an authenticator.
+	 */
+	readonly sent: boolean;
+
+	constructor(message: string, sent = false) {
 		super(message);
 		this.name = 'EgressError';
+		this.sent = sent;
 	}
 }
 

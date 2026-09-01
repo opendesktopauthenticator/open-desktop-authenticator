@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { generateGuardCode } from '../codes/totp';
 import { deviceIdFor } from '../confirmations/key';
 import type { SteamTransport } from '../confirmations/client';
+import { EgressError } from '../net/egress';
 
 /**
  * Attaching a new authenticator to a Steam account (§12 F3).
@@ -135,6 +136,25 @@ async function commitRequest(
 	try {
 		return await transport(request);
 	} catch (err) {
+		/*
+		 * **Only if the request actually went.**
+		 *
+		 * The first version of this wrapped every rejection, on the reasoning that
+		 * a transport rejects after the bytes have gone. Most of this transport's
+		 * refusals are the opposite: the routing check that finds Chromium would
+		 * connect directly, an account closed while a transport was held, a scheme
+		 * that cannot be carried. Nothing is sent, and they were being reported as
+		 * "Steam may have attached an authenticator — check the mobile app,
+		 * contact Steam Support, do not try again". Alarming, wrong, and it buried
+		 * the real cause, which is a proxy the user can fix.
+		 *
+		 * `EgressError` says which it is. Anything else says nothing, and an error
+		 * that cannot say is treated as sent — that is the assumption that cannot
+		 * lose an authenticator.
+		 */
+		if (err instanceof EgressError && !err.sent) {
+			throw err;
+		}
 		// Not `permanent: false`. Trying again is exactly what must not happen
 		// until somebody has looked at the account.
 		throw new EnrollmentError(`${uncertain} (${describeCause(err)})`, true, true);
