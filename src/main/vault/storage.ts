@@ -221,6 +221,81 @@ function syncDirectory(dir: string): void {
  * reading it back, because a half-written backup is worse than a stale one: the
  * stale one at least opens.
  */
+/**
+ * Where a rotation records the backup it still owes.
+ *
+ * **A rotation is two writes and there is a gap between them.** The main vault
+ * goes first, sealed under the new key; the backup is re-sealed under the same
+ * key a moment later. Lose power in between and the file opens with the new
+ * passphrase while `.bak` still opens with the retired one — which is exactly
+ * the hole re-sealing the backup exists to close, reappearing at the crash
+ * boundary instead of at the write.
+ *
+ * So the rotation says what it is about to do before it does any of it. If the
+ * journal is on disk when the application next starts, the rotation was
+ * interrupted and `reconcile` finishes it. The journal holds the backup envelope
+ * itself, already sealed under the new key, so finishing needs nothing the
+ * process no longer has — not the passphrase, not the old key, not the plaintext.
+ */
+const journalPath = (file: string): string => `${file}.rotating`;
+
+/** Record the backup a rotation is about to write. */
+export function writeRotationJournal(file: string, envelope: Envelope): void {
+	const serialised = `${JSON.stringify(envelope, null, 2)}
+`;
+	const temp = `${journalPath(file)}.tmp`;
+	try {
+		const fd = openSync(temp, 'w', 0o600);
+		try {
+			writeSync(fd, serialised, 0, 'utf8');
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameSync(temp, journalPath(file));
+		tighten(journalPath(file));
+		syncDirectory(dirname(file));
+	} catch (err) {
+		try {
+			if (existsSync(temp)) {
+				unlinkSync(temp);
+			}
+		} catch {
+			/* best effort */
+		}
+		throw new VaultStorageError('the rotation could not be recorded before it began', err);
+	}
+}
+
+/**
+ * The backup an interrupted rotation still owes, if there is one.
+ *
+ * A journal this cannot parse is treated as absent rather than thrown: it names
+ * work that cannot be completed, and refusing to open the vault over it would
+ * turn a lost backup into a lost vault.
+ */
+export function readRotationJournal(file: string): Envelope | undefined {
+	if (!existsSync(journalPath(file))) {
+		return undefined;
+	}
+	try {
+		return envelopeSchema.parse(JSON.parse(readFileSync(journalPath(file), 'utf8')));
+	} catch {
+		return undefined;
+	}
+}
+
+/** The rotation is finished, one way or another. */
+export function clearRotationJournal(file: string): void {
+	try {
+		if (existsSync(journalPath(file))) {
+			unlinkSync(journalPath(file));
+		}
+	} catch {
+		/* best effort: a stale journal is re-read and re-applied, which is a no-op */
+	}
+}
+
 export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 	const paths = vaultPaths(file);
 	const serialised = `${JSON.stringify(envelope, null, 2)}\n`;

@@ -2,14 +2,17 @@ import { statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { deriveKey, sealWithKey, unseal, VaultCryptoError, wipe } from './crypto';
 import {
+	clearRotationJournal,
 	putBack,
 	readBackupEnvelope,
+	readRotationJournal,
 	readEnvelope,
 	restoreEnvelopeInPlace,
 	setAside,
 	vaultExists,
 	writeBackupEnvelope,
-	writeEnvelope
+	writeEnvelope,
+	writeRotationJournal
 } from './storage';
 import { SALT_BYTES, SCRYPT_DEFAULTS, type Envelope, type Kdf } from '../../shared/vault-format';
 import {
@@ -169,6 +172,46 @@ export class VaultService {
 		}
 		wipe(key);
 		return false;
+	}
+
+	/**
+	 * Finish a rotation that was interrupted between its two writes.
+	 *
+	 * **The window this closes.** A rotation writes the vault under the new key
+	 * and then re-seals the backup under the same key. Lose power in between and
+	 * the vault opens with the new passphrase while `.bak` still opens with the
+	 * retired one — which is the hole re-sealing the backup exists to close,
+	 * reappearing at the crash boundary rather than at the write. The Settings
+	 * screen promises the opposite in as many words.
+	 *
+	 * The journal holds the finished backup envelope, already sealed under the new
+	 * key, so this needs nothing the process no longer has: not the passphrase,
+	 * not the old key, not the plaintext. It is safe to run at any time and safe
+	 * to run twice — writing the same backup again is the same backup.
+	 *
+	 * Called at startup, and again before anything that reads or replaces the
+	 * backup, so no path can act on one the last rotation was still owed.
+	 *
+	 * @returns whether an interrupted rotation was finished.
+	 */
+	reconcile(): boolean {
+		const owed = readRotationJournal(this.file);
+		if (!owed) {
+			return false;
+		}
+		try {
+			writeBackupEnvelope(this.file, owed);
+		} catch (err) {
+			// Left on disk deliberately: the backup is still readable with the
+			// retired passphrase and the next start must try again rather than
+			// forget. Nothing here is in a position to tell the user, and the vault
+			// itself is fine.
+			console.error('an interrupted passphrase rotation could not be finished', err);
+			return false;
+		}
+		clearRotationJournal(this.file);
+		this.backupCache = undefined;
+		return true;
 	}
 
 	exists(): boolean {
@@ -661,12 +704,31 @@ export class VaultService {
 		const rotatedVault = sealWithKey(JSON.stringify(contents), newKey, kdf);
 		const rotatedBackup = sealWithKey(priorPlaintext, newKey, kdf);
 
+		/*
+		 * **Said before it is done.** The two writes below are not atomic together,
+		 * and a crash between them left the vault opening with the new passphrase
+		 * while `.bak` still opened with the retired one — the hole re-sealing the
+		 * backup exists to close, reappearing at the crash boundary.
+		 *
+		 * The journal holds the finished backup envelope, already sealed under the
+		 * new key, so `reconcile` can complete the rotation on the next start
+		 * without the passphrase, the old key or the plaintext.
+		 */
+		try {
+			writeRotationJournal(this.file, rotatedBackup);
+		} catch (err) {
+			wipe(newKey);
+			throw err;
+		}
+
 		try {
 			writeEnvelope(this.file, rotatedVault);
 			// A rotation rewrites the file under a new key, which is the case a
 			// restore most needs to notice: the backup it holds cannot open it.
 			this.fileGeneration += 1;
 		} catch (err) {
+			// Nothing was replaced, so there is nothing to finish.
+			clearRotationJournal(this.file);
 			wipe(newKey);
 			throw err;
 		}
@@ -735,6 +797,8 @@ export class VaultService {
 				);
 			}
 			this.fileGeneration += 1;
+			// The rotation was undone, so there is no backup owed.
+			clearRotationJournal(this.file);
 			wipe(newKey);
 			// Logged rather than folded into the message: the user needs the plain
 			// sentence, and an EPERM from a backup file is for whoever reads the log.
@@ -745,6 +809,11 @@ export class VaultService {
 					'altered — try again.'
 			);
 		}
+
+		// Both writes landed, so nothing is owed. Deliberately *after* the backup
+		// write rather than beside it: a journal cleared early is a rotation this
+		// process can no longer finish.
+		clearRotationJournal(this.file);
 
 		// Same reasoning as `mutate`: an unlock that began before this rotation
 		// must not install the pre-rotation key and contents over it. Without
@@ -903,6 +972,9 @@ export class VaultService {
 	private backupCache: { key: string; envelope: Envelope | undefined } | undefined;
 
 	backupAvailable(): Envelope | undefined {
+		// Before answering, so nobody is offered a backup an interrupted rotation
+		// had already replaced — that one opens with the retired passphrase.
+		this.reconcile();
 		let key: string;
 		try {
 			const stat = statSync(`${this.file}.bak`);
@@ -964,6 +1036,10 @@ export class VaultService {
 	 * disposable.
 	 */
 	async restoreFromBackup(passphrase: string): Promise<void> {
+		// The same reason as `backupAvailable`: restoring the backup an interrupted
+		// rotation had already replaced would install one the retired passphrase
+		// opens, which is the state the rotation existed to leave behind.
+		this.reconcile();
 		const envelope = readBackupEnvelope(this.file);
 		if (!envelope) {
 			throw new VaultServiceError('there is no backup vault to restore from');

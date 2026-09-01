@@ -378,6 +378,23 @@ function start(): void {
 		}
 	});
 
+	/*
+	 * **Before anything reads the vault or its backup.**
+	 *
+	 * A passphrase rotation is two writes with a gap between them, and losing
+	 * power in that gap leaves the vault opening with the new passphrase while
+	 * `.bak` still opens with the retired one. The rotation records what it owes
+	 * before it starts; this is where the debt is paid, on the next start, with
+	 * nothing the process no longer has.
+	 *
+	 * Synchronous and cheap when there is nothing to do — one `existsSync` — and
+	 * the one moment it must happen is before a screen can offer to restore a
+	 * backup the last rotation had already replaced.
+	 */
+	if (vault.reconcile()) {
+		console.log('finished a passphrase rotation that was interrupted before it could complete');
+	}
+
 	const codes = new CodeService(vault);
 	const clipboard = new ClipboardCourier({ clipboard: electronClipboard });
 
