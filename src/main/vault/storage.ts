@@ -160,8 +160,15 @@ export function writeEnvelope(file: string, envelope: Envelope): void {
 		}
 		envelopeSchema.parse(JSON.parse(readBack));
 	} catch (err) {
-		restore(paths, hadExisting);
-		throw new VaultStorageError('the vault write failed and the previous file was restored', err);
+		const putBack = restore(paths, hadExisting);
+		throw new VaultStorageError(
+			putBack
+				? 'the vault write failed and the previous file was restored'
+				: 'the vault write failed and the previous file could NOT be put back. The file on ' +
+						'disk may be incomplete. The last good copy is beside it, named vault.json.bak — ' +
+						'do not delete it, and use Restore from backup in Settings.',
+			err
+		);
 	}
 }
 
@@ -236,15 +243,35 @@ export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 		} finally {
 			closeSync(fd);
 		}
+		/*
+		 * **Verified before the old backup is replaced, not after.**
+		 *
+		 * The rename came first and the read-back followed it, so a verification
+		 * failure had already destroyed the working backup — and the error thrown
+		 * says the backup could not be rewritten, which reads as "the old one is
+		 * still there". A vault holding revocation codes is exactly the thing not
+		 * to leave with no recoverable copy on the strength of a write that was
+		 * never checked.
+		 *
+		 * The temp file is on the same filesystem as the backup, so what is read
+		 * back here is what the rename will publish.
+		 */
+		const staged = readFileSync(temp, 'utf8');
+		if (staged !== serialised) {
+			throw new Error('the staged backup on disk does not match what was written');
+		}
+		envelopeSchema.parse(JSON.parse(staged));
+
 		renameSync(temp, paths.backup);
 		tighten(paths.backup);
 		syncDirectory(dirname(file));
 
+		// And again at the destination, which is cheap and catches a rename that
+		// reported success onto a filesystem that did something else.
 		const readBack = readFileSync(paths.backup, 'utf8');
 		if (readBack !== serialised) {
 			throw new Error('the backup on disk does not match what was written');
 		}
-		envelopeSchema.parse(JSON.parse(readBack));
 	} catch (err) {
 		try {
 			if (existsSync(temp)) {
@@ -299,20 +326,40 @@ function tighten(file: string): void {
 	}
 }
 
-function restore(paths: VaultPaths, hadExisting: boolean): void {
+/**
+ * Undo a failed write, and say whether it worked.
+ *
+ * **It used to say nothing, and the caller announced success regardless.** The
+ * copy back was wrapped in a bare `catch {}` on the reasoning that the backup is
+ * still on disk for manual recovery — true, and not what the message says. The
+ * caller throws "the vault write failed and the previous file was restored",
+ * which is a claim about `vault.json`, and a probe that made the copy fail left
+ * new or truncated bytes in that file under exactly those words. Somebody
+ * reading them has no reason to go looking at `.bak`.
+ *
+ * @returns whether the previous vault is back in place. `true` when there was
+ * nothing to put back, because then nothing was displaced either.
+ */
+function restore(paths: VaultPaths, hadExisting: boolean): boolean {
 	try {
 		if (existsSync(paths.temp)) {
 			unlinkSync(paths.temp);
 		}
 	} catch {
-		/* best effort */
+		/* best effort: a stray temp file is not what the caller is told about */
+	}
+	if (!hadExisting) {
+		return true;
+	}
+	if (!existsSync(paths.backup)) {
+		// Nothing to copy from. The file on disk is whatever the failed write left.
+		return false;
 	}
 	try {
-		if (hadExisting && existsSync(paths.backup)) {
-			copyFileSync(paths.backup, paths.file);
-		}
+		copyFileSync(paths.backup, paths.file);
+		return true;
 	} catch {
-		/* best effort — the backup is still on disk for manual recovery */
+		return false;
 	}
 }
 

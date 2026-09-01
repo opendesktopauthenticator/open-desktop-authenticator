@@ -634,7 +634,21 @@ export class VaultService {
 		 * on disk rather than an approximation of it — `mutate` seals that same
 		 * string and only then assigns it to `state.contents`.
 		 */
-		const priorEnvelope = readEnvelope(this.file);
+		/*
+		 * Wrapped, because `newKey` exists by now. `readEnvelope` reads and
+		 * validates the file, and it throws — a vault removed under a running
+		 * session, a share that dropped, a schema this build cannot parse. Every
+		 * other exit past the derivation wipes the key it made; this one was added
+		 * later and did not, so the rotation key survived in memory for the life of
+		 * the process.
+		 */
+		let priorEnvelope;
+		try {
+			priorEnvelope = readEnvelope(this.file);
+		} catch (err) {
+			wipe(newKey);
+			throw err;
+		}
 		const priorPlaintext = JSON.stringify(state.contents);
 
 		const contents = { ...state.contents, seq: state.contents.seq + 1 };
@@ -892,15 +906,34 @@ export class VaultService {
 		let key: string;
 		try {
 			const stat = statSync(`${this.file}.bak`);
-			key = `${stat.mtimeMs}:${stat.size}`;
+			// `ctimeMs` as well: a file replaced by a rename can land with the mtime
+			// it was written with, and the metadata change time moves regardless.
+			key = `${stat.mtimeMs}:${stat.ctimeMs}:${stat.size}`;
 		} catch {
-			this.backupCache = { key: 'absent', envelope: undefined };
+			this.backupCache = undefined;
 			return undefined;
 		}
-		if (this.backupCache?.key !== key) {
-			this.backupCache = { key, envelope: readBackupEnvelope(this.file) };
+
+		if (this.backupCache?.key === key) {
+			return this.backupCache.envelope;
 		}
-		return this.backupCache.envelope;
+
+		const envelope = readBackupEnvelope(this.file);
+		/*
+		 * **A negative answer is never cached.**
+		 *
+		 * The key is the file's size and timestamps, which is enough to notice an
+		 * ordinary change and not enough to notice every one: a backup that could
+		 * not be read, replaced by a good one of the same size in the same
+		 * millisecond, kept the same key — and the cached "unavailable" then stood
+		 * for the rest of the session, with the unlock screen telling somebody
+		 * whose vault would not open that they had no backup.
+		 *
+		 * Caching only the answer that says a backup *is* there costs one re-read
+		 * per poll in the one state that is already broken, and removes the class.
+		 */
+		this.backupCache = envelope === undefined ? undefined : { key, envelope };
+		return envelope;
 	}
 
 	/**
