@@ -28,6 +28,7 @@ const state = vi.hoisted(() => ({
 	crashAfterVaultWrite: false,
 	backupAttempted: false,
 	refuseBackupWrite: false,
+	refuseJournalStat: false,
 	backupWrites: 0
 }));
 
@@ -35,6 +36,17 @@ vi.mock('node:fs', async () => {
 	const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
 	return {
 		...actual,
+		statSync: (path: unknown, ...rest: unknown[]) => {
+			/*
+			 * A journal the process is not allowed to look at. `existsSync` gives the same
+			 * false for this as for a path with nothing at it, which is the whole
+			 * point of the case below.
+			 */
+			if (state.refuseJournalStat && typeof path === 'string' && path.endsWith('.rotating')) {
+				throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+			}
+			return (actual.statSync as (...args: unknown[]) => unknown)(path, ...rest);
+		},
 		openSync: (path: unknown, ...rest: unknown[]) => {
 			/*
 			 * **The on-disk state a crash between the two writes leaves.**
@@ -76,6 +88,7 @@ beforeEach(() => {
 	state.crashAfterVaultWrite = false;
 	state.backupAttempted = false;
 	state.refuseBackupWrite = false;
+	state.refuseJournalStat = false;
 	state.backupWrites = 0;
 });
 
@@ -331,5 +344,50 @@ describe('a backup an interrupted rotation could not replace', () => {
 		const vault = service();
 		expect(vault.reconcile()).toBe(true);
 		expect(vault.backupAvailable()).toBeDefined();
+	});
+});
+
+/**
+ * **"Not there" and "could not look" were the same answer.**
+ *
+ * The journal check was `existsSync`, which returns false for a path it is not
+ * allowed to stat exactly as it does for a path with nothing at it. A rotation
+ * that was interrupted then read as no rotation at all, the suspicion on the
+ * backup was cleared, and the unlock screen went back to offering a copy that
+ * may still open with the passphrase the user had just retired.
+ *
+ * Every other failure in that reader already lands on `unreadable`, which
+ * refuses to offer it. This was the one branch that failed the other way.
+ */
+describe('a journal the process cannot look at', () => {
+	it('is not read as no journal', async () => {
+		await interruptedRotation();
+
+		const vault = service();
+		state.refuseJournalStat = true;
+		const offered = vault.backupAvailable();
+		state.refuseJournalStat = false;
+
+		expect(
+			offered,
+			'a stat that failed read as "no rotation was interrupted", so the backup went on being ' +
+				'offered while it still opens with the retired passphrase'
+		).toBeUndefined();
+	});
+
+	it('is not restorable either', async () => {
+		await interruptedRotation();
+
+		const vault = service();
+		state.refuseJournalStat = true;
+		await expect(vault.restoreFromBackup(OLD)).rejects.toThrow(/interrupted/);
+		state.refuseJournalStat = false;
+	});
+
+	/* And a vault with no journal at all is still perfectly ordinary. */
+	it('does not make an untouched vault suspicious', async () => {
+		await vaultWithAnAccount();
+
+		expect(service().backupAvailable()).toBeDefined();
 	});
 });

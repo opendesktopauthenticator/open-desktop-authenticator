@@ -8,6 +8,7 @@ import {
 	openSync,
 	readFileSync,
 	renameSync,
+	statSync,
 	unlinkSync,
 	writeSync
 } from 'node:fs';
@@ -275,8 +276,25 @@ export function writeRotationJournal(file: string, envelope: Envelope): void {
  * turn a lost backup into a lost vault.
  */
 export function readRotationJournal(file: string): RotationJournal {
-	if (!existsSync(journalPath(file))) {
-		return { state: 'none' };
+	/*
+	 * **"Not there" and "could not look" are different answers.**
+	 *
+	 * This asked `existsSync`, which returns false for both: a path it is not
+	 * allowed to stat reads exactly like a path with nothing at it. Everything
+	 * downstream then treats that as "no rotation was interrupted" and clears the
+	 * suspicion on the backup - so the one remaining way to reach a backup that
+	 * may still open with a retired passphrase was for the check to fail rather
+	 * than to answer.
+	 *
+	 * Every other error in this function already lands on `unreadable`, which
+	 * refuses to offer the backup. This is the branch that did not.
+	 */
+	try {
+		if (statSync(journalPath(file), { throwIfNoEntry: false }) === undefined) {
+			return { state: 'none' };
+		}
+	} catch {
+		return { state: 'unreadable' };
 	}
 	try {
 		return {
