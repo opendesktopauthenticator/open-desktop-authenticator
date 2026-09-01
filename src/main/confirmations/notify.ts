@@ -111,6 +111,20 @@ interface AccountNotifyState {
 	 * did it anyway: `unreadable > 0` was checked against nothing.
 	 */
 	lastUnreadable: number;
+
+	/**
+	 * Which delivery attempt last moved `lastUnreadable`, and which last set
+	 * `toldSignInNeeded`.
+	 *
+	 * Both were rolled back by comparing the *value* — "is it still the number I
+	 * wrote" — or by not checking at all. A later poll that happens to record the
+	 * same count reads as this attempt's own work and gets undone; a later
+	 * sign-in notice that was delivered has its flag cleared by an earlier one
+	 * that was not, and the user is told twice. `seen` is keyed by attempt for
+	 * exactly this reason and these two were not.
+	 */
+	unreadableBy: number;
+	signInBy: number;
 }
 
 /**
@@ -383,6 +397,8 @@ export class ConfirmationNotifier {
 				seeded: true,
 				seen: new Map<string, number>([...ids].map((id) => [id, 0])),
 				toldSignInNeeded: false,
+				unreadableBy: 0,
+				signInBy: 0,
 				// What was already there is the baseline, not news — the same
 				// reasoning as seeding `seen`. Recording 0 here instead would make
 				// the very next poll re-announce what this one just said.
@@ -401,7 +417,7 @@ export class ConfirmationNotifier {
 				for (const entry of critical) {
 					seedState.seen.set(entry.id, attempt);
 				}
-				const seededUnreadable = unreadable;
+				seedState.unreadableBy = attempt;
 				this.toast(steamId64, accountName, composeBody(detail, critical, unreadable), () => {
 					/*
 					 * **The seed stands; the announcement does not.**
@@ -431,8 +447,9 @@ export class ConfirmationNotifier {
 					 * which is how a rise this poll knew nothing about stopped being a
 					 * rise and was never announced.
 					 */
-					if (seeded.lastUnreadable === seededUnreadable) {
+					if (seeded.unreadableBy === attempt) {
 						seeded.lastUnreadable = 0;
+						seeded.unreadableBy = 0;
 					}
 				});
 			}
@@ -472,6 +489,7 @@ export class ConfirmationNotifier {
 		/** What was announced before this poll, so a failed toast can restore it. */
 		const previouslyUnreadable = existing.lastUnreadable;
 		existing.lastUnreadable = unreadable;
+		existing.unreadableBy = attempt;
 
 		// 6. One toast, not two. A poll bringing both a new confirmation and an
 		//    unparseable one is still one thing happening.
@@ -506,8 +524,18 @@ export class ConfirmationNotifier {
 			 * looked new again — or one it recorded looked already-said and was
 			 * swallowed.
 			 */
-			if (existing.lastUnreadable === unreadable) {
+			/*
+			 * **By ownership, not by value.** Comparing the number matched whenever a
+			 * later poll happened to record the same count — a count that has not
+			 * moved is the ordinary case, not a rare one — and this then rolled that
+			 * poll's work back to a figure from before it ran. Where the earlier
+			 * figure was the higher of the two, that *raised* the mark, so the next
+			 * genuine rise looked like something already said and was never
+			 * announced.
+			 */
+			if (existing.unreadableBy === attempt) {
 				existing.lastUnreadable = previouslyUnreadable;
+				existing.unreadableBy = 0;
 			}
 		});
 	}
@@ -544,24 +572,34 @@ export class ConfirmationNotifier {
 		if (existing?.toldSignInNeeded) {
 			return;
 		}
+		const attempt = ++this.deliveries;
 		if (existing) {
 			existing.toldSignInNeeded = true;
+			existing.signInBy = attempt;
 		} else {
 			// `seeded: false` on purpose — no poll has succeeded, so the next one
 			// that does is still this account's first and must seed silently.
 			this.state.set(steamId64, {
 				seeded: false,
 				seen: new Map(),
+				unreadableBy: 0,
+				signInBy: attempt,
 				toldSignInNeeded: true,
 				lastUnreadable: 0
 			});
 		}
 		this.toast(steamId64, accountName, 'Sign in again to keep checking this account.', () => {
-			// Same rule: the flag means "we told them", and we did not. Cleared so
-			// the next poll — which will find the same expired session — says it.
+			/*
+			 * Same rule as the rest, and this was the one place with no rule at all:
+			 * the flag means "we told them", and we did not, so it is cleared — but
+			 * only if this attempt is the one that set it. Clearing it unconditionally
+			 * let an earlier notice that failed slowly undo a later one that had been
+			 * delivered, and the user was told to sign in again twice.
+			 */
 			const current = this.stateFor(steamId64);
-			if (current) {
+			if (current?.signInBy === attempt) {
 				current.toldSignInNeeded = false;
+				current.signInBy = 0;
 			}
 		});
 	}

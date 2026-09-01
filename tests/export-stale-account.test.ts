@@ -1252,6 +1252,55 @@ describe('two exports aimed at the same file', () => {
 	});
 
 	/**
+	 * **And the other door into the same loss.**
+	 *
+	 * The ownership check stops the rollback *deleting* a stranger's file. The
+	 * restore half went on renaming the set-aside copy over the destination
+	 * whatever was there — and a rename replaces silently, so the file was gone
+	 * just the same, by the path nobody had looked at.
+	 */
+	it('does not rename its old copy over a file it did not write', async () => {
+		const destination = join(dir, 'out.maFile');
+		writeFileSync(destination, 'the export this one is replacing');
+		const accounts: Account[] = [account];
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		// The mock fires on every successful rename, and there are two here: the
+		// set-aside of the file already at the destination, then the publish. Only
+		// the second is the moment this is about.
+		let renames = 0;
+		lockDuringRename = () => {
+			renames += 1;
+			if (renames !== 2) {
+				return;
+			}
+			// Something else claims the path, and the account goes, so the export
+			// rolls back onto a file that is no longer its own.
+			accounts.length = 0;
+			writeFileSync(destination, 'a file this export did not write');
+		};
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow();
+
+		expect(
+			readFileSync(destination, 'utf8'),
+			'the rollback renamed its set-aside copy over a file the export had not written, which ' +
+				'destroys it exactly as deleting it would'
+		).toBe('a file this export did not write');
+	});
+
+	/**
 	 * And the half the mutex cannot reach: something that is not an export
 	 * replacing the file. The rollback deletes the destination outright, so
 	 * without an ownership check it removes a file this export never created,

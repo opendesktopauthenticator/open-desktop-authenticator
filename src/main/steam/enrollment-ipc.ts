@@ -651,16 +651,28 @@ export function registerEnrollmentHandlers(
 				 * plaintext with the copy that was there before, which is this rollback's
 				 * goal reached by the other door. Only when neither worked is the export
 				 * still sitting at the destination.
+				 *
+				 * **But not on top of a file this export did not write.** The ownership
+				 * check above stops the *removal* from deleting a stranger's file and
+				 * this half went on overwriting one, which is the same loss by the other
+				 * door — a rename replaces silently. So the restore is skipped when
+				 * something is at the destination and it is not ours, and the set-aside
+				 * copy is then named as stranded, which is exactly what it is.
 				 */
-				const putBack = replacing
-					? await rename(kept, destination).then(
-							() => true,
-							() => false
-						)
-					: false;
+				const foreignAtDestination = atDestination !== undefined && !stillOurFile;
+				const putBack =
+					replacing && !foreignAtDestination
+						? await rename(kept, destination).then(
+								() => true,
+								() => false
+							)
+						: false;
 
 				const left: string[] = [];
-				if (!tookItBack && !putBack) {
+				// Only when what is sitting there is this export's own plaintext. A
+				// file somebody else wrote is not something to warn this user about,
+				// and naming it would send them to delete it.
+				if (!tookItBack && !putBack && !foreignAtDestination) {
 					left.push(basename(destination));
 				}
 				if (replacing && !putBack) {

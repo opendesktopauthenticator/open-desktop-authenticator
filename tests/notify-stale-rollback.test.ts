@@ -230,3 +230,105 @@ describe('a delivery attempt that outlives the account state it belonged to', ()
 		expect(h.toasts).toHaveLength(2);
 	});
 });
+
+/**
+ * **The two rollbacks that were still comparing values, or nothing at all.**
+ *
+ * `seen` was keyed by attempt. The unreadable high-water mark was rolled back by
+ * comparing the number — "is it still what I wrote" — which matches whenever a
+ * later poll records the same count, and a count that has not moved is the
+ * ordinary case rather than a rare one. The sign-in flag was cleared with no
+ * check whatsoever.
+ */
+describe('the rollbacks that were not keyed by attempt', () => {
+	it('does not undo an unreadable count a later poll recorded as its own', async () => {
+		const h = harness();
+		h.notifier.pending(ID, NAME, [], 0, 'full');
+
+		// Poll 1 raises the count to 4. Its toast is in flight.
+		h.notifier.pending(ID, NAME, [], 4, 'full');
+		expect(h.toasts).toHaveLength(1);
+
+		// Poll 2 finds the same count, records it as its own, and says nothing —
+		// which is right, an unchanged count is not news.
+		h.notifier.pending(ID, NAME, [], 4, 'full');
+		expect(h.toasts).toHaveLength(1);
+
+		// Poll 1 now reports it never appeared. Comparing values, this matched.
+		await h.settle(0, false);
+
+		// The count still has not moved, so there is still nothing to say.
+		h.notifier.pending(ID, NAME, [], 4, 'full');
+		expect(
+			h.toasts,
+			'the stale failure matched a later poll by value and rolled the mark back below it, so an ' +
+				'unchanged count was announced as a fresh rise'
+		).toHaveLength(1);
+	});
+
+	/**
+	 * And the direction that loses an alert rather than duplicating one: rolling
+	 * the mark back to a figure *higher* than the current count means the next
+	 * genuine rise is already below the mark and is never announced.
+	 */
+	it('does not raise the mark past a rise a later poll is waiting to report', async () => {
+		const h = harness();
+		h.notifier.pending(ID, NAME, [], 0, 'full');
+
+		// Up to 9, toast in flight.
+		h.notifier.pending(ID, NAME, [], 9, 'full');
+		// Most of them are resolved; the count drops, which is deliberately silent.
+		h.notifier.pending(ID, NAME, [], 1, 'full');
+		expect(h.toasts).toHaveLength(1);
+
+		// The first toast reports failure. Restoring blind puts the mark back to 0
+		// — but comparing by value would have matched nothing here, so this is the
+		// case that needs ownership rather than a value check to get right.
+		await h.settle(0, false);
+
+		// A genuine rise, well below the old high-water mark of 9.
+		h.notifier.pending(ID, NAME, [], 4, 'full');
+		expect(
+			h.toasts,
+			'a rise from 1 to 4 was measured against a mark left over from a poll whose toast nobody ' +
+				'saw, so nothing was said about it'
+		).toHaveLength(2);
+	});
+
+	it('does not clear a sign-in notice a later attempt delivered', async () => {
+		const h = harness();
+		h.notifier.pending(ID, NAME, [], 0, 'full');
+
+		// The session expires. The first notice is in flight.
+		h.notifier.signInNeeded(ID, NAME);
+		expect(h.toasts).toHaveLength(1);
+
+		// A poll succeeds, clearing the flag, and it expires again — this one is
+		// delivered.
+		h.notifier.pollSucceeded(ID);
+		h.notifier.signInNeeded(ID, NAME);
+		expect(h.toasts).toHaveLength(2);
+		await h.settle(1, true);
+
+		// Only now does the first report failure.
+		await h.settle(0, false);
+
+		h.notifier.signInNeeded(ID, NAME);
+		expect(
+			h.toasts,
+			'the stale failure cleared a flag a delivered notice owned, so the user was told to sign ' +
+				'in again a second time'
+		).toHaveLength(2);
+	});
+
+	/* And the behaviour the sign-in rollback exists for still works. */
+	it('still repeats a sign-in notice that never arrived', async () => {
+		const h = harness();
+		h.notifier.pending(ID, NAME, [], 0, 'full');
+		h.notifier.signInNeeded(ID, NAME);
+		await h.settle(0, false);
+
+		h.notifier.signInNeeded(ID, NAME);
+		expect(h.toasts, 'a notice nobody saw was recorded as told').toHaveLength(2);
+	});
+});
