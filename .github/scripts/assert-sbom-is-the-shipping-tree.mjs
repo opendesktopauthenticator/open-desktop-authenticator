@@ -182,6 +182,22 @@ while (queue.length > 0) {
 
 const allowed = new Set();
 const required = new Set();
+/**
+ * How many places each package is installed, which is how many records the
+ * document is entitled to.
+ *
+ * Not a flat "no duplicates" rule, and the difference matters. npm genuinely
+ * installs one version of one package at two paths when a nested dependency
+ * pins what the top level already has — this tree has none today, and a tree
+ * with one is not a defect. A cataloger reading the lockfile emits a record per
+ * entry, so the honest expectation is the count, not the absence.
+ *
+ * Derived here rather than assumed to be 1, because the version that assumed it
+ * would have failed a correct document on the first day npm produced that shape,
+ * and a release gate that goes red for being right is a release gate people
+ * learn to delete.
+ */
+const installs = new Map();
 for (const [path, mandatory] of reached) {
 	const entry = entries[path];
 	// An aliased install carries its real name in the entry; everything else is
@@ -189,6 +205,7 @@ for (const [path, mandatory] of reached) {
 	const name = entry.name ?? path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
 	const id = `${name}@${version(entry.version)}`;
 	allowed.add(id);
+	installs.set(id, (installs.get(id) ?? 0) + 1);
 	if (mandatory) {
 		required.add(id);
 	}
@@ -460,14 +477,33 @@ for (const entry of packages) {
 }
 
 const duplicated = [...records]
-	.filter(([, count]) => count > 1)
-	.map(([id, count]) => `${id} (${count} times)`)
+	.filter(([id, count]) => count > (installs.get(id) ?? 1))
+	.map(([id, count]) => `${id} (${count} records, installed in ${installs.get(id) ?? 1} place(s))`)
 	.sort();
 
 const extra = [...catalogued].filter((id) => !allowed.has(id)).sort();
 const missing = [...required].filter((id) => !catalogued.has(id)).sort();
 const problems = [];
 
+/*
+ * **An empty npm inventory is one specific mistake, so it says which.**
+ *
+ * Without this the failure is "the SBOM omits 40 packages", which reads as a
+ * packaging problem and sends the next reader to the wrong file. There is only
+ * one way a scan of this tree catalogues nothing: the cataloger selection
+ * matched no cataloger. It was `javascript`, a tag; it is now
+ * `javascript-lock-cataloger`, a name — both are valid selector forms, and a
+ * name that ever stops existing selects nothing at all rather than erroring.
+ */
+if (catalogued.size === 0) {
+	problems.push(
+		`the SBOM catalogues no npm packages at all, so the scan produced no inventory rather than ` +
+			`a wrong one. The first thing to check is the cataloger selection written by ` +
+			`assemble-shipping-tree.mjs into the scanner config: a cataloger name that matches ` +
+			`nothing selects nothing, and every other check below will then report the whole tree ` +
+			`as missing.`
+	);
+}
 if (extra.length > 0) {
 	problems.push(
 		`the SBOM lists ${extra.length} package(s) that ${lockfilePath} says this application does not ship: ${extra.join(', ')}`
@@ -483,10 +519,11 @@ if (missing.length > 0) {
 }
 if (duplicated.length > 0) {
 	problems.push(
-		`the SBOM lists ${duplicated.length} package(s) more than once: ${duplicated.join(', ')}. ` +
-			'A published SBOM is read by tools that count, and one record per component is what ' +
-			'those tools are entitled to. This is what two catalogers answering about the same tree ' +
-			'looks like — see the cataloger selection in assemble-shipping-tree.mjs.'
+		`the SBOM lists ${duplicated.length} package(s) more often than they are installed: ` +
+			`${duplicated.join(', ')}. A published SBOM is read by tools that count, and one record ` +
+			'per install location is what those tools are entitled to. This is what two catalogers ' +
+			'answering about the same tree looks like — see the cataloger selection in ' +
+			'assemble-shipping-tree.mjs.'
 	);
 }
 if (foreign.size > 0) {
