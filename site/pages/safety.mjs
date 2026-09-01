@@ -293,9 +293,9 @@ export const verify = {
 
 			<h2>2. Compute the hash of what you downloaded</h2>
 			<h3>Windows (PowerShell)</h3>
-			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-1.0.0-x64-setup.exe</code></pre>
+			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-${s.version}-x64-setup.exe</code></pre>
 			<h3>Linux</h3>
-			<pre><code>sha256sum open-desktop-authenticator-1.0.0-x86_64.AppImage</code></pre>
+			<pre><code>sha256sum open-desktop-authenticator-${s.version}-x86_64.AppImage</code></pre>
 			<h3>macOS</h3>
 			<p>
 				macOS ships <code>shasum</code> rather than <code>sha256sum</code>, so the Linux
@@ -303,7 +303,7 @@ export const verify = {
 				macOS build of this application — this is here for someone checking a download
 				on a Mac before moving it to the machine that will run it.
 			</p>
-			<pre><code>shasum -a 256 open-desktop-authenticator-1.0.0-x86_64.AppImage</code></pre>
+			<pre><code>shasum -a 256 open-desktop-authenticator-${s.version}-x86_64.AppImage</code></pre>
 			<p>Or check everything you downloaded at once, from that folder (Linux):</p>
 			<pre><code>sha256sum --check --ignore-missing SHA256SUMS.txt</code></pre>
 			<p>On macOS, the same thing:</p>

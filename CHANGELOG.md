@@ -10,6 +10,77 @@ public post-mortem — what broke, when we detected it, and what we changed.
 
 ## [Unreleased]
 
+## [1.5.0] — notifications, a browser, and recovery you can trust
+
+Two things you will notice, and a great deal of work on the paths you should
+never have to think about.
+
+### Added
+
+- **Desktop notifications for confirmations.** Off by default, and the setting
+  says what a toast can contain before you turn it on. Clicking one opens that
+  account's confirmations directly — including when the vault has locked and
+  reloaded the window in between, which is the case a notification is least
+  useful if it loses. You can choose how much detail a toast carries; the
+  quietest setting says only that something is waiting.
+- **A browser inside the application**, with tabs and an address bar that
+  belongs to the application rather than to the page. Steam pages you need to
+  reach — trade offers, market listings, account settings — open here instead of
+  in your ordinary browser, so a session opened for one account cannot be
+  reused by another.
+- **A routing choice per window.** Each browser window can use the account's
+  proxy, a different one, or go direct, and the choice is shown rather than
+  assumed. Direct is offered honestly: a shared proxy collects rate limits and
+  challenges a home connection never sees, so the routed window is sometimes
+  the one that will not load.
+- **Require proxies**, a vault-wide rule for people who want the stronger
+  version: a configured proxy is the only way out, the Direct button does not
+  exist, and the update check is refused. Enforced in the main process, not by
+  hiding a control.
+- An activity entry for a Steam session that has expired, so an account that
+  quietly stopped working says so instead of simply never showing anything.
+
+### Changed
+
+- **Steam's answers are reported as what they are.** A dozen messages named a
+  specific cause for a reply that did not carry one — a missing phone number, a
+  mistyped code, an authenticator "in the Steam mobile app" — and sent people to
+  do things that could not help. Where the cause is known it is still named;
+  where it is a likelihood it is now written as one.
+- **An operation Steam may already have carried out is a dead end, not a
+  failure you can retry.** Adding, activating and removing an authenticator all
+  reach Steam before anything can go wrong with the answer. When the reply is
+  lost, the application says so, stops offering the action, and remembers that
+  it did — across closing the screen and across a restart — until you tell it
+  you have checked the account. Where Steam is known to have acted, it says
+  that instead of pretending to be unsure.
+- The tray menu describes the application as it is now rather than as it was
+  when it started, on every platform.
+
+### Fixed
+
+- A passphrase change that could not finish no longer leaves the file and the
+  running session disagreeing about which passphrase opens it.
+- The backup beside your vault is re-sealed under the new passphrase when you
+  change it, is verified before the old one is replaced, and is never removed
+  on the strength of a repair that did not work.
+- A recovery file is written whole and durably, cannot overwrite a previous
+  authenticator's, and is completed on the next start if the machine stopped
+  half way through writing it.
+- Locking the vault now ends every Steam session, browser session, cached token
+  and half-finished sign-in it was holding, rather than most of them.
+- Notifications no longer lose or duplicate work when Steam is slow, and a
+  poll that fails no longer discards state belonging to a newer one.
+
+### Security
+
+- Enrolling an account through a proxy asks for that address to be approved
+  before a password travels down it. There is no stored account to compare
+  against on that path, which is exactly why it needed a gate.
+- The installer no longer carries test harnesses, and every dependency that
+  ships now carries the licence text its licence requires — including the three
+  that ship no licence file of their own.
+
 ## [1.0.0] — first packaged build
 
 The first version that exists as an installable file rather than as source.
