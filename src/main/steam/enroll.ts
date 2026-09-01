@@ -264,16 +264,36 @@ function describeStatus(status: number): string {
 			 * exactly that, and `AddAuthenticator` offers "Move it here instead" on
 			 * the same screen this error lands on.
 			 */
+			/*
+			 * **Steam does not say where it is.** EResult 29 here means one is
+			 * already attached, and nothing in the reply distinguishes the Steam
+			 * mobile app from SDA, from this application on another machine, or from
+			 * anything else holding the same secrets. Naming the mobile app sends a
+			 * user who has none of it installed looking for a screen they cannot
+			 * reach, and the advice that follows is the same either way.
+			 */
 			return (
-				'This account already has an authenticator in the Steam mobile app. Use Move an ' +
+				'This account already has an authenticator attached - in the Steam mobile app, in another ' +
+				'application like this one, or on another machine. Use Move an ' +
 				'authenticator instead of removing it: a transfer keeps Steam Guard on the account ' +
 				'throughout and carries a much shorter trading restriction than removing and adding ' +
 				'again, which costs fifteen days.'
 			);
 		case ERESULT.noMatch:
+			/*
+			 * **The likeliest cause, said as a likelihood.** EResult 9 is `NoMatch`,
+			 * a general "nothing matched" that Steam reuses widely; on this call it
+			 * is usually a missing or unconfirmed phone number, and it is worth
+			 * naming, because the alternative is a user with no idea what to do
+			 * next. Stating it as the cause is a different thing: someone whose
+			 * phone *is* confirmed then goes and re-verifies a number that was never
+			 * the problem, and concludes the application is broken when it does not
+			 * help.
+			 */
 			return (
-				'Steam needs a confirmed phone number on this account before an authenticator can be ' +
-				'added. Add and verify one in Steam, then try again.'
+				'Steam turned the request down without saying why (EResult 9). The usual cause is an ' +
+				'account with no confirmed phone number - check that in Steam first, and if there is ' +
+				'one on the account already, try again in a few minutes.'
 			);
 		case ERESULT.rateLimited:
 			return 'Steam is rate-limiting this account. Wait a while before trying again.';
@@ -282,7 +302,46 @@ function describeStatus(status: number): string {
 		case ERESULT.fail:
 			return 'Steam refused to add an authenticator, without saying why. Try again in a few minutes.';
 		default:
-			return `Steam refused to add an authenticator (EResult ${status}).`;
+			/*
+			 * Nothing here knows what this status means, so it says that rather than
+			 * translating it into a refusal. What *is* known is the outcome: the
+			 * reply carried a non-ok status and no secrets, so no authenticator was
+			 * added by it.
+			 */
+			return (
+				`Steam answered with a status this application does not recognise (EResult ${status}). ` +
+				'No authenticator was added.'
+			);
+	}
+}
+
+/**
+ * The same thing for an activation reply, and for the same reason.
+ *
+ * Every non-ok status here became "Steam did not accept the activation code.
+ * Check the code and try again" - including rate limiting, where Steam never
+ * looked at the code, and a malformed request, which is this application's
+ * fault. A user reading that retypes a correct code until Steam stops answering
+ * at all.
+ */
+function describeActivationStatus(status: number): string {
+	switch (status) {
+		case ERESULT.rateLimited:
+			return (
+				'Steam is rate-limiting this account and did not look at the code at all. Wait a few ' +
+				'minutes, then use the newest code.'
+			);
+		case ERESULT.invalidParam:
+			return (
+				'Steam rejected the activation request as malformed. This is a bug in this app, not ' +
+				'something you did.'
+			);
+		default:
+			return (
+				`Steam did not accept the activation (EResult ${status}). If the code was mistyped, ` +
+				'try the newest one - they expire quickly, and on an account with no phone number ' +
+				'they arrive by email rather than by text.'
+			);
 	}
 }
 
@@ -436,12 +495,7 @@ export async function finalizeEnrollment(
 	}
 
 	if (body.status !== undefined && body.status !== ERESULT.ok) {
-		throw new EnrollmentError(
-			`Steam did not accept the activation code (EResult ${body.status}). Check the code and ` +
-				'try again — it expires quickly, and on an account with no phone number it arrives ' +
-				'by email rather than by text.',
-			false
-		);
+		throw new EnrollmentError(describeActivationStatus(body.status), false);
 	}
 
 	/*
@@ -535,15 +589,27 @@ export async function removeAuthenticator(
 		throw new EnrollmentError(UNCERTAIN.remove, true, true);
 	}
 
-	// A wrong revocation code is by far the likeliest cause, and it is worth
-	// naming: the alternative is a user concluding the feature is broken and
-	// trying repeatedly with the same wrong code.
+	/*
+	 * **What the reply proves, and what it only suggests.**
+	 *
+	 * `revocation_attempts_remaining` is Steam counting down attempts against a
+	 * code it checked and rejected, so naming the code there is a statement about
+	 * something that was measured. A bare `success: false` is not: Steam refuses
+	 * this call for reasons that have nothing to do with the code - rate limiting,
+	 * an account restriction, a recent password change - and telling that user to
+	 * check it character by character sends them round a loop that cannot succeed
+	 * while the real cause goes unmentioned.
+	 *
+	 * A wrong code is still the likeliest cause and still worth naming. As a
+	 * likelihood.
+	 */
 	throw new EnrollmentError(
 		body.revocation_attempts_remaining !== undefined
 			? `Steam did not accept that revocation code. ${body.revocation_attempts_remaining} ` +
 					'attempts remain before Steam stops accepting it at all.'
-			: 'Steam did not accept that revocation code. Check it character by character — it is ' +
-					'the code beginning with R that you were told to write down.',
+			: 'Steam refused to remove the authenticator and did not say why. The likeliest cause is ' +
+					'a mistyped revocation code - it is the one beginning with R that you were told to ' +
+					'write down - and if it is right, wait a few minutes and try again.',
 		false
 	);
 }
