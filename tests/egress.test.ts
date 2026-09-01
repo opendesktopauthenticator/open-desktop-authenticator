@@ -2643,3 +2643,93 @@ describe('proxy credentials that could survive redaction', () => {
 		).toEqual([]);
 	});
 });
+
+/**
+ * **Whether the request went is the whole of what `enroll.ts` needs to know.**
+ *
+ * `AddAuthenticator`, `FinalizeAddAuthenticator` and `RemoveAuthenticator` all
+ * change a Steam account. When one of them fails, the only question that matters
+ * is whether Steam might have acted — and the transport is the only thing that
+ * can answer it.
+ *
+ * It answered wrongly for the case the distinction exists for. Every rejection
+ * marked itself by hand and the timeout was missed: a timeout happens by
+ * definition *after* `handle.end()`, and it reported `sent: false`, so a real
+ * lost reply on an irreversible call was passed through as an ordinary failure
+ * with no warning and an offer to try again.
+ *
+ * It is derived from `handle.end()` now, so a handler added later cannot be the
+ * one somebody forgot to mark.
+ */
+describe('whether a failed request had already gone', () => {
+	const direct = { steamId64: '76561198000000001' };
+	const routed = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.1:1080' };
+
+	it('says it had, when the answer never came', async () => {
+		vi.useFakeTimers();
+		try {
+			const { electron } = fakeElectron({ neverSettles: true });
+			const factory = new SteamTransportFactory(electron);
+			const transport = await factory.forAccount(direct);
+
+			const failing = transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+			const settled = failing.then(
+				() => undefined,
+				(err: unknown) => err
+			);
+
+			await vi.advanceTimersByTimeAsync(60_000);
+			const thrown = (await settled) as EgressError;
+
+			expect(thrown, 'the request did not time out at all').toBeInstanceOf(EgressError);
+			expect(thrown.message).toMatch(/did not answer in time/);
+			expect(
+				thrown.sent,
+				'a timeout was reported as though the request had never gone, so an irreversible Steam ' +
+					'call loses its "may already have happened" warning'
+			).toBe(true);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('says it had not, when the endpoint was refused before anything was built', async () => {
+		const { electron, requests } = fakeElectron({});
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(direct);
+
+		const thrown = (await transport({
+			url: 'https://not-steam.example/x',
+			method: 'GET',
+			cookie: ''
+		}).then(
+			() => undefined,
+			(err: unknown) => err
+		)) as EgressError;
+
+		expect(thrown).toBeInstanceOf(EgressError);
+		expect(requests, 'a request was built for an endpoint that should have been refused').toEqual(
+			[]
+		);
+		expect(
+			thrown.sent,
+			'a refusal in which no request was ever created claimed the bytes had gone'
+		).toBe(false);
+	});
+
+	it('says it had not, when the routing check refuses', async () => {
+		// The proxy is set but Chromium reports a direct route: nothing is sent.
+		const { electron, requests } = fakeElectron({ resolvesTo: 'DIRECT' });
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(routed);
+
+		const thrown = (await transport({ url: STEAM_URL, method: 'GET', cookie: '' }).then(
+			() => undefined,
+			(err: unknown) => err
+		)) as EgressError;
+
+		expect(thrown).toBeInstanceOf(EgressError);
+		expect(requests).toEqual([]);
+		expect(thrown.sent).toBe(false);
+	});
+});

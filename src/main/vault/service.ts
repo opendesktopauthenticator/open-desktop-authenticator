@@ -218,13 +218,53 @@ export class VaultService {
 		if (this.reconcileFailed) {
 			return false;
 		}
-		const owed = readRotationJournal(this.file);
-		if (!owed) {
+		const journal = readRotationJournal(this.file);
+		if (journal.state === 'none') {
+			this.backupSuspect = false;
 			return false;
 		}
+		if (journal.state === 'unreadable') {
+			/*
+			 * A rotation was interrupted and what it left cannot be read, so the
+			 * backup on disk may still open with the retired passphrase and nothing
+			 * here can put that right. It is not offered — see `backupSuspect`.
+			 */
+			this.backupSuspect = true;
+			return false;
+		}
+
+		/**
+		 * **Which side of the gap the crash happened on.**
+		 *
+		 * The journal is written before either write, so its presence means only
+		 * "a rotation started". A crash *before* the vault write leaves the file
+		 * under the OLD key — and installing the journal's backup then would put a
+		 * new-key copy beside an old-key vault, which is a backup the user's
+		 * passphrase cannot open.
+		 *
+		 * The envelope says which. Both were sealed under the same fresh salt in
+		 * the same rotation, so the vault carrying that salt is exactly the
+		 * statement "the main write landed". Nothing else has to be recorded.
+		 */
+		let vaultKdf;
 		try {
-			writeBackupEnvelope(this.file, owed);
+			vaultKdf = readEnvelope(this.file).kdf;
+		} catch {
+			this.backupSuspect = true;
+			return false;
+		}
+		if (vaultKdf.salt !== journal.backup.kdf.salt) {
+			// The rotation never reached the vault. Nothing is owed, and the backup
+			// beside it is the one that belongs to the key still in use.
+			clearRotationJournal(this.file);
+			this.backupSuspect = false;
+			return false;
+		}
+
+		try {
+			writeBackupEnvelope(this.file, journal.backup);
 		} catch (err) {
+			this.backupSuspect = true;
 			this.reconcileFailed = true;
 			// Left on disk deliberately: the backup is still readable with the
 			// retired passphrase and the next start must try again rather than
@@ -235,8 +275,25 @@ export class VaultService {
 		}
 		clearRotationJournal(this.file);
 		this.backupCache = undefined;
+		this.backupSuspect = false;
 		return true;
 	}
+
+	/**
+	 * Whether the backup on disk may still open with a passphrase that was
+	 * retired.
+	 *
+	 * Set when an interrupted rotation cannot be finished — the journal is
+	 * unreadable, or the write to replace the backup failed. The backup file is
+	 * still *there* and still parses, so every check that asks "is there a
+	 * backup" said yes and the unlock screen went on offering it. Restoring it
+	 * would install a vault the retired passphrase opens, which is the state the
+	 * whole rotation exists to leave behind.
+	 *
+	 * Not persisted: the journal on disk is the durable record, and this is only
+	 * what this process has already learned from it.
+	 */
+	private backupSuspect = false;
 
 	exists(): boolean {
 		return vaultExists(this.file);
@@ -1002,6 +1059,14 @@ export class VaultService {
 		// Before answering, so nobody is offered a backup an interrupted rotation
 		// had already replaced — that one opens with the retired passphrase.
 		this.reconcile();
+		if (this.backupSuspect) {
+			/*
+			 * The rotation could not be finished, so the file on disk is one the
+			 * retired passphrase may still open. It parses and it is there, which is
+			 * why this used to answer yes; being there is not the question.
+			 */
+			return undefined;
+		}
 		let key: string;
 		try {
 			const stat = statSync(`${this.file}.bak`);
@@ -1067,6 +1132,13 @@ export class VaultService {
 		// rotation had already replaced would install one the retired passphrase
 		// opens, which is the state the rotation existed to leave behind.
 		this.reconcile();
+		if (this.backupSuspect) {
+			throw new VaultServiceError(
+				'the backup cannot be restored: a passphrase change was interrupted and could not be ' +
+					'finished, so the copy on disk may still open with the passphrase you replaced. ' +
+					'Restoring it would undo that change. Your vault itself is unaffected.'
+			);
+		}
 		const envelope = readBackupEnvelope(this.file);
 		if (!envelope) {
 			throw new VaultServiceError('there is no backup vault to restore from');

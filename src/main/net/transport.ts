@@ -819,6 +819,22 @@ export class SteamTransportFactory {
 				return;
 			}
 
+			/**
+			 * **Whether any of this request has left the machine.**
+			 *
+			 * Derived from one fact — `handle.end()` has been called — rather than
+			 * decided at each rejection. It was decided at each rejection, and the
+			 * timeout was missed: a timeout happens by definition *after* the request
+			 * has gone, and it reported `sent: false`, so `enroll.ts` passed a real
+			 * lost-reply on an irreversible Steam call straight through as an
+			 * ordinary failure. That is the exact case the whole "committed, reply
+			 * unknown" distinction exists for, defeated by one unmarked constructor.
+			 *
+			 * Every rejection below reads this, so a handler added later cannot be
+			 * the one somebody forgot to mark.
+			 */
+			let sent = false;
+
 			const handle = this.electron.request({
 				url: request.url,
 				method: request.method,
@@ -908,14 +924,17 @@ export class SteamTransportFactory {
 				}
 				finish(() =>
 					reject(
-						new EgressError('Steam did not answer in time; the connection or proxy may be down.')
+						new EgressError(
+							'Steam did not answer in time; the connection or proxy may be down.',
+							sent
+						)
 					)
 				);
 			}, REQUEST_TIMEOUT_MS);
 			timer.unref?.();
 
 			handle.on('error', (error) =>
-				finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), true)))
+				finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), sent)))
 			);
 
 			handle.on('response', (response) => {
@@ -952,14 +971,14 @@ export class SteamTransportFactory {
 							// Already finished or never connected. Nothing to stop.
 						}
 						finish(() =>
-							reject(new EgressError('Steam sent an implausibly large response.', true))
+							reject(new EgressError('Steam sent an implausibly large response.', sent))
 						);
 						return;
 					}
 					chunks.push(bytes);
 				});
 				response.on('error', (error) =>
-					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), true)))
+					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), sent)))
 				);
 				response.on('end', () =>
 					finish(() => {
@@ -981,6 +1000,13 @@ export class SteamTransportFactory {
 				handle.write(request.body.toString());
 			}
 			handle.end();
+			/*
+			 * After `end`, because that is the moment the request is Chromium's and
+			 * an answer becomes something that can be lost rather than never asked
+			 * for. Everything that rejects above this line rejected before a byte
+			 * went; everything after it may not have.
+			 */
+			sent = true;
 		});
 	}
 }

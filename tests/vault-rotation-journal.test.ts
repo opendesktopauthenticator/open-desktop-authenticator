@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -232,5 +232,104 @@ describe('an interrupted rotation whose backup still cannot be written', () => {
 		).toBe(true);
 		// And a fresh process does try again.
 		expect(service().reconcile()).toBe(true);
+	});
+});
+
+/**
+ * **The journal says a rotation started, not which side of the gap it stopped
+ * on.**
+ *
+ * It is written before either write. A crash *before* the vault write leaves the
+ * file under the OLD key — and installing the journal's backup then puts a
+ * new-key copy beside an old-key vault, which is a backup the user's passphrase
+ * cannot open. Reconciliation installed it in both cases.
+ *
+ * The envelopes decide it: both were sealed under the same fresh salt in the same
+ * rotation, so a vault carrying that salt is exactly the statement "the main
+ * write landed".
+ */
+describe('a rotation that stopped before the vault was written', () => {
+	it('is discarded rather than finished', async () => {
+		const vault = await vaultWithAnAccount();
+		const before = readFileSync(file, 'utf8');
+
+		// A journal for a rotation whose vault write never happened: the salt in it
+		// belongs to a key nothing on disk was sealed with.
+		writeFileSync(
+			`${file}.rotating`,
+			readFileSync(`${file}.bak`, 'utf8').replace(/"salt": "[^"]*"/, '"salt": "b3RoZXItc2FsdA=="')
+		);
+
+		expect(
+			service().reconcile(),
+			'a backup was installed for a rotation that never reached the vault, so the copy on disk ' +
+				'is one the vault passphrase cannot open'
+		).toBe(false);
+		expect(existsSync(`${file}.rotating`), 'the journal was left to be replayed forever').toBe(
+			false
+		);
+		expect(readFileSync(file, 'utf8'), 'the vault itself was touched').toBe(before);
+		void vault;
+	});
+});
+
+/**
+ * **A backup that cannot be vouched for is not offered.**
+ *
+ * The file is still there and still parses, which is why every check said yes.
+ * Being there is not the question: if the rotation could not be finished, that
+ * file may still open with the passphrase the user replaced, and restoring it
+ * would undo the change they made.
+ */
+describe('a backup an interrupted rotation could not replace', () => {
+	it('is not offered while the write keeps failing', async () => {
+		await interruptedRotation();
+
+		const vault = service();
+		state.refuseBackupWrite = true;
+		const offered = vault.backupAvailable();
+		state.refuseBackupWrite = false;
+
+		expect(
+			offered,
+			'the unlock screen offered a backup that still opens with the retired passphrase'
+		).toBeUndefined();
+	});
+
+	it('cannot be restored while the write keeps failing', async () => {
+		await interruptedRotation();
+
+		const vault = service();
+		state.refuseBackupWrite = true;
+		await expect(
+			vault.restoreFromBackup(OLD),
+			'restoring installed a vault the replaced passphrase opens, undoing the rotation'
+		).rejects.toThrow(/interrupted/);
+		state.refuseBackupWrite = false;
+	});
+
+	/**
+	 * And the same when what the rotation left cannot be read at all — the shape a
+	 * crash produces alongside the crash the journal is for. This read as "no
+	 * rotation was interrupted", which is the worst of the three answers.
+	 */
+	it('is not offered when the journal itself is truncated', async () => {
+		await interruptedRotation();
+		writeFileSync(`${file}.rotating`, '{ "version": 1, "kdf');
+
+		const vault = service();
+		expect(
+			vault.backupAvailable(),
+			'a truncated journal read as no journal, so the backup went on being offered'
+		).toBeUndefined();
+		await expect(vault.restoreFromBackup(OLD)).rejects.toThrow(/interrupted/);
+	});
+
+	/* And once it is finished, the backup is offered again. */
+	it('is offered again once the rotation is finished', async () => {
+		await interruptedRotation();
+		const vault = service();
+		expect(vault.reconcile()).toBe(true);
+		expect(vault.backupAvailable()).toBeDefined();
 	});
 });

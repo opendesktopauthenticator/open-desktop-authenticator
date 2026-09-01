@@ -274,16 +274,42 @@ export function writeRotationJournal(file: string, envelope: Envelope): void {
  * work that cannot be completed, and refusing to open the vault over it would
  * turn a lost backup into a lost vault.
  */
-export function readRotationJournal(file: string): Envelope | undefined {
+export function readRotationJournal(file: string): RotationJournal {
 	if (!existsSync(journalPath(file))) {
-		return undefined;
+		return { state: 'none' };
 	}
 	try {
-		return envelopeSchema.parse(JSON.parse(readFileSync(journalPath(file), 'utf8')));
+		return {
+			state: 'owed',
+			backup: envelopeSchema.parse(JSON.parse(readFileSync(journalPath(file), 'utf8')))
+		};
 	} catch {
-		return undefined;
+		/*
+		 * **Unreadable is not absent.**
+		 *
+		 * It used to return `undefined` for both, so a truncated journal — the exact
+		 * thing a crash mid-rotation produces, alongside the crash the journal is
+		 * for — read as "no rotation was interrupted". The backup then went on being
+		 * offered and restored while it still opened with the retired passphrase,
+		 * which is the whole of what the journal exists to prevent.
+		 *
+		 * Nothing here can finish that rotation. What it can do is stop the rest of
+		 * the application acting on a backup it knows to be untrustworthy.
+		 */
+		return { state: 'unreadable' };
 	}
 }
+
+/**
+ * What the journal says about the last rotation.
+ *
+ *   - `none`: no rotation was interrupted.
+ *   - `owed`: one was, and this is the backup it still has to write.
+ *   - `unreadable`: one was, and what it left cannot be read. The backup on disk
+ *     may still open with a retired passphrase and nothing can put that right.
+ */
+export type RotationJournal =
+	{ state: 'none' } | { state: 'owed'; backup: Envelope } | { state: 'unreadable' };
 
 /** The rotation is finished, one way or another. */
 export function clearRotationJournal(file: string): void {
