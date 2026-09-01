@@ -27,6 +27,7 @@
     "tickets/*.d.mts",
     "site/*.d.mts",
     "site/pages/*.d.mts",
-    "store-identity.d.mts"
+    "store-identity.d.mts",
+    "electron-builder.config.d.mts"
   ]
 }

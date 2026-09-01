@@ -1,6 +1,4 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 /*
  * `resolution-mode` says to resolve the type the way the runtime `import()`
@@ -223,18 +221,31 @@ describe('exclusions this cannot classify', () => {
  * describing a configuration that no longer exists.
  */
 describe('the exclusions the shipped build really has', () => {
-	it('are read out of the real builder config', () => {
-		const config = readFileSync(join(__dirname, '..', 'electron-builder.config.mjs'), 'utf8');
-		const match = /files:\s*\[([\s\S]*?)\]/.exec(config);
-		expect(match, 'electron-builder.config.mjs no longer has a files array').not.toBeNull();
+	it('are read out of the real builder config', async () => {
+		/*
+		 * **Imported, not parsed.**
+		 *
+		 * This used to pull the entries out of the source text by pairing single
+		 * quotes, and every attempt to make that robust made it worse. An
+		 * apostrophe in a comment — "the renderer's bundle" — pairs with the next
+		 * one and swallows every entry between them. Stripping comments first with
+		 * a regular expression is worse still: `/*` inside the glob
+		 * `!node_modules/{react,react-dom,scheduler}/` + `**` opens a comment that
+		 * runs to the next `*` + `/` anywhere in the file.
+		 *
+		 * `files` is a value in a module. The SBOM guard itself imports the config
+		 * and reads it, for the same reason: what electron-builder acts on is the
+		 * array, and a comment or a reordering must not be able to change what this
+		 * believes.
+		 */
+		const config = await import('../electron-builder.config.mjs');
+		const entries = config.default.files;
 
-		const entries = [...(match?.[1] ?? '').matchAll(/'([^']*)'/g)].map((hit) => hit[1] as string);
-		expect(entries.length, 'no files entries were parsed, so this asserts nothing').toBeGreaterThan(
-			0
-		);
+		expect(entries, 'electron-builder.config.mjs exports no files array').toBeInstanceOf(Array);
+		expect(entries?.length, 'the files array is empty, so this asserts nothing').toBeGreaterThan(5);
 
 		expect(
-			[...excludedPackagesFrom(entries)].sort(),
+			[...excludedPackagesFrom(entries ?? [])].sort(),
 			'the packages the installer leaves out have changed, so the SBOM guard now describes a ' +
 				'different build than the one that ships — update this list deliberately'
 		).toEqual(EXCLUDED);

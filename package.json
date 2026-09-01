@@ -2,7 +2,7 @@
   "name": "open-desktop-authenticator",
   "version": "1.0.0",
   "private": true,
-  "description": "Open Desktop Authenticator \u2014 an open-source desktop authenticator for Steam, by MASTERPANEL LLC. A maintained successor to SDA.",
+  "description": "Open Desktop Authenticator — an open-source desktop authenticator for Steam, by MASTERPANEL LLC. A maintained successor to SDA.",
   "license": "MIT",
   "author": {
     "name": "MASTERPANEL LLC",
@@ -14,7 +14,7 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "npm run typecheck && electron-vite build",
+    "build": "npm run typecheck && npm run notices && electron-vite build",
     "package": "npm run build && electron-builder --config electron-builder.config.mjs --publish never",
     "package:store": "npm run build && electron-builder --config electron-builder.config.mjs --win appx --publish never",
     "start": "electron-vite preview",
@@ -27,7 +27,8 @@
     "benchmark:kdf": "node scripts/benchmark-kdf.mjs",
     "icons": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/make-icons.mjs",
     "smoke:browser": "electron-vite build && electron tools/smoke-browser-chrome.mjs && esbuild tools/smoke-browser-window.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/smoke/browser-window.js --log-level=error && electron out/smoke/browser-window.js",
-    "stress:browser": "electron-vite build && esbuild tools/stress-browser.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/stress/browser.js --log-level=error && electron out/stress/browser.js"
+    "stress:browser": "electron-vite build && esbuild tools/stress-browser.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/stress/browser.js --log-level=error && electron out/stress/browser.js",
+    "notices": "node scripts/generate-notices.mjs"
   },
   "dependencies": {
     "protobufjs": "7.6.5",
