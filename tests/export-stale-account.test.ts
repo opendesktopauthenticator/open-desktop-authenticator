@@ -1,4 +1,14 @@
-import { mkdtempSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdirSync,
+	mkdtempSync,
+	existsSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync
+} from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1504,6 +1514,81 @@ describe('two exports whose destinations are spelled differently', () => {
 			'the two spellings took two locks, ran together, and the failing export deleted the ' +
 				'successful one on its way out'
 		).toBe(true);
+	});
+
+	/**
+	 * **And the spellings `resolve` cannot settle.**
+	 *
+	 * `resolve` is textual: it collapses `.`, `..` and separators and knows
+	 * nothing about the filesystem underneath. A junction - or a symlink, which
+	 * is the same idea everywhere else - is a second name for a directory, so a
+	 * destination reached through one and the same file reached directly were two
+	 * keys for one file. The lock does not exist for the spellings that are easy
+	 * to normalise.
+	 *
+	 * The file itself does not exist yet, which is why `realpath` cannot simply be
+	 * applied to the destination. The directory does.
+	 *
+	 * **What is asserted is the serialisation itself**, not a file that survived.
+	 * The first version of this watched for the destructive outcome the test above
+	 * uses, and it passed with the canonicalisation removed: whether an unlocked
+	 * pair actually destroys anything depends on which await each lands on, and
+	 * the run happened to order them harmlessly. An interleaved write is the
+	 * property; the deletion is one thing it sometimes causes.
+	 */
+	it('serialises two exports through a directory link', async (context) => {
+		const real = join(dir, 'real');
+		const link = join(dir, 'link');
+		mkdirSync(real);
+		try {
+			if (process.platform === 'win32') {
+				execFileSync('cmd', ['/c', 'mklink', '/J', link, real], { stdio: 'pipe' });
+			} else {
+				symlinkSync(real, link, 'dir');
+			}
+		} catch {
+			// Some machines refuse to make one. Saying so is the honest outcome; the
+			// alternative is a green result that measured nothing at all.
+			context.skip();
+			return;
+		}
+
+		const accounts: Account[] = [account, other];
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [...accounts] })
+		} as unknown as VaultService;
+
+		const spellings = [join(real, 'shared.maFile'), join(link, 'shared.maFile')];
+		let next = 0;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(spellings[next++] ?? spellings[0] ?? '')
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		/*
+		 * One export writes its staged copy and renames it into place; the second
+		 * finds a file already there and sets it aside first, so run one after the
+		 * other this reads write, rename, write, rename, rename. Run together it
+		 * begins write, write - both inside the critical section at once, which is
+		 * the state every guarantee downstream is written against.
+		 */
+		const trace: string[] = [];
+		lockDuringWrite = () => trace.push('write');
+		lockDuringRename = () => trace.push('rename');
+
+		await Promise.allSettled([
+			handler(EVENT, { steamId64: account.steamId64 }),
+			handler(EVENT, { steamId64: other.steamId64 })
+		]);
+
+		expect(
+			trace.join(' '),
+			'a junction and its target took two locks for one file, so both exports were inside the ' +
+				'critical section at once'
+		).toBe('write rename write rename rename');
 	});
 });
 

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import { maFileName, toMaFile } from '../import/export';
@@ -122,14 +123,48 @@ const exportsInFlight = new Map<string, Promise<unknown>>();
  * necessary but not wrong — and doing it there is still wrong, because it would
  * make this code claim something about the filesystem that is false.
  *
- * `realpath` is deliberately not used. It resolves symlinks, which is the last
- * step of a true identity, and it fails outright when the file does not exist —
- * which is the ordinary case for an export, so it would leave the common path
- * unlocked.
+ * ## And the spellings `resolve` cannot settle
+ *
+ * `resolve` is textual. It knows nothing about junctions, symlinks, `\\?\`
+ * prefixes or 8.3 short names, so `C:/Users/x/Documents/out.maFile` and a
+ * junction pointing at that directory stayed two keys for one file — which is
+ * the defect this lock exists to prevent, reached by a shortcut somebody made
+ * years ago.
+ *
+ * `realpath` on the destination is the obvious answer and cannot be used: it
+ * fails outright when the file does not exist, which is the ordinary case for an
+ * export, so it would leave the common path unlocked. The **directory** does
+ * exist — the dialog just picked it — so the canonical form of the directory
+ * plus the name settles all of that without depending on the file.
+ *
+ * `.native` rather than plain `realpathSync`, because on Windows only the native
+ * call restores the true on-disk case and expands short names. Measured on
+ * Windows 11: it resolves a junction to its target and strips a `\\?\` prefix.
+ *
+ * **What this still does not close**: a mapped drive and its UNC form. `Z:` is a
+ * per-session mapping and `realpath` will not turn it into `\\server\share`,
+ * so those remain two keys for one file. That is what the content-based
+ * ownership check downstream is for — it is what catches a writer this map never
+ * knew about, whatever the reason it did not know.
  */
 function lockKey(path: string): string {
 	const full = resolve(path);
-	return process.platform === 'win32' || process.platform === 'darwin' ? full.toLowerCase() : full;
+	const name = basename(full);
+	let canonical = full;
+	if (name !== '') {
+		try {
+			canonical = join(realpathSync.native(dirname(full)), name);
+		} catch {
+			/*
+			 * No directory, or one that cannot be read. The resolved path is then the
+			 * best available and is still better than nothing: an export into a
+			 * directory that does not exist is about to fail anyway.
+			 */
+		}
+	}
+	return process.platform === 'win32' || process.platform === 'darwin'
+		? canonical.toLowerCase()
+		: canonical;
 }
 
 async function exclusively<T>(rawPath: string, run: () => Promise<T>): Promise<T> {
