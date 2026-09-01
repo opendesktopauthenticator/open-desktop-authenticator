@@ -103,6 +103,10 @@ function setup() {
 	}
 	for (const file of [
 		'package.json',
+		// The security page counts the shipping closure, not just the names in
+		// `dependencies`, so the build reads this too. Without it the whole
+		// selftest reported seventeen failures for one missing file.
+		'package-lock.json',
 		'LICENSE',
 		'README.md',
 		'THREAT_MODEL.md',

@@ -179,6 +179,22 @@ export default {
 		// Electron can never load, since a package is entered through its
 		// compiled entry point and a declaration is a compile-time artifact.
 		'!node_modules/**/*.d.{ts,cts,mts}',
+		// **The rest of what a published package carries and an installer does not
+		// need.** The directory list above catches `test/` and `examples/` and
+		// misses everything named differently: seven files survived it —
+		// `@protobufjs/float/bench/*`, `bytebuffer/scripts/build.js` and the same
+		// under its bundled `long`, `node-bignumber/example.js`,
+		// `protobufjs/ext/descriptor/test.js` and `protobufjs/scripts/postinstall.js`.
+		//
+		// Twelve kilobytes, so this is about what is in the archive rather than how
+		// big it is: a build script and a postinstall hook are code that ships
+		// inside a signed application and can never be reached by it, and every
+		// file in there is one more thing a reader of the SBOM has to account for.
+		//
+		// Checked against the installed tree rather than guessed: nothing matched
+		// here is an entry point, a `main`, or reachable from one.
+		'!node_modules/**/{bench,benchmark,perf,scripts}/**',
+		'!node_modules/**/{test,example,bench}.js',
 		// **React is bundled, not required.** Vite compiles the renderer into a
 		// single file that already contains React and ReactDOM; main and preload
 		// import neither. Shipping the packages as well duplicated ~7.5 MB — half

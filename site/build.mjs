@@ -140,6 +140,31 @@ export const SITE = {
 		const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'));
 		return Object.keys(pkg.dependencies ?? {}).length;
 	},
+
+	/**
+	 * How many packages are in the installer once their dependencies are counted.
+	 *
+	 * **The number above is five, and the sentence it sat in was about the whole
+	 * shipping surface.** "Every package that ships is a package someone could
+	 * compromise, so there are as close to none as the job allows" is a claim
+	 * about the supply chain, and five is the count of names typed into
+	 * `dependencies` — not of packages that ship. The closure is 39, plus the
+	 * Electron runtime.
+	 *
+	 * Five is still worth saying; it is a real and unusual number for an
+	 * application of this kind. Saying it *instead* of the closure, on the page
+	 * whose entire argument is that claims should be checkable, was the problem —
+	 * and the SBOM published beside every release lists all of them, so the page
+	 * was understating something a reader could already count.
+	 *
+	 * Read from the lockfile at build time for the reason the direct count is:
+	 * a number that has to be remembered is one that eventually goes stale.
+	 */
+	get shippedPackages() {
+		const lock = JSON.parse(readFileSync(join(here, '..', 'package-lock.json'), 'utf8'));
+		return Object.entries(lock.packages ?? {}).filter(([path, entry]) => path !== '' && !entry.dev)
+			.length;
+	},
 	/*
 	 * What it runs on.
 	 *
@@ -1003,7 +1028,7 @@ It runs entirely on the user's own machine. There is no account to create, no se
 - **Platforms:** ${platformSentence()}
 - **Install from:** the Microsoft Store (${SITE.store.url}) or GitHub releases (${SITE.repo}/releases/latest).
 - **This website hosts no binaries** and never will; every download control links outward.
-- **Runtime dependencies:** ${SITE.runtimeDependencies}.
+- **Dependencies:** ${SITE.runtimeDependencies} direct, ${SITE.shippedPackages} shipped in total, plus the Electron runtime.
 
 ## What it does
 

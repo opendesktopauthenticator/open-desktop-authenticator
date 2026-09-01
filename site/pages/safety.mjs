@@ -601,12 +601,18 @@ export const security = {
 					your codes" is an attack that works on real people.
 				</li>
 				<li>
-					<strong>${s.runtimeDependencies} runtime dependencies.</strong> Every package
-					that ships is a package someone could compromise, so there are as close to
-					none as the job allows. The number is counted from
-					<code>package.json</code> when this page is built rather than written into
-					the sentence, because a dependency claim that has to be remembered is one
-					that eventually goes stale.
+					<strong>${s.runtimeDependencies} direct dependencies, ${s.shippedPackages}
+					packages in total.</strong> Every package that ships is a package someone
+					could compromise, so there are as close to none as the job allows — but the
+					number worth trusting is the second one, because a dependency's own
+					dependencies ship too. This page used to give only the first, which is a
+					count of names typed into <code>package.json</code> rather than of packages
+					in the installer. Both are counted when the page is built, the first from
+					<code>package.json</code> and the second from
+					<code>package-lock.json</code>, because a claim that has to be remembered is
+					one that eventually goes stale. The complete list, with versions, is
+					published as an SBOM beside every release, and the Electron runtime is
+					shipped alongside them.
 				</li>
 			</ul>
 

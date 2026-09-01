@@ -324,7 +324,24 @@ const treeModules = join(treePath, 'node_modules');
 const strippedExtensions = strippedExtensionsFrom(builderFiles);
 const treeIsReadable = existsSync(treeModules);
 
-const shipped = [...required].filter((id) => !bundled.includes(id));
+/**
+ * **Electron is not one of the things in the asar; it is what opens the asar.**
+ *
+ * It reaches the closure through the pin in `package.json` rather than through
+ * the dependency graph, and the tree the scanner is pointed at holds a synthetic
+ * directory for it containing one hand-written `package.json`. `carriesCode`
+ * looked at that directory, found a manifest and nothing else, and filed the
+ * application runtime beside `@types/node` as shipping no loadable code — a
+ * hundred and forty megabytes of Chromium described as a manifest and a licence.
+ *
+ * True about the directory it was given and nonsense about the installer, which
+ * is the same defect the metadata-only group was added to fix, committed by that
+ * group. It gets its own line: the split below is about what goes *inside* the
+ * archive, and Electron is the thing outside it.
+ */
+const electronId = `electron@${version(pinned)}`;
+
+const shipped = [...required].filter((id) => !bundled.includes(id) && id !== electronId);
 const metadataOnly = treeIsReadable
 	? shipped
 			.filter((id) => !carriesCode(join(treeModules, packageName(id)), strippedExtensions))
@@ -335,7 +352,7 @@ const withCode = shipped.length - metadataOnly.length;
 function shape() {
 	const parts = [];
 	if (metadataOnly.length === 0 && bundled.length === 0) {
-		parts.push(`all ${required.size} as package directories inside the asar`);
+		parts.push(`all ${withCode} as package directories inside the asar`);
 	} else if (withCode > 0) {
 		parts.push(`${withCode} as package directories inside the asar`);
 	}
@@ -344,6 +361,9 @@ function shape() {
 			`${bundled.length} compiled into the renderer bundle, which is where ${builderConfigPath} sends ${bundled.sort().join(', ')}`
 		);
 	}
+	parts.push(
+		`electron ${version(pinned)} as the application runtime itself, outside the asar rather than in it`
+	);
 	if (metadataOnly.length > 0) {
 		parts.push(
 			`${metadataOnly.length} as a manifest and a licence with no loadable file at all, the packaging rules having stripped every file they contain (${metadataOnly.join(', ')})`
@@ -405,6 +425,21 @@ function isScannedDirectory(entry) {
 
 const catalogued = new Set();
 const foreign = new Set();
+/**
+ * How many records each npm component got, so a document that lists everything
+ * twice cannot pass as one that lists everything once.
+ *
+ * `catalogued` is a Set, which is right for the comparison it feeds and wrong as
+ * a description of the file: the exact pinned scanner produced **82 npm records
+ * for 41 components** and this collapsed them silently. The tree was correct and
+ * the guard was correct; the published document said every dependency twice, and
+ * an SBOM is read by tools that count.
+ *
+ * The cause was upstream — both JavaScript catalogers were enabled deliberately,
+ * so the lockfile and the installed files each answered — and that is fixed in
+ * `assemble-shipping-tree.mjs`. This is the half that would have said so.
+ */
+const records = new Map();
 for (const entry of packages) {
 	if (isScannedDirectory(entry)) {
 		continue;
@@ -418,10 +453,16 @@ for (const entry of packages) {
 	// without a purl.
 	if (purl(entry).startsWith('pkg:npm/')) {
 		catalogued.add(id);
+		records.set(id, (records.get(id) ?? 0) + 1);
 	} else {
 		foreign.add(id);
 	}
 }
+
+const duplicated = [...records]
+	.filter(([, count]) => count > 1)
+	.map(([id, count]) => `${id} (${count} times)`)
+	.sort();
 
 const extra = [...catalogued].filter((id) => !allowed.has(id)).sort();
 const missing = [...required].filter((id) => !catalogued.has(id)).sort();
@@ -438,6 +479,14 @@ if (missing.length > 0) {
 		// note over `metadataOnly` — and they still belong in the document, because
 		// an SBOM lists what is in the artifact and their licences are in it.
 		`the SBOM omits ${missing.length} package(s) the installer carries: ${missing.join(', ')}`
+	);
+}
+if (duplicated.length > 0) {
+	problems.push(
+		`the SBOM lists ${duplicated.length} package(s) more than once: ${duplicated.join(', ')}. ` +
+			'A published SBOM is read by tools that count, and one record per component is what ' +
+			'those tools are entitled to. This is what two catalogers answering about the same tree ' +
+			'looks like — see the cataloger selection in assemble-shipping-tree.mjs.'
 	);
 }
 if (foreign.size > 0) {

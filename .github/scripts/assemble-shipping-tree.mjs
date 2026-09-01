@@ -245,11 +245,25 @@ writeFileSync(join(electronDir, 'package.json'), `${JSON.stringify(meta, null, 2
 // The scanner's configuration, written here so it travels with the tree.
 // ---------------------------------------------------------------------------
 //
-// `default-catalogers` replaces the base set rather than filtering it, and that
-// is what makes both JavaScript catalogers run: the lock cataloger is the only
-// one tagged `directory`, and the package cataloger — tagged `installed` and
-// `image` — is the one that reads `node_modules`. Naming the ecosystem gets
-// both, so the lockfile and the installed files each answer independently.
+// **One cataloger, named, rather than the ecosystem.**
+//
+// `default-catalogers` replaces the base set rather than filtering it, so naming
+// `javascript` ran both JavaScript catalogers: the lock cataloger, the only one
+// tagged `directory`, and the package cataloger, which reads `node_modules`.
+// That was deliberate — the lockfile and the installed files each answering
+// independently — and the cost was paid by the published document. The exact
+// pinned scanner produced **82 npm records for 41 components**: every dependency
+// listed twice, in a file whose readers are tools that count.
+//
+// The redundancy it bought has not been given up, it has been moved to where it
+// belongs. `shipping-contents.mjs` reads the installed tree directly to decide
+// how each package reaches the user, so the files on disk are still cross-checked
+// against the lockfile — in the guard, which can say what it found, rather than
+// in the artifact, which can only list it again.
+//
+// The lock cataloger is the authoritative one because its input is the file this
+// script writes: a deterministic lockfile holding exactly the shipping closure,
+// including the synthetic electron entry that no `node_modules` scan would find.
 //
 // Everything else is excluded, and that is the second half of the fix. The
 // guard rejects any catalogued entry that carries no npm package URL, and the
@@ -261,7 +275,7 @@ writeFileSync(
 	[
 		'# Written by .github/scripts/assemble-shipping-tree.mjs. Do not edit by hand.',
 		'default-catalogers:',
-		'  - javascript',
+		'  - javascript-lock-cataloger',
 		''
 	].join('\n')
 );
@@ -273,7 +287,7 @@ console.log(
 );
 console.log(`  lockfile:  ${paths.length} entries, lockfileVersion 3, none flagged dev`);
 console.log(`  electron:  ${pinned}, from the pin in package.json`);
-console.log(`  scanner:   ${configOut}, JavaScript catalogers only`);
+console.log(`  scanner:   ${configOut}, javascript-lock-cataloger only`);
 for (const path of paths.sort()) {
 	console.log(`    ${path}@${packages[path].version}`);
 }
