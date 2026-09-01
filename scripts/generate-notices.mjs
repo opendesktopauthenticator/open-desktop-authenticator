@@ -52,6 +52,26 @@ function closure() {
 	return entries;
 }
 
+/**
+ * Line endings flattened to LF, and this is not cosmetic.
+ *
+ * Some packages ship a licence with CRLF. `.gitattributes` normalises this file
+ * to LF on the way into the repository, so a fresh checkout has LF on disk while
+ * a fresh generation reproduces the CRLF — and the test that regenerates and
+ * compares then fails on every runner, for a file nobody has touched. Measured:
+ * 665 CRLF pairs in the generated file against none in the committed blob.
+ *
+ * Writing LF makes the output the same on every platform, which is what a file
+ * that is committed and compared has to be.
+ */
+const normalise = (text) =>
+	text
+		.replace(
+			new RegExp(String.fromCharCode(13) + String.fromCharCode(10), 'g'),
+			String.fromCharCode(10)
+		)
+		.trim();
+
 /** Anything a package might call its licence, in any spelling or extension. */
 const LICENCE_FILE = /^(licen[sc]e|copying|notice|unlicense)(\.|$)/i;
 
@@ -74,7 +94,7 @@ function licenceText(packagePath) {
 		return undefined;
 	}
 	return found
-		.map((name) => `--- ${name} ---\n${readFileSync(join(dir, name), 'utf8').trim()}`)
+		.map((name) => `--- ${name} ---\n${normalise(readFileSync(join(dir, name), 'utf8'))}`)
 		.join('\n\n');
 }
 

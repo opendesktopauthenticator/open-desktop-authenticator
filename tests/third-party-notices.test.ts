@@ -125,6 +125,29 @@ describe('the third-party notices the installer carries', () => {
 		}
 	});
 
+	/**
+	 * **The same bytes on every platform, because it is committed and compared.**
+	 *
+	 * Some packages ship a licence with CRLF. `.gitattributes` normalises this
+	 * file to LF on the way into the repository, so a fresh checkout had LF on
+	 * disk while a fresh generation reproduced the CRLF — and the comparison above
+	 * then failed on every runner, for a file nobody had touched. Measured before
+	 * the generator was made to flatten them: 665 CRLF pairs against none in the
+	 * committed blob.
+	 */
+	it('has no carriage returns in it', () => {
+		const bytes = readFileSync(NOTICES);
+		const crlf = bytes.reduce(
+			(count, byte, index) => (byte === 13 && bytes[index + 1] === 10 ? count + 1 : count),
+			0
+		);
+		expect(
+			crlf,
+			'a licence with CRLF was copied through verbatim, so what git stores and what the ' +
+				'generator produces are different files and the comparison above fails on a fresh clone'
+		).toBe(0);
+	});
+
 	/* And the installer actually includes it. */
 	it('is named in the packaging rules', () => {
 		const config = readFileSync(join(ROOT, 'electron-builder.config.mjs'), 'utf8');
