@@ -17,9 +17,27 @@ import { registerHandler } from '../ipc/router';
  * account list to navigate within, with the push as the fast path for the
  * ordinary case.
  */
+/**
+ * How long an uncollected click stays worth acting on.
+ *
+ * It is an intention, and intentions go stale. The lock clears them, which
+ * covers the machine somebody walked away from — and a session that never locks
+ * is the ordinary case for a running application, so on that path the slot was
+ * held for as long as the process lived. A click nobody could collect is not
+ * collectable later either: the renderer refuses to navigate to an account that
+ * is not in its list, so a click for an account that has since been removed sits
+ * there indefinitely, and the next renderer that asks is sent somewhere for a
+ * reason nobody remembers.
+ *
+ * Five minutes is longer than any unlock takes and far shorter than "until the
+ * process exits".
+ */
+const CLICK_LIFETIME_MS = 5 * 60 * 1000;
+
 export class ToastClickRouter {
 	private readonly reveal: () => void;
 	private readonly push: (steamId64: string) => void;
+	private readonly now: () => number;
 
 	/**
 	 * The account a click asked for, until a renderer takes it.
@@ -30,9 +48,17 @@ export class ToastClickRouter {
 	 */
 	private pending: string | undefined;
 
-	constructor(options: { reveal: () => void; push: (steamId64: string) => void }) {
+	/** When the click that set `pending` happened. */
+	private pendingAt = 0;
+
+	constructor(options: {
+		reveal: () => void;
+		push: (steamId64: string) => void;
+		now?: () => number;
+	}) {
 		this.reveal = options.reveal;
 		this.push = options.push;
+		this.now = options.now ?? (() => Date.now());
 	}
 
 	/**
@@ -44,6 +70,7 @@ export class ToastClickRouter {
 	 */
 	activate(steamId64: string): void {
 		this.pending = steamId64;
+		this.pendingAt = this.now();
 		this.reveal();
 		this.push(steamId64);
 	}
@@ -63,6 +90,12 @@ export class ToastClickRouter {
 	 * same boolean — and the path that exists for the harder case did not.
 	 */
 	peek(): { steamId64?: string } {
+		if (this.pending !== undefined && this.now() - this.pendingAt >= CLICK_LIFETIME_MS) {
+			// Dropped on the way out rather than left to be re-read: an expired
+			// intent that stays in the slot is answered again by every later peek.
+			this.pending = undefined;
+			return {};
+		}
 		return this.pending === undefined ? {} : { steamId64: this.pending };
 	}
 
@@ -88,6 +121,23 @@ export class ToastClickRouter {
 	 */
 	forget(): void {
 		this.pending = undefined;
+	}
+
+	/**
+	 * The account is gone. Forget any click that was waiting for it.
+	 *
+	 * Beside the other per-account `forget`s, and missing from that row. A click
+	 * for a removed account can never be collected — the renderer will not
+	 * navigate to an account that is not in its list — so it stayed in the slot,
+	 * blocking nothing and helping nobody, until the vault locked. Worse if the
+	 * account comes back: a re-import restores the SteamID, and the intent from
+	 * before the removal is then live again and navigates somebody to a
+	 * confirmation list for a reason that no longer exists.
+	 */
+	forgetAccount(steamId64: string): void {
+		if (this.pending === steamId64) {
+			this.pending = undefined;
+		}
 	}
 }
 

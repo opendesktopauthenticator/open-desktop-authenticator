@@ -223,3 +223,128 @@ describe('routing a click', () => {
 		expect(r.router.peek(), 'a click from before a lock navigated after it').toEqual({});
 	});
 });
+
+/**
+ * **An intention that nobody collected, held until the process exits.**
+ *
+ * The slot was cleared on lock, which covers the machine somebody walked away
+ * from. A session that never locks is the ordinary case for a running
+ * application, and on that path nothing cleared it at all - and a click that
+ * could not be collected once cannot be collected later either. The renderer
+ * refuses to navigate to an account that is not in its list, so a click for an
+ * account since removed sat in the slot, and the next renderer to ask was sent
+ * somewhere for a reason nobody remembers.
+ */
+describe('a click nobody came to collect', () => {
+	function at(clock: { ms: number }) {
+		return new ToastClickRouter({
+			reveal: vi.fn(),
+			push: vi.fn(),
+			now: () => clock.ms
+		});
+	}
+
+	it('is still there a minute later', () => {
+		const clock = { ms: 1_000_000 };
+		const router = at(clock);
+		router.activate(ID);
+
+		clock.ms += 60_000;
+		expect(router.peek(), 'an ordinary unlock takes longer than this').toEqual({
+			steamId64: ID
+		});
+	});
+
+	it('is gone an hour later', () => {
+		const clock = { ms: 1_000_000 };
+		const router = at(clock);
+		router.activate(ID);
+
+		clock.ms += 60 * 60_000;
+		expect(
+			router.peek(),
+			'a click from an hour ago was handed to a renderer as a live intention, on a session ' +
+				'that had simply never locked'
+		).toEqual({});
+	});
+
+	/**
+	 * **And it does not come back when the clock does.**
+	 *
+	 * The expiry is a comparison against wall-clock time, and wall-clock time
+	 * moves backwards: an NTP correction, a timezone change, somebody setting it
+	 * by hand. If the expired intent is only *hidden* by that comparison rather
+	 * than dropped, the clock going back resurrects it, and a click from before
+	 * the correction navigates somebody who has long since moved on.
+	 *
+	 * Dropping it on the way out costs one assignment and makes the expiry a
+	 * decision rather than a filter.
+	 */
+	it('does not come back when the clock moves backwards', () => {
+		const clock = { ms: 1_000_000 };
+		const router = at(clock);
+		router.activate(ID);
+
+		clock.ms += 60 * 60_000;
+		expect(router.peek()).toEqual({});
+
+		// The correction: back to a moment when the click was still fresh.
+		clock.ms -= 59 * 60_000;
+
+		expect(
+			router.peek(),
+			'an expired click was handed out after the system clock moved back, because expiry hid ' +
+				'it rather than dropping it'
+		).toEqual({});
+	});
+
+	/* And a fresh click after an expiry is an ordinary live one. */
+	it('does not stop a later click being collected', () => {
+		const clock = { ms: 1_000_000 };
+		const router = at(clock);
+		router.activate(ID);
+		clock.ms += 60 * 60_000;
+		router.peek();
+
+		router.activate(ID);
+		expect(router.peek()).toEqual({ steamId64: ID });
+	});
+});
+
+/**
+ * **And a click for an account that is no longer there.**
+ *
+ * Every other per-account cache is dropped when an account is removed - the
+ * poller's schedule, the notifier's seen-set, the activity runs. This one was
+ * not in that row. The click cannot be collected, because the renderer will not
+ * navigate to an account missing from its list, so it stayed until the vault
+ * locked. Worse if the account comes back: a re-import restores the SteamID and
+ * the intent from before the removal is live again.
+ */
+describe('a click for an account that has been removed', () => {
+	function plain() {
+		return new ToastClickRouter({ reveal: vi.fn(), push: vi.fn() });
+	}
+
+	it('is forgotten with the account', () => {
+		const router = plain();
+		router.activate(ID);
+		router.forgetAccount(ID);
+
+		expect(
+			router.peek(),
+			'the click outlived the account it was for, and a re-import would make it live again'
+		).toEqual({});
+	});
+
+	it('does not disturb a click for a different account', () => {
+		const router = plain();
+		const other = '76561198000000002';
+		router.activate(other);
+		router.forgetAccount(ID);
+
+		expect(router.peek(), 'removing one account threw away another account/s click').toEqual({
+			steamId64: other
+		});
+	});
+});

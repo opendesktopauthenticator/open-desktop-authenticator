@@ -570,6 +570,10 @@ function start(): void {
 		// emptied the screen, with nothing saying anything had been thrown away.
 		if (gone) {
 			activity.forgetAccount(steamId64);
+			// And an uncollected toast click for an account that will not be in the
+			// list the renderer navigates within. Only on removal: a proxy save or a
+			// re-import leaves the account there, and the click is still good.
+			toastClicks.forgetAccount(steamId64);
 		} else {
 			activity.forgetRuns(steamId64);
 		}
