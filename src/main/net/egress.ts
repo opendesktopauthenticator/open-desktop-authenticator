@@ -716,9 +716,18 @@ export function isDirectContentHost(host: string): boolean {
 }
 
 export function planProxy(proxyUrl: string): ProxyPlan {
+	/*
+	 * Trimmed before anything else, because the check below refuses whitespace and
+	 * people paste addresses. `new URL` already ignores surrounding ASCII
+	 * whitespace, so this only makes the two agree — without it a pasted
+	 * `http://proxy.example:8080` with a trailing newline, no credentials
+	 * anywhere in it, was refused with a message about usernames and passwords.
+	 */
+	const address = proxyUrl.trim();
+
 	let url: URL;
 	try {
-		url = new URL(proxyUrl);
+		url = new URL(address);
 	} catch {
 		throw new EgressError('that is not a usable proxy address');
 	}
@@ -772,10 +781,25 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 	 * regex means typing the control characters, and typing them is how two of
 	 * them got into source files as literal bytes in the first place.
 	 */
-	const unsafeInUserinfo = (part: string): boolean =>
-		[...part].some((character) => {
+	const invisible = (text: string): boolean =>
+		[...text].some((character) => {
 			const code = character.codePointAt(0) ?? 0;
-			return code <= 0x20 || code === 0x7f;
+			/*
+			 * `\s` rather than a codepoint range, and this is the whole of the
+			 * second attempt at this fix. The first tested `code <= 0x20` — ASCII
+			 * space and the C0 controls — so a password separated by U+00A0 was
+			 * accepted and came back from `redactCredentials` **unchanged**: the
+			 * reported defect exactly, spelled with a different space character.
+			 * U+2028, U+2003 and U+3000 did the same.
+			 *
+			 * They work for the reason the ASCII space did. `AUTHORITY_END` is
+			 * built from `\s`, so the redactor stops at every one of them, while
+			 * `CROSSING_END` does not — and the one-word crossing that resolves the
+			 * ambiguity is beaten by a multi-word tail. Refusing exactly the class
+			 * the redactor's own boundaries are made of is what keeps the two in
+			 * step. A hand-listed set of codepoints is a list to fall behind.
+			 */
+			return /\s/u.test(character) || code <= 0x1f || (code >= 0x7f && code <= 0x9f);
 		});
 
 	/*
@@ -784,12 +808,17 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 	 * come back clean — `hunter%202` — while the text that is stored on the
 	 * account and pasted into every error message still has the space in it. A
 	 * check on the parsed values passes every case it exists to catch.
+	 *
+	 * The whole address rather than the userinfo alone: a host with a space in it
+	 * is not a host, and picking the userinfo substring back out of raw text is
+	 * the parse `redactCredentials` already cannot do reliably.
 	 */
-	if (unsafeInUserinfo(proxyUrl)) {
+	if (invisible(address)) {
 		throw new EgressError(
-			'a proxy username or password cannot contain a space or a control character. Web ' +
-				'addresses have no way to carry one, and it would survive into error messages that ' +
-				'are otherwise stripped of credentials. Write it percent-encoded — a space is %20.'
+			'a proxy address cannot contain a space or any other invisible character. Web ' +
+				'addresses have no way to carry one, and inside a username or password it would ' +
+				'survive into error messages that are otherwise stripped of credentials. If the ' +
+				'password really contains a space, write it percent-encoded as %20.'
 		);
 	}
 

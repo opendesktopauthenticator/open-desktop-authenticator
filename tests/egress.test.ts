@@ -2519,6 +2519,66 @@ describe('proxy credentials that could survive redaction', () => {
 		expect(plan.redacted).toBe('http://***:***@proxy.example:8080');
 	});
 
+	/**
+	 * **Whitespace is not only U+0020, and the first version of this fix thought
+	 * it was.**
+	 *
+	 * It refused codepoints `<= 0x20`, which is ASCII space and the C0 controls.
+	 * Measured afterwards: `http://alice:1234\u00a05\u00a06@proxy.example:8080`
+	 * was accepted and came back from `redactCredentials` **unchanged** — the
+	 * reported defect exactly, spelled with a different space character. U+2028,
+	 * U+2003 and U+3000 did the same, and none of them was in any test.
+	 *
+	 * They work for the reason the ASCII space did: `AUTHORITY_END` is built from
+	 * `\s`, so the redactor stops at every one of them, while `CROSSING_END` does
+	 * not, and the one-word crossing is beaten by a multi-word tail. Which is why
+	 * the check is now `\s` and not a list of numbers — the same class the
+	 * redactor's own boundaries are made of.
+	 */
+	it.each([
+		['a no-break space', 0x00a0],
+		['a line separator', 0x2028],
+		['a paragraph separator', 0x2029],
+		['an ideographic space', 0x3000],
+		['an em space', 0x2003],
+		['a next line', 0x0085],
+		['an en quad', 0x2000],
+		['a narrow no-break space', 0x202f]
+	])('are refused when separated by %s', (_what, code) => {
+		const ws = String.fromCharCode(code);
+		expect(
+			() => planProxy(`http://alice:1234${ws}5${ws}6@proxy.example:8080`),
+			`U+${code.toString(16)} was accepted, and redactCredentials cannot strip it either`
+		).toThrow(EgressError);
+	});
+
+	/**
+	 * **And the regression the first version caused.**
+	 *
+	 * The check ran on the whole raw string with no trim, so a pasted
+	 * `http://proxy.example:8080` carrying a trailing newline — no credentials
+	 * anywhere in it — was refused, with a message about usernames and passwords.
+	 * `new URL` has always ignored surrounding whitespace; the two now agree.
+	 */
+	it.each([
+		['a leading space', ' http://proxy.example:8080'],
+		['a trailing space', 'http://proxy.example:8080 '],
+		// Built from codepoints: written as escapes these reach the file as real
+		// bytes, which is a broken string literal for a newline and invisible for a
+		// tab. tests/no-binary-sources.test.ts exists because of the second one.
+		['a trailing newline', `http://proxy.example:8080${String.fromCharCode(10)}`],
+		[
+			'a tab either side',
+			`${String.fromCharCode(9)}http://proxy.example:8080${String.fromCharCode(9)}`
+		]
+	])('still accepts an address pasted with %s', (_what, raw) => {
+		expect(
+			planProxy(raw).proxyRules,
+			'an address people paste all the time was refused, and the message talked about a ' +
+				'password it does not have'
+		).toBe('http://proxy.example:8080');
+	});
+
 	/*
 	 * And the property the refusal exists to protect, asserted directly: whatever
 	 * `planProxy` accepts, `redactCredentials` can strip.
@@ -2533,5 +2593,53 @@ describe('proxy credentials that could survive redaction', () => {
 			);
 			expect(plan.redacted).not.toContain('alice');
 		}
+	});
+
+	/**
+	 * **The rule itself, over every separator a document could use.**
+	 *
+	 * The two lists above are cases somebody thought of, and both times the case
+	 * nobody thought of is what shipped. This asserts the invariant instead: for
+	 * every codepoint below U+3001, a proxy URL whose credentials are split by it
+	 * is either refused outright or fully redacted. Never accepted and left
+	 * legible, which is the only outcome that puts a password in a log.
+	 */
+	it('never accepts a separator that redaction cannot strip', () => {
+		const leaked: string[] = [];
+		for (let code = 1; code <= 0x3000; code += 1) {
+			const ws = String.fromCharCode(code);
+			const url = `http://alice:1234${ws}5${ws}6@proxy.example:8080`;
+
+			let credentials: { username: string; password: string } | undefined;
+			try {
+				credentials = planProxy(url).credentials;
+			} catch {
+				// Refused, which is one of the two acceptable answers.
+				continue;
+			}
+
+			/*
+			 * **Only when the URL really carries credentials.** For `/`, `?` and `#`
+			 * the parser reads `alice:1234` as host and port and everything after as
+			 * a path, query or fragment — there is no password in that string, so
+			 * `alice` surviving is a host name surviving, which is not a leak and
+			 * not something redaction should touch. Asserting on the raw text alone
+			 * flagged all three, which is the test being wrong rather than the code.
+			 */
+			if (!credentials) {
+				continue;
+			}
+
+			const redacted = redactCredentials(`could not connect: ${url}`);
+			if (redacted.includes(credentials.password) || redacted.includes(credentials.username)) {
+				leaked.push(`U+${code.toString(16).padStart(4, '0')}`);
+			}
+		}
+		expect(
+			leaked,
+			'these separators produce a URL that planProxy accepts as carrying credentials and that ' +
+				'redactCredentials leaves legible, so the password reaches every message an error is ' +
+				'displayed or logged in'
+		).toEqual([]);
 	});
 });
