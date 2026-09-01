@@ -3,6 +3,7 @@ import {
 	chmodSync,
 	closeSync,
 	existsSync,
+	linkSync,
 	fsyncSync,
 	mkdirSync,
 	openSync,
@@ -128,7 +129,56 @@ function durably(path: string, body: string): void {
 		} finally {
 			closeSync(fd);
 		}
-		renameSync(temp, path);
+		/*
+		 * **`link`, not `rename`, and that distinction is the whole point.**
+		 *
+		 * This file used to be written with `writeFileSync(..., { flag: 'wx' })` —
+		 * one syscall that creates the file or fails, and cannot overwrite. Making
+		 * the write durable replaced it with a temp file and a rename, and a rename
+		 * *does* overwrite: `renameSync` onto an existing path replaces it silently
+		 * on every platform this ships to. Measured, not assumed.
+		 *
+		 * That traded the guarantee the caller depends on for the one it was
+		 * asking for. A recovery file is keyed on the SteamID, so enrolling the
+		 * same account twice aims at the same path, and what would be replaced is
+		 * the backup of a *previous* authenticator — the single file in this
+		 * application whose entire purpose is to still be there later. The
+		 * `existsSync` above narrows the window and cannot close it: another
+		 * process, or another enrolment in this one, can create the file between
+		 * the check and the rename.
+		 *
+		 * `link` fails with EEXIST if the destination is there, atomically, which
+		 * is `wx` by another name. The temp is unlinked afterwards, leaving one
+		 * file with the contents already flushed to disk.
+		 */
+		try {
+			linkSync(temp, path);
+		} catch (err) {
+			if ((err as NodeJS.ErrnoException | undefined)?.code === 'EEXIST') {
+				throw err;
+			}
+			/*
+			 * Hard links are not universal — FAT32, some network shares, some
+			 * container mounts. Falling back to the rename keeps the durability and
+			 * loses only the atomicity of the exclusion, which the check above
+			 * still covers for everything but a genuine race. Refusing to write a
+			 * recovery file at all would be much worse than that.
+			 */
+			if (existsSync(path)) {
+				throw Object.assign(new Error('EEXIST: file already exists'), { code: 'EEXIST' });
+			}
+			renameSync(temp, path);
+			// The rename consumed it; there is nothing left to unlink.
+			syncDirectory(dirname(path));
+			return;
+		}
+
+		/*
+		 * The link succeeded, so the same bytes are now reachable under two names.
+		 * Dropping the temp leaves one file — and it has to happen here rather than
+		 * in the catch, which only runs when something went wrong.
+		 */
+		unlinkSync(temp);
 		syncDirectory(dirname(path));
 	} catch (err) {
 		try {
