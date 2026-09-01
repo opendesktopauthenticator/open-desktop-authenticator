@@ -565,10 +565,16 @@ export class EnrollmentService {
 			// the user can make sense of the next screen.
 			throw new EnrollmentError(
 				`Steam activated the authenticator on ${account.accountName}, but this could not be ` +
-					'saved. The account works — codes it generates are valid — and the app will keep ' +
-					'offering to finish activation until it can write. Unlock the vault and try once ' +
-					'more; if it says the account is already activated, that is the truth and nothing ' +
-					'is wrong.'
+					'saved here. The account works — the codes it generates are valid — and this ' +
+					'application will not ask Steam to activate it again, because Steam already has. ' +
+					'This entry will keep saying it is waiting to be activated until the vault can be ' +
+					'written; that is a record that is behind, not an account that is unprotected.',
+				// **Steam did this.** Not a maybe: the call returned success and the
+				// local write is what failed. Left as an ordinary error, the screen
+				// cleared itself and offered the same irreversible action again.
+				true,
+				true,
+				true
 			);
 		}
 
@@ -583,7 +589,13 @@ export class EnrollmentService {
 					'holds the authenticator that was activated — it was removed, or replaced by a ' +
 					'different one for the same account, while Steam was answering. The recovery file ' +
 					'written at enrollment still holds those secrets: use "Recover from file" to ' +
-					'restore them.'
+					'restore them.',
+				// **Steam did this.** Not a maybe: the call returned success and the
+				// local write is what failed. Left as an ordinary error, the screen
+				// cleared itself and offered the same irreversible action again.
+				true,
+				true,
+				true
 			);
 		}
 
@@ -737,7 +749,13 @@ export class EnrollmentService {
 				`Steam Guard has been removed from ${account.accountName} on Steam, but the account ` +
 					'could not be removed from this vault. It is no longer protected — add a new ' +
 					'authenticator to it as soon as you can. The codes this app still shows for it are ' +
-					'meaningless now, and removing the account here will not change anything on Steam.'
+					'meaningless now, and removing the account here will not change anything on Steam.',
+				// **Steam did this.** Not a maybe: the call returned success and the
+				// local write is what failed. Left as an ordinary error, the screen
+				// cleared itself and offered the same irreversible action again.
+				true,
+				true,
+				true
 			);
 		}
 
@@ -764,7 +782,11 @@ export class EnrollmentService {
 				`Steam Guard has been removed from ${account.accountName} on Steam, but this vault now ` +
 					'holds a different authenticator for that account — so nothing was removed here. ' +
 					'That entry was not the one detached and is still yours. Check the account before ' +
-					'removing anything by hand.'
+					'removing anything by hand.',
+				// **Steam did this.** The detach succeeded; what failed is local.
+				true,
+				true,
+				true
 			);
 		}
 	}
