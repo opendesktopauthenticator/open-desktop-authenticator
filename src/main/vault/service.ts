@@ -78,6 +78,16 @@ export interface VaultServiceOptions {
 	monotonic?: () => number;
 	/** Called whenever the vault locks, so the UI and pollers can react. */
 	onLock?: (reason: LockReason) => void;
+	/**
+	 * Called whenever the vault becomes unlocked, for the same reason.
+	 *
+	 * The asymmetry was the bug. A lock was announced and an unlock was not, so
+	 * anything that mirrors the state had to find out by asking - and the tray
+	 * menu Linux keeps assigned asks on a 250 ms beat, which left `Lock now`
+	 * greyed for a quarter second after the vault opened. A control that is dead
+	 * for a moment is worst in exactly the emergency it exists for.
+	 */
+	onUnlock?: () => void;
 }
 
 interface UnlockedState {
@@ -97,6 +107,7 @@ export class VaultService {
 	private readonly now: () => number;
 	private readonly monotonic: () => number;
 	private readonly onLock: (reason: LockReason) => void;
+	private readonly onUnlock: () => void;
 	private state: UnlockedState | undefined;
 
 	/**
@@ -167,6 +178,7 @@ export class VaultService {
 		this.now = options.now ?? (() => Date.now());
 		this.monotonic = options.monotonic ?? (() => performance.now());
 		this.onLock = options.onLock ?? (() => undefined);
+		this.onUnlock = options.onUnlock ?? (() => undefined);
 	}
 
 	/**
@@ -395,6 +407,7 @@ export class VaultService {
 			lastActivity: this.now(),
 			lastActivityMono: this.monotonic()
 		};
+		this.onUnlock();
 	}
 
 	/** Unlock an existing vault. */
@@ -459,6 +472,7 @@ export class VaultService {
 			lastActivity: this.now(),
 			lastActivityMono: this.monotonic()
 		};
+		this.onUnlock();
 	}
 
 	/**
@@ -1261,6 +1275,7 @@ export class VaultService {
 			lastActivity: this.now(),
 			lastActivityMono: this.monotonic()
 		};
+		this.onUnlock();
 	}
 
 	private require(): UnlockedState {

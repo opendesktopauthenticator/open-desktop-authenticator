@@ -130,6 +130,8 @@ interface World {
 	visible: boolean;
 	unlocked: boolean;
 	quits: number;
+	/** The tray's own listener, if it asked to be told about changes. */
+	announce?: () => void;
 }
 
 function harness(platform: NodeJS.Platform, initial: { visible: boolean; unlocked: boolean }) {
@@ -149,6 +151,9 @@ function harness(platform: NodeJS.Platform, initial: { visible: boolean; unlocke
 		isUnlocked: () => world.unlocked,
 		quit: () => {
 			world.quits += 1;
+		},
+		watch: (listener) => {
+			world.announce = listener;
 		}
 	};
 	createTray(host);
@@ -563,5 +568,63 @@ describe('the show/hide item when the menu is behind the world', () => {
 		const { world } = harness('linux', { visible: false, unlocked: true });
 		windowItem(openMenu()).click?.();
 		expect(world.visible).toBe(true);
+	});
+});
+
+/**
+ * **A quarter second is not nothing, for this control.**
+ *
+ * The assigned menu Linux keeps is refreshed by a 250 ms poll, and for the
+ * length of that beat it describes the state before last. Most of what it gets
+ * wrong is cosmetic. One thing is not: `Lock now` is built greyed while the
+ * vault is locked, so for a quarter second after an unlock it stays greyed - a
+ * dead control in exactly the emergency it exists for, and unlocking is the
+ * moment a person is most likely to be at the machine.
+ *
+ * The poll stays, because a signal somebody has to remember to send is a signal
+ * somebody forgets - the window hidden by its own close button announces
+ * nothing. What is added is a way for the changes that *are* known to say so.
+ */
+describe('a tray told about a change rather than polling for it', () => {
+	it('asks to be told, on the platform that keeps a menu', () => {
+		const { world } = harness('linux', { visible: true, unlocked: false });
+
+		expect(
+			world.announce,
+			'nothing registered, so the menu can only ever be as fresh as the last beat'
+		).toBeTypeOf('function');
+	});
+
+	it('rebuilds the menu when the vault unlocks', () => {
+		const { world } = harness('linux', { visible: true, unlocked: false });
+		expect(lockItem(openMenu()).enabled).toBe(false);
+
+		world.unlocked = true;
+		world.announce?.();
+
+		expect(
+			lockItem(openMenu()).enabled,
+			'the emergency control stayed greyed after the vault opened, until the next beat'
+		).toBe(true);
+	});
+
+	it('rebuilds the menu when the vault locks', () => {
+		const { world } = harness('linux', { visible: true, unlocked: true });
+		expect(lockItem(openMenu()).enabled).toBe(true);
+
+		world.unlocked = false;
+		world.announce?.();
+
+		expect(lockItem(openMenu()).enabled).toBe(false);
+	});
+
+	/*
+	 * And the platforms that build at the instant of the click have nothing to
+	 * be told: registering there would rebuild a menu nobody keeps.
+	 */
+	it.each<NodeJS.Platform>(['win32', 'darwin'])('does not ask on %s', (platform) => {
+		const { world } = harness(platform, { visible: true, unlocked: false });
+
+		expect(world.announce).toBeUndefined();
 	});
 });

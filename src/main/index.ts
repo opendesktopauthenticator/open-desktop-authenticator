@@ -264,8 +264,16 @@ function start(): void {
 		() => vault.isUnlocked() && vault.settings().requireProxies
 	);
 
+	/**
+	 * Told when the lock state moves, so the tray menu does not have to wait for
+	 * its own poll to notice. Set when the tray registers; a no-op before that
+	 * and on every platform that builds its menu at the instant of the click.
+	 */
+	let trayStateChanged: () => void = () => undefined;
+
 	const vault = new VaultService({
 		file: join(app.getPath('userData'), 'vault.json'),
+		onUnlock: () => trayStateChanged(),
 		onLock: () => {
 			// Staged maFile secrets do not outlive the unlocked session. A lock means
 			// the user has stopped being present — by choice, by idling, or by
@@ -375,6 +383,12 @@ function start(): void {
 			for (const window of BrowserWindow.getAllWindows()) {
 				window.webContents.reload();
 			}
+
+			// And the tray, which on Linux is holding a menu built from the state
+			// before this one. Its own poll would notice within a quarter second;
+			// saying so directly means the menu never describes a vault that has
+			// already locked.
+			trayStateChanged();
 		}
 	});
 
@@ -1334,6 +1348,9 @@ function start(): void {
 			isVisible: () => liveWindow()?.isVisible() ?? false,
 			lock: () => vault.lock('manual'),
 			isUnlocked: () => vault.isUnlocked(),
+			watch: (listener) => {
+				trayStateChanged = listener;
+			},
 			quit: () => {
 				quitting = true;
 				app.quit();

@@ -1168,3 +1168,63 @@ describe('the auto-confirm projection', () => {
 		expect(() => v.autoConfirmSchedule()).toThrow(VaultLockedError);
 	});
 });
+
+/**
+ * **A lock was announced and an unlock was not.**
+ *
+ * Anything that mirrors the lock state had to find out by asking, and the tray
+ * menu Linux keeps assigned asks on a 250 ms beat - so `Lock now` stayed greyed
+ * for a quarter second after the vault opened. A dead control, in exactly the
+ * emergency it exists for, at the moment somebody is provably at the machine.
+ *
+ * These drive the service rather than the tray: the tray's half is proved next
+ * door, and this is the half that has to fire for that to mean anything.
+ */
+describe('the unlock the vault announces', () => {
+	const PHRASE = 'a passphrase long enough to pass';
+
+	function watched(): { vault: VaultService; count: () => number } {
+		let unlocks = 0;
+		const vault = new VaultService({
+			file,
+			now,
+			onUnlock: () => {
+				unlocks += 1;
+			}
+		});
+		return { vault, count: () => unlocks };
+	}
+
+	it('is announced when a vault is created', async () => {
+		const watcher = watched();
+		await watcher.vault.create(PHRASE);
+
+		expect(
+			watcher.count(),
+			'creating a vault leaves it open, and nothing was told - so the tray menu offered to ' +
+				'lock a vault it believed was already locked'
+		).toBe(1);
+	});
+
+	it('is announced when a vault is unlocked', async () => {
+		const first = service();
+		await first.create(PHRASE);
+		first.lock();
+
+		const watcher = watched();
+		await watcher.vault.unlock(PHRASE);
+
+		expect(watcher.count(), 'the unlock was silent, so only a poll could notice it').toBe(1);
+	});
+
+	it('is not announced by an unlock that failed', async () => {
+		const first = service();
+		await first.create(PHRASE);
+		first.lock();
+
+		const watcher = watched();
+		await expect(watcher.vault.unlock('the wrong passphrase entirely')).rejects.toThrow();
+
+		expect(watcher.count(), 'a refused passphrase was announced as an unlock').toBe(0);
+	});
+});

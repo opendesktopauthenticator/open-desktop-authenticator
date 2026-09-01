@@ -57,6 +57,15 @@ export interface TrayHost {
 	lock(): void;
 	/** Whether the vault is currently unlocked, for the menu label. */
 	isUnlocked(): boolean;
+	/**
+	 * Register to be told when the answers above change.
+	 *
+	 * Optional, and the beat below is the reason it can be: a signal somebody has
+	 * to remember to send is a signal somebody forgets, so the poll stays as the
+	 * backstop and this only closes the gap it leaves. Unused where the menu is
+	 * built at the instant of the click, which is every platform but Linux.
+	 */
+	watch?(listener: () => void): void;
 	/** Really quit, running the normal shutdown path. */
 	quit(): void;
 }
@@ -198,6 +207,20 @@ export function createTray(host: TrayHost): Tray {
 		tray.on('right-click', () => tray.popUpContextMenu(menu()));
 	} else {
 		reassign();
+
+		/*
+		 * **Told rather than asked, where anything bothers to tell us.**
+		 *
+		 * The beat below is a quarter second, and for its length the assigned menu
+		 * describes the state before last: `Lock now` greyed for a vault that has
+		 * just opened is a dead control in precisely the emergency it exists for.
+		 * A lock and an unlock are both announced now, so that particular gap
+		 * closes to nothing.
+		 *
+		 * It does not replace the poll. The window hidden by its own close button
+		 * announces nothing, and neither does whatever gets added next.
+		 */
+		host.watch?.(() => reassign());
 
 		/*
 		 * **And whenever the answers change, which is mostly not because of this
