@@ -167,3 +167,66 @@ describe('a notification failure that arrives after later polls have run', () =>
 		expect(h.toasts, 'the rise was marked as announced by a toast nobody saw').toHaveLength(2);
 	});
 });
+
+/**
+ * **The attempt number itself, and why it is global.**
+ *
+ * It was a counter on the per-account state, reset to zero every time `forget`
+ * or `forgetAccount` replaced that state. So a lock, or an account removed and
+ * re-added, handed the same number out a second time — and a stale callback then
+ * matched a fresh attempt and un-announced work it did not own.
+ *
+ * The seeding branch is where it bites, because its rollback looks the state up
+ * again by SteamID rather than closing over the object it started with: after a
+ * forget it finds the *new* state and edits that one. The main poll rollback
+ * closes over the old object, which is orphaned and harmless to touch.
+ *
+ * The halt generation in the same file is global for exactly this reason. This
+ * counter was not, which is the same defect written twice.
+ */
+describe('a delivery attempt that outlives the account state it belonged to', () => {
+	it('does not un-announce a confirmation seeded after a forget', async () => {
+		const h = harness();
+
+		// Seeded with a security-critical confirmation, which is announced despite
+		// the seeding. Its toast is in flight.
+		h.notifier.pending(ID, NAME, [confirmation('X', true)], 0, 'full');
+		expect(h.toasts).toHaveLength(1);
+
+		// The account is removed, then comes back — a re-enrolment, a re-import, or
+		// simply a lock and unlock.
+		h.notifier.forgetAccount(ID);
+
+		// It seeds again with the same confirmation still pending, and that toast
+		// is delivered.
+		h.notifier.pending(ID, NAME, [confirmation('X', true)], 0, 'full');
+		expect(h.toasts).toHaveLength(2);
+		await h.settle(1, true);
+
+		// Only now does the first toast report that it never appeared.
+		await h.settle(0, false);
+
+		// X is still pending and has already been shown.
+		h.notifier.pending(ID, NAME, [confirmation('X', true)], 0, 'full');
+		expect(
+			h.toasts,
+			'the stale rollback matched a fresh attempt number, deleted an id it did not own, and ' +
+				'the account takeover warning was shown a third time'
+		).toHaveLength(2);
+	});
+
+	/*
+	 * And across `forget`, which is what a lock does.
+	 */
+	it('does not un-announce one seeded after a lock', async () => {
+		const h = harness();
+		h.notifier.pending(ID, NAME, [confirmation('X', true)], 0, 'full');
+		h.notifier.forget();
+		h.notifier.pending(ID, NAME, [confirmation('X', true)], 0, 'full');
+		await h.settle(1, true);
+		await h.settle(0, false);
+
+		h.notifier.pending(ID, NAME, [confirmation('X', true)], 0, 'full');
+		expect(h.toasts).toHaveLength(2);
+	});
+});

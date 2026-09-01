@@ -93,17 +93,6 @@ interface AccountNotifyState {
 	seen: Map<string, number>;
 
 	/**
-	 * How many toasts this account has attempted, ever.
-	 *
-	 * Delivery is asynchronous and the poller is not paused for it, so a failure
-	 * callback can arrive after any number of later polls have run and rewritten
-	 * everything it is about to undo. Each attempt takes the next number and every
-	 * rollback checks it before touching anything: state a later attempt owns is
-	 * that attempt's to correct, and a stale callback silently corrupting it is
-	 * worse than a toast that is simply lost.
-	 */
-	attempts: number;
-	/**
 	 * Whether this account's expired session has already been reported.
 	 *
 	 * A sign-in failure repeats on every poll until the user acts, and telling
@@ -254,6 +243,29 @@ export class ConfirmationNotifier {
 	/** The newest halt issued per account. Gone when the account is. */
 	private readonly latestHalt = new Map<string, number>();
 
+	/**
+	 * How many toasts have been attempted, across every account, ever.
+	 *
+	 * Delivery is asynchronous and the poller is not paused for it, so a failure
+	 * callback can arrive after any number of later polls have rewritten what it
+	 * is about to undo. Each attempt takes the next number and every rollback
+	 * checks it before touching anything.
+	 *
+	 * **Global, and that is the whole point of it being here rather than on the
+	 * per-account state.** It was a counter on the state object, reset to zero
+	 * every time `forget` or `forgetAccount` replaced it — so a lock, or an
+	 * account removed and re-added, handed the same number out a second time and a
+	 * stale callback matched a fresh attempt. Measured: seed an account with a
+	 * security-critical confirmation, forget it, seed it again and deliver that
+	 * one, then let the first delivery report failure — the confirmation is
+	 * announced a **third** time, because the stale rollback un-announced work it
+	 * did not own.
+	 *
+	 * The halt generation beside it is global for exactly this reason and this
+	 * counter was not, which is the same defect written twice in one file.
+	 */
+	private deliveries = 0;
+
 	constructor(options: ConfirmationNotifierOptions) {
 		this.host = options.host;
 		this.onActivate = options.onActivate ?? ((): void => undefined);
@@ -370,7 +382,6 @@ export class ConfirmationNotifier {
 			const seedState = {
 				seeded: true,
 				seen: new Map<string, number>([...ids].map((id) => [id, 0])),
-				attempts: 0,
 				toldSignInNeeded: false,
 				// What was already there is the baseline, not news — the same
 				// reasoning as seeding `seen`. Recording 0 here instead would make
@@ -386,7 +397,7 @@ export class ConfirmationNotifier {
 			if (critical.length > 0 || unreadable > 0) {
 				// Attributed to this attempt so the rollback below can tell whether it
 				// is still undoing its own work.
-				const attempt = ++seedState.attempts;
+				const attempt = ++this.deliveries;
 				for (const entry of critical) {
 					seedState.seen.set(entry.id, attempt);
 				}
@@ -443,7 +454,7 @@ export class ConfirmationNotifier {
 
 		// 4. What is actually new.
 		const fresh = awaiting.filter((entry) => !existing.seen.has(entry.id));
-		const attempt = ++existing.attempts;
+		const attempt = ++this.deliveries;
 		for (const entry of fresh) {
 			existing.seen.set(entry.id, attempt);
 		}
@@ -541,7 +552,6 @@ export class ConfirmationNotifier {
 			this.state.set(steamId64, {
 				seeded: false,
 				seen: new Map(),
-				attempts: 0,
 				toldSignInNeeded: true,
 				lastUnreadable: 0
 			});
