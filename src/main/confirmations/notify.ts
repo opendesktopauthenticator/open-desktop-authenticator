@@ -489,13 +489,28 @@ export class ConfirmationNotifier {
 		/** What was announced before this poll, so a failed toast can restore it. */
 		const previouslyUnreadable = existing.lastUnreadable;
 		existing.lastUnreadable = unreadable;
-		existing.unreadableBy = attempt;
 
 		// 6. One toast, not two. A poll bringing both a new confirmation and an
 		//    unparseable one is still one thing happening.
 		if (fresh.length === 0 && !newlyUnreadable) {
 			return;
 		}
+
+		/*
+		 * **Claimed only by a poll that is about to say something.**
+		 *
+		 * This was stamped above, beside the assignment, so every quiet poll took
+		 * ownership of the marker — and a quiet poll is the common case, one every
+		 * fifteen seconds. An attempt whose toast was still in flight then found the
+		 * marker owned by a poll that had announced nothing, could not roll it back,
+		 * and the rise it had failed to report was recorded as reported. Permanently:
+		 * nothing lowers the mark again.
+		 *
+		 * The value still moves on every poll, which is what stops an unchanged
+		 * count re-announcing itself. Only the claim is reserved for the attempt
+		 * that actually tries to deliver.
+		 */
+		existing.unreadableBy = attempt;
 		this.toast(steamId64, accountName, composeBody(detail, fresh, unreadable), () => {
 			/*
 			 * **Nothing was said, so nothing may be marked as said.**

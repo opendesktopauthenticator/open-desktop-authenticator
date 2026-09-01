@@ -462,7 +462,7 @@ export function App(): React.JSX.Element {
 			 * intent rather than double-use it.
 			 */
 			if (openConfirmationsRef.current(steamId64)) {
-				void api.takePendingConfirmations().catch(() => undefined);
+				void api.takePendingConfirmations({ acknowledged: steamId64 }).catch(() => undefined);
 			}
 		});
 	}, [api]);
@@ -487,8 +487,21 @@ export function App(): React.JSX.Element {
 		api
 			.takePendingConfirmations()
 			.then((pending) => {
-				if (!cancelled && pending.steamId64) {
-					openConfirmationsRef.current(pending.steamId64);
+				const target = pending.steamId64;
+				if (cancelled || target === undefined) {
+					return;
+				}
+				/*
+				 * **Cleared only once the navigation actually happened.**
+				 *
+				 * Reading used to clear it in main, and this threw away the boolean
+				 * saying whether it had worked. `openConfirmationsFor` returns false
+				 * when the account is not in the list yet — the exact case this path
+				 * exists for — so a security notification opened the application, went
+				 * nowhere, and left nothing behind to try again with.
+				 */
+				if (openConfirmationsRef.current(target)) {
+					void api.takePendingConfirmations({ acknowledged: target }).catch(() => undefined);
 				}
 			})
 			.catch(() => {

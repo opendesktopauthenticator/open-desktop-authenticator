@@ -49,16 +49,34 @@ export class ToastClickRouter {
 	}
 
 	/**
-	 * Take the click the renderer was not there to receive.
+	 * Look at the click the renderer was not there to receive.
 	 *
-	 * **Reading clears it.** A click that has been acted on must not navigate
-	 * somebody again the next time the renderer asks — which it does on every
-	 * unlock.
+	 * **Reading no longer clears it.** It did, and the renderer then navigated —
+	 * or failed to. `openConfirmationsFor` returns false when the account is not
+	 * in the list yet, which is precisely the case this slow path exists for: a
+	 * click landing after unlock and before `listAccounts` has answered. The
+	 * intent was already gone from main by then, so a security notification opened
+	 * the application and never opened Confirmations, with nothing anywhere
+	 * reporting that it had not.
+	 *
+	 * The push path had this right from the start — it gates its clear on that
+	 * same boolean — and the path that exists for the harder case did not.
 	 */
-	take(): { steamId64?: string } {
-		const steamId64 = this.pending;
-		this.pending = undefined;
-		return steamId64 === undefined ? {} : { steamId64 };
+	peek(): { steamId64?: string } {
+		return this.pending === undefined ? {} : { steamId64: this.pending };
+	}
+
+	/**
+	 * The renderer navigated. Forget it.
+	 *
+	 * Matched against what is pending rather than clearing whatever is there: a
+	 * second click arriving between the peek and the acknowledgement is a newer
+	 * intention, and it must not be swallowed by an acknowledgement of the first.
+	 */
+	acknowledge(steamId64: string): void {
+		if (this.pending === steamId64) {
+			this.pending = undefined;
+		}
 	}
 
 	/**
@@ -79,5 +97,11 @@ export class ToastClickRouter {
  * a packaged build, on a screen somebody is looking at.
  */
 export function registerToastClickHandlers(router: ToastClickRouter): void {
-	registerHandler(CHANNELS.takePendingConfirmations, () => router.take());
+	registerHandler(CHANNELS.takePendingConfirmations, ({ acknowledged }) => {
+		if (acknowledged !== undefined) {
+			router.acknowledge(acknowledged);
+			return {};
+		}
+		return router.peek();
+	});
 }

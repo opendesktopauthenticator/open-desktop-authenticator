@@ -879,7 +879,12 @@ export const IPC_CONTRACT = {
 	 * `webContents.send` has neither.
 	 */
 	[CHANNELS.takePendingConfirmations]: {
-		request: z.object({}).strict(),
+		/*
+		 * No argument peeks; `acknowledged` clears. Reading used to clear on its
+		 * own, so a renderer that could not navigate — the account not yet in its
+		 * list, which is the case this exists for — lost the click entirely.
+		 */
+		request: z.object({ acknowledged: z.string().optional() }).strict(),
 		response: z.object({ steamId64: z.string().optional() }).strict()
 	},
 
@@ -1237,7 +1242,7 @@ export interface RendererApi {
 	 * Returns `{}` when nothing is waiting, which is the ordinary answer.
 	 * Reading clears it, so a second call returns nothing.
 	 */
-	takePendingConfirmations(): Promise<{ steamId64?: string }>;
+	takePendingConfirmations(request?: { acknowledged?: string }): Promise<{ steamId64?: string }>;
 	/**
 	 * Remove an account and its secrets from this vault.
 	 *

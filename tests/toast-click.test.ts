@@ -140,22 +140,65 @@ describe('routing a click', () => {
 		const r = router();
 		r.router.activate(ID);
 		expect(r.push).toHaveBeenCalled();
-		expect(r.router.take()).toEqual({ steamId64: ID });
+		expect(r.router.peek()).toEqual({ steamId64: ID });
 	});
 
 	it('answers nothing when no click is waiting', () => {
-		expect(router().router.take()).toEqual({});
+		expect(router().router.peek()).toEqual({});
 	});
 
 	/*
 	 * The renderer asks on every unlock. A click already acted on must not
 	 * navigate somebody a second time.
 	 */
-	it('gives a click away only once', () => {
+	it('gives a click away only once, once it has been acted on', () => {
 		const r = router();
 		r.router.activate(ID);
-		expect(r.router.take()).toEqual({ steamId64: ID });
-		expect(r.router.take(), 'a collected click navigated somebody twice').toEqual({});
+		expect(r.router.peek()).toEqual({ steamId64: ID });
+		r.router.acknowledge(ID);
+		expect(r.router.peek(), 'an acted-on click navigated somebody twice').toEqual({});
+	});
+
+	/**
+	 * **And it survives a renderer that could not act on it.**
+	 *
+	 * Reading used to clear it. The renderer navigates by looking the account up
+	 * in the list it currently holds, and that lookup fails when the click lands
+	 * after unlock and before `listAccounts` has answered — which is the case this
+	 * whole slow path exists for. The intent was gone from main by then, so a
+	 * security notification opened the application, went nowhere, and left nothing
+	 * to try again with.
+	 */
+	it('keeps a click the renderer could not navigate to', () => {
+		const r = router();
+		r.router.activate(ID);
+
+		// The renderer looked, found no such account yet, and acknowledged nothing.
+		expect(r.router.peek()).toEqual({ steamId64: ID });
+
+		expect(
+			r.router.peek(),
+			'the click was consumed by a renderer that never navigated anywhere'
+		).toEqual({ steamId64: ID });
+	});
+
+	/**
+	 * An acknowledgement names what it acted on, so a click that arrived in
+	 * between is not swallowed by it. Two clicks a second apart, the second one
+	 * the newer intention: acknowledging the first must leave the second waiting.
+	 */
+	it('is not cleared by an acknowledgement of an older click', () => {
+		const r = router();
+		const other = '76561198000000002';
+		r.router.activate(ID);
+		r.router.activate(other);
+
+		r.router.acknowledge(ID);
+
+		expect(
+			r.router.peek(),
+			'acknowledging the click that was superseded threw away the one that superseded it'
+		).toEqual({ steamId64: other });
 	});
 
 	it('keeps only the most recent of two clicks', () => {
@@ -163,8 +206,9 @@ describe('routing a click', () => {
 		const other = '76561198000000002';
 		r.router.activate(ID);
 		r.router.activate(other);
-		expect(r.router.take()).toEqual({ steamId64: other });
-		expect(r.router.take()).toEqual({});
+		expect(r.router.peek()).toEqual({ steamId64: other });
+		r.router.acknowledge(other);
+		expect(r.router.peek()).toEqual({});
 	});
 
 	/*
@@ -176,6 +220,6 @@ describe('routing a click', () => {
 		const r = router();
 		r.router.activate(ID);
 		r.router.forget();
-		expect(r.router.take(), 'a click from before a lock navigated after it').toEqual({});
+		expect(r.router.peek(), 'a click from before a lock navigated after it').toEqual({});
 	});
 });

@@ -241,7 +241,7 @@ describe('a delivery attempt that outlives the account state it belonged to', ()
  * check whatsoever.
  */
 describe('the rollbacks that were not keyed by attempt', () => {
-	it('does not undo an unreadable count a later poll recorded as its own', async () => {
+	it('does not undo an unreadable count a later poll announced as its own', async () => {
 		const h = harness();
 		h.notifier.pending(ID, NAME, [], 0, 'full');
 
@@ -249,21 +249,31 @@ describe('the rollbacks that were not keyed by attempt', () => {
 		h.notifier.pending(ID, NAME, [], 4, 'full');
 		expect(h.toasts).toHaveLength(1);
 
-		// Poll 2 finds the same count, records it as its own, and says nothing —
-		// which is right, an unchanged count is not news.
-		h.notifier.pending(ID, NAME, [], 4, 'full');
-		expect(h.toasts).toHaveLength(1);
+		/*
+		 * Poll 2 carries a fresh confirmation, so it toasts — and that toast names
+		 * the same four unreadable entries in its body. It is delivered, so the
+		 * count really has been reported and poll 2 owns having reported it.
+		 *
+		 * The first version of this had poll 2 say nothing at all, which made it
+		 * assert the opposite of what it should: a poll that announced nothing has
+		 * nothing to protect, and the rise poll 1 failed to deliver must still be
+		 * retried. It contradicted the quiet-poll case below, and one of the two
+		 * had to be wrong.
+		 */
+		h.notifier.pending(ID, NAME, [confirmation('A')], 4, 'full');
+		expect(h.toasts).toHaveLength(2);
+		await h.settle(1, true);
 
 		// Poll 1 now reports it never appeared. Comparing values, this matched.
 		await h.settle(0, false);
 
-		// The count still has not moved, so there is still nothing to say.
-		h.notifier.pending(ID, NAME, [], 4, 'full');
+		// The count has not moved and has already been reported, so nothing is due.
+		h.notifier.pending(ID, NAME, [confirmation('A')], 4, 'full');
 		expect(
 			h.toasts,
-			'the stale failure matched a later poll by value and rolled the mark back below it, so an ' +
-				'unchanged count was announced as a fresh rise'
-		).toHaveLength(1);
+			'the stale failure matched a later poll by value and rolled the mark back below what that ' +
+				'poll had already told the user, so an unchanged count looked like a fresh rise'
+		).toHaveLength(2);
 	});
 
 	/**
@@ -330,5 +340,40 @@ describe('the rollbacks that were not keyed by attempt', () => {
 
 		h.notifier.signInNeeded(ID, NAME);
 		expect(h.toasts, 'a notice nobody saw was recorded as told').toHaveLength(2);
+	});
+});
+
+/**
+ * **A poll that says nothing may not claim to have said it.**
+ *
+ * The marker's owner was stamped beside the value, on every poll — and a poll
+ * that announces nothing is the common case, one every fifteen seconds. An
+ * attempt whose toast was still in flight then found the marker owned by a poll
+ * that had delivered nothing, could not roll it back, and the rise it failed to
+ * report was recorded as reported. Permanently: nothing lowers the mark again.
+ */
+describe('a quiet poll between a toast and its failure', () => {
+	it('does not stop the failed toast rolling its own work back', async () => {
+		const h = harness();
+		h.notifier.pending(ID, NAME, [], 0, 'full');
+
+		// The count rises to 3 and a toast goes out.
+		h.notifier.pending(ID, NAME, [], 3, 'full');
+		expect(h.toasts).toHaveLength(1);
+
+		// An ordinary quiet poll: nothing new, nothing announced.
+		h.notifier.pending(ID, NAME, [], 3, 'full');
+		expect(h.toasts).toHaveLength(1);
+
+		// The first toast reports that it never appeared.
+		await h.settle(0, false);
+
+		// The rise has still never been shown to anybody, so the next poll must.
+		h.notifier.pending(ID, NAME, [], 3, 'full');
+		expect(
+			h.toasts,
+			'a quiet poll took ownership of the marker, the failed toast could not undo it, and the ' +
+				'unreadable confirmations were never mentioned again'
+		).toHaveLength(2);
 	});
 });

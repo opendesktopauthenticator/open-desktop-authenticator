@@ -253,6 +253,17 @@ export function registerBrowserHandlers(deps: BrowserHandlerDeps): void {
 			// wiped its session; what is left is to tell the user the one thing that
 			// helps, which is not "it failed".
 			if (err instanceof BrowserSignInRequired) {
+				/*
+				 * **The same questions as the mint's failure path, for the same
+				 * reason.** `open` is a window being built, a session being wiped and
+				 * a cookie being refused — seconds during which the vault can lock,
+				 * `Require proxies` can be switched on, and the account can be removed
+				 * or rerouted. The mint's branch was fixed and this one was not, so the
+				 * renderer was still offered a sign-in for an account the vault no
+				 * longer holds.
+				 */
+				revalidate();
+				stillTheSameAccount();
 				return { signInRequired: true, reason: err.message };
 			}
 			throw err;

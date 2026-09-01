@@ -787,3 +787,65 @@ describe('a mint that fails while the world changes underneath it', () => {
 		expect(result.signInRequired).toBe(true);
 	});
 });
+
+/**
+ * **And the other way out with `signInRequired` on it.**
+ *
+ * `open` builds a window, wipes a session and offers a cookie Steam can refuse —
+ * seconds during which the vault can lock, `Require proxies` can be switched on,
+ * and the account can be removed or rerouted. The mint's branch was given those
+ * checks and this one was not, so a stale sign-in prompt still reached the
+ * renderer for an account the vault no longer holds.
+ */
+describe('a sign-in that Steam demands during the open itself', () => {
+	const refused = () => Promise.reject(new BrowserSignInRequired('that session has expired'));
+
+	it('does not ask for a sign-in for an account that was removed', async () => {
+		const harness = deps({}, undefined);
+		registerBrowserHandlers({
+			...harness.deps,
+			browsers: {
+				...harness.deps.browsers,
+				open: () => {
+					harness.changeRouting();
+					return refused();
+				}
+			} as unknown as AccountBrowsers
+		});
+
+		await expect(
+			invoke({ steamId64: '76561198000000001', route: 'proxy' }),
+			'a sign-in was offered for an account that had gone while the window was opening'
+		).rejects.toThrow(/changed while it was opening/);
+	});
+
+	it('does not ask for a sign-in on a vault that locked during the open', async () => {
+		let unlocked = true;
+		const harness = deps({ isUnlocked: () => unlocked });
+		registerBrowserHandlers({
+			...harness.deps,
+			browsers: {
+				...harness.deps.browsers,
+				open: () => {
+					unlocked = false;
+					return refused();
+				}
+			} as unknown as AccountBrowsers
+		});
+
+		await expect(invoke({ steamId64: '76561198000000001', route: 'proxy' })).rejects.toThrow(
+			/unlock the vault/i
+		);
+	});
+
+	/* And the answer the branch exists to give, which has to survive. */
+	it('still asks for a sign-in when nothing else changed', async () => {
+		const harness = deps({}, new BrowserSignInRequired('that session has expired'));
+		registerBrowserHandlers(harness.deps);
+
+		const result = (await invoke({ steamId64: '76561198000000001', route: 'proxy' })) as {
+			signInRequired: boolean;
+		};
+		expect(result.signInRequired).toBe(true);
+	});
+});

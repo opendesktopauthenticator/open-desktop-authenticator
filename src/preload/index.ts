@@ -185,8 +185,10 @@ const api: RendererApi = {
 	 * reloaded cases work, because a lock replaces the document that was
 	 * listening.
 	 */
-	takePendingConfirmations: () =>
-		ipcRenderer.invoke(CHANNELS.takePendingConfirmations) as Promise<{ steamId64?: string }>,
+	takePendingConfirmations: (request?: { acknowledged?: string }) =>
+		ipcRenderer.invoke(CHANNELS.takePendingConfirmations, request ?? {}) as Promise<{
+			steamId64?: string;
+		}>,
 	setAccountProxy: (steamId64: string, proxyUrl: string | null) =>
 		ipcRenderer.invoke(CHANNELS.accountSetProxy, { steamId64, proxyUrl }) as Promise<{
 			ok: true;
