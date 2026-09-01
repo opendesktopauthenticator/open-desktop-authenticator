@@ -184,16 +184,44 @@ function durably(path: string, body: string): void {
 				throw err;
 			}
 			/*
-			 * Hard links are not universal — FAT32, some network shares, some
-			 * container mounts. Falling back to the rename keeps the durability and
-			 * loses only the atomicity of the exclusion, which the check above
-			 * still covers for everything but a genuine race. Refusing to write a
-			 * recovery file at all would be much worse than that.
+			 * **Hard links are not universal**, and the fallback still may not
+			 * overwrite.
+			 *
+			 * FAT32, some network shares and some container mounts have no `link`.
+			 * What stood here was a check and then a rename, and the comment admitted
+			 * the gap in as many words: the check narrows the window and cannot close
+			 * it, because a rename overwrites and another enrolment can create the
+			 * file in between. What it would overwrite is a previous authenticator’s
+			 * recovery file - the one file here whose whole purpose is to still be
+			 * there later.
+			 *
+			 * So the name is claimed with the same exclusion, on the destination
+			 * itself: `wx` creates it or fails EEXIST, atomically, on every
+			 * filesystem. One syscall, not a check and then an action. The rename that
+			 * follows overwrites nothing but the empty file this call just made, and
+			 * anyone racing for the name has already lost it.
+			 *
+			 * A crash between the two leaves an empty file rather than a wrong one,
+			 * which is the right way for this to fail: it costs a later enrolment for
+			 * the same account an EEXIST it can report, and it cannot destroy a
+			 * recovery file that was already there, because such a file would have
+			 * taken the name first and failed this open.
 			 */
-			if (existsSync(path)) {
-				throw Object.assign(new Error('EEXIST: file already exists'), { code: 'EEXIST' });
+			closeSync(openSync(path, 'wx', 0o600));
+			try {
+				renameSync(temp, path);
+			} catch (renameFailed) {
+				/*
+				 * Leaving the empty placeholder behind would deny the name to every
+				 * later attempt, for a write that never happened.
+				 */
+				try {
+					unlinkSync(path);
+				} catch {
+					/* best effort */
+				}
+				throw renameFailed;
 			}
-			renameSync(temp, path);
 			// The rename consumed it; there is nothing left to unlink.
 			syncDirectory(dirname(path));
 			return;

@@ -33,6 +33,7 @@ import { MINIMUM_SCRYPT } from '../src/shared/vault-format';
 const state = vi.hoisted(() => ({
 	corruptStaged: false,
 	corruptMain: false,
+	corruptDestination: false,
 	failRestore: false
 }));
 
@@ -50,6 +51,14 @@ vi.mock('node:fs', async () => {
 		readFileSync: (path: unknown, ...rest: unknown[]) => {
 			if (state.corruptMain && typeof path === 'string' && path.endsWith('vault.json')) {
 				return '{"not":"what was written"}';
+			}
+			if (state.corruptDestination && typeof path === 'string' && path.endsWith('.bak')) {
+				/*
+				 * The destination read-back, after the rename: a filesystem that
+				 * reported a rename it did not perform, or a device that went away
+				 * between the two calls.
+				 */
+				return '{"not":"what the rename was supposed to publish"}';
 			}
 			if (state.corruptStaged && typeof path === 'string' && path.endsWith('.bak.tmp')) {
 				// What a short write leaves: the file exists and holds less than was
@@ -71,12 +80,14 @@ beforeEach(() => {
 	file = join(dir, 'vault.json');
 	state.corruptStaged = false;
 	state.corruptMain = false;
+	state.corruptDestination = false;
 	state.failRestore = false;
 });
 
 afterEach(() => {
 	state.corruptStaged = false;
 	state.corruptMain = false;
+	state.corruptDestination = false;
 	state.failRestore = false;
 	rmSync(dir, { recursive: true, force: true });
 });
@@ -174,5 +185,72 @@ describe('a failed write whose rollback also fails', () => {
 		state.corruptMain = false;
 
 		expect(message).toMatch(/previous file was restored/);
+	});
+});
+
+/**
+ * **The half the staged check could not reach.**
+ *
+ * Verifying the staged file before the rename moved most of the risk off the old
+ * backup and left this: the rename replaces the working backup, and the
+ * read-back that follows it can still fail - a filesystem that reported a rename
+ * it did not perform, a device that went away between the two. At that point the
+ * previous backup is gone, what stands in its place is the thing that just
+ * failed verification, and the error says the backup "could not be rewritten",
+ * which a reader takes to mean the old one survived.
+ *
+ * It is a narrow window and the file behind it is a vault holding revocation
+ * codes, which is the whole argument for closing it.
+ */
+describe('replacing the backup when the published file does not verify', () => {
+	it('puts the previous backup back', async () => {
+		writeEnvelope(file, await envelope('{"seq":1}'));
+		writeEnvelope(file, await envelope('{"seq":2}'));
+
+		const paths = vaultPaths(file);
+		const before = readFileSync(paths.backup, 'utf8');
+		const replacement = await envelope('{"seq":3}');
+
+		state.corruptDestination = true;
+		expect(() => writeBackupEnvelope(file, replacement)).toThrow(VaultStorageError);
+		state.corruptDestination = false;
+
+		expect(existsSync(paths.backup), 'the backup file is gone entirely').toBe(true);
+		expect(
+			readFileSync(paths.backup, 'utf8'),
+			'the rename had already destroyed the working backup by the time the verification ran, ' +
+				'and nothing put it back - so what is on disk is the file that failed the check, under ' +
+				'an error saying the backup could not be rewritten'
+		).toBe(before);
+		expect(readBackupEnvelope(file), 'and it no longer opens').toBeDefined();
+	});
+
+	it('leaves no copy of the old backup lying beside it', async () => {
+		writeEnvelope(file, await envelope('{"seq":1}'));
+		writeEnvelope(file, await envelope('{"seq":2}'));
+		const paths = vaultPaths(file);
+
+		const replacement = await envelope('{"seq":3}');
+
+		state.corruptDestination = true;
+		expect(() => writeBackupEnvelope(file, replacement)).toThrow(VaultStorageError);
+		state.corruptDestination = false;
+
+		expect(
+			existsSync(`${paths.backup}.previous`),
+			'a second copy of the vault was left on disk after the write that failed'
+		).toBe(false);
+	});
+
+	/* And the ordinary path leaves nothing behind either. */
+	it('leaves no copy behind when the write succeeds', async () => {
+		writeEnvelope(file, await envelope('{"seq":1}'));
+		writeEnvelope(file, await envelope('{"seq":2}'));
+		const paths = vaultPaths(file);
+
+		writeBackupEnvelope(file, await envelope('{"seq":3}'));
+
+		expect(existsSync(`${paths.backup}.previous`)).toBe(false);
+		expect(readBackupEnvelope(file)).toBeDefined();
 	});
 });

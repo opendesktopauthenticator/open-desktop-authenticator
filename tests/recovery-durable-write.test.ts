@@ -25,7 +25,9 @@ const state = vi.hoisted(() => ({
 	shortWrite: false,
 	hideDestination: false,
 	silentShortWrite: false,
-	noProgress: false
+	noProgress: false,
+	noHardLinks: false,
+	failRename: false
 }));
 
 vi.mock('node:fs', async () => {
@@ -61,6 +63,23 @@ vi.mock('node:fs', async () => {
 				throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' });
 			}
 			return (actual.writeSync as (...args: unknown[]) => number)(fd, data, ...rest);
+		},
+		linkSync: (from: unknown, to: unknown) => {
+			/*
+			 * A filesystem with no hard links: FAT32, some network shares, some
+			 * container mounts. EPERM rather than EEXIST, because EEXIST means the
+			 * destination is taken and is rethrown rather than falling back.
+			 */
+			if (state.noHardLinks) {
+				throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+			}
+			return (actual.linkSync as (...args: unknown[]) => void)(from, to);
+		},
+		renameSync: (from: unknown, to: unknown) => {
+			if (state.failRename && typeof to === 'string' && to.endsWith('.json')) {
+				throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+			}
+			return (actual.renameSync as (...args: unknown[]) => void)(from, to);
 		},
 		existsSync: (path: unknown) => {
 			/*
@@ -103,6 +122,8 @@ beforeEach(() => {
 	state.hideDestination = false;
 	state.silentShortWrite = false;
 	state.noProgress = false;
+	state.noHardLinks = false;
+	state.failRename = false;
 });
 
 afterEach(() => {
@@ -255,5 +276,78 @@ describe('a write that lands short without throwing', () => {
 		expect(threw, 'a write that never advances was treated as success').toBe(true);
 		expect(existsSync(path)).toBe(false);
 		expect(readdirSync(join(dir, 'recovery')), 'a staged fragment was left behind').toEqual([]);
+	});
+});
+
+/**
+ * **The fallback for filesystems with no hard links, which had the race back.**
+ *
+ * `link` is what makes the exclusion atomic: it creates the name or fails
+ * EEXIST, in one syscall. It is not universal, so there is a fallback — and the
+ * fallback was `if (existsSync(path)) throw; renameSync(temp, path)`, with a
+ * comment saying in as many words that the check narrows the window and cannot
+ * close it. Everything above passes on a filesystem that has links, so the
+ * property was proved on the path that was never in doubt and left unproved on
+ * the one that was.
+ *
+ * A recovery file is the copy that exists because everything else was lost.
+ * "Almost never overwritten" is not what that file is for.
+ */
+describe('the same file on a filesystem that cannot make hard links', () => {
+	it('is still written when nothing is in the way', () => {
+		state.noHardLinks = true;
+		expect(writeRecoveryFile(path, envelope)).toBe(path);
+		expect(readFileSync(path, 'utf8')).toContain(envelope.ciphertext);
+	});
+
+	it('is not replaced by a second enrollment', () => {
+		state.noHardLinks = true;
+		writeRecoveryFile(path, envelope);
+		const first = readFileSync(path, 'utf8');
+
+		const second = writeRecoveryFile(path, { ...envelope, ciphertext: 'b'.repeat(400) });
+
+		expect(second, 'the second enrollment was written over the first').not.toBe(path);
+		expect(readFileSync(path, 'utf8')).toBe(first);
+	});
+
+	/* The one that was open: the file appears after the check and before the
+	 * rename, and a rename overwrites. */
+	it('is not replaced by a write that started before it appeared', () => {
+		state.noHardLinks = true;
+		writeRecoveryFile(path, envelope);
+		const first = readFileSync(path, 'utf8');
+
+		state.hideDestination = true;
+		const second = writeRecoveryFile(path, { ...envelope, ciphertext: 'c'.repeat(400) });
+		state.hideDestination = false;
+
+		expect(
+			readFileSync(path, 'utf8'),
+			'on a filesystem with no hard links, a recovery file that appeared after the existence ' +
+				'check was overwritten by the enrollment that had already checked - and what it ' +
+				'replaced was a previous authenticator backup'
+		).toBe(first);
+		expect(second, 'the second write went to the destination anyway').not.toBe(path);
+	});
+
+	/**
+	 * And the cost of claiming the name first is a placeholder, which must not
+	 * outlive a write that failed: leaving it would deny the name to every later
+	 * attempt for an enrollment that was never recorded.
+	 */
+	it('leaves nothing behind when the write cannot be published', () => {
+		state.noHardLinks = true;
+		state.failRename = true;
+		expect(() => writeRecoveryFile(path, envelope)).toThrow(/EIO/);
+		state.failRename = false;
+		state.noHardLinks = false;
+
+		expect(
+			existsSync(path),
+			'an empty file was left at the destination by a write that failed, and every later ' +
+				'enrollment for this account will now be pushed aside by it'
+		).toBe(false);
+		expect(readdirSync(join(dir, 'recovery')), 'a staged copy was left beside it').toEqual([]);
 	});
 });

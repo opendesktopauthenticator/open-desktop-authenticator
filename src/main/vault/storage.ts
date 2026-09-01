@@ -363,15 +363,60 @@ export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 		}
 		envelopeSchema.parse(JSON.parse(staged));
 
-		renameSync(temp, paths.backup);
-		tighten(paths.backup);
-		syncDirectory(dirname(file));
+		/*
+		 * **The one that was still open: the destination check has no way back.**
+		 *
+		 * Verifying the staged copy moved most of the risk off the old backup, and
+		 * left this. The rename replaces the working backup, and the read-back that
+		 * follows it can fail - a filesystem that reported a rename it did not do,
+		 * a device that went away between the two. At that point the previous
+		 * backup is gone and what stands in its place is the thing that just failed
+		 * verification, while the error says the backup "could not be rewritten",
+		 * which a reader takes to mean the old one survived.
+		 *
+		 * So the old one is copied aside first, and put back if anything after the
+		 * rename goes wrong. A copy rather than a rename, deliberately: renaming it
+		 * out of the way would leave a moment with no backup at all, and a crash
+		 * inside that moment is the failure this whole file exists to avoid.
+		 */
+		let previous: string | undefined;
+		if (existsSync(paths.backup)) {
+			previous = `${paths.backup}.previous`;
+			copyFileSync(paths.backup, previous);
+		}
 
-		// And again at the destination, which is cheap and catches a rename that
-		// reported success onto a filesystem that did something else.
-		const readBack = readFileSync(paths.backup, 'utf8');
-		if (readBack !== serialised) {
-			throw new Error('the backup on disk does not match what was written');
+		try {
+			renameSync(temp, paths.backup);
+			tighten(paths.backup);
+			syncDirectory(dirname(file));
+
+			// And again at the destination, which is cheap and catches a rename that
+			// reported success onto a filesystem that did something else.
+			const readBack = readFileSync(paths.backup, 'utf8');
+			if (readBack !== serialised) {
+				throw new Error('the backup on disk does not match what was written');
+			}
+		} catch (err) {
+			if (previous !== undefined && existsSync(previous)) {
+				try {
+					copyFileSync(previous, paths.backup);
+					tighten(paths.backup);
+					syncDirectory(dirname(file));
+				} catch {
+					/* the throw below is what the caller acts on either way */
+				}
+			}
+			throw err;
+		} finally {
+			if (previous !== undefined) {
+				try {
+					if (existsSync(previous)) {
+						unlinkSync(previous);
+					}
+				} catch {
+					/* best effort: a stray copy of the old backup is overwritten next time */
+				}
+			}
 		}
 	} catch (err) {
 		try {
