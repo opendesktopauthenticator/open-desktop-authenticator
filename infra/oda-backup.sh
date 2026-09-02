@@ -146,8 +146,16 @@ if [ "$cutoff_age" -lt 7689600 ] || [ "$cutoff_age" -gt 7862400 ]; then
 fi
 find "$dest" -name 'tickets-*.tar.gz' ! -newermt "$cutoff" -delete
 
-kept_config=$(ls -1 "$dest"/config-*.tar.gz 2>/dev/null | wc -l)
-kept_tickets=$(ls -1 "$dest"/tickets-*.tar.gz 2>/dev/null | wc -l)
+# `find`, not `ls`, because an empty glob is an ordinary state here and `ls` treats
+# it as an error: it exits 2, `pipefail` carries that to the assignment, and
+# `set -e` kills the run. On a fresh box - the timer enabled before the ticket
+# service has ever started - that happened after the config archive had been
+# written and the retention sweep had run, so a backup that had in fact succeeded
+# was reported as `status=2/INVALIDARGUMENT` with nothing in the journal, and the
+# `else` branch written for exactly that case was unreachable. `find` exits 0 when
+# it matches nothing.
+kept_config=$(find "$dest" -maxdepth 1 -name 'config-*.tar.gz' | wc -l)
+kept_tickets=$(find "$dest" -maxdepth 1 -name 'tickets-*.tar.gz' | wc -l)
 if [ -n "$tickets" ]; then
   logger -t oda-backup "config $(du -h "$config" | cut -f1) ($kept_config kept), tickets $(du -h "$tickets" | cut -f1) ($kept_tickets kept)"
 else

@@ -78,13 +78,22 @@ ufw --force delete allow 443/tcp >/dev/null 2>&1 || true
 # Only rules this script wrote are considered: matched on the `cloudflare`
 # comment, so a hand-added allow is never touched. Deleted by number in
 # descending order, because deleting renumbers everything below it.
+#
+# `|| true` because **nothing being stale is the normal outcome**, not an error.
+# The loop above has just re-added exactly the currently-published ranges, so the
+# `grep -v` usually matches nothing and exits 1 - and under `set -euo pipefail` an
+# assignment whose command substitution fails kills the script. It died here on
+# every healthy run: the firewall ended up correct, then the shell exited 1 before
+# `rm -f "$ranges"` and before the confirmation line, so the temp file leaked and
+# the operator saw no output and a failure status from the one script that can
+# take the site offline.
 stale=$(
 	ufw status numbered \
 		| grep -E '# cloudflare' \
 		| grep -vFf <(sed 's/^/ /' "$ranges") \
 		| grep -oE '^\[[ 0-9]+\]' \
 		| tr -d '[] ' \
-		| sort -rn
+		| sort -rn || true
 )
 removed=0
 for n in $stale; do

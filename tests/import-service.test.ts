@@ -630,6 +630,45 @@ describe('replacing an existing account', () => {
 		expect(vault.read().accounts[0]?.revocationCode).toBe('R99999');
 	});
 
+	/*
+	 * **And when the file carries the key with nothing in it, which is the form
+	 * this application itself writes.**
+	 *
+	 * `export.ts` emits `revocation_code: account.revocationCode ?? ''` for an
+	 * account that has no code, so exporting and re-importing produced exactly
+	 * this file. The parser accepted `''` as a real code — while the warning
+	 * beside it, which tests `!data.revocation_code`, had already said the file
+	 * had none — and `mergeAccount` resolves with `??`, for which `''` is not
+	 * nullish. So the stored code lost to an empty string: the one loss the
+	 * merge docblock says a replace can never cause.
+	 */
+	it('NEVER drops a stored revocation code for an empty one in the file', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push(existingAccount());
+		});
+
+		const id = stageOne(file({ revocation_code: '' }));
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+		expect(
+			vault.read().accounts[0]?.revocationCode,
+			'an empty string in the file overwrote the only copy of the revocation code in existence'
+		).toBe('R99999');
+	});
+
+	it('NEVER drops a stored device id for an empty one in the file', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push({ ...existingAccount(), deviceId: 'android:kept-device-id' });
+		});
+		const before = vault.read().accounts[0]?.deviceId;
+		expect(before, 'the fixture carries no device id, so this asserts nothing').toBeDefined();
+
+		const id = stageOne(file({ device_id: '' }));
+		await imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }]);
+
+		expect(vault.read().accounts[0]?.deviceId).toBe(before);
+	});
+
 	it('keeps settings the user chose in the app', async () => {
 		await vault.mutate((draft) => {
 			draft.accounts.push({
