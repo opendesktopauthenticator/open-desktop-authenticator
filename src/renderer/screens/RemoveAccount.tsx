@@ -41,7 +41,7 @@ export function RemoveAccount({
 	onDeactivate: (
 		passphrase: string,
 		acknowledgement: string
-	) => Promise<{ state?: 'uncertain'; guidance?: string; certain?: boolean }>;
+	) => Promise<{ state?: 'uncertain'; guidance?: string; certain?: boolean; persisted?: boolean }>;
 	/**
 	 * Clear the vault's record that an irreversible operation on this account was
 	 * left unresolved. Called only when the user says they have checked it.
@@ -65,11 +65,15 @@ export function RemoveAccount({
 	 * had said in as many words that it would not send the request a second time.
 	 * The vault remembers it now, and this is where that record is read.
 	 */
-	const [uncertain, setUncertain] = useState<{ guidance: string; certain: boolean } | undefined>(
+	const [uncertain, setUncertain] = useState<
+		{ guidance: string; certain: boolean; persisted?: boolean } | undefined
+	>(
 		account.unresolvedOperation?.kind === 'deactivate'
 			? {
 					guidance: account.unresolvedOperation.guidance,
-					certain: account.unresolvedOperation.certain === true
+					certain: account.unresolvedOperation.certain === true,
+					// Read from the account, so it is durable by construction.
+					persisted: true
 				}
 			: undefined
 	);
@@ -96,11 +100,12 @@ export function RemoveAccount({
 				 * known to have performed rendered as one nobody can be sure about.
 				 */
 				const outcome = result as
-					{ state?: string; guidance?: string; certain?: boolean } | undefined;
+					{ state?: string; guidance?: string; certain?: boolean; persisted?: boolean } | undefined;
 				if (outcome?.state === 'uncertain') {
 					setUncertain({
 						guidance: outcome.guidance ?? 'Steam did not answer, so the outcome is unknown.',
-						certain: outcome.certain === true
+						certain: outcome.certain === true,
+						persisted: outcome.persisted === true
 					});
 					return;
 				}
@@ -141,11 +146,23 @@ export function RemoveAccount({
 				<p className="error">{uncertain.guidance}</p>
 				<p>
 					{uncertain.certain
-						? 'This application will not send the request again. The account has no second ' +
-							'factor until you add one somewhere else — do that before anything else.'
-						: 'Nothing here can tell whether Steam acted on the request, so this application ' +
-							'will not send it again. Check Steam Guard on the account before doing ' +
-							'anything else.'}
+						? 'The account has no second factor until you add one somewhere else — do that ' +
+							'before anything else.'
+						: 'Nothing here can tell whether Steam acted on the request. Check Steam Guard on ' +
+							'the account before doing anything else.'}
+				</p>
+				{/*
+				 * **Only promised when it is true.** The refusal is kept on the account,
+				 * and that write can fail. It was caught and swallowed, and the screen
+				 * went on saying the request would not be sent again — about a record
+				 * that does not exist.
+				 */}
+				<p>
+					{uncertain.persisted === false
+						? 'This warning could not be saved, so it will be gone once you close this window. ' +
+							'The account will still be listed here and will still show codes, which may ' +
+							'mean nothing. Write down what it says above before you close it.'
+						: 'This application will not send the request again.'}
 				</p>
 				<div className="controls">
 					<button type="button" onClick={onClose}>

@@ -379,7 +379,8 @@ export function registerEnrollmentHandlers(
 		steamId64: string,
 		kind: 'activate' | 'deactivate',
 		outcome: { guidance: string; certain?: boolean }
-	): Promise<void> {
+	): Promise<boolean> {
+		let recorded = false;
 		try {
 			await vault.mutate((draft) => {
 				const account = draft.accounts.find((entry) => entry.steamId64 === steamId64);
@@ -392,10 +393,12 @@ export function registerEnrollmentHandlers(
 					at: new Date().toISOString(),
 					...(outcome.certain === true ? { certain: true } : {})
 				};
+				recorded = true;
 			});
 		} catch (err) {
 			console.error('an unresolved Steam operation could not be recorded in the vault', err);
 		}
+		return recorded;
 	}
 
 	/*
@@ -436,16 +439,17 @@ export function registerEnrollmentHandlers(
 	 */
 	function heldBack(
 		steamId64: string
-	): { state: 'uncertain'; guidance: string; certain?: boolean } | undefined {
+	): { state: 'uncertain'; guidance: string; certain?: boolean; persisted?: boolean } | undefined {
 		const held = vault
 			.read()
 			.accounts.find((entry) => entry.steamId64 === steamId64)?.unresolvedOperation;
 		if (held === undefined) {
 			return undefined;
 		}
+		// Read back out of the vault, so it is durable by construction.
 		return held.certain === true
-			? { state: 'uncertain', guidance: held.guidance, certain: true }
-			: { state: 'uncertain', guidance: held.guidance };
+			? { state: 'uncertain', guidance: held.guidance, certain: true, persisted: true }
+			: { state: 'uncertain', guidance: held.guidance, persisted: true };
 	}
 
 	registerHandler(CHANNELS.enrollActivate, async ({ steamId64, code }) => {
@@ -458,8 +462,17 @@ export function registerEnrollmentHandlers(
 			return { state: await enrollment.activate(steamId64, code) };
 		} catch (err) {
 			const outcome = uncertainOrRethrow(err);
-			await latch(steamId64, 'activate', outcome);
-			return outcome;
+			/*
+			 * **Whether the refusal survives this window is part of the answer.**
+			 *
+			 * The write can fail — a full disk, a vault that locked while Steam was
+			 * being waited on, a row that is no longer there — and it was caught,
+			 * logged and swallowed, after which the screen went on saying "this
+			 * application will not send the request again". That is a promise about
+			 * a record that does not exist: close the window and the account looks
+			 * ordinary, with the same button offering the same irreversible call.
+			 */
+			return { ...outcome, persisted: await latch(steamId64, 'activate', outcome) };
 		}
 	});
 
@@ -487,10 +500,10 @@ export function registerEnrollmentHandlers(
 				/*
 				 * The account is still in the vault — a removal whose outcome is
 				 * unknown does not get to delete the secrets that might still be the
-				 * live ones — so there is a row to write this on.
+				 * live ones — so there is a row to write this on. Whether the write
+				 * landed travels with the outcome; see the activation path above.
 				 */
-				await latch(steamId64, 'deactivate', outcome);
-				return outcome;
+				return { ...outcome, persisted: await latch(steamId64, 'deactivate', outcome) };
 			}
 
 			// The same cleanup a local removal does: cookie jar, cached session,

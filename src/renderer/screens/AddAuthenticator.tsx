@@ -58,6 +58,7 @@ export function AddAuthenticator({
 		state: 'activated' | 'wantMore' | 'uncertain';
 		guidance?: string;
 		certain?: boolean;
+		persisted?: boolean;
 	}>;
 	/** Opens the revocation-code ceremony for the newly enrolled account. */
 	onBackup: (steamId64: string, accountName: string) => void;
@@ -117,10 +118,13 @@ export function AddAuthenticator({
 	 * the form again — after the application had said it would not send the
 	 * request a second time.
 	 */
-	const [uncertain, setUncertain] = useState<{ guidance: string; certain: boolean } | undefined>(
+	const [uncertain, setUncertain] = useState<
+		{ guidance: string; certain: boolean; persisted?: boolean } | undefined
+	>(
 		unresolved === undefined
 			? undefined
-			: { guidance: unresolved.guidance, certain: unresolved.certain === true }
+			: // Read from the account, so it is durable by construction.
+				{ guidance: unresolved.guidance, certain: unresolved.certain === true, persisted: true }
 	);
 	const [resolving, setResolving] = useState(false);
 	const [emailDomain, setEmailDomain] = useState<string | undefined>();
@@ -141,9 +145,32 @@ export function AddAuthenticator({
 		 * putting the form back, live, under a message saying not to try again.
 		 */
 		if (outcome.state === 'uncertain') {
+			/*
+			 * No `persisted` here: this outcome comes from the enrollment itself,
+			 * which has no account row to write a refusal onto — the vault write is
+			 * what failed in one of these branches. Durability is not applicable
+			 * rather than absent, and the copy distinguishes the two.
+			 */
 			setUncertain({ guidance: outcome.guidance, certain: outcome.certain === true });
 			return;
 		}
+		/*
+		 * **Cleared on the way through, and this is not tidiness.**
+		 *
+		 * `uncertain` was only ever set, never unset. Gating the forms on it — which
+		 * is what stops the screen offering the request it has just refused —
+		 * therefore made a *successful* second attempt invisible: `setEnrolled` and
+		 * `setStep('activate')` would run with a stale warning still set, the
+		 * activation block is gated on the same flag, and the user would be looking
+		 * at a panel about the previous attempt with no revocation-code button, at
+		 * the exact moment this screen's own copy calls that the one step not to
+		 * skip.
+		 *
+		 * An outcome that got this far is a live one. Whatever the last attempt
+		 * left behind stops applying here.
+		 */
+		setUncertain(undefined);
+
 		if (outcome.state === 'needsEmailCode') {
 			setEmailDomain(outcome.emailDomain);
 			setCode('');
@@ -218,7 +245,8 @@ export function AddAuthenticator({
 				 */
 				setUncertain({
 					guidance: result.guidance ?? 'Steam did not answer, so the outcome is unknown.',
-					certain: result.certain === true
+					certain: result.certain === true,
+					persisted: result.persisted === true
 				});
 				return;
 			}
@@ -258,12 +286,12 @@ export function AddAuthenticator({
 				    step already promises and what resuming actually does. Its absence
 				    meant the only exits were activating successfully or the revocation
 				    button beside it. */}
-				{step === 'credentials' && (
+				{uncertain === undefined && step === 'credentials' && (
 					<button type="button" className="secondary" onClick={onClose} disabled={busy}>
 						Cancel
 					</button>
 				)}
-				{step === 'emailCode' && (
+				{uncertain === undefined && step === 'emailCode' && (
 					<button
 						type="button"
 						className="secondary"
@@ -286,7 +314,17 @@ export function AddAuthenticator({
 			{error && <p className="error">{error}</p>}
 			{notice && <p className="hint">{notice}</p>}
 
-			{step === 'credentials' && (
+			{/*
+			 * **Gated, like the activation block below it.**
+			 *
+			 * The warning panel was rendered *above* these forms rather than instead
+			 * of them, so after an outcome that says "this application will not send
+			 * it again" the credentials form and the email-code form were still
+			 * mounted, still enabled, and still wired to the handler. The sentence
+			 * and the screen disagreed, and the screen is the one the user can act
+			 * on: a probe invoked the irreversible call twice through it.
+			 */}
+			{uncertain === undefined && step === 'credentials' && (
 				<>
 					<div className="notice">
 						<strong>This changes your Steam account, and it cannot be undone from here.</strong>
@@ -417,7 +455,7 @@ export function AddAuthenticator({
 				</>
 			)}
 
-			{step === 'emailCode' && (
+			{uncertain === undefined && step === 'emailCode' && (
 				<form onSubmit={submitEmailCode}>
 					<div className="ceremony">
 						<h2>Check your email</h2>
@@ -467,11 +505,23 @@ export function AddAuthenticator({
 					<p>{uncertain.guidance}</p>
 					<p>
 						{uncertain.certain
-							? 'This application will not send the request again. Follow the steps above before ' +
-								'starting another enrollment for this account.'
-							: 'Nothing here can tell whether Steam acted on the last request, so this ' +
-								'application will not send it again. Check the Steam mobile app before doing ' +
-								'anything else.'}
+							? 'Follow the steps above before starting another enrollment for this account.'
+							: 'Nothing here can tell whether Steam acted on the last request. Check the Steam ' +
+								'mobile app before doing anything else.'}
+					</p>
+					{/*
+					 * **Only promised when it is true.** The refusal is kept on the
+					 * account, and that write can fail — a full disk, a vault that locked
+					 * while Steam was being waited on. It was caught and swallowed, and
+					 * the screen went on saying the request would not be sent again about
+					 * a record that does not exist.
+					 */}
+					<p>
+						{uncertain.persisted === false
+							? 'This warning could not be saved, so it will be gone once you close this ' +
+								'window and the account will look ordinary again. Write down what it says ' +
+								'above before you close it.'
+							: 'This application will not send the request again.'}
 					</p>
 					<div className="controls">
 						<button type="button" onClick={onClose}>

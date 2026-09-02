@@ -337,3 +337,113 @@ describe('an operation attempted while one is still unresolved', () => {
 		expect(calls.activate).toBe(1);
 	});
 });
+
+/**
+ * **A promise about a record that does not exist.**
+ *
+ * The latch write can fail — a full disk, a vault that locked while Steam was
+ * being waited on, a row that is no longer there — and it was caught, logged
+ * and swallowed. The handler then returned the same terminal outcome as ever,
+ * and the screen went on saying "this application will not send the request
+ * again": a promise about a record nothing wrote. Close the window and the
+ * account looks ordinary, with the same button offering the same irreversible
+ * call.
+ *
+ * The outcome carries whether it was actually written down, so the sentence can
+ * be true either way.
+ */
+describe('an outcome whose latch could not be written', () => {
+	/** A vault that reads fine and refuses every write. */
+	function unwritable(accounts: Account[]): VaultService {
+		return {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts }),
+			mutate: () => Promise.reject(new Error('ENOSPC: no space left on device')),
+			settings: () => ({ requireProxies: false })
+		} as unknown as VaultService;
+	}
+
+	it('does not claim to have been saved', async () => {
+		register(unwritable([account()]), {
+			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		const result = (await handler(EVENT, REMOVE)) as { state?: string; persisted?: boolean };
+
+		expect(result.state, 'the guidance has to reach the user either way').toBe('uncertain');
+		expect(
+			result.persisted,
+			'the write failed and the outcome still said the refusal would outlive the window, so ' +
+				'the screen promised something nothing had recorded'
+		).toBe(false);
+	});
+
+	it('says so for an activation too', async () => {
+		register(unwritable([account()]), {
+			activate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.enrollActivate);
+		if (!handler) throw new Error('enrollActivate was not registered');
+
+		const result = (await handler(EVENT, { steamId64: STEAM_ID, code: '12345' })) as {
+			persisted?: boolean;
+		};
+
+		expect(result.persisted).toBe(false);
+	});
+
+	/*
+	 * A vault write that succeeds but finds no row is the same outcome as one
+	 * that throws: nothing was recorded, and the promise is just as empty.
+	 */
+	it('does not claim to have been saved when the account is not there', async () => {
+		register(vaultHolding([]), {
+			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
+
+		expect(
+			result.persisted,
+			'the mutate succeeded and wrote nothing, which reads as success unless the write itself ' +
+				'reports what it did'
+		).toBe(false);
+	});
+
+	/* And it does say so when it really was written. */
+	it('says it was saved when it was', async () => {
+		const accounts = [account()];
+		register(vaultHolding(accounts), {
+			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
+
+		expect(result.persisted).toBe(true);
+		expect(accounts[0]?.unresolvedOperation).toBeDefined();
+	});
+
+	/* A refusal read back out of the vault is durable by construction. */
+	it('says so for a refusal that came from the vault', async () => {
+		const accounts = [account()];
+		accounts[0]!.unresolvedOperation = {
+			kind: 'deactivate',
+			guidance: GUIDANCE,
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		register(vaultHolding(accounts), {});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
+
+		expect(result.persisted).toBe(true);
+	});
+});

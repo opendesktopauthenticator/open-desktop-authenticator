@@ -124,6 +124,7 @@ const api: RendererApi = {
 			state: 'activated' | 'wantMore' | 'uncertain';
 			guidance?: string;
 			certain?: boolean;
+			persisted?: boolean;
 		}>,
 
 	// Takes no path and returns none: the OS dialog is the only thing that names
@@ -138,7 +139,13 @@ const api: RendererApi = {
 			passphrase,
 			// Forwarded, never synthesised here. The handler is what enforces it.
 			acknowledgement
-		}) as Promise<{ ok?: true; state?: 'uncertain'; guidance?: string; certain?: boolean }>,
+		}) as Promise<{
+			ok?: true;
+			state?: 'uncertain';
+			guidance?: string;
+			certain?: boolean;
+			persisted?: boolean;
+		}>,
 
 	removeAccount: (steamId64: string, passphrase: string) =>
 		ipcRenderer.invoke(CHANNELS.accountRemove, { steamId64, passphrase }) as Promise<{

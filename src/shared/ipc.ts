@@ -886,7 +886,16 @@ export const IPC_CONTRACT = {
 			/** Present only for `uncertain`. See `uncertainOutcome`. */
 			guidance: z.string().optional(),
 			/** `true` when Steam is known to have acted, rather than may have. */
-			certain: z.boolean().optional()
+			certain: z.boolean().optional(),
+			/**
+			 * Whether the refusal was written down where it outlives this window.
+			 *
+			 * The vault write can fail, and it was swallowed — after which the screen
+			 * went on promising the request would not be sent again, about a record
+			 * that does not exist. `false` means the warning is worth reading now,
+			 * because it will not be there later.
+			 */
+			persisted: z.boolean().optional()
 		})
 	},
 
@@ -960,7 +969,9 @@ export const IPC_CONTRACT = {
 			state: z.literal('uncertain').optional(),
 			guidance: z.string().optional(),
 			/** `true` when Steam is known to have acted, rather than may have. */
-			certain: z.boolean().optional()
+			certain: z.boolean().optional(),
+			/** Whether the refusal outlives this window. See `enrollActivate`. */
+			persisted: z.boolean().optional()
 		})
 	},
 
@@ -1248,6 +1259,8 @@ export interface RendererApi {
 		guidance?: string;
 		/** `true` when Steam is known to have acted, rather than may have. */
 		certain?: boolean;
+		/** Whether the refusal outlives this window. */
+		persisted?: boolean;
 	}>;
 
 	/** Write an account out as a maFile. Opens the OS save dialog; returns a name. */
@@ -1271,7 +1284,13 @@ export interface RendererApi {
 		steamId64: string,
 		passphrase: string,
 		acknowledgement: string
-	): Promise<{ ok?: true; state?: 'uncertain'; guidance?: string; certain?: boolean }>;
+	): Promise<{
+		ok?: true;
+		state?: 'uncertain';
+		guidance?: string;
+		certain?: boolean;
+		persisted?: boolean;
+	}>;
 	/** Set routing for one account, or pass `null` to remove it. */
 	setAccountProxy(steamId64: string, proxyUrl: string | null): Promise<{ ok: true }>;
 	/** Enable or disable automatic confirmation for one account, per type. */
