@@ -10,6 +10,7 @@ import { readRecoveryFile, RecoveryError } from '../vault/recovery';
 import type { EnrollmentService } from './enrollment';
 import { EnrollmentError } from './enroll';
 import { authenticatorFingerprint } from './enrollment';
+import type { Account } from '../../shared/vault-schema';
 import { PROXY_REQUIRED } from '../net/egress';
 import { ProxyConsent } from '../net/proxy-consent';
 import { VaultLockedError, type VaultService } from '../vault/service';
@@ -447,8 +448,28 @@ export function registerEnrollmentHandlers(
 			 * All three are refusals now. Nothing here guesses which operation a
 			 * person meant.
 			 */
-			const account = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
-			const held = account?.unresolvedOperation;
+			const { account, held, stale } = recordFor(steamId64);
+
+			/*
+			 * **A record about an authenticator that is gone is cleared, not refused.**
+			 *
+			 * Refusing it was the first version, and its message even claimed the
+			 * record had been cleared while nothing cleared it — so an account whose
+			 * authenticator had been re-imported was blocked from every operation
+			 * with no way out of it. There is nothing to reconcile: the thing the
+			 * record was about does not exist any more, and what the user needs back
+			 * is the account.
+			 */
+			if (stale) {
+				await vault.mutate((draft) => {
+					const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
+					if (stored !== undefined) {
+						delete stored.unresolvedOperation;
+					}
+				});
+				return { ok: true as const };
+			}
+
 			if (account === undefined || held === undefined) {
 				throw new EnrollmentError(
 					'There is nothing recorded against that account to resolve. It may have been ' +
@@ -461,16 +482,6 @@ export function registerEnrollmentHandlers(
 					'That account has a different unfinished operation recorded against it, so this ' +
 						'answer does not apply to it. Open the account and resolve the one it is ' +
 						'actually waiting on.'
-				);
-			}
-			if (
-				held.fingerprint === undefined ||
-				held.fingerprint !== authenticatorFingerprint(account)
-			) {
-				throw new EnrollmentError(
-					'The authenticator on that account is not the one this was recorded about — it has ' +
-						'been replaced or re-imported since. The old record has been cleared; check the ' +
-						'account on Steam and start again if anything is still outstanding.'
 				);
 			}
 
@@ -490,7 +501,7 @@ export function registerEnrollmentHandlers(
 				// The service owns what an activated account looks like — including the
 				// revocation-code ceremony and the recovery file, both of which the
 				// version written here skipped.
-				await enrollment.reconcileActivated(steamId64, held.fingerprint);
+				await enrollment.reconcileActivated(steamId64, authenticatorFingerprint(account));
 				return { ok: true as const };
 			}
 
@@ -505,7 +516,7 @@ export function registerEnrollmentHandlers(
 						'other way.'
 				);
 			}
-			await enrollment.reconcileDetached(steamId64, passphrase, held.fingerprint);
+			await enrollment.reconcileDetached(steamId64, passphrase, authenticatorFingerprint(account));
 			// The same teardown a local removal does: cookie jar, cached session,
 			// pending list.
 			onRemoved(steamId64);
@@ -533,12 +544,35 @@ export function registerEnrollmentHandlers(
 	 * "should I detach this?" is not knowable while "did the activation land?"
 	 * is open.
 	 */
+	/**
+	 * The record on an account, **if it is about the authenticator now on it**.
+	 *
+	 * A record whose fingerprint does not match is about an authenticator that has
+	 * since been replaced, and it does not apply to the one that took its place.
+	 * Reading it without that check turned the guard against acting on a
+	 * replacement into something worse: every activation and removal for the
+	 * account was refused, the resolution refused too, and nothing in the
+	 * application could unblock it.
+	 */
+	function recordFor(steamId64: string): {
+		account: Account | undefined;
+		held: Account['unresolvedOperation'];
+		stale: boolean;
+	} {
+		const account = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+		const held = account?.unresolvedOperation;
+		if (account === undefined || held === undefined) {
+			return { account, held: undefined, stale: false };
+		}
+		const stale =
+			held.fingerprint === undefined || held.fingerprint !== authenticatorFingerprint(account);
+		return { account, held: stale ? undefined : held, stale };
+	}
+
 	function heldBack(
 		steamId64: string
 	): { state: 'uncertain'; guidance: string; certain?: boolean; persisted?: boolean } | undefined {
-		const held = vault
-			.read()
-			.accounts.find((entry) => entry.steamId64 === steamId64)?.unresolvedOperation;
+		const { held } = recordFor(steamId64);
 		if (held === undefined) {
 			return undefined;
 		}

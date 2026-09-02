@@ -274,26 +274,44 @@ describe('resolving an unresolved operation', () => {
 	 * authenticator attached to it, so a record about a removed authenticator
 	 * matched the one imported to replace it.
 	 */
-	it('refuses when the authenticator has been replaced since', async () => {
+	/**
+	 * **A record about an authenticator that is gone is cleared, not refused.**
+	 *
+	 * Refusing it was the first attempt at this, and it was worse than the defect
+	 * it closed: `heldBack` blocks every activation and removal while a record
+	 * exists, and the only way out — the resolution — refused too. An account
+	 * whose authenticator had been re-imported could not be used or unblocked by
+	 * any route in the application. The message even claimed the record had been
+	 * cleared while nothing cleared it.
+	 */
+	it('clears a record about an authenticator that has been replaced', async () => {
 		const accounts = latched('activate', { fingerprint: fingerprint('a different secret') });
 		const { run, spy } = resolve(accounts, { kind: 'activate', steamActed: true });
 
-		await expect(run).rejects.toThrow(/replaced or re-imported/i);
+		expect(await run).toEqual({ ok: true });
 		expect(
 			spy.activated,
 			'a replacement authenticator was marked active by a record about the one it replaced'
 		).toEqual([]);
+		expect(
+			accounts[0]?.unresolvedOperation,
+			'the record about a vanished authenticator survived, so the account stays blocked for ever'
+		).toBeUndefined();
 	});
 
 	/*
 	 * A record written before fingerprints existed cannot be matched, so it is
 	 * refused rather than assumed to be about whatever is there now.
 	 */
-	it('refuses a record with no fingerprint at all', async () => {
+	/* Written before fingerprints existed: it cannot be matched, so it is cleared
+	 * rather than left blocking the account for ever. */
+	it('clears a record with no fingerprint at all', async () => {
 		const accounts = latched('activate', { fingerprint: undefined });
-		const { run } = resolve(accounts, { kind: 'activate', steamActed: true });
+		const { run, spy } = resolve(accounts, { kind: 'activate', steamActed: true });
 
-		await expect(run).rejects.toThrow(/replaced or re-imported/i);
+		expect(await run).toEqual({ ok: true });
+		expect(spy.activated).toEqual([]);
+		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
 	});
 
 	/**
@@ -593,6 +611,10 @@ describe('an outcome whose latch could not be written', () => {
 		accounts[0]!.unresolvedOperation = {
 			kind: 'deactivate',
 			guidance: GUIDANCE,
+			fingerprint: createHash('sha256')
+				.update(accounts[0]!.sharedSecret)
+				.digest('hex')
+				.slice(0, 16),
 			at: '2026-01-01T00:00:00.000Z'
 		};
 		register(vaultHolding(accounts), {});
@@ -602,5 +624,40 @@ describe('an outcome whose latch could not be written', () => {
 		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
 
 		expect(result.persisted).toBe(true);
+	});
+
+	/**
+	 * **And a record about a replaced authenticator does not block the new one.**
+	 *
+	 * `heldBack` refuses every activation and removal while a record exists. Read
+	 * without checking which authenticator it concerns, a leftover record made
+	 * the replacement unusable — the exact account-bricking the fingerprint was
+	 * added to prevent, arriving through the guard itself.
+	 */
+	it('does not block an authenticator the record was never about', async () => {
+		const accounts = [account()];
+		accounts[0]!.unresolvedOperation = {
+			kind: 'deactivate',
+			guidance: GUIDANCE,
+			fingerprint: 'a fingerprint from a different authenticator',
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		let sent = 0;
+		register(vaultHolding(accounts), {
+			deactivate: () => {
+				sent += 1;
+				return Promise.resolve();
+			}
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		await handler(EVENT, REMOVE);
+
+		expect(
+			sent,
+			'a record about an authenticator that is gone refused an operation on the one that ' +
+				'replaced it, and nothing in the application could clear it'
+		).toBe(1);
 	});
 });
