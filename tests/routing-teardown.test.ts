@@ -88,11 +88,43 @@ describe('the shared routing teardown', () => {
 		expect(body, 'the removal case is gone, so a removed account keeps its entries').toContain(
 			'activity.forgetAccount(steamId64)'
 		);
+		/*
+		 * **Inside the block, not merely after it starts.**
+		 *
+		 * This compared indices: "`if (gone) {` appears at a lower offset than the
+		 * call". Appearing earlier in the text is not being inside the block — move
+		 * the call to just past the closing brace, making the history delete
+		 * unconditional, and the ordering still holds. That is the exact regression
+		 * the comment above describes: `dropAccountRouting` runs on a proxy save and
+		 * on a re-import as well as on a removal, so an unconditional delete throws
+		 * away held account-recovery evidence nobody has read.
+		 *
+		 * The block is extracted by brace-matching from `if (gone) {`, and the call
+		 * has to be within it.
+		 */
 		const guard = body.indexOf('if (gone) {');
 		expect(guard, 'the removed-account guard is gone').toBeGreaterThan(-1);
-		expect(guard, 'the history delete is no longer behind the removed-account guard').toBeLessThan(
-			body.indexOf('activity.forgetAccount(steamId64)')
-		);
+
+		const open = body.indexOf('{', guard);
+		let depth = 0;
+		let close = -1;
+		for (let i = open; i < body.length; i += 1) {
+			if (body[i] === '{') depth += 1;
+			else if (body[i] === '}') {
+				depth -= 1;
+				if (depth === 0) {
+					close = i;
+					break;
+				}
+			}
+		}
+		expect(close, 'the removed-account guard is not a balanced block').toBeGreaterThan(open);
+
+		expect(
+			body.slice(open, close),
+			'the history delete is not inside the removed-account guard, so an ordinary proxy save ' +
+				'or a re-import destroys entries nobody has read'
+		).toContain('activity.forgetAccount(steamId64)');
 	});
 
 	/*

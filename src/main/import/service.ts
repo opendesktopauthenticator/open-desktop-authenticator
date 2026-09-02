@@ -479,7 +479,18 @@ export class ImportService {
 			if (steamId64 !== undefined) {
 				if (existing.has(steamId64)) {
 					summary.duplicate = 'vault';
-				} else if (bestForAccount.get(steamId64) !== id) {
+				} else if (bestForAccount.has(steamId64) && bestForAccount.get(steamId64) !== id) {
+					/*
+					 * **`has` first, because the map does not hold unusable files at all.**
+					 *
+					 * Pass two skips every entry with `!entry.usable`, so an unusable file
+					 * is never in the map — and `get(...) !== id` is then `undefined !== id`,
+					 * which is true. A single damaged file was therefore reported as a
+					 * duplicate of a selection containing only itself, and the screen told
+					 * the user another file they chose was the same account. They were sent
+					 * looking for a duplicate that does not exist instead of being shown the
+					 * real reason the row was blocked.
+					 */
 					summary.duplicate = 'selection';
 				}
 			}

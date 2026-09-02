@@ -79,9 +79,26 @@ describe('S6 — IPC answers only our own renderer', () => {
 	});
 
 	it('fails closed when no trusted sender has been configured', () => {
-		// A handler answering before setTrustedSender runs would be answering an
-		// unknown caller; the default must deny.
-		expect(router).toMatch(/isTrustedSender[^=]*=\s*\(\)\s*=>\s*false/);
+		/*
+		 * A handler answering before `setTrustedSender` runs would be answering an
+		 * unknown caller; the default must deny.
+		 *
+		 * **The previous pattern could not match the declaration it was written
+		 * for.** `[^=]*` cannot cross the `=` inside the type annotation
+		 * `(frameUrl: string) => boolean`, so it skipped past line 31 entirely and
+		 * matched `isTrustedSender = () => false;` inside `__resetRouterForTests`
+		 * — certifying a test helper. Changing the real default to `() => true`
+		 * left it green while the IPC boundary answered any WebContents in the
+		 * process.
+		 *
+		 * Anchored to the `let` declaration, so only the shipped default can
+		 * satisfy it.
+		 */
+		expect(
+			router,
+			'the IPC router does not deny by default, so a handler registered before ' +
+				'setTrustedSender runs answers an unknown caller'
+		).toMatch(/let isTrustedSender\b[\s\S]{0,120}?=\s*\(\)\s*=>\s*false;/);
 	});
 
 	it('derives "us" from the same predicate as the navigation lock', () => {

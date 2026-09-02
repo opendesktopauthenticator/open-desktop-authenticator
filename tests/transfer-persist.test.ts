@@ -56,8 +56,6 @@ function harness(
 		mutateThrows?: boolean;
 		readsBackWrong?: boolean;
 		writeRecoveryThrows?: boolean;
-		/** The disk refuses the copy of an undecodable reply, so memory is all there is. */
-		unreadableWriteThrows?: boolean;
 		/**
 		 * Holds a sign-in open, so something can happen while it awaits Steam.
 		 *
@@ -701,10 +699,20 @@ describe('when the connection dies before Steam answers', () => {
 /*
  * A replacement that decodes and still cannot be used.
  *
- * The durable copy was written only when the *decoder* threw. A reply that
- * parses cleanly and then fails validation — a mismatched SteamID, or a Guard
- * scheme this build does not know — is every bit as unusable and every bit as
- * irreplaceable, and it stayed in memory alone.
+ * **This block used to describe a durable copy of the reply.** That feature is
+ * gone — `transfer-screen-wiring.test.ts` asserts `writeUnreadableReply`,
+ * `UNREADABLE_EXTENSION`, `writeUnreadable` and `rawReply` are all absent from
+ * `recovery.ts` and `transfer.ts`, and only a `bodyArrived` boolean remains. Its
+ * two tests, named 'is saved rather than left in memory' and 'saves the exact
+ * bytes Steam sent', were left behind with their assertions removed and three
+ * lines of setup each: no `expect` anywhere, and a `.catch` swallowing the
+ * rejection. Nothing could turn them red — deleting the whole handling, or
+ * restoring the feature they were named for, left both green.
+ *
+ * What is still true, and what is asserted below, is that a reply which parses
+ * and then fails validation must be reported as Steam having rotated the
+ * authenticator. Reporting only "invalid reply" would read as "nothing
+ * happened", which is the one thing it does not mean.
  */
 describe('a decoded reply this build cannot use', () => {
 	/** Decodes fine; the SteamID inside belongs to somebody else. */
@@ -716,18 +724,6 @@ describe('a decoded reply this build cannot use', () => {
 				replacementToken: { ...REPLACEMENT, steamId64: '76561198000000999' }
 			}
 		});
-
-	it('is saved rather than left in memory', async () => {
-		const h = mismatched();
-		await readyToSubmit(h);
-		await h.service.completeTransfer('12345').catch(() => undefined);
-	});
-
-	it('saves the exact bytes Steam sent', async () => {
-		const h = mismatched();
-		await readyToSubmit(h);
-		await h.service.completeTransfer('12345').catch(() => undefined);
-	});
 
 	it('says the authenticator was replaced anyway', async () => {
 		// Steam rotated it before sending this. Reporting only "invalid reply" would

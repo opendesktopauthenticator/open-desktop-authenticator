@@ -705,6 +705,27 @@ function start(): void {
 	 */
 	const liveToasts = new Set<Notification>();
 
+	/**
+	 * How many toasts stay reachable at once.
+	 *
+	 * A bound is needed because they are no longer released on `close` — see the
+	 * `close` comment below — and Windows offers no event for "this left the
+	 * Action Center". Insertion order is iteration order for a `Set`, so the
+	 * oldest goes first, which is also the one least likely to still be clicked.
+	 */
+	const MAX_LIVE_TOASTS = 64;
+
+	const retainToast = (toast: Notification): void => {
+		liveToasts.add(toast);
+		while (liveToasts.size > MAX_LIVE_TOASTS) {
+			const oldest: Notification | undefined = liveToasts.values().next().value;
+			if (oldest === undefined) {
+				break;
+			}
+			liveToasts.delete(oldest);
+		}
+	};
+
 	const notifier = new ConfirmationNotifier({
 		host: {
 			show: ({ title, body, onClick }) =>
@@ -719,7 +740,7 @@ function start(): void {
 					 * never appeared silenced its confirmation for the whole session.
 					 */
 					const toast = new Notification({ title, body, icon: notificationImage() });
-					liveToasts.add(toast);
+					retainToast(toast);
 
 					/*
 					 * **A machine with no notification service reports NOT delivered.**
@@ -749,12 +770,28 @@ function start(): void {
 						liveToasts.delete(toast);
 						resolve(false);
 					});
-					// Kept until it leaves the user's notification centre, because that is
-					// how long the click can still arrive.
-					toast.on('close', () => liveToasts.delete(toast));
-					if (onClick) {
-						toast.on('click', onClick);
-					}
+					/*
+					 * **Not released on `close`, which is the event that says the opposite
+					 * of what it sounds like.**
+					 *
+					 * The rule is right — keep it while the click can still arrive — and
+					 * `close` is the wrong place to hang it. Electron's own typings say so
+					 * (`electron.d.ts`, the `close` docs): on Windows the event fires for a
+					 * system timeout as well as a real dismissal, and "if a notification is
+					 * in the Action Center after the initial `close` event is emitted" it
+					 * is still there, still clickable. So the default five seconds of
+					 * screen time ended the retention while the notification the user has
+					 * not looked at yet sat waiting for them — and clicking it did nothing,
+					 * which is exactly the collected-object failure `liveToasts` was added
+					 * to stop, reached through the release instead of the reference.
+					 *
+					 * A click is the one signal that the handler has done its job, so that
+					 * is what releases it; `MAX_LIVE_TOASTS` bounds the rest.
+					 */
+					toast.on('click', () => {
+						liveToasts.delete(toast);
+						onClick?.();
+					});
 					toast.show();
 				})
 		},

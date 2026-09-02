@@ -369,8 +369,47 @@ export class ActivityLog {
 		const list = this.entries.get(steamId64) ?? [];
 		list.push(entry);
 		if (list.length > MAX_ENTRIES_PER_ACCOUNT) {
-			list.splice(0, list.length - MAX_ENTRIES_PER_ACCOUNT);
+			this.trim(steamId64, list);
 		}
 		this.entries.set(steamId64, list);
+	}
+
+	/**
+	 * Make room, without throwing away the one entry this class exists for.
+	 *
+	 * **The trim used to take the oldest entries whatever they were**, and a held
+	 * confirmation is recorded exactly once — `reported.held` suppresses every
+	 * later pass while it is still held. So a busy account evicted the held
+	 * account-recovery entry after a hundred approvals and could never write it
+	 * again: `hasUrgent()` went back to false, the badge went dark, and the
+	 * confirmation was still sitting on Steam waiting for somebody to look at it.
+	 * The class docblock names that exact outcome as the thing to prevent, and
+	 * stopping the self-inflicted flood is what turned it from self-healing into
+	 * permanent.
+	 *
+	 * So unheld entries go first, oldest among them first. Only when there is
+	 * nothing else left to drop does a held one go — and then its id is released
+	 * from the dedup set, so the next pass records it again rather than staying
+	 * silent about a confirmation that is still held.
+	 */
+	private trim(steamId64: string, list: ActivityEntry[]): void {
+		let excess = list.length - MAX_ENTRIES_PER_ACCOUNT;
+
+		for (let i = 0; i < list.length && excess > 0;) {
+			if (list[i]?.kind === 'held') {
+				i += 1;
+			} else {
+				list.splice(i, 1);
+				excess -= 1;
+			}
+		}
+
+		while (excess > 0 && list.length > 0) {
+			const dropped = list.shift();
+			excess -= 1;
+			if (dropped?.kind === 'held') {
+				this.reported.get(steamId64)?.held.delete(dropped.confirmation.id);
+			}
+		}
 	}
 }

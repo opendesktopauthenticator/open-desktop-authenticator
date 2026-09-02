@@ -419,6 +419,19 @@ export class AutoConfirmEngine {
 		 */
 		this.epochs.set(steamId64, this.epochOf(steamId64) + 1);
 		this.state.delete(steamId64);
+		/*
+		 * **And the halt, for the same reason `forgetAccount` clears it.**
+		 *
+		 * Deleting `state` alone puts the account back into normal polling while
+		 * leaving its id in `halted` — and `tick` walks that set on every beat and
+		 * calls `onStillHalted`, which is the retry path for a halt toast the OS
+		 * refused. So after a settings save the engine went on insisting "stopped
+		 * after 10 consecutive failures" about an account it was polling
+		 * successfully, once every beat, for as long as the app stayed open.
+		 * Nothing else could clear it: only `stop()` and `forgetAccount` ever
+		 * remove an id from that set.
+		 */
+		this.halted.delete(steamId64);
 		this.scheduleDirty = true;
 		// The schedule just changed; the cached soonest time may no longer be it.
 		this.earliestDueAt = 0;

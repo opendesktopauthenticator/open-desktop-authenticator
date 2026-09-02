@@ -295,6 +295,18 @@ export function VaultHome({
 	 * stop waiting to find out.
 	 */
 	const list = useRef<HTMLUListElement>(null);
+	/*
+	 * **The list only exists once there are rows, and it is not there on first
+	 * mount.**
+	 *
+	 * `App`'s refresh sets `status` and then awaits `listAccounts` before setting
+	 * `accounts`, so there is always a committed render where the vault is
+	 * unlocked and `accounts` is still `[]`. On that render the empty state is
+	 * shown, `list.current` is null, and an effect with `[]` deps bailed and never
+	 * ran again — so the light stayed at the row's centre, on the CSS fallback,
+	 * until something else unmounted and remounted the screen.
+	 */
+	const hasRows = accounts.length > 0;
 	useEffect(() => {
 		const element = list.current;
 		if (!element) {
@@ -325,7 +337,7 @@ export function VaultHome({
 			// A frame still queued after unmount would touch a detached row.
 			cancelAnimationFrame(frame);
 		};
-	}, []);
+	}, [hasRows]);
 
 	const byAccount = new Map(codes?.codes.map((entry) => [entry.steamId64, entry]));
 	const failures = new Map(codes?.failures.map((entry) => [entry.steamId64, entry.reason]));

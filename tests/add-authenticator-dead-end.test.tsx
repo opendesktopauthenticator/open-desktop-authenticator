@@ -114,7 +114,17 @@ describe('the screen with no outcome outstanding', () => {
 	});
 
 	it('does not show the warning', () => {
-		expect(screen()).not.toContain('will not send it again');
+		/*
+		 * **The phrase has to be one the component can actually render.**
+		 *
+		 * This looked for 'will not send it again'; the copy is 'This application
+		 * will not send the request again.' The searched substring appears nowhere
+		 * under any props, so the assertion held in every state — including with the
+		 * warning panel on screen, which is the one state it exists to exclude. Its
+		 * sibling above uses the right phrase, which is what makes this a typo
+		 * rather than a different check.
+		 */
+		expect(screen()).not.toContain('will not send the request again');
 	});
 });
 

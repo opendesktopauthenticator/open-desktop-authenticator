@@ -755,3 +755,74 @@ describe('a pass that keeps finding the same thing', () => {
 		expect(log.for(ID).filter((entry) => entry.kind === 'approved')).toHaveLength(3);
 	});
 });
+
+/**
+ * **A held account-recovery confirmation must not be evicted by ordinary
+ * traffic.**
+ *
+ * It is recorded exactly once — `reported.held` suppresses every later pass
+ * while it is still held, because re-recording it four times a minute would
+ * bury everything else. The trim then took the oldest hundred entries whatever
+ * they were, so a busy account pushed the held entry out and could never write
+ * it again: `hasUrgent()` went back to false and the badge went dark while the
+ * confirmation was still sitting on Steam waiting for somebody to look.
+ *
+ * The class docblock names that exact outcome as the thing this log exists to
+ * prevent. Fixing the self-inflicted flood is what turned the eviction from
+ * self-healing into permanent.
+ */
+describe('a held confirmation under a flood of ordinary ones', () => {
+	const ID = '76561198000000001';
+	const holding = [{ confirmation: recovery, reason: 'account recovery' }];
+
+	it('is still urgent after far more approvals than the log can hold', () => {
+		const activity = log();
+
+		activity.recordPass(ID, [], holding);
+		expect(activity.hasUrgent(), 'the hold was never recorded, so this asserts nothing').toBe(true);
+
+		// Every later pass approves a market listing and re-reports the same hold.
+		for (let i = 0; i < 150; i += 1) {
+			activity.recordPass(ID, [confirmation({ id: `listing-${i}` })], holding);
+		}
+
+		expect(
+			activity.hasUrgent(),
+			'the account-recovery hold was evicted by routine approvals and can never be recorded ' +
+				'again, so the badge goes dark while the confirmation is still held on Steam'
+		).toBe(true);
+	});
+
+	it('still bounds the log', () => {
+		const activity = log();
+		activity.recordPass(ID, [], holding);
+		for (let i = 0; i < 300; i += 1) {
+			activity.recordPass(ID, [confirmation({ id: `listing-${i}` })], holding);
+		}
+
+		expect(
+			activity.for(ID).length,
+			'protecting the hold let the log grow without limit'
+		).toBeLessThanOrEqual(100);
+	});
+
+	/*
+	 * And an account with nothing but holds is still bounded — the last resort
+	 * drops the oldest hold and releases its id, so the next pass records it
+	 * again rather than going quiet about a confirmation that is still held.
+	 */
+	it('stays urgent even when every entry is a hold', () => {
+		const activity = log();
+		for (let i = 0; i < 150; i += 1) {
+			activity.recordPass(
+				ID,
+				[],
+				[{ confirmation: confirmation({ id: `hold-${i}` }), reason: 'x' }]
+			);
+		}
+		activity.recordPass(ID, [], holding);
+
+		expect(activity.for(ID).length).toBeLessThanOrEqual(100);
+		expect(activity.hasUrgent()).toBe(true);
+	});
+});

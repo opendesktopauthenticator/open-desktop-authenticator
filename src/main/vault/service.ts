@@ -871,6 +871,20 @@ export class VaultService {
 		// A new rotation is a new debt, so a previous failure to pay one is not a
 		// reason to skip this.
 		this.reconcileFailed = false;
+
+		/*
+		 * **What the journal already held, read before it is replaced.**
+		 *
+		 * `writeRotationJournal` overwrites unconditionally, so a debt an earlier
+		 * interrupted rotation left — one `reconcile` has not managed to pay,
+		 * because something else holds `.bak` open — is gone the moment this
+		 * rotation starts. That is fine while this rotation goes on to succeed and
+		 * pay its own debt. It is not fine on the path below that decides nothing
+		 * was written and clears the journal: true of this rotation, false of the
+		 * one it just overwrote.
+		 */
+		const previouslyOwed = readRotationJournal(this.file);
+
 		try {
 			// The nonce of the vault this rotation is about to write. Fresh for every
 			// seal, so a later start can tell "nothing has been written since" from
@@ -924,8 +938,23 @@ export class VaultService {
 						'that is refused, use the old one. Do not delete vault.json.bak.'
 				);
 			}
-			// Nothing was replaced, so there is nothing to finish.
-			clearRotationJournal(this.file);
+			/*
+			 * Nothing was replaced, so *this* rotation has nothing to finish — but
+			 * the journal it overwrote on the way in may still have. Putting that
+			 * debt back is the difference between a backup that is known to be stale
+			 * and one that is silently trusted: clearing it told the next start the
+			 * rotation had been reconciled, and `reconcile` would then stop suspecting
+			 * a `.bak` that still opens with a passphrase two changes old.
+			 *
+			 * `unreadable` is left to clear. Nothing parseable is lost, and
+			 * `reconcile` re-derives its suspicion from the files themselves rather
+			 * than from anything remembered here.
+			 */
+			if (previouslyOwed.state === 'owed') {
+				writeRotationJournal(this.file, previouslyOwed.backup, previouslyOwed.vaultNonce);
+			} else {
+				clearRotationJournal(this.file);
+			}
 			wipe(newKey);
 			throw err;
 		}

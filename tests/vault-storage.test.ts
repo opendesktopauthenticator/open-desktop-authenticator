@@ -255,12 +255,50 @@ describe.skipIf(process.platform === 'win32')('the vault is owner-only on disk',
 describe('the owner-only policy is in the source, on every platform', () => {
 	const SOURCE = readFileSync(join(__dirname, '..', 'src', 'main', 'vault', 'storage.ts'), 'utf8');
 
+	/**
+	 * One function's body, so a duplicate elsewhere cannot answer for it.
+	 *
+	 * **Every literal below occurs more than once in the file.**
+	 * `openSync(paths.temp, 'w', 0o600)` is in `writeEnvelope` and again in
+	 * `restoreEnvelopeInPlace`; `tighten(paths.backup);` is in three places. A
+	 * whole-file `toContain` was therefore satisfied by any one of them — so
+	 * dropping the mode from `writeEnvelope`, the write that publishes the live
+	 * vault, left the guard green. That would leave the temp file at whatever the
+	 * umask allows for the whole write and fsync of a vault, readable by any other
+	 * local user, which is the exact window this describe block exists to close —
+	 * and the behavioural tests above cannot see it, because they read the mode
+	 * only after `tighten` has narrowed the published file, and are POSIX-only.
+	 */
+	const bodyOf = (name: string): string => {
+		const start = SOURCE.indexOf(`export function ${name}(`);
+		expect(start, `storage.ts no longer exports ${name}`).toBeGreaterThan(-1);
+		const end = SOURCE.indexOf(
+			`
+export `,
+			start + 1
+		);
+		return SOURCE.slice(start, end === -1 ? SOURCE.length : end);
+	};
+
 	it('opens the temp file with an explicit mode', () => {
-		expect(SOURCE).toContain("openSync(paths.temp, 'w', 0o600)");
+		expect(
+			bodyOf('writeEnvelope'),
+			'the write that publishes the live vault creates its temp file at whatever the umask ' +
+				'allows, and it stays that way for the whole write and fsync'
+		).toContain("openSync(paths.temp, 'w', 0o600)");
 	});
 
 	it('narrows the vault and its backup after the rename', () => {
-		expect(SOURCE).toMatch(/tighten\(file\);/);
-		expect(SOURCE).toMatch(/tighten\(paths\.backup\);/);
+		const body = bodyOf('writeEnvelope');
+		expect(body).toMatch(/tighten\(file\);/);
+		expect(body).toMatch(/tighten\(paths\.backup\);/);
+	});
+
+	/*
+	 * The restore path publishes the same bytes and needs the same care, so it is
+	 * asserted separately rather than being allowed to stand in for the one above.
+	 */
+	it('applies the same mode on the restore path', () => {
+		expect(bodyOf('restoreEnvelopeInPlace')).toContain("openSync(paths.temp, 'w', 0o600)");
 	});
 });
