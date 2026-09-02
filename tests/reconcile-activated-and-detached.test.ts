@@ -221,6 +221,57 @@ describe('a row replaced while the reconciliation was in flight', () => {
 		} as unknown as VaultService;
 	}
 
+	/**
+	 * **And it says it did nothing, rather than reporting success.**
+	 *
+	 * The identity re-check makes the write conditional. A method that returns the
+	 * same way either side of it tells the caller a reconciliation happened when
+	 * the row had moved on — the record stays, the account stays blocked, the
+	 * session is torn down for a removal that did not occur, and the screen closes
+	 * as though it were sorted. That is the same silent-success defect this whole
+	 * mechanism keeps producing, one level further down.
+	 */
+	it('reports that it changed nothing', async () => {
+		const accounts = [account({ status: 'active' })];
+		const expected = authenticatorFingerprint(accounts[0]!);
+		const vault = swappingVault(accounts);
+
+		const applied = await new EnrollmentService(vault, transports, {}).reconcileDetached(
+			ID,
+			'a passphrase long enough',
+			expected
+		);
+
+		expect(applied, 'a removal that deleted nothing was reported as done').toBe(false);
+	});
+
+	it('reports the same for an activation that matched nothing', async () => {
+		const accounts = [account()];
+		const expected = authenticatorFingerprint(accounts[0]!);
+		accounts[0] = account({ sharedSecret: 'YSBkaWZmZXJlbnQgc2VjcmV0' });
+		const { vault } = vaultHolding(accounts);
+
+		const applied = await new EnrollmentService(vault, transports, {}).reconcileActivated(
+			ID,
+			expected
+		);
+
+		expect(applied).toBe(false);
+	});
+
+	/* And a reconciliation that really did apply says so. */
+	it('reports success when it did apply', async () => {
+		const accounts = [account()];
+		const { vault } = vaultHolding(accounts);
+
+		expect(
+			await new EnrollmentService(vault, transports, {}).reconcileActivated(
+				ID,
+				authenticatorFingerprint(accounts[0]!)
+			)
+		).toBe(true);
+	});
+
 	it('does not delete the authenticator that replaced the one it was about', async () => {
 		const accounts = [account({ status: 'active' })];
 		const expected = authenticatorFingerprint(accounts[0]!);

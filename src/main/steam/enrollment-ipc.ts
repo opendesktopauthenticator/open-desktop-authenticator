@@ -252,6 +252,18 @@ function raceLost(wasRemoved: boolean, left: readonly string[]): Error {
 	);
 }
 
+/**
+ * Said when a reconciliation matched nothing by the time it wrote.
+ *
+ * The identity is re-checked at the moment of the write, so a row replaced
+ * inside the window is not acted on — and the caller must not be told the work
+ * happened. Reporting success for changing nothing is the defect this whole
+ * mechanism keeps producing.
+ */
+const MOVED_ON =
+	'That account changed while this was being resolved, so nothing was altered. Open it again ' +
+	'and check what it is waiting on.';
+
 export function registerEnrollmentHandlers(
 	enrollment: EnrollmentService,
 	vault: VaultService,
@@ -501,7 +513,9 @@ export function registerEnrollmentHandlers(
 				// The service owns what an activated account looks like — including the
 				// revocation-code ceremony and the recovery file, both of which the
 				// version written here skipped.
-				await enrollment.reconcileActivated(steamId64, authenticatorFingerprint(account));
+				if (!(await enrollment.reconcileActivated(steamId64, authenticatorFingerprint(account)))) {
+					throw new EnrollmentError(MOVED_ON);
+				}
 				return { ok: true as const };
 			}
 
@@ -516,7 +530,16 @@ export function registerEnrollmentHandlers(
 						'other way.'
 				);
 			}
-			await enrollment.reconcileDetached(steamId64, passphrase, authenticatorFingerprint(account));
+			if (
+				!(await enrollment.reconcileDetached(
+					steamId64,
+					passphrase,
+					authenticatorFingerprint(account)
+				))
+			) {
+				// Nothing was deleted, so nothing is torn down and nothing is claimed.
+				throw new EnrollmentError(MOVED_ON);
+			}
 			// The same teardown a local removal does: cookie jar, cached session,
 			// pending list.
 			onRemoved(steamId64);

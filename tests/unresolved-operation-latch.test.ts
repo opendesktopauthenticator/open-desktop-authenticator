@@ -226,11 +226,11 @@ describe('resolving an unresolved operation', () => {
 			overrides: {
 				reconcileActivated: (steamId64: string) => {
 					activated.push(steamId64);
-					return Promise.resolve();
+					return Promise.resolve(true);
 				},
 				reconcileDetached: (steamId64: string, passphrase: string) => {
 					detached.push({ steamId64, passphrase });
-					return Promise.resolve();
+					return Promise.resolve(true);
 				}
 			} as Partial<EnrollmentService>
 		};

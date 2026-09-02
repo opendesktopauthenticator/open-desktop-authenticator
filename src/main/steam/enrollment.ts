@@ -671,7 +671,8 @@ export class EnrollmentService {
 	 * Both are the same mistake — restating a rule instead of calling the code
 	 * that owns it.
 	 */
-	async reconcileActivated(steamId64: string, fingerprint: string): Promise<void> {
+	async reconcileActivated(steamId64: string, fingerprint: string): Promise<boolean> {
+		let applied = false;
 		await this.vault.mutate((draft) => {
 			/*
 			 * **Checked again here, at the moment of the write.**
@@ -694,7 +695,19 @@ export class EnrollmentService {
 			// shown is not finished, however Steam feels about it.
 			stored.status = stored.revocationBackedUpAt ? 'active' : 'pendingRevocationBackup';
 			delete stored.unresolvedOperation;
+			applied = true;
 		});
+
+		/*
+		 * **Nothing matched, so nothing is claimed.** The identity re-check above
+		 * makes the write conditional, and a method that returns the same way
+		 * either side of it tells the caller a reconciliation happened when the row
+		 * had moved on — leaving the record in place, the account still blocked,
+		 * and the screen closed as though it were sorted.
+		 */
+		if (!applied) {
+			return false;
+		}
 
 		// And the recovery file, which still says `pendingActivation` — written
 		// before Steam was asked, and true until this moment.
@@ -714,6 +727,7 @@ export class EnrollmentService {
 				// reconciliation that has already been applied to the vault.
 			}
 		}
+		return true;
 	}
 
 	/**
@@ -729,8 +743,9 @@ export class EnrollmentService {
 		steamId64: string,
 		passphrase: string,
 		fingerprint: string
-	): Promise<void> {
+	): Promise<boolean> {
 		await this.vault.verifyPassphrase(passphrase);
+		let applied = false;
 		await this.vault.mutate((draft) => {
 			// Identity at the moment of the delete, not at the moment of the check.
 			// `deactivateOnce` matches this way for the same reason: the passphrase
@@ -740,9 +755,17 @@ export class EnrollmentService {
 			);
 			if (index >= 0) {
 				draft.accounts.splice(index, 1);
+				applied = true;
 			}
 		});
+		if (!applied) {
+			// The row moved on between the check and the delete. Saying "removed"
+			// about an account that is still there is the one answer this must not
+			// give — the caller tears down the session on the strength of it.
+			return false;
+		}
 		this.tokens.delete(steamId64);
+		return true;
 	}
 
 	async deactivate(steamId64: string, passphrase: string): Promise<void> {
