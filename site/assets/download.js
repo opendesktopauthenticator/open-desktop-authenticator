@@ -43,37 +43,33 @@
 	root.setAttribute('data-platform', platform());
 
 	/*
-	 * The review ask, shown once a download has actually started.
+	 * **The review ask, shown at the click and never in the way of it.**
 	 *
-	 * The site's rule is that the ask goes after the thing it is asking about,
-	 * and on this page that moment is a click on a real download rather than the
-	 * page loading. Before it, the reader has received nothing and the request is
-	 * an interruption; after it, they are holding the thing.
+	 * It used to appear on the visit after a download route was followed, which
+	 * meant almost nobody saw it: the routes navigate away, and coming back to
+	 * this page is not something people do. So it is shown at the moment of the
+	 * click instead — and the thing the reader asked for is the first control in
+	 * it, one click away, always working.
 	 *
-	 * Deliberately not a modal. This is a security tool whose entire argument is
-	 * that you should check it rather than trust it, and a page that blocks the
-	 * screen the instant you download something reads exactly like the sites it
-	 * warns about. It appears in the flow of the page, it can be refused, and a
-	 * refusal is remembered.
+	 * **Not a gate.** The link is followed by this script, so if the script fails
+	 * to load or throws, every download link on the page is an ordinary link that
+	 * works. Nothing here can leave somebody unable to get a build, which on a
+	 * page whose whole job is handing over a genuine build is the only acceptable
+	 * failure mode.
+	 *
+	 * It also asks once. Somebody who has said "do not ask again", or who has
+	 * followed the review link, goes straight through on every later click.
 	 */
 	var prompt = document.querySelector('[data-review-prompt]');
 	if (!prompt) return;
 
 	var DISMISSED = 'oda.review-prompt.dismissed';
-	var STARTED = 'oda.review-prompt.started';
 
 	/*
 	 * Storage can throw outright — a private window, a browser set to block site
-	 * data — and this is a review prompt, not worth an exception that stops the
-	 * rest of the page.
-	 *
-	 * **Which way that fails changed with the reveal.** While the ask was shown on
-	 * a timer and storage only suppressed it, "we could not remember" meant it was
-	 * shown, and this comment said so. Now that the ask is *triggered* by a
-	 * remembered flag, the same failure means it is never shown at all: nobody is
-	 * asked rather than somebody being asked twice. That is still the harmless
-	 * direction of the two, but it is the opposite one, and the sentence that used
-	 * to be here described the behaviour before the change.
+	 * data. This is a review prompt, not worth an exception that stops the page,
+	 * and "we could not remember" resolves to asking, which is the harmless
+	 * direction: an extra ask, never a blocked download.
 	 */
 	function remembered(key) {
 		try {
@@ -82,104 +78,66 @@
 			return false;
 		}
 	}
-	function forget(key) {
-		try {
-			window.localStorage.removeItem(key);
-		} catch {
-			/* the dismissal below is what actually stops it returning */
-		}
-	}
 	function remember(key) {
 		try {
 			window.localStorage.setItem(key, '1');
 		} catch {
-			/* nothing to do: the ask simply returns next time */
+			/* the ask simply returns next time */
 		}
 	}
 
-	function reveal() {
-		if (prompt.hidden === false || remembered(DISMISSED)) return;
-
-		prompt.hidden = false;
-
-		/*
-		 * Laid out again once it is visible.
-		 *
-		 * The widget is in the page from the start, so Trustpilot's loader has
-		 * already bound it — but it was bound inside a hidden container, where the
-		 * box has no width to measure. Their loader exposes exactly this call for
-		 * widgets revealed after load; without it the iframe can settle at zero
-		 * width and the reader sees a gap where the review box should be.
-		 *
-		 * Guarded, because the script is third-party and blocked more often than
-		 * people think. Without it the anchor inside the widget is still a working
-		 * link to the review page, which is the whole reason that anchor is there.
-		 */
-		var slot = prompt.querySelector('.trustpilot-widget');
-		if (slot && window.Trustpilot && typeof window.Trustpilot.loadFromElement === 'function') {
-			window.Trustpilot.loadFromElement(slot, true);
-		}
-	}
-
+	var proceed = prompt.querySelector('[data-review-continue]');
 	var dismiss = prompt.querySelector('[data-review-dismiss]');
+
 	if (dismiss) {
 		dismiss.addEventListener('click', function () {
-			prompt.hidden = true;
 			remember(DISMISSED);
-			// So a later visit does not open with it again.
-			forget(STARTED);
+			prompt.hidden = true;
 		});
 	}
 
 	/*
-	 * **Following the review link counts as answering.**
-	 *
-	 * "Not now" was the only thing that disarmed the prompt, so somebody who
-	 * actually went and wrote the review was asked again on every later visit —
-	 * while /privacy says the flags exist so the page can ask once and then stop.
-	 * A promise the page does not keep is worse than not making it.
+	 * Following the review link counts as answering. "Do not ask again" was once
+	 * the only thing that stopped it, so somebody who actually went and wrote the
+	 * review was asked again on every later visit.
 	 */
-	var writes = prompt.querySelectorAll('a[href]');
+	var writes = prompt.querySelectorAll('a[href]:not([data-review-continue])');
 	for (var w = 0; w < writes.length; w += 1) {
 		writes[w].addEventListener('click', function () {
 			remember(DISMISSED);
-			forget(STARTED);
 		});
 	}
 
-	/*
-	 * **Shown when they come back, because they always leave.**
-	 *
-	 * The first version revealed the prompt 1.2 seconds after a click. Every
-	 * route here navigates away in the same tab — the Store listing, the releases
-	 * page — so the page was gone long before the timer fired, and the prompt was
-	 * never seen once. It was written as though these links start a file
-	 * download; they open a page somebody then leaves for.
-	 *
-	 * So the click only records that a build was fetched, and the ask is made on
-	 * the next load of this page. That is a moment the reader chose, and by then
-	 * they have actually installed the thing rather than merely clicked at it.
-	 */
-	if (remembered(STARTED)) reveal();
-
-	/*
-	 * **Every route that leads to a build — and the copy says so.**
-	 *
-	 * An earlier version armed only on "routes that hand over a file", which was
-	 * a distinction that does not exist here: the Store link opens a listing and
-	 * so does the release link. Neither hands over a file, so the prompt could
-	 * never truthfully say "your download has started" — the fix was the sentence,
-	 * not the selector. It asks whether you got it working instead, which is a
-	 * question this page is entitled to ask of anyone who went looking for a
-	 * build.
-	 */
 	var routes = document.querySelectorAll('[data-got-it]');
 	for (var i = 0; i < routes.length; i += 1) {
-		routes[i].addEventListener('click', function () {
-			remember(STARTED);
-			// And in case the link opened in a new tab and this page survives, which
-			// costs nothing to handle and means the ask is not always deferred.
-			window.setTimeout(reveal, 1200);
+		routes[i].addEventListener('click', function (event) {
+			var href = this.getAttribute('href');
+			if (!href || remembered(DISMISSED)) return;
+
+			/*
+			 * A modifier or middle click is a deliberate "open this somewhere else".
+			 * Cancelling it swallows an action the reader took on purpose, and the
+			 * prompt they would get instead is in the wrong window.
+			 */
+			if (event.defaultPrevented || event.button !== 0) return;
+			if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+
+			event.preventDefault();
+			if (proceed) {
+				proceed.setAttribute('href', href);
+				proceed.textContent =
+					'Continue to ' + (this.getAttribute('data-got-it') || 'the download') + ' \u2192';
+				proceed.onclick = function (e) {
+					e.preventDefault();
+					// Asked once: they are on their way, and the next click goes straight
+					// through.
+					remember(DISMISSED);
+					window.location.href = href;
+				};
+			}
+			prompt.hidden = false;
+			prompt.scrollIntoView({ block: 'center' });
+			if (proceed) proceed.focus();
 		});
 	}
 })();

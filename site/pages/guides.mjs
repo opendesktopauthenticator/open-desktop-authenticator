@@ -262,27 +262,41 @@ ${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
 				about. Hidden to begin with and hidden again for anybody who says no,
 				because an ask that ignores an answer is not an ask.
 			-->
+			<!--
+				Shown when a download route is clicked, before the browser follows it.
+				Never a gate: the link the reader asked for is the first control in the
+				block and works whether or not they do anything else here, and if this
+				script does not run the link is an ordinary link.
+
+				It asks them to come back afterwards rather than to review now. The rule
+				this site holds itself to is in markup.mjs: a review from somebody who
+				has not used the thing is worth nothing to the reader it is meant to
+				reassure. They are one click from a download, so they have not used it.
+			-->
 			<aside class="ask ask-prompt" data-review-prompt hidden>
 				<div class="ask-body">
-					<h2>If you got it working</h2>
+					<h2>One thing before you go</h2>
 					<p>
-						Nothing here knows whether you actually downloaded anything — every route on
-						this page opens a release listing rather than handing you a file, so this is
-						a question, not an announcement. If you did install it and it works, saying
-						so publicly is the only way the next person — who has no way to tell us
-						apart from the sites that steal inventories — finds out that it does.
+						Your download is one click away and this does not hold it up. When you have
+						actually used it — today, next week, whenever — come back and say how it
+						went. The next person has no way to tell this project apart from the sites
+						that steal inventories, and a review on a platform we do not own is
+						something they can check without taking our word for it.
 					</p>
 					<p class="hint">
-						It takes a minute. Nothing is offered in return, nothing is filtered, and
-						if it turns out not to work for you that is the review worth leaving most.
+						Nothing is offered in return and nothing is filtered. If it turns out not to
+						work for you, that is the review worth leaving most.
 					</p>
-					<div class="ask-collector" data-review-prompt-collector>${reviewCollector(s)}</div>
 					<div class="ask-actions">
-						<a class="button" href="${s.reviews.write}" rel="noopener nofollow">Write a review →</a>
+						<a class="button" href="#" data-review-continue rel="noopener">Continue to the download →</a>
 						<button type="button" class="button button-quiet" data-review-dismiss>
-							Not now
+							Do not ask again
 						</button>
 					</div>
+					<div class="ask-collector" data-review-prompt-collector>${reviewCollector(s)}</div>
+					<p class="hint">
+						Already used it? The box above goes straight to the review form.
+					</p>
 				</div>
 			</aside>
 		</article>`

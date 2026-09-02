@@ -987,8 +987,41 @@ main.has-hero {
  * this block at exactly the moment it would move. It collapses to nothing when
  * the script is blocked, leaving the anchor inside it as an ordinary link.
  */
+/*
+ * **Sized to the button, not to the column.**
+ *
+ * The widget was given the full width of the card, and Trustpilot centres a
+ * small button inside whatever box it is handed — so a dark page carried a
+ * white slab the width of the article with a button floating in the middle of
+ * it. The frame is the widget's own background, which no rule here can reach
+ * into, so the fix is to stop giving it room to be a slab.
+ *
+ * `min-height` holds the space the iframe will occupy so the paragraph below it
+ * does not jump when it loads, and the reader's eye is on this block at exactly
+ * the moment it would move.
+ */
+/*
+ * **Sized to the button inside it, not to the column.**
+ *
+ * Trustpilot's Review Collector is a fixed white button, and it ignores
+ * `data-theme="dark"` — the theme reaches the frame and the template does not
+ * use it. Given the full width of the card it therefore drew a white slab
+ * across a dark page with a small button adrift in the middle.
+ *
+ * Nothing here can style across the frame boundary, so the fix is to stop
+ * giving it room to be a slab: the frame is the width of the control it holds,
+ * clipped to the same radius as the buttons beside it, so it reads as
+ * Trustpilot's own button rather than as a hole in the page.
+ *
+ * `min-height` holds the space before the frame loads, so the line below it
+ * does not jump while the reader is looking at it.
+ */
 .ask-collector {
-	margin: 4px 0 2px;
+	margin: 10px 0 6px;
+	width: 250px;
+	border-radius: var(--radius);
+	overflow: hidden;
+	line-height: 0;
 }
 .ask-collector .trustpilot-widget {
 	min-height: 52px;

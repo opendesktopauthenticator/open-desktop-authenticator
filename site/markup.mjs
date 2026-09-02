@@ -53,7 +53,8 @@ export function reviewCollector(s) {
 						data-template-id="${escape(w.templateId)}"
 						data-businessunit-id="${escape(w.businessUnitId)}"
 						data-style-height="52px"
-						data-style-width="100%"
+						data-style-width="250px"
+						data-theme="dark"
 						data-token="${escape(w.token)}"
 					>
 						<a href="${escape(s.reviews.profile)}" target="_blank" rel="noopener nofollow">Trustpilot</a>
