@@ -400,3 +400,180 @@ describe('the main process', () => {
 		).toContain("fileOperationJournal(app.getPath('userData'))");
 	});
 });
+
+const REMOVE = {
+	steamId64: STEAM_ID,
+	passphrase: 'a passphrase long enough',
+	acknowledgement: 'REMOVE STEAM GUARD'
+};
+
+/**
+ * **An answer that could not be acted on has not been acted on.**
+ *
+ * The note was cleared as soon as the three identity checks agreed the answer
+ * was about this record — before the work. Every branch after that point can
+ * fail without changing anything: a mistyped vault passphrase rejects inside
+ * `reconcileDetached`, and both reconciliations return false when the
+ * authenticator has moved on. Each of those deliberately leaves the vault's
+ * record standing so the refusal survives, and the note had already gone.
+ *
+ * Where the note is the only record — which is the case it exists for, the one
+ * where `latch`'s vault write never happened — a single typo destroyed the
+ * durable refusal, and the next attempt sent the irreversible request again.
+ */
+describe('resolving an operation that then fails', () => {
+	it('keeps the note when the passphrase is refused', async () => {
+		const journal = memoryJournal();
+		journal.record({
+			steamId64: STEAM_ID,
+			kind: 'deactivate',
+			fingerprint: authenticatorFingerprint(account()),
+			at: '2026-01-01T00:00:00.000Z'
+		});
+
+		register(
+			vaultHolding([account()]),
+			{ reconcileDetached: () => Promise.reject(new Error('that passphrase was not accepted')) },
+			journal
+		);
+
+		await expect(
+			handlerFor(CHANNELS.accountResolveOperation)(EVENT, {
+				steamId64: STEAM_ID,
+				kind: 'deactivate',
+				steamActed: true,
+				passphrase: 'a passphrase long enough'
+			})
+		).rejects.toThrow();
+
+		expect(
+			journal.read(STEAM_ID),
+			'one typo in the vault passphrase destroyed the only durable record that an irreversible ' +
+				'request had already gone to Steam, so the next attempt sends it again'
+		).toBeDefined();
+	});
+
+	it('keeps the note when the authenticator has moved on', async () => {
+		const journal = memoryJournal();
+		journal.record({
+			steamId64: STEAM_ID,
+			kind: 'activate',
+			fingerprint: authenticatorFingerprint(account()),
+			at: '2026-01-01T00:00:00.000Z'
+		});
+
+		register(
+			vaultHolding([account()]),
+			{ reconcileActivated: () => Promise.resolve(false) },
+			journal
+		);
+
+		await expect(
+			handlerFor(CHANNELS.accountResolveOperation)(EVENT, {
+				steamId64: STEAM_ID,
+				kind: 'activate',
+				steamActed: true
+			})
+		).rejects.toThrow();
+
+		expect(
+			journal.read(STEAM_ID),
+			'nothing was reconciled and the record went anyway'
+		).toBeDefined();
+	});
+
+	it('clears it once the answer is actually acted on', async () => {
+		const journal = memoryJournal();
+		journal.record({
+			steamId64: STEAM_ID,
+			kind: 'activate',
+			fingerprint: authenticatorFingerprint(account()),
+			at: '2026-01-01T00:00:00.000Z'
+		});
+
+		register(
+			vaultHolding([account()]),
+			{ reconcileActivated: () => Promise.resolve(true) },
+			journal
+		);
+
+		await handlerFor(CHANNELS.accountResolveOperation)(EVENT, {
+			steamId64: STEAM_ID,
+			kind: 'activate',
+			steamActed: true
+		});
+
+		expect(journal.read(STEAM_ID)).toBeUndefined();
+	});
+});
+
+/**
+ * **A stale vault record must not hide a note about the authenticator in hand.**
+ *
+ * `recordFor` consulted the note only when the account row carried no
+ * `unresolvedOperation` at all. But a record whose fingerprint no longer matches
+ * is treated everywhere else as no record — so an account holding a left-over
+ * one masked a note about the authenticator it holds *now*, and the irreversible
+ * call went straight through. That is the single case the note exists for.
+ *
+ * Stale records persist rather than being rare: `mergeAccount` in the import
+ * service spreads the existing row and never clears `unresolvedOperation`, so a
+ * Replace-existing import leaves one behind indefinitely.
+ */
+describe('a note about the current authenticator', () => {
+	/** The row as an import-replace leaves it: new secret, old record. */
+	function replacedAccount(): Account {
+		const row = account() as Account & {
+			unresolvedOperation?: Record<string, unknown>;
+		};
+		row.unresolvedOperation = {
+			kind: 'activate',
+			guidance: 'an older operation, about an authenticator that has since been replaced',
+			fingerprint: 'the authenticator that used to be here',
+			at: '2025-01-01T00:00:00.000Z'
+		};
+		return row;
+	}
+
+	it('is still enforced when the row carries a stale record', async () => {
+		const journal = memoryJournal();
+		const row = replacedAccount();
+		journal.record({
+			steamId64: STEAM_ID,
+			kind: 'deactivate',
+			fingerprint: authenticatorFingerprint(row),
+			at: '2026-01-01T00:00:00.000Z'
+		});
+
+		const deactivate = vi.fn(() => Promise.resolve());
+		register(vaultHolding([row]), { deactivate }, journal);
+
+		const result = await handlerFor(CHANNELS.accountDeactivate)(EVENT, REMOVE);
+
+		expect(
+			deactivate,
+			'a left-over record about a replaced authenticator hid the note about the current one, ' +
+				'so RemoveAuthenticator went to Steam a second time for an operation whose outcome ' +
+				'nobody knows'
+		).not.toHaveBeenCalled();
+		expect(result).toMatchObject({ state: 'uncertain' });
+	});
+
+	/*
+	 * And the stale record is still clearable, which is what gives the account
+	 * back rather than refusing it forever.
+	 */
+	it('still lets a stale record be resolved away', async () => {
+		const journal = memoryJournal();
+		const row = replacedAccount();
+		register(vaultHolding([row]), {}, journal);
+
+		const result = await handlerFor(CHANNELS.accountResolveOperation)(EVENT, {
+			steamId64: STEAM_ID,
+			kind: 'activate',
+			steamActed: false
+		});
+
+		expect(result).toEqual({ ok: true });
+	});
+});

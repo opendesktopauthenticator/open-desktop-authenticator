@@ -35,8 +35,8 @@ export const privacy = {
 				kind. <strong>This website</strong> is a separate thing and does collect a
 				little — server logs kept for 14 days, Cloudflare in front of it, Google
 				Analytics, and Trustpilot on the pages that ask you for a review. All of that
-				is listed below, along with what a report holds, how long it lives, and the two
-				things the download page keeps in your own browser.
+				is listed below, along with what a report holds, how long it lives, and the one
+				thing the download page keeps in your own browser.
 			</p>
 
 			<div class="callout">

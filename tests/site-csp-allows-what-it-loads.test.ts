@@ -225,4 +225,47 @@ describe('where the review loader is allowed to go', () => {
 				'writes, so a reader is told about storage that does not exist'
 		).toEqual([]);
 	});
+
+	/*
+	 * **And the count in the prose, which is where the reader actually looks.**
+	 *
+	 * Both checks above work on `<code>`-wrapped key names. The lede — the one
+	 * paragraph most readers stop at — states a *number* in words, and when the
+	 * download prompt was rewritten from two keys to one, the section below it was
+	 * corrected and the lede went on saying "the two things the download page keeps
+	 * in your own browser". The page contradicted itself 135 lines apart, on the one
+	 * page whose entire subject is what is kept, and shipped that way.
+	 *
+	 * Derived from the script rather than pinned to a word, so the next change to
+	 * what is stored fails here instead of being described wrongly.
+	 */
+	it('counts the browser storage correctly in the prose, not only in the list', () => {
+		const privacy = readFileSync(join(ROOT, 'site', 'pages', 'privacy.mjs'), 'utf8');
+		const download = readFileSync(join(ROOT, 'site', 'assets', 'download.js'), 'utf8');
+
+		const kept = new Set([...download.matchAll(/'(oda\.[a-z.-]+)'/g)].map((m) => m[1]));
+		expect(kept.size, 'the download script keeps no keys, so this asserts nothing').toBeGreaterThan(
+			0
+		);
+
+		const WORDS = ['no', 'one', 'two', 'three', 'four', 'five'];
+		// Whitespace-collapsed: the sentence wraps across source lines, and a check
+		// that misses it because of a line break is worse than no check.
+		const prose = privacy.replace(/\s+/g, ' ');
+		const claim = /the (no|one|two|three|four|five) thing(s?) the download page keeps/.exec(prose);
+		expect(
+			claim,
+			'the sentence that states the count is gone; this test needs rewriting'
+		).not.toBeNull();
+
+		expect(
+			claim?.[1],
+			`the page tells the reader how many things it keeps in their browser, and the number is ` +
+				`wrong: the download script keeps ${kept.size} (${[...kept].join(', ')})`
+		).toBe(WORDS[kept.size]);
+
+		expect(claim?.[2], 'the count and its noun disagree in number').toBe(
+			kept.size === 1 ? '' : 's'
+		);
+	});
 });

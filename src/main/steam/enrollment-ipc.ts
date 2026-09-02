@@ -546,15 +546,22 @@ export function registerEnrollmentHandlers(
 			}
 
 			/*
-			 * **The user has answered this operation, so the note is spent.**
+			 * **The note is spent only once the answer has been acted on.**
 			 *
-			 * Cleared here, once the three checks above agree the answer is about this
-			 * record — and before acting, so that a failure while acting cannot leave
-			 * an answered note to be read again on the next start. The vault record,
-			 * where there is one, is cleared by the branches below.
+			 * It was cleared here, before the work — and every branch below can fail
+			 * without changing anything: a mistyped vault passphrase rejects inside
+			 * `reconcileDetached`, and both reconciliations return false when the
+			 * authenticator moved on. Each of those deliberately leaves the vault's
+			 * record intact so the refusal survives, and the note had already gone.
+			 *
+			 * Where the note is the only record — which is exactly what it exists for,
+			 * the case where `latch`'s vault write never happened — one typo in the
+			 * passphrase destroyed the durable refusal, and the next attempt sent the
+			 * irreversible request to Steam again.
+			 *
+			 * So each success path clears it, next to the vault record it belongs
+			 * with. A failure leaves both standing.
 			 */
-			journal.clear(steamId64, kind);
-
 			if (!steamActed) {
 				// Steam did nothing, so the account is what it always was and the
 				// operation is worth trying again. Only the refusal is lifted.
@@ -564,6 +571,7 @@ export function registerEnrollmentHandlers(
 						delete stored.unresolvedOperation;
 					}
 				});
+				journal.clear(steamId64, kind);
 				return { ok: true as const };
 			}
 
@@ -574,6 +582,7 @@ export function registerEnrollmentHandlers(
 				if (!(await enrollment.reconcileActivated(steamId64, authenticatorFingerprint(account)))) {
 					throw new EnrollmentError(MOVED_ON);
 				}
+				journal.clear(steamId64, kind);
 				return { ok: true as const };
 			}
 
@@ -598,6 +607,7 @@ export function registerEnrollmentHandlers(
 				// Nothing was deleted, so nothing is torn down and nothing is claimed.
 				throw new EnrollmentError(MOVED_ON);
 			}
+			journal.clear(steamId64, kind);
 			// The same teardown a local removal does: cookie jar, cached session,
 			// pending list.
 			onRemoved(steamId64);
@@ -655,10 +665,26 @@ export function registerEnrollmentHandlers(
 		 * Consulted only when the vault has nothing, so the guidance a real failure
 		 * produced always wins over this generic one.
 		 */
-		const note = stored === undefined ? journal.read(steamId64) : undefined;
-		const held =
-			stored ??
-			(note === undefined
+		/*
+		 * **Whenever the vault's record does not apply — not merely when it is absent.**
+		 *
+		 * This read the note only for `stored === undefined`, and a record that is
+		 * present but *stale* is treated everywhere else as no record at all. So an
+		 * account carrying a left-over record about an authenticator since replaced
+		 * masked a note about the one it holds now — which is the single case this
+		 * file exists to cover — and the irreversible call went through.
+		 *
+		 * Stale records persist: `mergeAccount` in the import service spreads the
+		 * existing row and never clears `unresolvedOperation`, so a replace leaves one
+		 * behind indefinitely.
+		 */
+		const current = account === undefined ? undefined : authenticatorFingerprint(account);
+		const applies = (record: { fingerprint?: string } | undefined): boolean =>
+			record !== undefined && record.fingerprint !== undefined && record.fingerprint === current;
+
+		const note = account === undefined || applies(stored) ? undefined : journal.read(steamId64);
+		const noted =
+			note === undefined
 				? undefined
 				: {
 						kind: note.kind,
@@ -674,17 +700,27 @@ export function registerEnrollmentHandlers(
 									'doing anything else here.',
 						fingerprint: note.fingerprint,
 						at: note.at
-					});
+					};
 
-		if (account === undefined || held === undefined) {
+		if (account === undefined) {
 			// A note with no account row left to hang it on is unreachable from here.
 			// The initial-enrolment case, where there may never have been a row, needs
 			// a surface of its own.
 			return { account, held: undefined, stale: false };
 		}
-		const stale =
-			held.fingerprint === undefined || held.fingerprint !== authenticatorFingerprint(account);
-		return { account, held: stale ? undefined : held, stale };
+
+		// The vault's own record first: the guidance a real failure produced always
+		// beats the note's generic wording.
+		if (applies(stored)) {
+			return { account, held: stored, stale: false };
+		}
+		if (applies(noted)) {
+			return { account, held: noted, stale: false };
+		}
+
+		// Neither applies. `stale` says there is something to clear, which is what
+		// lets the resolve handler give the account back rather than refuse forever.
+		return { account, held: undefined, stale: stored !== undefined || note !== undefined };
 	}
 
 	function heldBack(
