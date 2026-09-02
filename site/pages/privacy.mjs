@@ -170,18 +170,16 @@ export const privacy = {
 					commit before this entry existed, including this one — a page that lists
 					everyone we talk to and then ended the list with the sentence below.
 				</dd>
-				<dt>Two things kept in your own browser</dt>
+				<dt>One thing kept in your own browser</dt>
 				<dd>
-					The download page remembers two flags in your browser's local storage, and
-					nothing else does: <code>oda.review-prompt.started</code>, set when you follow
-					one of the links to a build, and <code>oda.review-prompt.dismissed</code>, set
-					if you turn the review prompt down or follow the link to write one. They exist
-					so the page can ask you about a review once, on a later visit, and then stop
-					asking. Following a download link is all that sets the first one — this site
-					cannot tell whether you actually downloaded or installed anything, and does not
-					try to.
-					They never leave your machine, nothing on the server reads them, and clearing
-					your site data removes them. Neither expires on its own.
+					The download page remembers a single flag in your browser's local storage, and
+					nothing else does: <code>oda.review-prompt.dismissed</code>, set if you turn the
+					review prompt down, follow the link to write a review, or carry on to a build
+					from the prompt itself. It exists so the page can ask you about a review once
+					and then stop asking. This site cannot tell whether you actually downloaded or
+					installed anything, and does not try to.
+					It never leaves your machine, nothing on the server reads it, and clearing your
+					site data removes it. It does not expire on its own.
 				</dd>
 				<dt>Nobody else</dt>
 				<dd>

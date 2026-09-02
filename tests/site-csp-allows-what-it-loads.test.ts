@@ -193,4 +193,36 @@ describe('where the review loader is allowed to go', () => {
 				'not mention them'
 		).toEqual([]);
 	});
+
+	/*
+	 * And the other direction, which is the one that actually went wrong.
+	 *
+	 * The check above only asks that every key the script writes is disclosed. It is
+	 * satisfied by a privacy page that describes *more* storage than exists — so when
+	 * the download prompt was rewritten and `oda.review-prompt.started` stopped being
+	 * written, the page went on telling readers it was stored, and nothing failed.
+	 *
+	 * An over-disclosure is a smaller harm than an under-disclosure but it is still a
+	 * false statement on the one page whose entire subject is what this site keeps,
+	 * and a reader who goes looking for the key to clear it will not find it.
+	 */
+	it('describes no browser storage that the download page does not keep', () => {
+		const privacy = readFileSync(join(ROOT, 'site', 'pages', 'privacy.mjs'), 'utf8');
+		const download = readFileSync(join(ROOT, 'site', 'assets', 'download.js'), 'utf8');
+
+		const described = [...privacy.matchAll(/<code>(oda\.[a-z.-]+)<\/code>/g)].map(
+			(match) => match[1]
+		);
+		expect(
+			described.length,
+			'the privacy page names no storage keys, so this asserts nothing'
+		).toBeGreaterThan(0);
+
+		const imaginary = described.filter((key) => key !== undefined && !download.includes(key));
+		expect(
+			imaginary,
+			'the page about what this site stores describes keys the download script never ' +
+				'writes, so a reader is told about storage that does not exist'
+		).toEqual([]);
+	});
 });
