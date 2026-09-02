@@ -161,16 +161,44 @@ const CHROMIUM_SCHEME: Record<string, string> = {
  * IP literals, bracketed IPv6 and underscore hosts unchanged apart from case.
  */
 function canonicalHost(hostname: string): string {
-	let decoded = hostname;
+	// What the parser gave us, case-folded. The fallback for everything below,
+	// because it is the one form guaranteed not to name a different host.
+	const raw = hostname.toLowerCase();
+
+	let decoded: string;
 	try {
 		decoded = decodeURIComponent(hostname);
 	} catch {
 		// Not valid percent-encoding, so it is already the literal host.
+		return raw;
 	}
+
+	/*
+	 * **Decoding can put an authority delimiter back into the host.**
+	 *
+	 * `%40` decodes to `@` and `%2F` to `/`, and both re-split the string the
+	 * moment it is pasted into `scheme://host:port` — so `socks5://ex%40mple.com`
+	 * would be planned as `socks5://ex@mple.com`, which `socks-proxy-agent` reads
+	 * as the user `ex` at the host `mple.com`. A different operator entirely, on
+	 * the one feature whose whole job is to send traffic somewhere specific.
+	 *
+	 * `domainToASCII` does not save us: measured, it returns `''` for
+	 * `ex@mple.com` but `'a'` for `a/b.example` — silently truncating to a host
+	 * that is not remotely the one asked for.
+	 *
+	 * So anything carrying a delimiter keeps the spelling the parser produced.
+	 * The routing check then refuses it, which is the honest outcome: an address
+	 * we cannot canonicalise is one we cannot promise anything about.
+	 */
+	const delimiter = decoded.startsWith('[') ? /[@/\\?#\s]/ : /[@/\\?#\s:]/;
+	if (delimiter.test(decoded)) {
+		return raw;
+	}
+
 	const ascii = domainToASCII(decoded);
 	// Empty means it is not a domain Chromium would accept at all — leave it
 	// alone but for case, and let the routing check refuse it honestly.
-	return ascii === '' ? decoded.toLowerCase() : ascii;
+	return ascii === '' ? raw : ascii;
 }
 
 const PAC_TOKEN: Record<string, string> = {

@@ -1,4 +1,4 @@
-import { releaseGaps, reviewAsk, reviewCollector } from '../markup.mjs';
+import { releaseGaps, reviewAsk } from '../markup.mjs';
 
 /** Download status, migration, documentation hub, FAQ, support and 404. */
 

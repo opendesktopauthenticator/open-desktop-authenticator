@@ -826,3 +826,130 @@ describe('a held confirmation under a flood of ordinary ones', () => {
 		expect(activity.hasUrgent()).toBe(true);
 	});
 });
+
+/**
+ * **Protecting the held entries must not make them re-record themselves.**
+ *
+ * `recordPass` holds `reported.get(id)` as `seen` and tests `seen.held` for each
+ * confirmation in the batch; `push` reaches `trim` synchronously inside that
+ * loop. So a trim that deletes from `seen.held` is mutating the very set the
+ * loop is still consulting — and once every entry in the list is a hold, the
+ * preference pass finds nothing to drop and the last resort evicts an older
+ * hold, releasing an id the batch has not reached yet. That one is recorded
+ * again in the same pass, which evicts the next, and the cascade runs to the end
+ * of the batch.
+ *
+ * The result is a log that rewrites itself on every unchanged poll, and a badge
+ * that relights the moment it is acknowledged — which is precisely what the
+ * `reported` docblock says the dedup exists to prevent.
+ */
+describe('an account holding back more confirmations than the log can keep', () => {
+	const ID = '76561198000000001';
+	const many = Array.from({ length: 101 }, (_, i) => ({
+		confirmation: confirmation({ id: `held-${i}` }),
+		reason: 'trades are switched off'
+	}));
+
+	it('writes nothing new when the same ones are still held', () => {
+		const activity = log();
+
+		activity.recordPass(ID, [], many);
+		const afterFirst = activity.watermark();
+		expect(afterFirst, 'nothing was recorded at all, so this asserts nothing').toBeGreaterThan(0);
+
+		activity.recordPass(ID, [], many);
+		activity.recordPass(ID, [], many);
+
+		expect(
+			activity.watermark() - afterFirst,
+			'the same unchanged poll rewrote the whole held set, so the log churns a hundred entries ' +
+				'every fifteen seconds for the life of the process'
+		).toBe(0);
+	});
+
+	it('lets an acknowledged badge stay discharged', () => {
+		const activity = log();
+		const critical = { confirmation: recovery, reason: 'account recovery' };
+
+		activity.recordPass(ID, [], [...many, critical]);
+		expect(activity.hasUrgent(), 'nothing was urgent, so this asserts nothing').toBe(true);
+
+		activity.acknowledge(activity.watermark());
+		expect(activity.hasUrgent()).toBe(false);
+
+		// The same confirmations are still held. Nothing new has happened.
+		activity.recordPass(ID, [], [...many, critical]);
+
+		expect(
+			activity.hasUrgent(),
+			'the badge relit on an unchanged poll, so it can never be discharged'
+		).toBe(false);
+	});
+
+	/*
+	 * And the guarantee this trim exists for still holds: the security-critical
+	 * hold is the one entry that must survive the crowd.
+	 */
+	it('still keeps the security-critical hold', () => {
+		const activity = log();
+		const critical = { confirmation: recovery, reason: 'account recovery' };
+
+		activity.recordPass(ID, [], [critical, ...many]);
+
+		expect(
+			activity.for(ID).some((e) => e.kind === 'held' && e.confirmation.id === recovery.id),
+			'the account-recovery hold was crowded out by ordinary ones'
+		).toBe(true);
+	});
+});
+
+/**
+ * **An urgent entry arriving into a full log must not be deleted on arrival.**
+ *
+ * The first version of the trim dropped "anything that is not a hold" before any
+ * hold — and `halted`, `unreadable` and `signInRequired` are not holds, though
+ * `hasUrgent` counts all three. So with a hundred ordinary holds already
+ * recorded, a sign-in expiring wrote an entry that the very same trim spliced
+ * straight back out, and the dedup upstream had already marked it reported.
+ */
+describe('an urgent entry arriving into a full log', () => {
+	const ID = '76561198000000001';
+	const crowd = Array.from({ length: 100 }, (_, i) => ({
+		confirmation: confirmation({ id: `held-${i}` }),
+		reason: 'trades are switched off'
+	}));
+
+	it('survives a log already full of ordinary holds', () => {
+		const activity = log();
+		activity.recordPass(ID, [], crowd);
+		expect(activity.for(ID)).toHaveLength(100);
+
+		activity.recordSignInRequired(ID);
+
+		expect(
+			activity.for(ID).some((entry) => entry.kind === 'signInRequired'),
+			'the sign-in notice was spliced out by the same push that added it, and nothing will ' +
+				'write it again'
+		).toBe(true);
+		expect(activity.hasUrgent(), 'and the badge never lit for it').toBe(true);
+	});
+
+	it('so does a halt', () => {
+		const activity = log();
+		activity.recordPass(ID, [], crowd);
+
+		activity.recordFailure(ID, 'ten consecutive failures', true);
+
+		expect(activity.for(ID).some((entry) => entry.kind === 'halted')).toBe(true);
+		expect(activity.hasUrgent()).toBe(true);
+	});
+
+	it('and the log is still capped', () => {
+		const activity = log();
+		activity.recordPass(ID, [], crowd);
+		activity.recordSignInRequired(ID);
+		activity.recordFailure(ID, 'ten consecutive failures', true);
+
+		expect(activity.for(ID).length).toBeLessThanOrEqual(100);
+	});
+});

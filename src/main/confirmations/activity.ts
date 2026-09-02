@@ -22,6 +22,35 @@ import type { ConfirmationSummary } from '../../shared/ipc';
  */
 
 /** Per account. Old entries fall off rather than growing without bound. */
+/**
+ * Whether an entry is one a person genuinely needs to look at.
+ *
+ * Only security-critical holds count among the holds: a trade held back because
+ * the user has not enabled trades is normal, and counting it would drown the
+ * signal that matters.
+ *
+ * **Shared by `hasUrgent` and the trim**, so the badge and the log cannot
+ * disagree about what is worth keeping. They did: the trim dropped "anything
+ * that is not a hold" first, and three of the four kinds below are not holds —
+ * so with the log full of ordinary holds, a sign-in expiring wrote an entry that
+ * the same trim spliced straight back out.
+ */
+function isUrgent(entry: ActivityEntry): boolean {
+	return (
+		(entry.kind === 'held' && entry.confirmation.securityCritical) ||
+		entry.kind === 'halted' ||
+		// **Counts as urgent, because it cannot be ruled out.** An entry that
+		// failed to parse has no type, so there is no way to know it was not the
+		// account-recovery confirmation. Treating "we could not read it" as
+		// ordinary would be assuming the best about the one case where this
+		// application's whole purpose is to assume the worst.
+		entry.kind === 'unreadable' ||
+		// Nothing this application does will fix an expired session, so it is
+		// exactly the case that has to reach a person.
+		entry.kind === 'signInRequired'
+	);
+}
+
 const MAX_ENTRIES_PER_ACCOUNT = 100;
 
 export type ActivityEntry =
@@ -309,19 +338,7 @@ export class ActivityLog {
 	 */
 	hasUrgent(): boolean {
 		return this.all().some(
-			({ entry }) =>
-				(this.order.get(entry) ?? 0) > this.acknowledgedSeq &&
-				((entry.kind === 'held' && entry.confirmation.securityCritical) ||
-					entry.kind === 'halted' ||
-					// **Counts as urgent, because it cannot be ruled out.** An entry that
-					// failed to parse has no type, so there is no way to know it was not
-					// the account-recovery confirmation. Treating "we could not read it"
-					// as ordinary would be assuming the best about the one case where
-					// this application's whole purpose is to assume the worst.
-					entry.kind === 'unreadable' ||
-					// Nothing this application does will fix an expired session, so it
-					// is exactly the case that has to reach a person.
-					entry.kind === 'signInRequired')
+			({ entry }) => (this.order.get(entry) ?? 0) > this.acknowledgedSeq && isUrgent(entry)
 		);
 	}
 
@@ -369,7 +386,7 @@ export class ActivityLog {
 		const list = this.entries.get(steamId64) ?? [];
 		list.push(entry);
 		if (list.length > MAX_ENTRIES_PER_ACCOUNT) {
-			this.trim(steamId64, list);
+			this.trim(list);
 		}
 		this.entries.set(steamId64, list);
 	}
@@ -383,32 +400,61 @@ export class ActivityLog {
 	 * account-recovery entry after a hundred approvals and could never write it
 	 * again: `hasUrgent()` went back to false, the badge went dark, and the
 	 * confirmation was still sitting on Steam waiting for somebody to look at it.
-	 * The class docblock names that exact outcome as the thing to prevent, and
-	 * stopping the self-inflicted flood is what turned it from self-healing into
-	 * permanent.
 	 *
-	 * So unheld entries go first, oldest among them first. Only when there is
-	 * nothing else left to drop does a held one go — and then its id is released
-	 * from the dedup set, so the next pass records it again rather than staying
-	 * silent about a confirmation that is still held.
+	 * Entries are dropped in order of how little they are missed: anything that is
+	 * not a hold, then a hold nobody needs to act on, and only then a
+	 * security-critical one. `hasUrgent` counts exactly the last group, so this is
+	 * the order that keeps the badge honest.
+	 *
+	 * **Nothing is released from `reported.held` here, and that is deliberate.** A
+	 * first version of this deleted an evicted hold's id so a later pass could
+	 * record it again — but `recordPass` holds that same Set as `seen` and tests
+	 * it once per confirmation, and `push` reaches this function synchronously
+	 * inside that loop. Releasing an id the batch had not reached yet made it
+	 * record again in the same pass, which evicted the next hold, which released
+	 * that one: with more held confirmations than the log can keep, every
+	 * unchanged poll rewrote the entire set and the badge relit the instant it was
+	 * acknowledged. That is the flood the `reported` docblock exists to stop.
+	 *
+	 * The cost is that an account holding back more than a hundred
+	 * *security-critical* confirmations at once would lose the oldest of them from
+	 * the log. Account-recovery confirmations arrive one at a time; a hundred
+	 * simultaneously is not a state Steam produces.
 	 */
-	private trim(steamId64: string, list: ActivityEntry[]): void {
+	private trim(list: ActivityEntry[]): void {
 		let excess = list.length - MAX_ENTRIES_PER_ACCOUNT;
-
-		for (let i = 0; i < list.length && excess > 0;) {
-			if (list[i]?.kind === 'held') {
-				i += 1;
-			} else {
-				list.splice(i, 1);
-				excess -= 1;
-			}
+		if (excess <= 0) {
+			return;
 		}
 
-		while (excess > 0 && list.length > 0) {
-			const dropped = list.shift();
-			excess -= 1;
-			if (dropped?.kind === 'held') {
-				this.reported.get(steamId64)?.held.delete(dropped.confirmation.id);
+		/*
+		 * **Not "held last" — urgent last.** A first version dropped anything that
+		 * was not a hold before any hold, and `halted`, `unreadable` and
+		 * `signInRequired` are not holds. With a hundred ordinary holds already in
+		 * the log, a sign-in expiring pushed an entry that the very same trim then
+		 * spliced straight back out — deleted on arrival, and never written again,
+		 * because the dedup upstream had already recorded it as reported.
+		 *
+		 * `isUrgent` is the same predicate `hasUrgent` counts, so the two cannot
+		 * drift: the log evicts exactly what the badge does not care about first.
+		 */
+		const droppable: ((entry: ActivityEntry) => boolean)[] = [
+			(entry) => !isUrgent(entry),
+			() => true
+		];
+
+		for (const mayGo of droppable) {
+			for (let i = 0; i < list.length && excess > 0;) {
+				const entry = list[i];
+				if (entry !== undefined && mayGo(entry)) {
+					list.splice(i, 1);
+					excess -= 1;
+				} else {
+					i += 1;
+				}
+			}
+			if (excess === 0) {
+				return;
 			}
 		}
 	}

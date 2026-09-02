@@ -3083,3 +3083,55 @@ describe('a proxy host that is not spelled canonically', () => {
 		);
 	});
 });
+
+/**
+ * **Canonicalising a host must never name a different one.**
+ *
+ * `canonicalHost` percent-decodes before folding, because a SOCKS host arrives
+ * percent-encoded — that is how the internationalised case works at all. But
+ * `%40` decodes to `@` and `%2F` to `/`, and both re-split the string the moment
+ * it is pasted into `scheme://host:port`: `socks5://ex%40mple.com` would be
+ * planned as `socks5://ex@mple.com`, which `socks-proxy-agent` reads as the user
+ * `ex` at the host `mple.com`. A different operator entirely, on the one feature
+ * whose whole job is to send traffic somewhere specific.
+ *
+ * `domainToASCII` does not catch it. Measured: it returns `''` for
+ * `ex@mple.com`, but `'a'` for `a/b.example` — silently truncating to a host
+ * nothing asked for.
+ */
+describe('a proxy host carrying an encoded delimiter', () => {
+	it('does not turn an encoded @ into a userinfo separator', () => {
+		const plan = planProxy('socks5://ex%40mple.com:1080');
+
+		expect(
+			plan.endpoint,
+			'the decoded @ re-split the authority, so the planned proxy is a different host from ' +
+				'the one configured'
+		).not.toContain('@');
+		expect(plan.proxyRules).not.toMatch(/\/\/[^/]*@/);
+	});
+
+	it('does not truncate a host at an encoded slash', () => {
+		const plan = planProxy('socks5://a%2Fb.example:1080');
+
+		expect(
+			plan.endpoint,
+			'the host was silently shortened to something that is not the configured proxy'
+		).not.toBe('a:1080');
+		expect(plan.endpoint).not.toContain('/');
+	});
+
+	/*
+	 * And the cases the decoding exists for are untouched.
+	 */
+	it('still folds case and punycode for an ordinary host', () => {
+		expect(planProxy('socks5://Proxy.Example:1080').endpoint).toBe('proxy.example:1080');
+		expect(
+			planProxy('socks5://%D0%BF%D1%80%D0%B8%D0%BC%D0%B5%D1%80.%D1%80%D1%84:1080').endpoint
+		).toBe('xn--e1afmkfd.xn--p1ai:1080');
+	});
+
+	it('leaves an address literal alone', () => {
+		expect(planProxy('socks5://10.0.0.1:1080').endpoint).toBe('10.0.0.1:1080');
+	});
+});
