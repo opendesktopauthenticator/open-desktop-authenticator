@@ -245,8 +245,8 @@ export default {
 	win: {
 		icon: 'build/icon.ico',
 		// Signing is not configured. The Store target does not need it — Microsoft
-		// re-signs — and the direct-download targets ship unsigned until the
-		// SignPath Foundation certificate exists. Stated rather than omitted, so
+		// re-signs — and the direct-download targets ship unsigned, with no
+		// certificate planned. Stated rather than omitted, so
 		// nobody reads the absence as an oversight.
 		signAndEditExecutable: true,
 		target: [

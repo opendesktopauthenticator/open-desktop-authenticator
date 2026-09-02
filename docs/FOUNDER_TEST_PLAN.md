@@ -692,6 +692,6 @@ that closed are the ones a reader would otherwise assume are still open.
 - **Run a Linux build.** Neither the AppImage nor the `.deb` has been launched by
   a human. This is the largest untested surface in the project.
 - A Windows code-signing certificate (Q2) — the direct downloads stay unsigned
-  until SignPath, and the Store package is signed by Microsoft instead.
+  (no certificate is planned), and the Store package is signed by Microsoft instead.
 - Sign-off on the IPC channel table (§24.3).
 - The scrypt work factor benchmarked on your slowest target machine (Q6).

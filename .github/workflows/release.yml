@@ -654,7 +654,7 @@ jobs:
 
       # Proof of *where* the bytes came from: which workflow, which commit,
       # which runner. This is the closest thing to a signature the direct
-      # download channel has until the SignPath certificate exists, and unlike a
+      # download channel has, there being no code-signing certificate, and unlike a
       # certificate it says something a certificate cannot — that these bytes
       # were produced by this public workflow from this tag.
       - name: Attest build provenance

@@ -88,7 +88,8 @@ real commitment; none of them blocks a release today, and no page may claim any
 of them while it is on this list.
 
 - Signed Git tags. The v1.0.0 tag is unsigned.
-- Code-signing for the Windows direct downloads. Blocked on SignPath Foundation.
+- Code-signing for the Windows direct downloads. Not planned: the SignPath Foundation
+  declined, and a bought certificate would not clear the SmartScreen warning on its own.
   The Store package is signed by Microsoft on ingestion, which is a different
   channel with a different guarantee.
 - Reproducible builds.

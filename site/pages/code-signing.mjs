@@ -1,30 +1,28 @@
 /**
  * Code signing policy.
  *
- * SignPath Foundation requires this page, and requires specific literal
- * strings on it: the term "Code signing policy" on the home page and the
- * download/release pages, the exact attribution sentence, the team roles, and
- * a privacy policy reference. Those are quoted requirements from
- * https://signpath.org/terms.html, not stylistic choices — a paraphrase of the
- * attribution line is a failed condition, so `tests/code-signing-policy.test.ts`
- * asserts the exact strings rather than trusting anybody to keep them.
+ * **This page was originally written to a sponsor's requirements.** An
+ * application to the SignPath Foundation was declined — their programme is for
+ * projects with established public visibility, which is a threshold a new
+ * project cannot clear by writing better code — so every claim that a
+ * certificate was coming, and the attribution line that named them as the
+ * sponsor, have been removed. Naming a sponsor who is not sponsoring you is the
+ * one thing a page about trust cannot do.
  *
- * It is also a page worth having independently. "Who is allowed to approve a
- * signature" is exactly the question §4's chain leaves open once a certificate
- * exists: a stranger can check that a binary is signed, but not who decided it
- * should be. This says so, in advance of having the certificate.
+ * The page stays, because most of it never depended on that. "Who is allowed to
+ * approve a release" is exactly the question the verification chain leaves open,
+ * and it is worth answering whether or not anything is signed. What it says now
+ * is the settled position rather than a plan: the Store build carries
+ * Microsoft's signature, the direct downloads carry none, and the checksums and
+ * the provenance attestation are how a stranger checks them.
  */
-
-/** SignPath's required attribution, quoted exactly. Do not paraphrase. */
-export const SIGNPATH_ATTRIBUTION =
-	'Free code signing provided by SignPath.io, certificate by SignPath Foundation';
 
 export const codeSigningPolicy = {
 	slug: 'code-signing-policy',
 	navTitle: 'Code signing policy',
 	title: 'Code signing policy',
 	description:
-		'Who may approve a release for signing, which builds are eligible, and how to verify one. Required by SignPath Foundation.',
+		'Which builds carry a signature and which do not, who is accountable for a release, and how to verify one without trusting us.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'WebPage',
@@ -38,24 +36,34 @@ export const codeSigningPolicy = {
 
 			<div class="callout">
 				<p>
-					<strong>${SIGNPATH_ATTRIBUTION}</strong>
+					<strong>The direct downloads are not code-signed, and no certificate is
+					planned.</strong> None of the builds on
+					<a href="${s.repo}/releases/latest" rel="noopener">the releases page</a> carry
+					a code-signing certificate, so Windows warns on first run.
 				</p>
 				<p>
-					An application is in progress and <strong>has not been granted yet</strong>.
-					Until it is, none of the builds on
-					<a href="${s.repo}/releases/latest" rel="noopener">the releases page</a> carry
-					a code-signing certificate, and Windows warns on first run. This page
-					describes the policy that applies once the certificate exists, and is
-					published now so it can be read before it matters rather than after.
+					We applied to the SignPath Foundation, which gives free certificates to
+					open-source projects, and were declined: their programme asks for
+					established public visibility — stars, forks, articles, independent
+					discussion — which a project this young does not have yet. That is written
+					here rather than quietly dropped, because a page about who you can trust is
+					the wrong place to be vague about what did not happen.
+				</p>
+				<p>
+					Paying for one would not change what you see today either. Since March 2024
+					no certificate — not even Extended Validation — removes the Windows
+					SmartScreen warning on its own; reputation accrues with downloads over
+					time. So the honest answer is the one below: use the Store build if you want
+					a signature, and verify the direct downloads by checksum and attestation.
 				</p>
 			</div>
 
-			<h2>What gets signed, and what does not</h2>
+			<h2>What carries a signature, and what does not</h2>
 			<p>
-				Only artifacts built by this project's own public workflow, from a tag in
-				<a href="${s.repo}" rel="noopener">this repository</a>, are eligible. Nothing
-				built on a maintainer's machine is ever signed, and no third party's binaries
-				are signed with this certificate.
+				Nothing this project publishes directly is signed by us. If that ever changes,
+				only artifacts built by this project's own public workflow, from a tag in
+				<a href="${s.repo}" rel="noopener">this repository</a>, would be eligible —
+				nothing built on a maintainer's machine, and no third party's binaries.
 			</p>
 			<p>
 				<strong>The Microsoft Store package is separate.</strong> Microsoft re-signs
@@ -76,15 +84,15 @@ export const codeSigningPolicy = {
 				<dt>Approvers</dt>
 				<dd>
 					<a href="https://github.com/orgs/${s.githubOrg}/people?query=role%3Aowner" rel="noopener">Owners
-					of the ${s.githubOrg} organisation</a>. A signing request is approved by an
-					owner, who is the same person accountable for the release under
+					of the ${s.githubOrg} organisation</a>. A release is approved by an owner, who
+					is the same person accountable for it under
 					<a href="/owners">${s.brand.legal}</a>.
 				</dd>
 				<dt>Multi-factor authentication</dt>
 				<dd>
-					Required for every person in both roles, on GitHub and on SignPath. This is a
-					SignPath Foundation condition and it is also the only thing standing between a
-					stolen password and a release going out over this project's name.
+					Required for every person in both roles on GitHub. It is the only thing
+					standing between a stolen password and a release going out over this
+					project's name, which is true whether or not anything is signed.
 				</dd>
 			</dl>
 
@@ -103,7 +111,8 @@ export const codeSigningPolicy = {
 			<h2>Verifying a release</h2>
 			<p>
 				A signature tells you who published a file. It does not tell you which source
-				produced it, so this project publishes both:
+				produced it — and since nothing here is signed, the second half is all there
+				is, which is why it is published in full:
 				<code>SHA256SUMS.txt</code> and a build provenance attestation naming the
 				workflow run, commit and tag.
 				<a href="/verify">The verification steps walk through both</a>, and they are

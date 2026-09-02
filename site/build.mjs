@@ -359,7 +359,8 @@ export const SITE = {
 		 * so. The Microsoft Store package carries Microsoft's signature because
 		 * Microsoft re-signs what it distributes; the `.exe`, `.AppImage` and
 		 * `.deb` on the release page carry none, so Windows warns on first run.
-		 * Blocked on the SignPath Foundation certificate — see
+		 * No certificate is planned: the SignPath Foundation declined, and a paid
+		 * one would not clear the Windows warning on its own anyway. See
 		 * /code-signing-policy, which exists and says the same thing.
 		 */
 		codeSigned: false,
