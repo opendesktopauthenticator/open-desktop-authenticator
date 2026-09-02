@@ -435,13 +435,24 @@ describe('how long a shown toast is kept', () => {
 		return MAIN.slice(start, end);
 	})();
 
-	it('does not release the toast when the OS says it closed', () => {
-		const close = /toast\.on\('close'[\s\S]{0,200}?\)/.exec(wiring)?.[0] ?? '';
+	it('does not listen for close at all', () => {
+		/*
+		 * The property, not a window around the handler. A first attempt matched
+		 * `/toast\.on\('close'[\s\S]{0,200}?\)/` and asked whether the result deleted
+		 * anything — but the lazy `\)` stops at the arrow's own `()`, so the slice
+		 * was `toast.on('close', ()` and the assertion held whatever the handler
+		 * did. Restoring the bug left it green.
+		 *
+		 * There is no correct use of `close` here: Windows emits it on timeout while
+		 * the notification is still in the Action Center and still clickable, so the
+		 * decision is not to listen for it.
+		 */
 		expect(
-			close,
-			'the toast is dropped on `close`, which Windows emits on timeout while the notification ' +
-				'is still sitting clickable in the Action Center'
-		).not.toContain('liveToasts.delete');
+			wiring,
+			'a `close` listener is back. Windows emits that event on timeout while the notification ' +
+				'is still sitting clickable in the Action Center, so anything hung on it acts while ' +
+				'the click can still arrive'
+		).not.toContain("toast.on('close'");
 	});
 
 	it('releases it once the click has been delivered', () => {
