@@ -260,21 +260,33 @@ export function App(): React.JSX.Element {
 
 	useEffect(() => {
 		abandonPendingSignIns();
-		/*
-		 * **And the prompt already held, which the counter cannot reach.**
-		 *
-		 * `abandonPendingSignIns` stops a *late* answer installing itself. A prompt
-		 * that had already arrived stayed in state: a notification opening
-		 * Confirmations over it left it there, and pressing Back re-rendered it — a
-		 * sign-in, with a password field, for a request the user began before and
-		 * has since navigated away from twice.
-		 *
-		 * The same reasoning the overlay guard beside `setBrowserSignIn` already
-		 * uses: the open belonged to the account list, so leaving discards it.
-		 * Moved below this state for the obvious reason that it needs the setter.
-		 */
-		setBrowserSignIn(undefined);
 	}, [view]);
+
+	/*
+	 * **And the prompt already held, which the counter cannot reach.**
+	 *
+	 * `abandonPendingSignIns` stops a *late* answer from installing itself. A
+	 * prompt that had already arrived stayed in state: a notification opening
+	 * Confirmations over it left it there, and pressing Back re-rendered it — a
+	 * sign-in, with a password field, for a request the user began before and has
+	 * since navigated away from twice. `mayShowSignInPrompt` hid it in between,
+	 * which is what made this survivable rather than obvious, and also what let it
+	 * come back.
+	 *
+	 * Adjusted during render rather than in an effect. React's own guidance for
+	 * state that has to be reset when something else changes, and here it is also
+	 * the correct one: an effect would render the stale prompt once before
+	 * clearing it, which on this screen means a password field appearing and
+	 * vanishing.
+	 *
+	 * The same reasoning the overlay guard beside `setBrowserSignIn` already uses:
+	 * the open belonged to the account list, so leaving discards it.
+	 */
+	const [signInBelongsTo, setSignInBelongsTo] = useState(view);
+	if (signInBelongsTo !== view) {
+		setSignInBelongsTo(view);
+		setBrowserSignIn(undefined);
+	}
 
 	/**
 	 * **Discarded rather than deferred.**

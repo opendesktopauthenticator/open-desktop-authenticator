@@ -189,30 +189,46 @@ describe('an answer arriving behind an overlay', () => {
  * began earlier and has since navigated away from twice.
  *
  * `mayShowSignInPrompt` hides it while the user is elsewhere, which is what made
- * this survivable rather than invisible, and also what made it come back.
+ * this survivable rather than obvious, and also what let it come back.
  *
- * Asserted on the source, and on the *contents of the effect* rather than on a
- * line or an ordering: effects do not run under `renderToStaticMarkup` and this
- * project has no DOM runner, and a position is the thing this repository keeps
- * being caught by.
+ * Asserted on the source because effects and render-time resets both need a DOM
+ * runner this project does not have — and asserted as the *pairing* of the view
+ * comparison with the clear, rather than as a line or a position, because a
+ * position is the thing this repository keeps being caught by.
  */
 describe('navigating away from a held sign-in prompt', () => {
 	const source = readFileSync(join(__dirname, '..', 'src', 'renderer', 'App.tsx'), 'utf8');
 
-	/** The body of the effect that watches the view. */
-	const body = (() => {
-		const start = source.indexOf('abandonPendingSignIns();');
-		expect(start, 'nothing calls abandonPendingSignIns any more').toBeGreaterThan(-1);
-		const end = source.indexOf('}, [view]);', start);
-		expect(end, 'the view effect changed shape; this test needs rewriting').toBeGreaterThan(start);
+	/** The block that resets the prompt when the view has changed under it. */
+	const reset = (() => {
+		const start = source.indexOf('if (signInBelongsTo !== view) {');
+		expect(
+			start,
+			'nothing notices the view changing under a held prompt any more, so it is only hidden ' +
+				'and comes back the moment the user returns to the account list'
+		).toBeGreaterThan(-1);
+		const end = source.indexOf(
+			`
+	}`,
+			start
+		);
+		expect(end, 'the reset changed shape; this test needs rewriting').toBeGreaterThan(start);
 		return source.slice(start, end);
 	})();
 
 	it('discards the prompt already held, as well as the ones still coming', () => {
 		expect(
-			body,
-			'the counter is advanced but the prompt in state is left alone, so it is only hidden — ' +
-				'and it takes the window again the moment the user comes back to the account list'
+			reset,
+			'the view change is noticed but the prompt in state is left alone, so it takes the ' +
+				'window again the moment the user comes back to the account list'
 		).toContain('setBrowserSignIn(undefined)');
+	});
+
+	it('still advances the counter that stops late answers', () => {
+		expect(
+			source,
+			'without this a sign-in answered after the user navigated away installs itself on ' +
+				'whatever screen they are looking at now'
+		).toContain('abandonPendingSignIns();');
 	});
 });
