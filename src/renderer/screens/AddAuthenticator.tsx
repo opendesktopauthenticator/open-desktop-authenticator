@@ -90,7 +90,7 @@ export function AddAuthenticator({
 	 */
 	unresolved?: { guidance: string; certain?: boolean } | undefined;
 	/** Say the account has been checked, clearing the record above. */
-	onResolve: (steamId64: string) => Promise<unknown>;
+	onResolve: (steamId64: string, steamActed: boolean) => Promise<unknown>;
 }): React.JSX.Element {
 	const [step, setStep] = useState<'credentials' | 'emailCode' | 'activate' | 'done'>(
 		resume ? 'activate' : 'credentials'
@@ -533,19 +533,40 @@ export function AddAuthenticator({
 						 * ever, and a warning that never clears is one people learn to
 						 * ignore.
 						 */}
+						{/*
+						 * **Two answers.** One generic "I have checked" cleared the record
+						 * and left the account reading `pendingActivation`, so "Finish
+						 * activation" came straight back — and on an authenticator Steam
+						 * had already activated it fails in a way that looks like a wrong
+						 * code. What the user found is the only thing that settles it.
+						 */}
 						{enrolled !== undefined && (
-							<button
-								type="button"
-								disabled={resolving}
-								onClick={() => {
-									setResolving(true);
-									void onResolve(enrolled.steamId64)
-										.then(onClose)
-										.finally(() => setResolving(false));
-								}}
-							>
-								I have checked this account
-							</button>
+							<>
+								<button
+									type="button"
+									disabled={resolving}
+									onClick={() => {
+										setResolving(true);
+										void onResolve(enrolled.steamId64, true)
+											.then(onClose)
+											.finally(() => setResolving(false));
+									}}
+								>
+									Steam Guard is on this account now
+								</button>
+								<button
+									type="button"
+									disabled={resolving}
+									onClick={() => {
+										setResolving(true);
+										void onResolve(enrolled.steamId64, false)
+											.then(onClose)
+											.finally(() => setResolving(false));
+									}}
+								>
+									Steam Guard is not on it — let me try again
+								</button>
+							</>
 						)}
 					</div>
 				</section>

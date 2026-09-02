@@ -193,7 +193,7 @@ describe('resolving an unresolved operation', () => {
 		const handler = handlers.get(CHANNELS.accountResolveOperation);
 		if (!handler) throw new Error('accountResolveOperation was not registered');
 
-		expect(await handler(EVENT, { steamId64: STEAM_ID })).toEqual({ ok: true });
+		expect(await handler(EVENT, { steamId64: STEAM_ID, steamActed: false })).toEqual({ ok: true });
 		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
 	});
 
@@ -210,7 +210,7 @@ describe('resolving an unresolved operation', () => {
 		const handler = handlers.get(CHANNELS.accountResolveOperation);
 		if (!handler) throw new Error('accountResolveOperation was not registered');
 
-		await handler(EVENT, { steamId64: STEAM_ID });
+		await handler(EVENT, { steamId64: STEAM_ID, steamActed: false });
 
 		expect(
 			accounts[1]?.unresolvedOperation,
@@ -310,7 +310,7 @@ describe('an operation attempted while one is still unresolved', () => {
 		const activate = handlers.get(CHANNELS.enrollActivate);
 		if (!resolve || !activate) throw new Error('handlers were not registered');
 
-		await resolve(EVENT, { steamId64: STEAM_ID });
+		await resolve(EVENT, { steamId64: STEAM_ID, steamActed: false });
 		const result = (await activate(EVENT, { steamId64: STEAM_ID, code: '12345' })) as {
 			state: string;
 		};
@@ -445,5 +445,89 @@ describe('an outcome whose latch could not be written', () => {
 		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
 
 		expect(result.persisted).toBe(true);
+	});
+});
+
+/**
+ * **"I have checked" is not an outcome, and it was being treated as one.**
+ *
+ * Clearing the record on its own left the account exactly as the interrupted
+ * operation had left it, which puts the same offer straight back on the screen:
+ * an activation Steam completed still reads `pendingActivation`, so "Finish
+ * activation" returns and fails in a way that looks like a wrong code; a removal
+ * Steam performed leaves the account listed and still generating codes for an
+ * authenticator that is no longer attached to anything.
+ *
+ * Three outcomes, needing opposite things, behind one generic button. The
+ * resolution carries what the user found now.
+ */
+describe('reconciling an account against what the user found', () => {
+	function withLatch(kind: 'activate' | 'deactivate', accounts = [account()]): Account[] {
+		accounts[0]!.unresolvedOperation = {
+			kind,
+			guidance: GUIDANCE,
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		return accounts;
+	}
+
+	const resolve = async (accounts: Account[], steamActed: boolean): Promise<void> => {
+		register(vaultHolding(accounts), {});
+		const handler = handlers.get(CHANNELS.accountResolveOperation);
+		if (!handler) throw new Error('accountResolveOperation was not registered');
+		await handler(EVENT, { steamId64: STEAM_ID, steamActed });
+	};
+
+	it('marks an activation Steam completed as active', async () => {
+		const accounts = withLatch('activate');
+		await resolve(accounts, true);
+
+		expect(
+			accounts[0]?.status,
+			'the account still read pendingActivation, so the screen offered to finish an activation ' +
+				'Steam had already finished — which fails in a way that looks like a wrong code'
+		).toBe('active');
+		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
+	});
+
+	it('removes an account whose authenticator Steam detached', async () => {
+		const accounts = withLatch('deactivate');
+		await resolve(accounts, true);
+
+		expect(
+			accounts.length,
+			'the account stayed in the vault, listed and still generating codes for an authenticator ' +
+				'that is no longer attached to anything'
+		).toBe(0);
+	});
+
+	it('leaves the account alone when Steam did nothing', async () => {
+		const accounts = withLatch('deactivate');
+		await resolve(accounts, false);
+
+		expect(accounts.length, 'an account Steam never touched was deleted').toBe(1);
+		expect(accounts[0]?.status, 'and its state was changed for no reason').toBe(
+			'pendingActivation'
+		);
+		expect(accounts[0]?.unresolvedOperation, 'but the refusal is lifted, so a retry can run').toBe(
+			undefined
+		);
+	});
+
+	it('does not mark an account active because a removal was resolved', async () => {
+		const accounts = withLatch('deactivate');
+		await resolve(accounts, false);
+
+		expect(accounts[0]?.status).toBe('pendingActivation');
+	});
+
+	/* And the other accounts are untouched by any of it. */
+	it('touches only the account it was asked about', async () => {
+		const other = account();
+		other.steamId64 = '76561198000000002';
+		const accounts = withLatch('deactivate', [account(), other]);
+		await resolve(accounts, true);
+
+		expect(accounts.map((entry) => entry.steamId64)).toEqual(['76561198000000002']);
 	});
 });

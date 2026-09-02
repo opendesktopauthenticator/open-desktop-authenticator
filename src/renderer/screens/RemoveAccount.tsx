@@ -46,7 +46,7 @@ export function RemoveAccount({
 	 * Clear the vault's record that an irreversible operation on this account was
 	 * left unresolved. Called only when the user says they have checked it.
 	 */
-	onResolve: () => Promise<unknown>;
+	onResolve: (steamActed: boolean) => Promise<unknown>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [passphrase, setPassphrase] = useState('');
@@ -175,17 +175,37 @@ export function RemoveAccount({
 					 * guidance above stops being useful to them. Without it the account
 					 * carries the warning for ever.
 					 */}
+					{/*
+					 * **Two answers, because there are two outcomes and they need
+					 * opposite things.** One generic "I have checked" cleared the record
+					 * and left the account exactly as the interrupted removal had left
+					 * it — still listed, still showing codes for an authenticator that
+					 * may no longer be attached. What the user found is the only thing
+					 * that settles it.
+					 */}
 					<button
 						type="button"
 						disabled={resolving}
 						onClick={() => {
 							setResolving(true);
-							void onResolve()
+							void onResolve(true)
 								.then(onClose)
 								.finally(() => setResolving(false));
 						}}
 					>
-						I have checked this account
+						Steam Guard is off — remove this account here
+					</button>
+					<button
+						type="button"
+						disabled={resolving}
+						onClick={() => {
+							setResolving(true);
+							void onResolve(false)
+								.then(onClose)
+								.finally(() => setResolving(false));
+						}}
+					>
+						Steam Guard is still on — let me try again
 					</button>
 				</div>
 			</main>

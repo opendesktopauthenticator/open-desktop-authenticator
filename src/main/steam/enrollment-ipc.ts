@@ -406,14 +406,56 @@ export function registerEnrollmentHandlers(
 	 * the latch is cleared by the person saying they have been and looked -
 	 * which is also the moment the guidance stops being useful to them.
 	 */
-	registerHandler(CHANNELS.accountResolveOperation, async ({ steamId64 }) => {
+	registerHandler(CHANNELS.accountResolveOperation, async ({ steamId64, steamActed }) => {
 		requireUnlocked();
+
+		/*
+		 * **The account is brought into line with what the user found.**
+		 *
+		 * Clearing the record on its own left the account exactly as the
+		 * interrupted operation had left it, which puts the same offer straight
+		 * back on the screen: an activation Steam completed still reads
+		 * `pendingActivation`, so "Finish activation" returns and fails in a way
+		 * that looks like a wrong code; a removal Steam performed leaves the
+		 * account listed and still generating codes for an authenticator that is
+		 * no longer attached.
+		 *
+		 * Nothing here can discover which of those happened — only the person who
+		 * went and looked can — so this asks them, and then does the small amount
+		 * of work their answer implies.
+		 */
+		let detached = false;
 		await vault.mutate((draft) => {
 			const account = draft.accounts.find((entry) => entry.steamId64 === steamId64);
-			if (account !== undefined) {
-				delete account.unresolvedOperation;
+			if (account === undefined) {
+				return;
+			}
+			const kind = account.unresolvedOperation?.kind;
+			delete account.unresolvedOperation;
+
+			if (!steamActed) {
+				// Steam did nothing, so the account is what it always was and the
+				// operation is worth trying again.
+				return;
+			}
+			if (kind === 'activate') {
+				// Steam has the authenticator live. The vault was simply never told.
+				account.status = 'active';
+				return;
+			}
+			if (kind === 'deactivate') {
+				// Steam Guard is off. Keeping the row would keep showing codes for an
+				// authenticator that is not attached to anything.
+				draft.accounts.splice(draft.accounts.indexOf(account), 1);
+				detached = true;
 			}
 		});
+
+		if (detached) {
+			// The same teardown a local removal does: cookie jar, cached session,
+			// pending list.
+			onRemoved(steamId64);
+		}
 		return { ok: true as const };
 	});
 

@@ -95,7 +95,7 @@ describe('the screen after an outcome Steam may already have acted on', () => {
 			unresolved: { guidance: 'Steam did not answer, so the outcome is unknown.' }
 		});
 
-		expect(withAccount).toContain('I have checked this account');
+		expect(withAccount).toContain('Steam Guard is on this account now');
 		expect(hasSubmit(withAccount), 'the activation form was still offered').toBe(false);
 	});
 });

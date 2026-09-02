@@ -902,7 +902,18 @@ export const IPC_CONTRACT = {
 	[CHANNELS.enrollCancel]: { request: emptyRequest, response: okResponse },
 
 	[CHANNELS.accountResolveOperation]: {
-		request: z.object({ steamId64: z.string() }).strict(),
+		/**
+		 * **What the user found, not merely that they looked.**
+		 *
+		 * Clearing the record on its own leaves the account in whichever state the
+		 * interrupted operation left it — an activation Steam completed still reads
+		 * `pendingActivation`, so "Finish activation" comes straight back; a
+		 * removal Steam performed leaves the account listed and still showing codes
+		 * that mean nothing. One generic "checked" cannot be right for both of
+		 * those and for the third case, where Steam did nothing and a retry is
+		 * exactly what is wanted.
+		 */
+		request: z.object({ steamId64: z.string(), steamActed: z.boolean() }).strict(),
 		response: okResponse
 	},
 
@@ -1242,7 +1253,7 @@ export interface RendererApi {
 	 * Say the account has been checked, clearing the refusal to repeat an
 	 * operation whose outcome was never established.
 	 */
-	resolveAccountOperation(steamId64: string): Promise<{ ok: true }>;
+	resolveAccountOperation(steamId64: string, steamActed: boolean): Promise<{ ok: true }>;
 	/** Abandon a sign-in that has not attached an authenticator yet. */
 	cancelEnrollment(): Promise<{ ok: true }>;
 	activateAuthenticator(
