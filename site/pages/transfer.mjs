@@ -14,6 +14,8 @@
  * neither applies, the page says nothing.
  */
 
+import { reviewAsk } from '../markup.mjs';
+
 /** Valve's own pages. Every number on these pages comes from one of them. */
 const VALVE = {
 	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31',
@@ -409,5 +411,7 @@ export const moveToPc = {
 					<span>What the new one does, and why the old one stops working.</span></a>
 				</li>
 			</ul>
+
+${reviewAsk(s, { got: 'Did this get your authenticator onto your PC?' })}
 		</article>`
 };

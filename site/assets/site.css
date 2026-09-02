@@ -979,6 +979,31 @@ main.has-hero {
 	align-items: center;
 }
 
+/*
+ * The Trustpilot box.
+ *
+ * `min-height` holds the space the iframe will take, so the paragraph below it
+ * does not jump when the widget finishes loading — and the reader's eye is on
+ * this block at exactly the moment it would move. It collapses to nothing when
+ * the script is blocked, leaving the anchor inside it as an ordinary link.
+ */
+.ask-collector {
+	margin: 4px 0 2px;
+}
+.ask-collector .trustpilot-widget {
+	min-height: 52px;
+}
+
+/*
+ * The prompt shown after a download starts. Marked out a little more than the
+ * ordinary ask because it appears rather than being scrolled to, and something
+ * that appears without saying why reads as an advertisement.
+ */
+.ask-prompt {
+	border-color: var(--line-strong);
+	margin-top: 28px;
+}
+
 /* ------------------------------------------------------------------ give -- */
 
 /* Three ways to pay somebody else, side by side and equally weighted. */

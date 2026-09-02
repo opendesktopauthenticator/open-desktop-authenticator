@@ -41,4 +41,90 @@
 	}
 
 	root.setAttribute('data-platform', platform());
+
+	/*
+	 * The review ask, shown once a download has actually started.
+	 *
+	 * The site's rule is that the ask goes after the thing it is asking about,
+	 * and on this page that moment is a click on a real download rather than the
+	 * page loading. Before it, the reader has received nothing and the request is
+	 * an interruption; after it, they are holding the thing.
+	 *
+	 * Deliberately not a modal. This is a security tool whose entire argument is
+	 * that you should check it rather than trust it, and a page that blocks the
+	 * screen the instant you download something reads exactly like the sites it
+	 * warns about. It appears in the flow of the page, it can be refused, and a
+	 * refusal is remembered.
+	 */
+	var prompt = document.querySelector('[data-review-prompt]');
+	if (!prompt) return;
+
+	var DISMISSED = 'oda.review-prompt.dismissed';
+
+	/*
+	 * Storage can throw outright — a private window, a browser set to block site
+	 * data — and this is a review prompt. It is not worth an exception that stops
+	 * the rest of the page, and "we could not remember" resolves to showing the
+	 * ask, which is the harmless direction.
+	 */
+	function remembered(key) {
+		try {
+			return window.localStorage.getItem(key) === '1';
+		} catch {
+			return false;
+		}
+	}
+	function remember(key) {
+		try {
+			window.localStorage.setItem(key, '1');
+		} catch {
+			/* nothing to do: the ask simply returns next time */
+		}
+	}
+
+	function reveal() {
+		if (prompt.hidden === false || remembered(DISMISSED)) return;
+
+		prompt.hidden = false;
+
+		/*
+		 * Laid out again once it is visible.
+		 *
+		 * The widget is in the page from the start, so Trustpilot's loader has
+		 * already bound it — but it was bound inside a hidden container, where the
+		 * box has no width to measure. Their loader exposes exactly this call for
+		 * widgets revealed after load; without it the iframe can settle at zero
+		 * width and the reader sees a gap where the review box should be.
+		 *
+		 * Guarded, because the script is third-party and blocked more often than
+		 * people think. Without it the anchor inside the widget is still a working
+		 * link to the review page, which is the whole reason that anchor is there.
+		 */
+		var slot = prompt.querySelector('.trustpilot-widget');
+		if (slot && window.Trustpilot && typeof window.Trustpilot.loadFromElement === 'function') {
+			window.Trustpilot.loadFromElement(slot, true);
+		}
+	}
+
+	var dismiss = prompt.querySelector('[data-review-dismiss]');
+	if (dismiss) {
+		dismiss.addEventListener('click', function () {
+			prompt.hidden = true;
+			remember(DISMISSED);
+		});
+	}
+
+	/*
+	 * Every route that hands somebody a build, found by what it is rather than by
+	 * where it sits: a download added to this page later is marked the same way
+	 * and needs no change here.
+	 */
+	var routes = document.querySelectorAll('[data-got-it]');
+	for (var i = 0; i < routes.length; i += 1) {
+		routes[i].addEventListener('click', function () {
+			// After the navigation has been handed to the browser, so nothing here
+			// can delay or interfere with the download itself.
+			window.setTimeout(reveal, 1200);
+		});
+	}
 })();

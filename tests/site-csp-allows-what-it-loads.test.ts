@@ -1,0 +1,108 @@
+import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+/**
+ * **The page and the header have to agree, and nothing said so.**
+ *
+ * Every third-party script the site loads is named twice: once in the HTML the
+ * builder emits, and once in the `script-src` list nginx sends. Adding one to
+ * either side alone produces the worst kind of failure — the browser refuses
+ * the request, the feature is simply absent, and the page looks fine. Nobody
+ * finds it except by opening a console on the deployed site.
+ *
+ * The Trustpilot review widget needs *two* directives for that reason:
+ * `script-src` for the loader, and `frame-src` for the box, which is rendered
+ * in an iframe from the same host. With only the first, the loader runs, does
+ * its work, and the widget is invisible — one directive short of a review
+ * collector that collects nothing.
+ *
+ * Read as text on both sides. Importing the builder would write the whole site
+ * as a side effect, and reading `site/dist` would tie this to an artifact that
+ * does not exist on a clean checkout — both of which this suite has already
+ * been bitten by once each.
+ */
+
+const ROOT = join(__dirname, '..');
+
+const builder = readFileSync(join(ROOT, 'site', 'build.mjs'), 'utf8');
+const headers = readFileSync(
+	join(ROOT, 'infra', 'nginx', 'snippets', 'security-headers.conf'),
+	'utf8'
+);
+
+/** The CSP line nginx actually sends. */
+const csp = /add_header Content-Security-Policy\s+"([^"]+)"/.exec(headers)?.[1] ?? '';
+
+/** One directive's source list, as a set of hosts. */
+function directive(name: string): string[] {
+	const found = new RegExp(`(?:^|;)\\s*${name}\\s+([^;]+)`).exec(csp)?.[1];
+	return found === undefined ? [] : found.trim().split(/\s+/);
+}
+
+/** Every external origin the built pages ask for a script from. */
+function scriptOrigins(): string[] {
+	const origins = new Set<string>();
+	for (const match of builder.matchAll(/<script[^>]+src="(https:\/\/[^"$]+)/g)) {
+		origins.add(new URL(match[1] ?? '').origin);
+	}
+	// The loader is referenced through the config rather than inline, so take the
+	// origins the config states as well.
+	for (const match of builder.matchAll(/origin:\s*'(https:\/\/[^']+)'/g)) {
+		origins.add(match[1] ?? '');
+	}
+	/*
+	 * The site's own origin is one of those, and `'self'` already covers it —
+	 * listing it in `script-src` would be noise, and failing this check over it
+	 * would be a guard complaining about the thing working correctly.
+	 */
+	const own = /origin:\s*'(https:\/\/(?:www\.)?opendesktopauthenticator\.com)'/.exec(builder)?.[1];
+	if (own !== undefined) {
+		origins.delete(own);
+	}
+	return [...origins];
+}
+
+describe('the content security policy and the pages it protects', () => {
+	it('names a policy at all, so the checks below are not reading an empty string', () => {
+		expect(csp, 'no Content-Security-Policy header was found in the nginx snippet').not.toBe('');
+		expect(directive('script-src').length).toBeGreaterThan(0);
+	});
+
+	it('permits every third-party script the pages load', () => {
+		const allowed = directive('script-src');
+		const refused = scriptOrigins().filter((origin) => !allowed.includes(origin));
+
+		expect(
+			refused,
+			'the built HTML asks for these and the policy refuses them, so the feature is silently ' +
+				'absent on the deployed site and present on every developer machine'
+		).toEqual([]);
+	});
+
+	/**
+	 * The widget renders in an iframe, and `frame-src` has no fallback to
+	 * `script-src` — it falls back to `default-src`, which is `'self'`. Allowing
+	 * the loader and forgetting the frame is a review collector that loads and
+	 * shows nothing.
+	 */
+	it('permits the review widget to render its frame', () => {
+		const widget = /origin:\s*'(https:\/\/widget\.trustpilot\.com)'/.exec(builder)?.[1];
+		if (widget === undefined) {
+			expect.fail('the review widget origin is no longer declared, so this asserts nothing');
+		}
+
+		expect(
+			directive('frame-src'),
+			'the loader is allowed and the frame is not, so the widget runs and renders nothing — ' +
+				'and a refused frame says nothing in the page'
+		).toContain(widget);
+	});
+
+	/* And the policy has not quietly grown a wildcard while nobody looked. */
+	it('does not allow scripts from anywhere', () => {
+		expect(directive('script-src')).not.toContain('*');
+		expect(csp).not.toContain("'unsafe-inline'");
+		expect(csp).not.toContain("'unsafe-eval'");
+	});
+});

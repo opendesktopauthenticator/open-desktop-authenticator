@@ -27,6 +27,30 @@ export const escape = (s) =>
  * is asking about, which is the only position where it is a request rather than
  * an interruption.
  */
+/**
+ * Trustpilot's Review Collector, as markup.
+ *
+ * The box people actually type in. Everything about it is public — the
+ * identifiers appear in the source of every site that embeds one — and the
+ * anchor inside it is not decoration: it is what a reader sees when the script
+ * is blocked, which on a privacy-minded audience is a real fraction of them.
+ * Losing the widget should cost the reader a click, not the whole invitation.
+ */
+export function reviewCollector(s) {
+	const w = s.reviews.widget;
+	return `<div
+						class="trustpilot-widget"
+						data-locale="${escape(w.locale)}"
+						data-template-id="${escape(w.templateId)}"
+						data-businessunit-id="${escape(w.businessUnitId)}"
+						data-style-height="52px"
+						data-style-width="100%"
+						data-token="${escape(w.token)}"
+					>
+						<a href="${escape(s.reviews.profile)}" target="_blank" rel="noopener nofollow">Trustpilot</a>
+					</div>`;
+}
+
 export function reviewAsk(s, { got }) {
 	return `			<aside class="ask">
 				<div class="ask-body">
@@ -43,6 +67,7 @@ export function reviewAsk(s, { got }) {
 						not help, that is worth writing too.
 					</p>
 				</div>
+				<div class="ask-collector">${reviewCollector(s)}</div>
 				<div class="ask-actions">
 					<a class="button" href="${s.reviews.write}" rel="noopener nofollow">Write a review →</a>
 					<a class="button button-quiet" href="${s.reviews.profile}" rel="noopener nofollow">Read the reviews</a>

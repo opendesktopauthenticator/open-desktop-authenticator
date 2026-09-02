@@ -279,7 +279,28 @@ export const SITE = {
 	 */
 	reviews: {
 		profile: 'https://www.trustpilot.com/review/opendesktopauthenticator.com',
-		write: 'https://www.trustpilot.com/evaluate/opendesktopauthenticator.com'
+		write: 'https://www.trustpilot.com/evaluate/opendesktopauthenticator.com',
+		/*
+		 * **The Review Collector, embedded rather than linked.**
+		 *
+		 * The ask already existed and pointed at Trustpilot; almost nobody follows
+		 * a link out of a page to write something. The widget puts the box on the
+		 * page the reader is already on, which is the difference between an
+		 * invitation and an errand.
+		 *
+		 * These are public identifiers — they appear in the markup of every site
+		 * that embeds one, and the token identifies the widget rather than
+		 * authorising anything. No secret belongs here.
+		 */
+		widget: {
+			script: 'https://widget.trustpilot.com/bootstrap/v5/tp.widget.bootstrap.min.js',
+			origin: 'https://widget.trustpilot.com',
+			locale: 'en-US',
+			/** Review Collector. */
+			templateId: '56278e9abfbbba0bdcd568bc',
+			businessUnitId: '6a8f1c6d93a7a59a46a46270',
+			token: '7f6209c2-e467-4b2f-9dd4-2bd892cb1e0c'
+		}
 	},
 
 	/*
@@ -531,6 +552,19 @@ function head(page) {
 	-->
 	<script async src="https://www.googletagmanager.com/gtag/js?id=${SITE.analyticsId}"></script>
 	<script src="${asset('analytics.js')}" defer></script>
+	<!--
+		Trustpilot's widget loader, which turns the review boxes on this site into
+		something a reader can write in without leaving the page.
+
+		Second third-party script, and the same reasoning as the one above: no
+		integrity attribute, because Trustpilot regenerates the bundle and
+		publishes no stable hash, so pinning one would break every widget on their
+		next deploy. The CSP host allowlist and TLS are what this rests on, and the
+		frame-src directive has to name the same host: the widget renders in an
+		iframe, and without it the box is invisible with nothing in the console to
+		say why.
+	-->
+	<script async src="${SITE.reviews.widget.script}"></script>
 	${page.structuredData ? `<script type="application/ld+json">${JSON.stringify(datedFor(page))}</script>` : ''}
 	<script type="application/ld+json">${JSON.stringify(breadcrumbs(page))}</script>`.trim();
 }

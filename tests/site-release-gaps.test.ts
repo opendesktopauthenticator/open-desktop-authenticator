@@ -61,8 +61,25 @@ const NOTHING: Release = {
 const site = (release: Release) => ({
 	release,
 	origin: 'https://example.test',
-	// `reviewAsk` reads these; the rest of SITE is not reached by any body here.
-	reviews: { profile: 'https://example.test/p', write: 'https://example.test/w' }
+	/*
+	 * `reviewAsk` reads these; the rest of SITE is not reached by any body here.
+	 * The widget block is read too — the ask embeds Trustpilot's collector — and
+	 * it is spelled out rather than defaulted, so a body that starts reading a
+	 * new field fails here instead of rendering an empty attribute into the
+	 * published page.
+	 */
+	reviews: {
+		profile: 'https://example.test/p',
+		write: 'https://example.test/w',
+		widget: {
+			script: 'https://widget.example.test/bootstrap.js',
+			origin: 'https://widget.example.test',
+			locale: 'en-US',
+			templateId: 'template',
+			businessUnitId: 'unit',
+			token: 'token'
+		}
+	}
 });
 /**
  * The three phrasings, spelled out because the seam tests below need to ask for
