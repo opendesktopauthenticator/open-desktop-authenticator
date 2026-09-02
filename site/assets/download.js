@@ -60,6 +60,7 @@
 	if (!prompt) return;
 
 	var DISMISSED = 'oda.review-prompt.dismissed';
+	var STARTED = 'oda.review-prompt.started';
 
 	/*
 	 * Storage can throw outright — a private window, a browser set to block site
@@ -72,6 +73,13 @@
 			return window.localStorage.getItem(key) === '1';
 		} catch {
 			return false;
+		}
+	}
+	function forget(key) {
+		try {
+			window.localStorage.removeItem(key);
+		} catch {
+			/* the dismissal below is what actually stops it returning */
 		}
 	}
 	function remember(key) {
@@ -111,19 +119,32 @@
 		dismiss.addEventListener('click', function () {
 			prompt.hidden = true;
 			remember(DISMISSED);
+			// So a later visit does not open with it again.
+			forget(STARTED);
 		});
 	}
 
 	/*
-	 * Every route that hands somebody a build, found by what it is rather than by
-	 * where it sits: a download added to this page later is marked the same way
-	 * and needs no change here.
+	 * **Shown when they come back, because they always leave.**
+	 *
+	 * The first version revealed the prompt 1.2 seconds after a click. Every
+	 * route here navigates away in the same tab — the Store listing, the releases
+	 * page — so the page was gone long before the timer fired, and the prompt was
+	 * never seen once. It was written as though these links start a file
+	 * download; they open a page somebody then leaves for.
+	 *
+	 * So the click only records that a build was fetched, and the ask is made on
+	 * the next load of this page. That is a moment the reader chose, and by then
+	 * they have actually installed the thing rather than merely clicked at it.
 	 */
+	if (remembered(STARTED)) reveal();
+
 	var routes = document.querySelectorAll('[data-got-it]');
 	for (var i = 0; i < routes.length; i += 1) {
 		routes[i].addEventListener('click', function () {
-			// After the navigation has been handed to the browser, so nothing here
-			// can delay or interfere with the download itself.
+			remember(STARTED);
+			// And in case the link opened in a new tab and this page survives, which
+			// costs nothing to handle and means the ask is not always deferred.
 			window.setTimeout(reveal, 1200);
 		});
 	}

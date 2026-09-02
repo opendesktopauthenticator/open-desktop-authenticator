@@ -106,3 +106,47 @@ describe('the content security policy and the pages it protects', () => {
 		expect(csp).not.toContain("'unsafe-eval'");
 	});
 });
+
+/**
+ * **A page that loads a third party has to be a page that says so.**
+ *
+ * The loader went onto all thirty-two pages while seven carried a widget —
+ * including `/privacy`, which lists every third party this site talks to and
+ * ends that list with "Nobody else". A page cannot both load Trustpilot and
+ * say nobody else is involved.
+ *
+ * Read from the builder's source rather than from `site/dist`, for the reason
+ * the file above already gives: the build does not exist on a clean checkout.
+ */
+describe('where the review loader is allowed to go', () => {
+	it('is conditional rather than on every page', () => {
+		const loader = /\$\{([^}]*)\?\s*`<script async src="\$\{SITE\.reviews\.widget\.script\}"/.exec(
+			builder
+		);
+
+		expect(
+			loader,
+			'the Trustpilot loader is emitted unconditionally, so it ships to every page including ' +
+				'the ones that carry no widget and the one that promises nobody else is involved'
+		).not.toBeNull();
+	});
+
+	it('is decided by what the page actually renders', () => {
+		expect(
+			builder,
+			'the condition is a flag somebody has to remember rather than the rendered body, which ' +
+				'is how it drifts from what the page really contains'
+		).toContain("body.includes('trustpilot-widget')");
+	});
+
+	/* And the page that promises to name every third party names this one. */
+	it('is disclosed on the privacy page', () => {
+		const privacy = readFileSync(join(ROOT, 'site', 'pages', 'privacy.mjs'), 'utf8');
+
+		expect(
+			privacy,
+			'the site loads Trustpilot on seven pages and the page that lists every third party it ' +
+				'talks to does not mention it'
+		).toContain('Trustpilot');
+	});
+});

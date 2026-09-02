@@ -30,11 +30,20 @@ export const escape = (s) =>
 /**
  * Trustpilot's Review Collector, as markup.
  *
- * The box people actually type in. Everything about it is public — the
- * identifiers appear in the source of every site that embeds one — and the
- * anchor inside it is not decoration: it is what a reader sees when the script
- * is blocked, which on a privacy-minded audience is a real fraction of them.
- * Losing the widget should cost the reader a click, not the whole invitation.
+ * **It is a call to action, not a form.** Trustpilot's own catalogue describes
+ * the Review Collector as a button-style widget, and inspecting the rendered
+ * frame confirms it: no field, no submit, one outbound link into Trustpilot's
+ * evaluation flow. The writing still happens on their site. That is not a fault
+ * — a review nobody can tie to a real Trustpilot account is worth nothing to
+ * the reader it is meant to reassure — but it is worth stating plainly, because
+ * this was first added under the description "collect reviews without leaving
+ * the page", which it does not do.
+ *
+ * What it does buy is Trustpilot's own tracked collection surface rather than a
+ * hand-rolled link, and everything about it is public: the identifiers appear
+ * in the source of every site that embeds one. The anchor inside it is not
+ * decoration — it is what a reader sees when the script is blocked, which on a
+ * privacy-minded audience is a real fraction of them.
  */
 export function reviewCollector(s) {
 	const w = s.reviews.widget;

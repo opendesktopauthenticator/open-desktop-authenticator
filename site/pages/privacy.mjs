@@ -154,6 +154,20 @@ export const privacy = {
 					August 2026, which was wrong</strong>: this one is added after our build, so
 					it never appeared in the source we were checking.
 				</dd>
+				<dt>Trustpilot, on the pages that ask for a review</dt>
+				<dd>
+					Seven pages carry a Trustpilot review button, and only those seven load
+					Trustpilot's script — this page does not, and neither does any page that is
+					not asking you for a review. Where it does load, Trustpilot sees the request
+					the same way any embedded widget's host does: your IP address, your browser,
+					and which of our pages you were on. We send it nothing about you, and we
+					receive nothing back about who clicked; what we can see is the public review
+					count on our own profile, the same number you can.
+					<br />
+					<strong>Added 2 September 2026.</strong> It went onto every page for one
+					commit before this entry existed, including this one — a page that lists
+					everyone we talk to and then ended the list with the sentence below.
+				</dd>
 				<dt>Nobody else</dt>
 				<dd>
 					No advertising network, no third-party fonts, and nothing sold or shared.

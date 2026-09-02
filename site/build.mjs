@@ -283,10 +283,14 @@ export const SITE = {
 		/*
 		 * **The Review Collector, embedded rather than linked.**
 		 *
-		 * The ask already existed and pointed at Trustpilot; almost nobody follows
-		 * a link out of a page to write something. The widget puts the box on the
-		 * page the reader is already on, which is the difference between an
-		 * invitation and an errand.
+		 * The ask already existed and pointed at Trustpilot by hand. This replaces
+		 * that with Trustpilot's own collection surface, which they track as one.
+		 *
+		 * **It is still a button.** The Review Collector renders a call to action,
+		 * not a form: the writing happens on Trustpilot, as it has to if the review
+		 * is going to be tied to a real account and mean anything to the reader.
+		 * Worth saying because it was first added here under a description that
+		 * claimed otherwise.
 		 *
 		 * These are public identifiers — they appear in the markup of every site
 		 * that embeds one, and the token identifies the widget rather than
@@ -447,7 +451,11 @@ const NAV = [
  * Relative canonicals and missing ones are the two ways a site ends up with the
  * same content indexed under several URLs.
  */
-function head(page) {
+/**
+ * @param page the page being rendered
+ * @param collectsReviews whether its body actually carries a review widget
+ */
+function head(page, collectsReviews) {
 	const url = `${SITE.origin}/${page.slug === 'index' ? '' : page.slug}`;
 	// The brand suffix is the short form. Spelling it out costs 29 characters,
 	// which is most of the room a result has before it is truncated mid-word —
@@ -563,8 +571,14 @@ function head(page) {
 		frame-src directive has to name the same host: the widget renders in an
 		iframe, and without it the box is invisible with nothing in the console to
 		say why.
+
+		Only on the pages that actually carry a widget, and derived from the
+		rendered body rather than from a flag somebody has to remember. It went on
+		all thirty-two first, including /privacy — a page that lists every third
+		party this site talks to and ends that list with "Nobody else", while
+		loading a third party to say it.
 	-->
-	<script async src="${SITE.reviews.widget.script}"></script>
+	${collectsReviews ? `<script async src="${SITE.reviews.widget.script}"></script>` : ''}
 	${page.structuredData ? `<script type="application/ld+json">${JSON.stringify(datedFor(page))}</script>` : ''}
 	<script type="application/ld+json">${JSON.stringify(breadcrumbs(page))}</script>`.trim();
 }
@@ -702,7 +716,7 @@ function layout(page) {
 	return `<!doctype html>
 <html lang="en">
 <head>
-	${head(page)}
+	${head(page, body.includes('trustpilot-widget'))}
 </head>
 <body>
 	<a class="skip" href="#main">Skip to content</a>
