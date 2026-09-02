@@ -2,7 +2,7 @@ import {
 	STEAM_ROUTED_DOMAINS,
 	describesDirectRoute,
 	planProxy,
-	routedEndpoint,
+	routedVia,
 	steamOnlyBypass,
 	type ProxyPlan
 } from '../net/egress';
@@ -458,7 +458,16 @@ export async function openAccountBrowser(
 			}
 			// Each probe is a round trip of its own, and there are several.
 			options.stillWanted?.();
-			if (describesDirectRoute(resolved) || routedEndpoint(resolved) !== plan.endpoint) {
+			// The scheme is compared as well as the endpoint: an `https://` proxy
+			// applied as plain `PROXY` reaches the same operator with the hop in the
+			// clear, which for a window carrying a signed-in Steam session is the
+			// exact exposure this check exists to refuse.
+			const via = routedVia(resolved);
+			if (
+				describesDirectRoute(resolved) ||
+				via?.endpoint !== plan.endpoint ||
+				via.token !== plan.pacToken
+			) {
 				throw new BrowserSessionError(
 					`this account is set to route through ${plan.redacted}, but this window would not. ` +
 						'Refusing to open it: browsing anyway would put your own address on the account ' +

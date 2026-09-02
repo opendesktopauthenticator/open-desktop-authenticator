@@ -142,6 +142,14 @@ function fakeElectron(
 		neverSettles?: boolean;
 		/** Delivers the body in these exact pieces instead of one string chunk. */
 		bodyChunks?: Buffer[];
+		/**
+		 * Holds `resolveProxy` open until `releaseResolveProxy` is called.
+		 *
+		 * The routing check is the one `await` a vault lock can land inside, so
+		 * without this there is no way to test what a late answer does to state the
+		 * lock has already torn down.
+		 */
+		deferResolveProxy?: boolean;
 	} = {}
 ): {
 	electron: ElectronNetworking;
@@ -180,8 +188,18 @@ function fakeElectron(
 	 * `...state` copies the values as they are at return time, so a test that
 	 * sets `failSetProxy` afterwards was setting it on nothing.
 	 */
-	state: { failSetProxy?: Error };
+	state: { failSetProxy?: Error; failClear?: Error };
 	failSetProxy?: Error;
+	/**
+	 * Make an already-registered request fail **now**.
+	 *
+	 * `abort()` only counts in this fake, exactly as Electron's does not settle
+	 * synchronously — so a request cancelled by a lock stays pending, and the
+	 * interesting question is what its cleanup does when it finally notices.
+	 */
+	failLate: (index: number) => void;
+	/** Answer a `resolveProxy` that `deferResolveProxy` is holding open. */
+	releaseResolveProxy: (answer: string) => void;
 } {
 	const sessions: {
 		partition: string;
@@ -205,7 +223,10 @@ function fakeElectron(
 				callback: (response: { requestHeaders: Record<string, string> }) => void
 		  ) => void)
 		| undefined;
-	const state: { failSetProxy?: Error } = {};
+	const state: { failSetProxy?: Error; failClear?: Error } = {};
+	/** Each request's listener map, in the order the requests were made. */
+	const handleListeners: Record<string, ((...args: never[]) => void)[]>[] = [];
+	let releaseProxy: ((answer: string) => void) | undefined;
 
 	/**
 	 * Partition name → the one session that name refers to.
@@ -256,6 +277,9 @@ function fakeElectron(
 					}
 				},
 				clearStorageData() {
+					if (state.failClear) {
+						return Promise.reject(state.failClear);
+					}
 					record.cleared = (record.cleared ?? 0) + 1;
 					return Promise.resolve();
 				},
@@ -267,6 +291,11 @@ function fakeElectron(
 				 * session carrying somebody else's proxy — all of which look configured.
 				 */
 				resolveProxy() {
+					if (reply.deferResolveProxy === true) {
+						return new Promise<string>((resolve) => {
+							releaseProxy = resolve;
+						});
+					}
 					if (reply.resolvesTo !== undefined) {
 						return Promise.resolve(reply.resolvesTo);
 					}
@@ -275,7 +304,15 @@ function fakeElectron(
 						return Promise.resolve('DIRECT');
 					}
 					const [scheme = '', endpoint = ''] = config.proxyRules.split('://');
-					const keyword = scheme.startsWith('socks') ? scheme.toUpperCase() : 'PROXY';
+					// The measured tokens, per the `DEFAULT_PORT` docblock in `egress.ts`:
+					// Chromium reports an HTTPS proxy as `HTTPS`, not `PROXY`. This fake
+					// said `PROXY` for both, which is the very confusion the routing check
+					// was missing — a fake that reproduces the bug cannot detect it.
+					const keyword = scheme.startsWith('socks')
+						? scheme.toUpperCase()
+						: scheme === 'https'
+							? 'HTTPS'
+							: 'PROXY';
 					return Promise.resolve(`${keyword} ${endpoint}`);
 				}
 				// No `on`. Electron's Session does not emit `login`, so neither does
@@ -296,6 +333,7 @@ function fakeElectron(
 			requests.push(entry);
 
 			const listeners: Record<string, ((...args: never[]) => void)[]> = {};
+			handleListeners.push(listeners);
 			const handle: NetRequestHandle = {
 				setHeader(name, value) {
 					entry.headers[name] = value;
@@ -378,6 +416,14 @@ function fakeElectron(
 		sessions,
 		requests,
 		aborted: () => aborts,
+		failLate: (index) => {
+			handleListeners[index]?.error?.forEach((fn) =>
+				(fn as (e: Error) => void)(new Error('net::ERR_ABORTED'))
+			);
+		},
+		releaseResolveProxy: (answer) => {
+			releaseProxy?.(answer);
+		},
 		headerFilter: () => (headers) => {
 			if (!onHeaders) {
 				throw new Error('the transport never registered a header filter');
@@ -2731,5 +2777,200 @@ describe('whether a failed request had already gone', () => {
 		expect(thrown).toBeInstanceOf(EgressError);
 		expect(requests).toEqual([]);
 		expect(thrown.sent).toBe(false);
+	});
+});
+
+/** Let every pending microtask and timer callback run. */
+const settleAll = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * **A route is a protocol as well as an address.**
+ *
+ * `assertRouted` compared `host:port` and nothing else, so a proxy configured
+ * `https://` — chosen precisely so the hop to the operator is encrypted — was
+ * recorded `verified` against an applied plain `PROXY host:443`. Same operator,
+ * same port, no TLS: every Steam cookie and every proxy credential on that hop
+ * readable by anything in between, and the account card reporting the route as
+ * confirmed.
+ *
+ * The endpoint half of this check was itself a fix for a substring test. It got
+ * the address right and never looked at the scheme.
+ */
+describe('the protocol a proxy is actually applied over', () => {
+	const overTls = { steamId64: '76561198000000009', proxyUrl: 'https://10.0.0.1:8080' };
+
+	it('refuses an https proxy that Chromium applies in the clear', async () => {
+		const { electron, requests } = fakeElectron({ resolvesTo: 'PROXY 10.0.0.1:8080' });
+		const transport = await new SteamTransportFactory(electron).forAccount(overTls);
+
+		await expect(transport({ url: STEAM_URL, method: 'GET', cookie: '' })).rejects.toThrow(
+			/HTTPS|protocol/i
+		);
+		expect(
+			requests,
+			'the request went out over an unencrypted hop to the proxy, which is the one thing ' +
+				'configuring an https proxy is for'
+		).toEqual([]);
+	});
+
+	it('records it as blocked rather than verified', async () => {
+		const { electron } = fakeElectron({ resolvesTo: 'PROXY 10.0.0.1:8080' });
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(overTls);
+
+		await transport({ url: STEAM_URL, method: 'GET', cookie: '' }).catch(() => undefined);
+
+		expect(factory.routingStatus(overTls.steamId64)?.state).toBe('blocked');
+	});
+
+	/*
+	 * The other direction, and the reason the tokens are taken from the measured
+	 * list rather than guessed: a scheme missing from that map refuses a proxy
+	 * that works perfectly, which is a worse outcome for the person holding it
+	 * than the leak this check closes.
+	 */
+	it('allows an https proxy that Chromium applies as HTTPS', async () => {
+		const { electron, requests } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(overTls);
+
+		await transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+
+		expect(requests, 'a correctly applied https proxy was refused').toHaveLength(1);
+		expect(factory.routingStatus(overTls.steamId64)?.state).toBe('verified');
+	});
+
+	it('still allows a socks5 proxy applied as SOCKS5', async () => {
+		const { electron, requests } = fakeElectron();
+		const transport = await new SteamTransportFactory(electron).forAccount({
+			steamId64: '76561198000000010',
+			proxyUrl: 'socks5://10.0.0.1:1080'
+		});
+
+		await transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+		expect(requests).toHaveLength(1);
+	});
+});
+
+/**
+ * **What a lock can still reach.**
+ *
+ * These are the two places where an operation the vault has already finished
+ * with comes back later and writes into state belonging to the account as it is
+ * *now*. Both are the shape of the enrolment mutex bug: something captured
+ * before an await, acted on after it, without asking whether it is still the
+ * current thing.
+ */
+describe('an operation that outlived the account it belonged to', () => {
+	const routed = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.1:1080' };
+
+	it('cannot take a newer request off the cancel list', async () => {
+		const { electron, aborted, failLate } = fakeElectron({ neverSettles: true });
+		const factory = new SteamTransportFactory(electron);
+
+		const first = await factory.forAccount(routed);
+		void first({ url: STEAM_URL, method: 'GET', cookie: '' }).catch(() => undefined);
+		await settleAll();
+
+		// The vault locks. The first request is cancelled and the account's entry in
+		// the cancel list goes with it — but Electron does not settle an aborted
+		// request synchronously, so the request itself is still out there.
+		factory.forget(routed.steamId64);
+		const afterFirstLock = aborted();
+
+		// Unlocked again, and a second request goes out under the same account.
+		const second = await factory.forAccount(routed);
+		void second({ url: STEAM_URL, method: 'GET', cookie: '' }).catch(() => undefined);
+		await settleAll();
+
+		// Only now does the abandoned first request notice. Its cleanup holds a
+		// reference to the cancel list as it was, which is no longer the one the
+		// account is using.
+		failLate(0);
+		await settleAll();
+
+		factory.forget(routed.steamId64);
+
+		expect(
+			aborted() - afterFirstLock,
+			'the second request was not cancelled by the lock: a dead request cleaned up the live ' +
+				"request's entry, so the vault sealed while a connection to Steam carried on"
+		).toBe(1);
+	});
+
+	it('cannot restore a route verified for a session that is gone', async () => {
+		const { electron, releaseResolveProxy } = fakeElectron({ deferResolveProxy: true });
+		const factory = new SteamTransportFactory(electron);
+
+		const transport = await factory.forAccount(routed);
+		const inFlight = transport({ url: STEAM_URL, method: 'GET', cookie: '' }).catch(
+			() => undefined
+		);
+		await settleAll();
+
+		// The lock lands while the routing check is still waiting for its answer.
+		factory.forget(routed.steamId64);
+		expect(factory.routingStatus(routed.steamId64)).toBeUndefined();
+
+		releaseResolveProxy('SOCKS5 10.0.0.1:1080');
+		await inFlight;
+
+		expect(
+			factory.routingStatus(routed.steamId64),
+			'the account card reports a verified route on the strength of a check made against a ' +
+				'session that no longer exists — a stale yes from the one control whose job is to ' +
+				'say whether traffic really left through the proxy'
+		).toBeUndefined();
+	});
+});
+
+/**
+ * **A cookie jar that refused to empty must not be handed back.**
+ *
+ * `clearStorageData` rejecting was caught and discarded. `fromPartition` returns
+ * the same session object for the same partition name, so the next sign-in for
+ * that account got the very jar whose Steam cookies had just refused to be
+ * destroyed — a live credential outliving the lock that exists to end it, with
+ * nothing anywhere saying so.
+ */
+describe('a session whose jar could not be emptied', () => {
+	const routed = { steamId64: '76561198000000001', proxyUrl: 'socks5://10.0.0.1:1080' };
+
+	it('is never handed back to the account', async () => {
+		const { electron, sessions, state } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+
+		await factory.forAccount(routed);
+		expect(sessions).toHaveLength(1);
+
+		state.failClear = new Error('net::ERR_ACCESS_DENIED');
+		factory.forget(routed.steamId64);
+		await settleAll();
+
+		await factory.forAccount(routed);
+
+		expect(sessions, 'no new session was built at all').toHaveLength(2);
+		expect(
+			sessions[1]?.partition,
+			'the same partition was reused, so Chromium handed back the session holding the Steam ' +
+				'cookies the lock failed to destroy'
+		).not.toBe(sessions[0]?.partition);
+	});
+
+	/*
+	 * And the ordinary case is untouched: a jar that empties keeps its name, so
+	 * this does not quietly leak a partition per lock.
+	 */
+	it('keeps its name when the jar empties normally', async () => {
+		const { electron, sessions } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+
+		await factory.forAccount(routed);
+		factory.forget(routed.steamId64);
+		await settleAll();
+		await factory.forAccount(routed);
+
+		expect(sessions).toHaveLength(1);
+		expect(sessions[0]?.cleared).toBe(1);
 	});
 });

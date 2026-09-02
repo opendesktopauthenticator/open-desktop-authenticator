@@ -2,7 +2,7 @@ import {
 	BROWSER_ONLY_HEADERS,
 	describeNetworkError,
 	describesDirectRoute,
-	routedEndpoint,
+	routedVia,
 	EgressError,
 	redactCredentials,
 	isSteamEndpoint,
@@ -222,6 +222,13 @@ export class SteamTransportFactory {
 	private readonly clearing = new Map<string, Promise<void>>();
 	private readonly routing = new Map<string, RoutingStatus>();
 	/**
+	 * How many times this account's jar refused to empty.
+	 *
+	 * Part of the partition name, so a jar that could not be emptied is never
+	 * handed back. See `partitionFor`.
+	 */
+	private readonly spoiled = new Map<string, number>();
+	/**
 	 * Requests currently on the wire, per account, so a lock can cancel them.
 	 *
 	 * Without this, "everything stops while the vault is locked" is only true
@@ -438,10 +445,14 @@ export class SteamTransportFactory {
 		session: ProxyCapableSession,
 		steamId64: string,
 		plan: ProxyPlan,
-		url: string
+		url: string,
+		granted: Grant
 	): Promise<void> {
 		const block = (reason: string): never => {
-			this.routing.set(steamId64, { state: 'blocked', via: plan.redacted, reason });
+			// Recorded only if the account is still the one that asked. The refusal
+			// below is thrown either way — a request that cannot be vouched for is
+			// refused whatever else has happened.
+			this.recordRouting(steamId64, granted, { state: 'blocked', via: plan.redacted, reason });
 			throw new EgressError(
 				`this account is set to route through ${plan.redacted}, but ${reason}. ` +
 					'Refusing to connect: sending this request anyway would expose the address the ' +
@@ -469,16 +480,43 @@ export class SteamTransportFactory {
 		// a different host and a different port, both containing the intended string
 		// — and approves an ordered list whose *first* entry, the one Chromium
 		// actually uses, is somebody else's proxy entirely.
-		const actual = routedEndpoint(resolved);
-		if (actual !== plan.endpoint) {
+		const actual = routedVia(resolved);
+		if (actual?.endpoint !== plan.endpoint) {
 			return block('a different proxy is applied to it');
 		}
 
-		this.routing.set(steamId64, {
+		// **The scheme is the other half of the route.** This compared `host:port`
+		// alone, so an `https://` proxy — configured so the hop to the operator is
+		// encrypted — passed against an applied `PROXY host:443`, which is the same
+		// operator reached in the clear. Same endpoint, different protocol, and
+		// every cookie on that hop readable by anything in between. The check that
+		// exists to fail closed recorded it `verified`.
+		if (actual.token !== plan.pacToken) {
+			return block(
+				`it is applied as ${actual.token} where ${plan.pacToken} was configured, which ` +
+					'reaches the same operator over a different protocol'
+			);
+		}
+
+		this.recordRouting(steamId64, granted, {
 			state: 'verified',
 			via: plan.redacted,
 			checkedAtMs: this.now()
 		});
+	}
+
+	/**
+	 * The partition name this account's sessions are built under.
+	 *
+	 * Normally one name for the life of the account. It changes only when a wipe
+	 * failed: see the `catch` in `forget` for why a spoiled jar has to be
+	 * abandoned rather than reused.
+	 */
+	private partitionFor(steamId64: string): string {
+		const spoiled = this.spoiled.get(steamId64) ?? 0;
+		return spoiled === 0
+			? `${this.partitionPrefix}${steamId64}`
+			: `${this.partitionPrefix}${steamId64}-${spoiled}`;
 	}
 
 	/**
@@ -521,7 +559,25 @@ export class SteamTransportFactory {
 		const cleared = session?.clearStorageData?.();
 		if (cleared) {
 			const pending = cleared
-				.catch(() => undefined)
+				.catch(() => {
+					/*
+					 * **The jar is still full, and the name is what makes it reachable.**
+					 *
+					 * This was swallowed. `fromPartition` returns the same session object
+					 * for the same partition name, so the next sign-in for this account
+					 * was handed back the very session whose cookies had just refused to
+					 * be destroyed — a live Steam credential outliving the vault lock
+					 * that exists to end it, with nothing anywhere reporting a problem.
+					 *
+					 * Retrying is not the answer: the call that refused would be asked
+					 * again with nothing changed. So the partition is abandoned instead.
+					 * Chromium keeps the old session alive in memory, unreferenced and
+					 * unreachable by us, and builds this account an empty one under the
+					 * next name. Memory held by a jar we failed to empty is a far
+					 * smaller thing than that jar being reused.
+					 */
+					this.spoiled.set(steamId64, (this.spoiled.get(steamId64) ?? 0) + 1);
+				})
 				.finally(() => {
 					if (this.clearing.get(steamId64) === pending) {
 						this.clearing.delete(steamId64);
@@ -565,14 +621,35 @@ export class SteamTransportFactory {
 		return { generation: this.generation, epoch: this.epoch.get(steamId64) ?? 0 };
 	}
 
+	/** Whether the permission granted earlier is still the current one. */
+	private stillGranted(steamId64: string, granted: Grant): boolean {
+		return (
+			this.generation === granted.generation && (this.epoch.get(steamId64) ?? 0) === granted.epoch
+		);
+	}
+
 	/** Throw unless the permission granted earlier is still the current one. */
 	private assertGranted(steamId64: string, granted: Grant): void {
-		if (
-			this.generation !== granted.generation ||
-			(this.epoch.get(steamId64) ?? 0) !== granted.epoch
-		) {
+		if (!this.stillGranted(steamId64, granted)) {
 			throw new EgressError('this account was closed before the request was sent');
 		}
+	}
+
+	/**
+	 * Record what was learned about a route, unless the account moved on.
+	 *
+	 * `assertRouted` awaits `resolveProxy`, and a lock can land inside that await.
+	 * `forget` deletes the routing entry precisely so nothing claims to know the
+	 * route of a session that no longer exists — and then the late resolution
+	 * wrote `verified` back, restoring a yes about a session that had been torn
+	 * down. On the one control whose job is to say whether traffic really left
+	 * through the proxy, a stale yes is the answer it must never give.
+	 */
+	private recordRouting(steamId64: string, granted: Grant, status: RoutingStatus): void {
+		if (!this.stillGranted(steamId64, granted)) {
+			return;
+		}
+		this.routing.set(steamId64, status);
 	}
 
 	private abortInFlight(steamId64: string): void {
@@ -682,10 +759,9 @@ export class SteamTransportFactory {
 		}
 
 		// No `persist:` prefix: in-memory, so cookies never touch the disk.
-		const session = this.electron.sessionFromPartition(
-			`${this.partitionPrefix}${account.steamId64}`,
-			{ cache: false }
-		);
+		const session = this.electron.sessionFromPartition(this.partitionFor(account.steamId64), {
+			cache: false
+		});
 		session.setUserAgent?.(STEAM_USER_AGENT);
 
 		// Stripped at the session, not per request: Electron adds these itself
@@ -792,7 +868,7 @@ export class SteamTransportFactory {
 		// refusal to route is not a reason to look at the URL — it is a reason to
 		// send nothing at all.
 		if (plan) {
-			await this.assertRouted(session, steamId64, plan, ROUTING_PROBE_URL);
+			await this.assertRouted(session, steamId64, plan, ROUTING_PROBE_URL, granted);
 		}
 
 		// Re-checked after the await. A lock or a routing change landing inside it
@@ -902,7 +978,13 @@ export class SteamTransportFactory {
 				settled = true;
 				clearTimeout(timer);
 				outstanding.delete(handle);
-				if (outstanding.size === 0) {
+				// **Only if the map still points at this set.** `outstanding` is a
+				// closure capture, and `abortInFlight` deletes the key outright — so a
+				// newer request installs a fresh set under it, and this older request
+				// settling afterwards emptied its own dead set and then deleted the
+				// *newer* one from the map. The next lock had nothing to cancel while a
+				// live request carried on running against a sealed vault.
+				if (outstanding.size === 0 && this.inFlight.get(steamId64) === outstanding) {
 					this.inFlight.delete(steamId64);
 				}
 				run();

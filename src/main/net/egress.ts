@@ -116,6 +116,31 @@ const CHROMIUM_SCHEME: Record<string, string> = {
 };
 
 /**
+ * What `resolveProxy` calls each scheme back.
+ *
+ * **The protocol half of the routing check.** `routedEndpoint` compared only
+ * `host:port` and threw the scheme away, so an `https://` proxy — configured
+ * precisely so the hop to the operator is encrypted — was recorded `verified`
+ * against an applied `PROXY host:443`, which is the same operator reached in
+ * the clear. Every credential and every Steam cookie on that hop is then
+ * readable by anything between here and the proxy, and the account card said
+ * the route was confirmed.
+ *
+ * The tokens are the measured ones from `DEFAULT_PORT` above, not guesses:
+ * Chromium spells SOCKS4 `SOCKS` and plain HTTP `PROXY`. `socks4` is in
+ * `REFUSED_SCHEMES` and so can never reach a plan, but it is mapped anyway —
+ * an entry missing from here refuses a proxy that works, which is the failure
+ * the port default above is documented so carefully to avoid.
+ */
+const PAC_TOKEN: Record<string, string> = {
+	'http:': 'PROXY',
+	'https:': 'HTTPS',
+	'socks5:': 'SOCKS5',
+	'socks5h:': 'SOCKS5',
+	'socks4:': 'SOCKS'
+};
+
+/**
  * What a user is told when `Require proxies` stops a request that has no route.
  *
  * Shared, because the same refusal is reached from four places — a transport, a
@@ -523,6 +548,14 @@ export interface ProxyPlan {
 	 * than merely checked to be non-direct — see `assertRouted`.
 	 */
 	endpoint: string;
+	/**
+	 * The PAC token `resolveProxy` must answer with for this plan.
+	 *
+	 * Checked alongside `endpoint`, because the same host and port reached over a
+	 * different protocol is a different route — and for `https`, an unencrypted
+	 * one.
+	 */
+	pacToken: string;
 }
 
 /**
@@ -570,7 +603,7 @@ export function describesDirectRoute(resolved: string): boolean {
  * all three were recorded as `verified`. On the one feature whose entire purpose
  * is to fail closed rather than leak an address.
  */
-export function routedEndpoint(resolved: string): string | undefined {
+export function routedVia(resolved: string): { token: string; endpoint: string } | undefined {
 	const first = resolved.split(';')[0]?.trim();
 	if (first === undefined || first === '' || /^DIRECT$/i.test(first)) {
 		return undefined;
@@ -578,7 +611,25 @@ export function routedEndpoint(resolved: string): string | undefined {
 	// `SCHEME host:port`. Anything else is not a route we can vouch for, and
 	// returning undefined makes the caller refuse rather than guess.
 	const parts = first.split(/\s+/);
-	return parts.length >= 2 ? parts[1] : undefined;
+	const token = parts[0];
+	const endpoint = parts[1];
+	if (token === undefined || endpoint === undefined) {
+		return undefined;
+	}
+	// Upper-cased because the comparison is against the tokens in `PAC_TOKEN`,
+	// and a case difference is not a routing difference.
+	return { token: token.toUpperCase(), endpoint };
+}
+
+/**
+ * The endpoint half of {@link routedVia}.
+ *
+ * **Not sufficient on its own for a routing check** — the scheme is half the
+ * route, and the two callers that verify a proxy compare both. This remains for
+ * the places that genuinely only need to know where traffic is going.
+ */
+export function routedEndpoint(resolved: string): string | undefined {
+	return routedVia(resolved)?.endpoint;
 }
 
 /**
@@ -881,7 +932,8 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 	const plan: ProxyPlan = {
 		proxyRules: `${scheme}://${host}`,
 		redacted: `${scheme}://${url.username === '' ? '' : '***:***@'}${host}`,
-		endpoint: host
+		endpoint: host,
+		pacToken: PAC_TOKEN[url.protocol] as string
 	};
 
 	if (url.username !== '' || url.password !== '') {
