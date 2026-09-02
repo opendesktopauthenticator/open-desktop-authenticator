@@ -650,15 +650,37 @@ figure.diagram figcaption {
 	transform: translateY(-1px);
 	box-shadow: 0 14px 30px -16px rgba(66, 242, 154, 0.75);
 }
-.button-quiet {
+/*
+ * **The quiet modifier, at a specificity that can actually reach a `<button>`.**
+ *
+ * `.button-quiet` is 0,1,0 and `button.button` further down is 0,1,1, so on a
+ * real `<button>` the modifier lost and the control rendered as a full primary
+ * call to action — same mint gradient, same lift on hover. The download page's
+ * "Do not ask again" is the one control on the site that uses this combination,
+ * and it sat next to "Continue to the Store build" with identical weight: two
+ * primary buttons, one of which permanently turns something off.
+ *
+ * Found by rendering the page, not by reading it. The class was present in the
+ * markup and spelled correctly, so nothing about the source looked wrong.
+ *
+ * The hover state has to be neutralised as well as the background: `button.button:hover`
+ * brightens, lifts and casts a mint shadow, and a quiet control that does all
+ * three on hover is not quiet.
+ */
+.button-quiet,
+button.button.button-quiet {
 	background: transparent;
 	border: 1px solid var(--line-strong);
 	color: var(--text);
 }
-.button-quiet:hover {
+.button-quiet:hover,
+button.button.button-quiet:hover {
 	border-color: var(--mint);
 	color: var(--mint);
+	background: transparent;
 	box-shadow: none;
+	filter: none;
+	transform: none;
 }
 
 /* --------------------------------------------------------------- projects -- */
