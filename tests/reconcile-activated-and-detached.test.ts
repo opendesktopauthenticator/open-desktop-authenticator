@@ -447,8 +447,18 @@ describe('the claim on an authenticator across a lock', () => {
 	});
 
 	/**
-	 * And the finished operation takes its own marker and no one else's — the
-	 * second half of the same defect, which admitted a third operation.
+	 * And an operation is allowed again once the first has really settled.
+	 *
+	 * **The token comparison itself is not covered, and cannot be.** It is the
+	 * second half of the reported defect: a settled attempt deleting whatever
+	 * marker is there, which after the lock cleared the map was somebody else's.
+	 * With the lock no longer clearing, two simultaneous claims cannot be
+	 * produced through any public path — the guard and the set are synchronous
+	 * with no await between them — so nothing can drive `releaseInFlight` into
+	 * the case it exists for. Removing the comparison leaves every test green.
+	 *
+	 * It stays as defence: the state is unreachable today because of one line in
+	 * `forget`, and that is a thin thing to rest an irreversible operation on.
 	 */
 	it('does not release a claim that belongs to another attempt', async () => {
 		const { service, release, atSteam } = hanging();
