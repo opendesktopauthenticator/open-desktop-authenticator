@@ -16,6 +16,8 @@
  * depends on, and it is why this needs no proxy-agent dependency (Q19).
  */
 
+import { domainToASCII } from 'node:url';
+
 /** Schemes we accept from a user or a maFile. */
 /**
  * Schemes we accept from a user or a maFile.
@@ -132,6 +134,45 @@ const CHROMIUM_SCHEME: Record<string, string> = {
  * an entry missing from here refuses a proxy that works, which is the failure
  * the port default above is documented so carefully to avoid.
  */
+/**
+ * The host spelled the way Chromium will spell it back.
+ *
+ * **`socks5:` and `socks5h:` are not "special" schemes**, so the WHATWG URL
+ * parser leaves their host exactly as typed: case preserved, non-ASCII
+ * percent-encoded. `http:` and `https:` are special, and the parser lowercases
+ * and IDNA-encodes those itself. Chromium makes no such distinction — it
+ * canonicalises every proxy host before reporting it through `resolveProxy`.
+ *
+ * So `endpoint` was built from the raw string and compared with `!==` against a
+ * canonicalised one, and for a SOCKS proxy the two could never agree. Measured
+ * on this project's own Electron 43.3.0:
+ *
+ *   socks5://Proxy.Example:1080   ->  SOCKS5 proxy.example:1080
+ *   socks5://пример.рф:1080       ->  SOCKS5 xn--e1afmkfd.xn--p1ai:1080
+ *   https://Proxy.Example:8080    ->  HTTPS  proxy.example:8080   (already agreed)
+ *
+ * A single capital letter in a SOCKS hostname therefore blocked every request on
+ * that account — every confirmation, poll, clock sync, enrolment and transfer —
+ * with `assertRouted` reporting "a different proxy is applied to it" about the
+ * very same proxy. That is the identical failure the `DEFAULT_PORT` docblock
+ * above was written for, reached by the other half of the same string.
+ *
+ * `domainToASCII` is the same UTS-46 mapping Chromium applies, and it returns
+ * IP literals, bracketed IPv6 and underscore hosts unchanged apart from case.
+ */
+function canonicalHost(hostname: string): string {
+	let decoded = hostname;
+	try {
+		decoded = decodeURIComponent(hostname);
+	} catch {
+		// Not valid percent-encoding, so it is already the literal host.
+	}
+	const ascii = domainToASCII(decoded);
+	// Empty means it is not a domain Chromium would accept at all — leave it
+	// alone but for case, and let the routing check refuse it honestly.
+	return ascii === '' ? decoded.toLowerCase() : ascii;
+}
+
 const PAC_TOKEN: Record<string, string> = {
 	'http:': 'PROXY',
 	'https:': 'HTTPS',
@@ -927,7 +968,9 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 	// then reports that filled-in port back through `resolveProxy`, so a portless
 	// `endpoint` can never match what the routing check is handed.
 	const port = url.port === '' ? (DEFAULT_PORT[url.protocol] as string) : url.port;
-	const host = `${url.hostname}:${port}`;
+	// Canonicalised, so `endpoint` is the string Chromium reports back rather
+	// than the one the user happened to type. See `canonicalHost`.
+	const host = `${canonicalHost(url.hostname)}:${port}`;
 
 	const plan: ProxyPlan = {
 		proxyRules: `${scheme}://${host}`,

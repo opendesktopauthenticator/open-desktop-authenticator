@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { domainToASCII } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
 	describeNetworkError,
@@ -303,7 +304,27 @@ function fakeElectron(
 					if (config?.mode !== 'fixed_servers' || config.proxyRules === undefined) {
 						return Promise.resolve('DIRECT');
 					}
-					const [scheme = '', endpoint = ''] = config.proxyRules.split('://');
+					const [scheme = '', rawEndpoint = ''] = config.proxyRules.split('://');
+					/*
+					 * **Canonicalised, because Chromium canonicalises.** It does not echo
+					 * back the rule it was given: it lowercases and IDNA-encodes the proxy
+					 * host first. Measured on this project's own Electron 43.3.0 —
+					 * `socks5://Proxy.Example:1080` is reported as
+					 * `SOCKS5 proxy.example:1080`. A fake that echoed the rule verbatim
+					 * agreed with `plan.endpoint` no matter how it was spelled, which is
+					 * why a real proxy being blocked for a capital letter was invisible
+					 * here.
+					 */
+					const lastColon = rawEndpoint.lastIndexOf(':');
+					const rawHost = lastColon === -1 ? rawEndpoint : rawEndpoint.slice(0, lastColon);
+					const rawPort = lastColon === -1 ? '' : rawEndpoint.slice(lastColon);
+					let decodedHost = rawHost;
+					try {
+						decodedHost = decodeURIComponent(rawHost);
+					} catch {
+						/* already literal */
+					}
+					const endpoint = `${domainToASCII(decodedHost) || decodedHost.toLowerCase()}${rawPort}`;
 					// The measured tokens, per the `DEFAULT_PORT` docblock in `egress.ts`:
 					// Chromium reports an HTTPS proxy as `HTTPS`, not `PROXY`. This fake
 					// said `PROXY` for both, which is the very confusion the routing check
@@ -2972,5 +2993,93 @@ describe('a session whose jar could not be emptied', () => {
 
 		expect(sessions).toHaveLength(1);
 		expect(sessions[0]?.cleared).toBe(1);
+	});
+});
+
+/**
+ * **The proxy host, spelled the way Chromium will spell it back.**
+ *
+ * `socks5:` and `socks5h:` are not "special" schemes, so the WHATWG URL parser
+ * leaves their host exactly as typed — case preserved, non-ASCII
+ * percent-encoded. `http:` and `https:` are special, and the parser lowercases
+ * and IDNA-encodes those itself. Chromium makes no such distinction: it
+ * canonicalises every proxy host before reporting it through `resolveProxy`.
+ *
+ * So `endpoint` was built from the raw string and compared with `!==` against a
+ * canonicalised one, and for a SOCKS proxy the two could never agree. One
+ * capital letter in a SOCKS hostname blocked every request on that account —
+ * every confirmation, poll, clock sync, enrolment and transfer — with
+ * `assertRouted` reporting "a different proxy is applied to it" about the very
+ * same proxy. The identical failure the `DEFAULT_PORT` docblock was written
+ * for, reached through the other half of the same string.
+ *
+ * The right-hand sides below are **measured**, not assumed: each was produced by
+ * `session.setProxy` followed by
+ * `resolveProxy('https://steamcommunity.com/mobileconf/getlist')` on this
+ * project's own Electron 43.3.0.
+ */
+describe('a proxy host that is not spelled canonically', () => {
+	it.each([
+		['socks5://Proxy.Example:1080', 'SOCKS5 proxy.example:1080'],
+		['socks5h://Proxy.Example:1080', 'SOCKS5 proxy.example:1080'],
+		[
+			'socks5://%D0%BF%D1%80%D0%B8%D0%BC%D0%B5%D1%80.%D1%80%D1%84:1080',
+			'SOCKS5 xn--e1afmkfd.xn--p1ai:1080'
+		],
+		['https://Proxy.Example:8080', 'HTTPS proxy.example:8080'],
+		['http://MY-PROXY.example:8080', 'PROXY my-proxy.example:8080'],
+		['socks5://10.0.0.1:1080', 'SOCKS5 10.0.0.1:1080']
+	])('%s is planned as the endpoint Chromium reports', (configured, chromiumSaid) => {
+		expect(
+			planProxy(configured).endpoint,
+			`Chromium answers "${chromiumSaid}" for this proxy, and the routing check compares its ` +
+				'answer to the planned endpoint with strict equality — so a disagreement here blocks ' +
+				'every request on the account with a message naming the very proxy that is working'
+		).toBe(routedEndpoint(chromiumSaid));
+	});
+
+	/*
+	 * End to end through the real factory, so the whole path is exercised rather
+	 * than the parsing half alone.
+	 */
+	it('does not block an account whose SOCKS proxy is typed with capitals', async () => {
+		const { electron, requests } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount({
+			steamId64: '76561198000000021',
+			proxyUrl: 'socks5://Proxy.Example:1080'
+		});
+
+		await transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+
+		expect(requests, 'a working proxy was refused over a capital letter').toHaveLength(1);
+		expect(factory.routingStatus('76561198000000021')?.state).toBe('verified');
+	});
+
+	it('does not block an account whose SOCKS proxy is an internationalised name', async () => {
+		const { electron, requests } = fakeElectron();
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount({
+			steamId64: '76561198000000022',
+			proxyUrl: 'socks5://пример.рф:1080'
+		});
+
+		await transport({ url: STEAM_URL, method: 'GET', cookie: '' });
+
+		expect(requests).toHaveLength(1);
+		expect(factory.routingStatus('76561198000000022')?.state).toBe('verified');
+	});
+
+	/*
+	 * And the endpoint still identifies the proxy: canonicalising must not make
+	 * two different proxies compare equal.
+	 */
+	it('still tells two different proxies apart', () => {
+		expect(planProxy('socks5://a.example:1080').endpoint).not.toBe(
+			planProxy('socks5://b.example:1080').endpoint
+		);
+		expect(planProxy('socks5://proxy.example:1080').endpoint).not.toBe(
+			planProxy('socks5://proxy.example:1081').endpoint
+		);
 	});
 });
