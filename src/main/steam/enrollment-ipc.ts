@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -9,6 +9,7 @@ import { DEACTIVATE_ACK, matchesDeactivateAck } from '../../shared/ipc';
 import { readRecoveryFile, RecoveryError } from '../vault/recovery';
 import type { EnrollmentService } from './enrollment';
 import { EnrollmentError } from './enroll';
+import { authenticatorFingerprint } from './enrollment';
 import { PROXY_REQUIRED } from '../net/egress';
 import { ProxyConsent } from '../net/proxy-consent';
 import { VaultLockedError, type VaultService } from '../vault/service';
@@ -375,21 +376,6 @@ export function registerEnrollmentHandlers(
 	 * outcome still has to reach the user: a lost latch costs the durability, and
 	 * refusing to answer would cost them the guidance as well.
 	 */
-	/**
-	 * Which authenticator a record is about, without copying its secret.
-	 *
-	 * A SteamID outlives the authenticator attached to it. Remove the account and
-	 * import or enrol a replacement and the SteamID is identical, so a record left
-	 * over from the previous one matched the new one exactly — and resolving it
-	 * acted on an authenticator the record had never been about.
-	 */
-	function fingerprintOf(account: { sharedSecret?: string }): string {
-		return createHash('sha256')
-			.update(account.sharedSecret ?? '')
-			.digest('hex')
-			.slice(0, 16);
-	}
-
 	async function latch(
 		steamId64: string,
 		kind: 'activate' | 'deactivate',
@@ -417,7 +403,7 @@ export function registerEnrollmentHandlers(
 				account.unresolvedOperation = {
 					kind,
 					guidance: outcome.guidance,
-					fingerprint: fingerprintOf(account),
+					fingerprint: authenticatorFingerprint(account),
 					at: new Date().toISOString(),
 					...(outcome.certain === true ? { certain: true } : {})
 				};
@@ -477,7 +463,10 @@ export function registerEnrollmentHandlers(
 						'actually waiting on.'
 				);
 			}
-			if (held.fingerprint === undefined || held.fingerprint !== fingerprintOf(account)) {
+			if (
+				held.fingerprint === undefined ||
+				held.fingerprint !== authenticatorFingerprint(account)
+			) {
 				throw new EnrollmentError(
 					'The authenticator on that account is not the one this was recorded about — it has ' +
 						'been replaced or re-imported since. The old record has been cleared; check the ' +
@@ -501,7 +490,7 @@ export function registerEnrollmentHandlers(
 				// The service owns what an activated account looks like — including the
 				// revocation-code ceremony and the recovery file, both of which the
 				// version written here skipped.
-				await enrollment.reconcileActivated(steamId64);
+				await enrollment.reconcileActivated(steamId64, held.fingerprint);
 				return { ok: true as const };
 			}
 
@@ -516,7 +505,7 @@ export function registerEnrollmentHandlers(
 						'other way.'
 				);
 			}
-			await enrollment.reconcileDetached(steamId64, passphrase);
+			await enrollment.reconcileDetached(steamId64, passphrase, held.fingerprint);
 			// The same teardown a local removal does: cookie jar, cached session,
 			// pending list.
 			onRemoved(steamId64);

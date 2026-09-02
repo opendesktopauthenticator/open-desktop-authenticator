@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { EnrollmentService } from '../src/main/steam/enrollment';
+import { authenticatorFingerprint, EnrollmentService } from '../src/main/steam/enrollment';
 import type { SteamTransportFactory } from '../src/main/net/transport';
 import type { VaultService } from '../src/main/vault/service';
 import type { Account } from '../src/shared/vault-schema';
@@ -68,7 +68,7 @@ describe('an activation the user confirmed on Steam', () => {
 		const { vault } = vaultHolding(accounts);
 		const service = new EnrollmentService(vault, transports, {});
 
-		await service.reconcileActivated(ID);
+		await service.reconcileActivated(ID, authenticatorFingerprint(account()));
 
 		expect(
 			accounts[0]?.status,
@@ -83,7 +83,7 @@ describe('an activation the user confirmed on Steam', () => {
 		const { vault } = vaultHolding(accounts);
 		const service = new EnrollmentService(vault, transports, {});
 
-		await service.reconcileActivated(ID);
+		await service.reconcileActivated(ID, authenticatorFingerprint(account()));
 
 		expect(accounts[0]?.status).toBe('active');
 	});
@@ -97,7 +97,10 @@ describe('an activation the user confirmed on Steam', () => {
 		};
 		const { vault } = vaultHolding(accounts);
 
-		await new EnrollmentService(vault, transports, {}).reconcileActivated(ID);
+		await new EnrollmentService(vault, transports, {}).reconcileActivated(
+			ID,
+			authenticatorFingerprint(account())
+		);
 
 		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
 	});
@@ -117,7 +120,7 @@ describe('an activation the user confirmed on Steam', () => {
 			}
 		});
 
-		await service.reconcileActivated(ID);
+		await service.reconcileActivated(ID, authenticatorFingerprint(account()));
 
 		expect(
 			updated.map((entry) => entry.status),
@@ -131,7 +134,10 @@ describe('an activation the user confirmed on Steam', () => {
 		const { vault } = vaultHolding([]);
 
 		await expect(
-			new EnrollmentService(vault, transports, {}).reconcileActivated(ID)
+			new EnrollmentService(vault, transports, {}).reconcileActivated(
+				ID,
+				authenticatorFingerprint(account())
+			)
 		).resolves.not.toThrow();
 	});
 });
@@ -142,7 +148,9 @@ describe('a removal the user confirmed on Steam', () => {
 		const { vault, checked } = vaultHolding(accounts, { refuse: true });
 		const service = new EnrollmentService(vault, transports, {});
 
-		await expect(service.reconcileDetached(ID, 'the wrong passphrase')).rejects.toThrow();
+		await expect(
+			service.reconcileDetached(ID, 'the wrong passphrase', authenticatorFingerprint(account()))
+		).rejects.toThrow();
 
 		expect(checked, 'the passphrase was never checked at all').toEqual(['the wrong passphrase']);
 		expect(
@@ -158,7 +166,8 @@ describe('a removal the user confirmed on Steam', () => {
 
 		await new EnrollmentService(vault, transports, {}).reconcileDetached(
 			ID,
-			'a passphrase long enough'
+			'a passphrase long enough',
+			authenticatorFingerprint(account())
 		);
 
 		expect(checked).toEqual(['a passphrase long enough']);
@@ -172,9 +181,77 @@ describe('a removal the user confirmed on Steam', () => {
 
 		await new EnrollmentService(vault, transports, {}).reconcileDetached(
 			ID,
-			'a passphrase long enough'
+			'a passphrase long enough',
+			authenticatorFingerprint(account())
 		);
 
 		expect(accounts.map((entry) => entry.steamId64)).toEqual(['76561198000000002']);
+	});
+});
+
+/**
+ * **Identity at the moment of the write, not at the moment of the check.**
+ *
+ * The IPC handler checks the fingerprint before calling in, and then there are
+ * awaits — a passphrase derivation for the removal, the mutate itself — before
+ * anything is written. A row replaced inside that window is a different
+ * authenticator wearing the same SteamID, and matching on the SteamID alone
+ * would act on it.
+ *
+ * `deactivateOnce` has always matched on identity inside its own mutate for
+ * exactly this reason. These reconciliations did not, which put the
+ * replaced-authenticator defect back through a door one step further along
+ * from the one that was closed.
+ */
+describe('a row replaced while the reconciliation was in flight', () => {
+	/** A vault whose row is swapped for a different authenticator mid-call. */
+	function swappingVault(accounts: Account[]) {
+		return {
+			read: () => ({ accounts }),
+			verifyPassphrase: () => {
+				// The long await in the middle. By the time it resolves, the account
+				// has been replaced — an import, or a fresh enrolment.
+				accounts[0] = account({ sharedSecret: 'YSBkaWZmZXJlbnQgc2VjcmV0', status: 'active' });
+				return Promise.resolve(undefined);
+			},
+			mutate: (apply: (draft: { accounts: Account[] }) => void) => {
+				apply({ accounts });
+				return Promise.resolve();
+			}
+		} as unknown as VaultService;
+	}
+
+	it('does not delete the authenticator that replaced the one it was about', async () => {
+		const accounts = [account({ status: 'active' })];
+		const expected = authenticatorFingerprint(accounts[0]!);
+		const vault = swappingVault(accounts);
+
+		await new EnrollmentService(vault, transports, {}).reconcileDetached(
+			ID,
+			'a passphrase long enough',
+			expected
+		);
+
+		expect(
+			accounts.length,
+			'the row was replaced between the check and the delete, and the delete matched on the ' +
+				'SteamID alone — so it destroyed the authenticator that had taken its place'
+		).toBe(1);
+		expect(accounts[0]?.sharedSecret).toBe('YSBkaWZmZXJlbnQgc2VjcmV0');
+	});
+
+	it('does not mark a replacement active either', async () => {
+		const accounts = [account()];
+		const expected = authenticatorFingerprint(accounts[0]!);
+		accounts[0] = account({ sharedSecret: 'YSBkaWZmZXJlbnQgc2VjcmV0' });
+		const { vault } = vaultHolding(accounts);
+
+		await new EnrollmentService(vault, transports, {}).reconcileActivated(ID, expected);
+
+		expect(
+			accounts[0]?.status,
+			'a record about one authenticator marked a different one active, because the write ' +
+				'matched on the SteamID rather than on which authenticator it was about'
+		).toBe('pendingActivation');
 	});
 });

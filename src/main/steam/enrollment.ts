@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
 	createLoginSession,
 	PROXY_POLICY_STOPPED,
@@ -103,6 +104,22 @@ interface PendingLogin {
 	startedAtMs: number;
 	/** Resolves when the library reports the session authenticated. */
 	authenticated: Promise<void>;
+}
+
+/**
+ * Which authenticator a record is about, without copying its secret.
+ *
+ * A SteamID outlives the authenticator attached to it: remove the account and
+ * import or enrol a replacement and the SteamID is identical, so a record left
+ * over from the previous one matches the new one exactly. Exported because the
+ * IPC handler checks it before calling in and the writes below check it again
+ * at the moment they write — two places, and they must not drift.
+ */
+export function authenticatorFingerprint(account: { sharedSecret?: string }): string {
+	return createHash('sha256')
+		.update(account.sharedSecret ?? '')
+		.digest('hex')
+		.slice(0, 16);
 }
 
 export class EnrollmentService {
@@ -654,9 +671,21 @@ export class EnrollmentService {
 	 * Both are the same mistake — restating a rule instead of calling the code
 	 * that owns it.
 	 */
-	async reconcileActivated(steamId64: string): Promise<void> {
+	async reconcileActivated(steamId64: string, fingerprint: string): Promise<void> {
 		await this.vault.mutate((draft) => {
-			const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
+			/*
+			 * **Checked again here, at the moment of the write.**
+			 *
+			 * The handler checks the fingerprint before calling in, and then there
+			 * are awaits — a passphrase derivation, the mutate itself — before
+			 * anything is written. A row replaced inside that window is a different
+			 * authenticator wearing the same SteamID, and the ordinary removal path
+			 * has always matched on identity inside its own mutate for exactly this
+			 * reason. This is the same rule.
+			 */
+			const stored = draft.accounts.find(
+				(entry) => entry.steamId64 === steamId64 && authenticatorFingerprint(entry) === fingerprint
+			);
 			if (stored === undefined) {
 				return;
 			}
@@ -671,7 +700,12 @@ export class EnrollmentService {
 		// before Steam was asked, and true until this moment.
 		if (this.updateRecovery) {
 			try {
-				const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+				const stored = this.vault
+					.read()
+					.accounts.find(
+						(entry) =>
+							entry.steamId64 === steamId64 && authenticatorFingerprint(entry) === fingerprint
+					);
 				if (stored) {
 					this.updateRecovery(stored);
 				}
@@ -691,14 +725,24 @@ export class EnrollmentService {
 	 * unattended unlocked machine could destroy an account through a screen whose
 	 * own removal form refuses to work without the passphrase.
 	 */
-	async reconcileDetached(steamId64: string, passphrase: string): Promise<void> {
+	async reconcileDetached(
+		steamId64: string,
+		passphrase: string,
+		fingerprint: string
+	): Promise<void> {
 		await this.vault.verifyPassphrase(passphrase);
 		await this.vault.mutate((draft) => {
-			const index = draft.accounts.findIndex((entry) => entry.steamId64 === steamId64);
+			// Identity at the moment of the delete, not at the moment of the check.
+			// `deactivateOnce` matches this way for the same reason: the passphrase
+			// derivation above is a long await, and this call destroys secrets.
+			const index = draft.accounts.findIndex(
+				(entry) => entry.steamId64 === steamId64 && authenticatorFingerprint(entry) === fingerprint
+			);
 			if (index >= 0) {
 				draft.accounts.splice(index, 1);
 			}
 		});
+		this.tokens.delete(steamId64);
 	}
 
 	async deactivate(steamId64: string, passphrase: string): Promise<void> {
