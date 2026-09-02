@@ -163,16 +163,17 @@
 	if (remembered(STARTED)) reveal();
 
 	/*
-	 * **Only the routes that hand over a file.**
+	 * **Every route that leads to a build — and the copy says so.**
 	 *
-	 * The Store link opens a listing. Somebody who clicks it, looks, and comes
-	 * back has downloaded nothing — and was met with "Your download has started.
-	 * You now have the thing most people cannot safely get", which is untrue and
-	 * reads as the kind of thing this site warns people about. Only the routes
-	 * that really produce a build arm the prompt; the Store listing is marked as
-	 * a route for the copy above but not for this.
+	 * An earlier version armed only on "routes that hand over a file", which was
+	 * a distinction that does not exist here: the Store link opens a listing and
+	 * so does the release link. Neither hands over a file, so the prompt could
+	 * never truthfully say "your download has started" — the fix was the sentence,
+	 * not the selector. It asks whether you got it working instead, which is a
+	 * question this page is entitled to ask of anyone who went looking for a
+	 * build.
 	 */
-	var routes = document.querySelectorAll('[data-got-it][data-hands-over-a-file]');
+	var routes = document.querySelectorAll('[data-got-it]');
 	for (var i = 0; i < routes.length; i += 1) {
 		routes[i].addEventListener('click', function () {
 			remember(STARTED);

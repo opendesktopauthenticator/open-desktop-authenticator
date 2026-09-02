@@ -37,7 +37,7 @@ export const download = {
 
 				<div class="download-primary download-linux">
 					<p>
-						<a class="button" href="${s.repo}/releases/latest" rel="noopener" data-got-it="the Linux build" data-hands-over-a-file>Download for Linux</a>
+						<a class="button" href="${s.repo}/releases/latest" rel="noopener" data-got-it="the Linux build">Download for Linux</a>
 					</p>
 					<p class="download-why">
 						An AppImage and a <code>.deb</code>, published on the releases page.
@@ -51,7 +51,7 @@ export const download = {
 					<summary>Can't use the Store, or want to check the bytes yourself?</summary>
 					<p>
 						The same builds are on
-						<a href="${s.repo}/releases/latest" rel="noopener" data-got-it="a build from the release page" data-hands-over-a-file>the GitHub releases page</a>,
+						<a href="${s.repo}/releases/latest" rel="noopener" data-got-it="a build from the release page">the GitHub releases page</a>,
 						including the portable build, which has no Store equivalent — it writes
 						nothing outside its own folder and runs from a USB stick. Take this route
 						if the Store is missing from your Windows image, if the machine is locked
@@ -264,12 +264,13 @@ ${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
 			-->
 			<aside class="ask ask-prompt" data-review-prompt hidden>
 				<div class="ask-body">
-					<h2>Your download has started</h2>
+					<h2>If you got it working</h2>
 					<p>
-						You now have the thing most people cannot safely get: a Steam authenticator
-						they can read the source of. If it works, saying so publicly is the only
-						way the next person — who has no way to tell us apart from the sites that
-						steal inventories — finds out that it does.
+						Nothing here knows whether you actually downloaded anything — every route on
+						this page opens a release listing rather than handing you a file, so this is
+						a question, not an announcement. If you did install it and it works, saying
+						so publicly is the only way the next person — who has no way to tell us
+						apart from the sites that steal inventories — finds out that it does.
 					</p>
 					<p class="hint">
 						It takes a minute. Nothing is offered in return, nothing is filtered, and
