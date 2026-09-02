@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CHANNELS } from '../src/shared/channels';
@@ -362,6 +362,13 @@ describe('the journal on disk', () => {
 	it('refuses to write an id that is not a SteamID', () => {
 		fileOperationJournal(dir).record({ ...note, steamId64: '../../escaped' });
 
+		// `<dir>/pending-operations/../../escaped...` resolves above the journal
+		// directory entirely, so the check has to be for the escaped path itself —
+		// an empty journal directory is also what a write that went elsewhere leaves.
+		expect(
+			existsSync(join(dir, '..', 'escaped.activate.json')),
+			'a malformed id named a path outside the journal directory and the write followed it'
+		).toBe(false);
 		expect(readdirSync(dir)).toEqual([]);
 	});
 
