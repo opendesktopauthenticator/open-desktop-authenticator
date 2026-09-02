@@ -380,6 +380,18 @@ export function registerEnrollmentHandlers(
 		kind: 'activate' | 'deactivate',
 		outcome: { guidance: string; certain?: boolean }
 	): Promise<boolean> {
+		/*
+		 * **Two facts, and only one of them is "it was written".**
+		 *
+		 * `updated` says the callback found the row and changed the draft;
+		 * `recorded` says the vault write that followed actually landed. Setting
+		 * one flag inside the callback conflates them: `mutate` applies the change
+		 * to a clone and installs it only once `writeEnvelope` returns, so a
+		 * failure *after* the callback discards the draft — and the flag, already
+		 * set, would go on claiming the refusal was saved. That is the same false
+		 * promise this function exists to stop making, one level down.
+		 */
+		let updated = false;
 		let recorded = false;
 		try {
 			await vault.mutate((draft) => {
@@ -393,8 +405,10 @@ export function registerEnrollmentHandlers(
 					at: new Date().toISOString(),
 					...(outcome.certain === true ? { certain: true } : {})
 				};
-				recorded = true;
+				updated = true;
 			});
+			// Only now: the write is done.
+			recorded = updated;
 		} catch (err) {
 			console.error('an unresolved Steam operation could not be recorded in the vault', err);
 		}

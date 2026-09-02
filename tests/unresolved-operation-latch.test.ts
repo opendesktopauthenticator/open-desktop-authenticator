@@ -381,6 +381,45 @@ describe('an outcome whose latch could not be written', () => {
 		).toBe(false);
 	});
 
+	/**
+	 * **And a write that fails after the callback has run.**
+	 *
+	 * `mutate` applies the change to a clone and installs it only once the vault
+	 * write returns, so a failure after the callback discards the draft entirely.
+	 * A flag set inside that callback is therefore a statement about the draft,
+	 * not about the disk — and it claimed the refusal had been saved when the
+	 * write had just failed, which is the same false promise one level down.
+	 */
+	it('does not claim to have been saved when the write fails after the change', async () => {
+		const stored = [account()];
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: stored }),
+			settings: () => ({ requireProxies: false }),
+			mutate: (apply: (draft: { accounts: Account[] }) => void) => {
+				// The row is found and the draft is changed, and then the write fails —
+				// so nothing reaches disk and the draft is thrown away.
+				apply({ accounts: structuredClone(stored) });
+				return Promise.reject(new Error('ENOSPC: no space left on device'));
+			}
+		} as unknown as VaultService;
+
+		register(vault, {
+			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
+
+		expect(
+			result.persisted,
+			'the flag was set inside the callback, so a write that failed straight afterwards still ' +
+				'reported the refusal as saved'
+		).toBe(false);
+	});
+
 	it('says so for an activation too', async () => {
 		register(unwritable([account()]), {
 			activate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
