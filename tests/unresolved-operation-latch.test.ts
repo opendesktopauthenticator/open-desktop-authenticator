@@ -149,6 +149,67 @@ describe('a removal whose outcome was never established', () => {
 	});
 });
 
+/**
+ * **The record has to be about the authenticator the operation ran against.**
+ *
+ * The fingerprint was stamped from whatever row was there *after* the Steam
+ * call failed, by SteamID alone. An import-replace landing during that call
+ * therefore produced a record about the replacement — and the resolve guard
+ * then compares the replacement against itself, agrees, and lets "yes, Steam
+ * did it" act on an authenticator the operation never touched. For a removal
+ * that is a splice of live secrets.
+ *
+ * It is not a lucky race: the import's own commit drops the account's routing,
+ * which aborts the request in flight, so the replace is what *causes* the
+ * uncertain outcome whose record is then mis-stamped.
+ */
+describe('a row replaced while the Steam call was failing', () => {
+	it('is not what the record ends up describing', async () => {
+		const accounts = [account()];
+		const replaced = account();
+		replaced.sharedSecret = 'YSBkaWZmZXJlbnQgc2VjcmV0';
+
+		register(vaultHolding(accounts), {
+			deactivate: () => {
+				// The import lands while Steam is failing to answer.
+				accounts[0] = replaced;
+				return Promise.reject(new EnrollmentError(GUIDANCE, true, true));
+			}
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
+
+		expect(
+			accounts[0]?.unresolvedOperation,
+			'the record was stamped with the replacement authenticator, so resolving it would act ' +
+				'on one the operation never touched'
+		).toBeUndefined();
+		expect(
+			result.persisted,
+			'and it claimed the refusal had been recorded when the row it was about had gone'
+		).toBe(false);
+	});
+
+	/* The ordinary case still records, against the row it really ran on. */
+	it('still records when the row is the one it ran against', async () => {
+		const accounts = [account()];
+		register(vaultHolding(accounts), {
+			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+		});
+		const handler = handlers.get(CHANNELS.accountDeactivate);
+		if (!handler) throw new Error('accountDeactivate was not registered');
+
+		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
+
+		expect(result.persisted).toBe(true);
+		expect(accounts[0]?.unresolvedOperation?.fingerprint).toBe(
+			createHash('sha256').update(accounts[0]!.sharedSecret).digest('hex').slice(0, 16)
+		);
+	});
+});
+
 describe('an activation whose outcome was never established', () => {
 	it('is written to the account', async () => {
 		const accounts = [account()];

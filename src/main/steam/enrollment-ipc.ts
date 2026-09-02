@@ -389,10 +389,36 @@ export function registerEnrollmentHandlers(
 	 * outcome still has to reach the user: a lost latch costs the durability, and
 	 * refusing to answer would cost them the guidance as well.
 	 */
+	/** The digest of the authenticator currently on an account, or none. */
+	function operatedOn(steamId64: string): string {
+		const account = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+		return account === undefined ? '' : authenticatorFingerprint(account);
+	}
+
 	async function latch(
 		steamId64: string,
 		kind: 'activate' | 'deactivate',
-		outcome: { guidance: string; certain?: boolean }
+		outcome: { guidance: string; certain?: boolean },
+		/**
+		 * **The authenticator the operation ran against**, sampled before it ran.
+		 *
+		 * The record exists to say which authenticator an unfinished operation was
+		 * about, and this stamped whatever row was there *afterwards* — by SteamID
+		 * alone, after the Steam call had already failed. An import-replace landing
+		 * during that call therefore produced a record about the replacement, and
+		 * the resolve guard then compared the replacement against itself, agreed,
+		 * and let "yes, Steam did it" act on an authenticator the operation never
+		 * touched.
+		 *
+		 * Not a lucky race, either: the import's own commit drops the account's
+		 * routing, which aborts the request in flight — so the replace is what
+		 * *causes* the uncertain outcome whose record is then mis-stamped.
+		 *
+		 * `deactivateOnce` captures identity before its Steam call for exactly this
+		 * reason, and both reconciliations re-check it at the write. This is the
+		 * one path that did neither.
+		 */
+		fingerprint: string
 	): Promise<boolean> {
 		/*
 		 * **Two facts, and only one of them is "it was written".**
@@ -409,14 +435,20 @@ export function registerEnrollmentHandlers(
 		let recorded = false;
 		try {
 			await vault.mutate((draft) => {
-				const account = draft.accounts.find((entry) => entry.steamId64 === steamId64);
+				const account = draft.accounts.find(
+					(entry) =>
+						entry.steamId64 === steamId64 && authenticatorFingerprint(entry) === fingerprint
+				);
 				if (account === undefined) {
+					// The row this operation was about is gone. There is nothing to
+					// record against, and recording against its replacement is the
+					// defect the fingerprint argument exists to stop.
 					return;
 				}
 				account.unresolvedOperation = {
 					kind,
 					guidance: outcome.guidance,
-					fingerprint: authenticatorFingerprint(account),
+					fingerprint,
 					at: new Date().toISOString(),
 					...(outcome.certain === true ? { certain: true } : {})
 				};
@@ -611,6 +643,9 @@ export function registerEnrollmentHandlers(
 		if (blocked !== undefined) {
 			return blocked;
 		}
+		// Sampled before the request goes, so a row replaced while Steam is failing
+		// to answer cannot be what the record ends up describing.
+		const ran = operatedOn(steamId64);
 		try {
 			return { state: await enrollment.activate(steamId64, code) };
 		} catch (err) {
@@ -625,7 +660,7 @@ export function registerEnrollmentHandlers(
 			 * a record that does not exist: close the window and the account looks
 			 * ordinary, with the same button offering the same irreversible call.
 			 */
-			return { ...outcome, persisted: await latch(steamId64, 'activate', outcome) };
+			return { ...outcome, persisted: await latch(steamId64, 'activate', outcome, ran) };
 		}
 	});
 
@@ -646,6 +681,9 @@ export function registerEnrollmentHandlers(
 				return blocked;
 			}
 
+			// Before the request goes. See `latch`.
+			const ran = operatedOn(steamId64);
+
 			try {
 				await enrollment.deactivate(steamId64, passphrase);
 			} catch (err) {
@@ -656,7 +694,7 @@ export function registerEnrollmentHandlers(
 				 * live ones — so there is a row to write this on. Whether the write
 				 * landed travels with the outcome; see the activation path above.
 				 */
-				return { ...outcome, persisted: await latch(steamId64, 'deactivate', outcome) };
+				return { ...outcome, persisted: await latch(steamId64, 'deactivate', outcome, ran) };
 			}
 
 			// The same cleanup a local removal does: cookie jar, cached session,
