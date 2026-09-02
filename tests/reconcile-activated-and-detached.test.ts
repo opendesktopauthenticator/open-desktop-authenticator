@@ -320,57 +320,57 @@ describe('a row replaced while the reconciliation was in flight', () => {
  * activation screen while it is still waiting on Steam, and Remove is available
  * from the account list the moment it lands.
  */
+/**
+ * A token the service will accept, and a transport that hands one back.
+ *
+ * The file-level `transports` is an empty object, which is fine for the
+ * reconciliations above — they never reach Steam. These do.
+ */
+const jwt = (claims: Record<string, unknown>): string => {
+	const encode = (value: unknown): string =>
+		Buffer.from(JSON.stringify(value)).toString('base64url');
+	return `${encode({ typ: 'JWT' })}.${encode(claims)}.sig`;
+};
+const TOKEN = jwt({ aud: ['web', 'mobile'], exp: Math.floor(Date.now() / 1000) + 86_400 });
+const live = {
+	forAccount: () =>
+		Promise.resolve(() =>
+			Promise.resolve({
+				status: 200,
+				text: JSON.stringify({ response: { access_token: TOKEN } })
+			})
+		)
+} as unknown as SteamTransportFactory;
+
+/**
+ * A service whose activation hangs inside Steam until released.
+ *
+ * `atSteam` resolves when `finalizeEnrollment` is actually entered, which is
+ * several awaits after `activate` is called — the token mint happens first.
+ * Releasing before that point leaves the activation hanging for ever, which
+ * is how the first version of these timed out rather than asserting.
+ */
+function hanging() {
+	// `activate` refuses anything but pendingActivation before it reaches the
+	// mutex, so an active account would never engage the guard under test.
+	const accounts = [account({ status: 'pendingActivation', refreshToken: TOKEN })];
+	let releaseFinalize: (() => void) | undefined;
+	let arrived: () => void = () => undefined;
+	const atSteam = new Promise<void>((resolve) => {
+		arrived = resolve;
+	});
+	const service = new EnrollmentService(vaultHolding(accounts).vault, live, {
+		finalizeEnrollment: () =>
+			new Promise((resolve) => {
+				releaseFinalize = () => resolve({ state: 'activated' as const });
+				arrived();
+			}),
+		removeAuthenticator: () => Promise.resolve()
+	});
+	return { service, accounts, atSteam, release: () => releaseFinalize?.() };
+}
+
 describe('an activation and a removal for the same authenticator', () => {
-	/**
-	 * A token the service will accept, and a transport that hands one back.
-	 *
-	 * The file-level `transports` is an empty object, which is fine for the
-	 * reconciliations above — they never reach Steam. These do.
-	 */
-	const jwt = (claims: Record<string, unknown>): string => {
-		const encode = (value: unknown): string =>
-			Buffer.from(JSON.stringify(value)).toString('base64url');
-		return `${encode({ typ: 'JWT' })}.${encode(claims)}.sig`;
-	};
-	const TOKEN = jwt({ aud: ['web', 'mobile'], exp: Math.floor(Date.now() / 1000) + 86_400 });
-	const live = {
-		forAccount: () =>
-			Promise.resolve(() =>
-				Promise.resolve({
-					status: 200,
-					text: JSON.stringify({ response: { access_token: TOKEN } })
-				})
-			)
-	} as unknown as SteamTransportFactory;
-
-	/**
-	 * A service whose activation hangs inside Steam until released.
-	 *
-	 * `atSteam` resolves when `finalizeEnrollment` is actually entered, which is
-	 * several awaits after `activate` is called — the token mint happens first.
-	 * Releasing before that point leaves the activation hanging for ever, which
-	 * is how the first version of these timed out rather than asserting.
-	 */
-	function hanging() {
-		// `activate` refuses anything but pendingActivation before it reaches the
-		// mutex, so an active account would never engage the guard under test.
-		const accounts = [account({ status: 'pendingActivation', refreshToken: TOKEN })];
-		let releaseFinalize: (() => void) | undefined;
-		let arrived: () => void = () => undefined;
-		const atSteam = new Promise<void>((resolve) => {
-			arrived = resolve;
-		});
-		const service = new EnrollmentService(vaultHolding(accounts).vault, live, {
-			finalizeEnrollment: () =>
-				new Promise((resolve) => {
-					releaseFinalize = () => resolve({ state: 'activated' as const });
-					arrived();
-				}),
-			removeAuthenticator: () => Promise.resolve()
-		});
-		return { service, accounts, atSteam, release: () => releaseFinalize?.() };
-	}
-
 	it('cannot both be in flight at once', async () => {
 		const { service, release, atSteam } = hanging();
 
@@ -409,6 +409,61 @@ describe('an activation and a removal for the same authenticator', () => {
 		release();
 		await activating.catch(() => undefined);
 
+		await expect(service.deactivate(ID, 'a passphrase long enough')).resolves.not.toThrow();
+	});
+});
+
+/**
+ * **A lock does not stop the request, so it must not release the claim.**
+ *
+ * The shared mutex was cleared wholesale on lock, on the reasoning that nobody
+ * is waiting after a lock and a stale marker would refuse the next retry. But
+ * the promise is still running and Steam is still going to answer — so
+ * unlocking admitted a second irreversible operation against the same
+ * authenticator, and when the first settled its unconditional delete removed
+ * the *second's* marker and admitted a third.
+ *
+ * Reproduced exactly that way: activation A in flight, lock and unlock admits
+ * removal B, A settles and admits removal C while B is still running.
+ */
+describe('the claim on an authenticator across a lock', () => {
+	it('survives a lock while the request is still in the air', async () => {
+		const { service, release, atSteam } = hanging();
+		const activating = service.activate(ID, '12345');
+		await atSteam;
+
+		// The vault locks and is unlocked again. The Steam request is untouched by
+		// either: it is still running.
+		service.forget();
+
+		await expect(
+			service.deactivate(ID, 'a passphrase long enough'),
+			'the lock released a claim on an operation Steam had not answered yet, so a second ' +
+				'irreversible request went out beside the first'
+		).rejects.toThrow(/being activated/i);
+
+		release();
+		await activating.catch(() => undefined);
+	});
+
+	/**
+	 * And the finished operation takes its own marker and no one else's — the
+	 * second half of the same defect, which admitted a third operation.
+	 */
+	it('does not release a claim that belongs to another attempt', async () => {
+		const { service, release, atSteam } = hanging();
+		const activating = service.activate(ID, '12345');
+		await atSteam;
+		service.forget();
+
+		// B is refused, as above. Now A settles.
+		await service.deactivate(ID, 'a passphrase long enough').catch(() => undefined);
+		release();
+		await activating.catch(() => undefined);
+
+		// With the claim correctly released by A, an operation may start again —
+		// what must not happen is A releasing a claim it does not own while a
+		// different operation holds it.
 		await expect(service.deactivate(ID, 'a passphrase long enough')).resolves.not.toThrow();
 	});
 });

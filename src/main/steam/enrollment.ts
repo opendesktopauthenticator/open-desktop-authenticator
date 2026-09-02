@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
 	createLoginSession,
 	PROXY_POLICY_STOPPED,
@@ -164,9 +164,20 @@ export class EnrollmentService {
 	 * from the activation screen while it is still waiting on Steam, and Remove
 	 * is available from the account list the moment it lands.
 	 *
-	 * The value is what is running, so the refusal can say which.
+	 * The value carries what is running, so the refusal can say which, **and a
+	 * token identifying the attempt**.
+	 *
+	 * Without the token this was worse than the two mutexes it replaced.
+	 * `forget()` cleared the whole map on lock while a Steam request was still
+	 * running, so unlocking let a second operation start; the first one's
+	 * `finally` then deleted unconditionally, removing the second's marker and
+	 * letting a third begin. Reproduced: activation A in flight, lock and unlock
+	 * admits removal B, A settles and admits removal C while B is still running.
+	 *
+	 * So each attempt owns its entry and removes only its own, and a lock no
+	 * longer clears entries belonging to operations that have not settled.
 	 */
-	private readonly inFlight = new Map<string, 'activation' | 'removal'>();
+	private readonly inFlight = new Map<string, { kind: 'activation' | 'removal'; token: string }>();
 
 	/**
 	 * True from the first line of `begin` until it settles.
@@ -519,17 +530,18 @@ export class EnrollmentService {
 		const running = this.inFlight.get(steamId64);
 		if (running !== undefined) {
 			throw new EnrollmentError(
-				running === 'activation'
+				running.kind === 'activation'
 					? 'that account is already being activated.'
 					: 'that account is having its authenticator removed from Steam. Wait for that to ' +
 							'finish before activating it.'
 			);
 		}
-		this.inFlight.set(steamId64, 'activation');
+		const token = randomUUID();
+		this.inFlight.set(steamId64, { kind: 'activation', token });
 		try {
 			return await this.finishActivation(account, steamId64, activationCode);
 		} finally {
-			this.inFlight.delete(steamId64);
+			this.releaseInFlight(steamId64, token);
 		}
 	}
 
@@ -679,6 +691,19 @@ export class EnrollmentService {
 	 * avoid, arrived at from the other direction.
 	 */
 	/**
+	 * Give up this attempt's claim, **and only this attempt's**.
+	 *
+	 * An unconditional delete removes whatever is there, which after a lock and
+	 * an unlock is somebody else's marker — so the operation that finished let a
+	 * third start alongside the second. Compare before removing.
+	 */
+	private releaseInFlight(steamId64: string, token: string): void {
+		if (this.inFlight.get(steamId64)?.token === token) {
+			this.inFlight.delete(steamId64);
+		}
+	}
+
+	/**
 	 * **Bring the vault into line with an activation the user confirmed on Steam.**
 	 *
 	 * Lives here rather than in the IPC handler because the rules it has to obey
@@ -802,17 +827,18 @@ export class EnrollmentService {
 		const running = this.inFlight.get(steamId64);
 		if (running !== undefined) {
 			throw new EnrollmentError(
-				running === 'removal'
+				running.kind === 'removal'
 					? 'that account is already being removed.'
 					: 'that account is being activated. Wait for that to finish before removing its ' +
 							'authenticator from Steam.'
 			);
 		}
-		this.inFlight.set(steamId64, 'removal');
+		const token = randomUUID();
+		this.inFlight.set(steamId64, { kind: 'removal', token });
 		try {
 			await this.deactivateOnce(steamId64, passphrase);
 		} finally {
-			this.inFlight.delete(steamId64);
+			this.releaseInFlight(steamId64, token);
 		}
 	}
 
@@ -1002,10 +1028,20 @@ export class EnrollmentService {
 		}
 		this.tokens.clear();
 		this.textedTheCode.clear();
-		// An operation in flight will clear its own entry when it settles, but a
-		// lock means nobody is waiting on it — and a stale marker would refuse the
-		// retry after the next unlock.
-		this.inFlight.clear();
+		/*
+		 * **The in-flight markers are deliberately NOT cleared here.**
+		 *
+		 * They were, on the reasoning that a lock means nobody is waiting and a
+		 * stale marker would refuse the retry after the next unlock. But a lock
+		 * does not stop the request: the promise is still running, Steam is still
+		 * going to answer, and clearing the marker let a second irreversible
+		 * operation start against the same authenticator while the first was in
+		 * the air.
+		 *
+		 * Each attempt removes its own entry when it settles, and every request
+		 * here is bounded by the transport timeout, so nothing is stranded for
+		 * longer than that.
+		 */
 	}
 
 	/**
