@@ -41,7 +41,7 @@ export function RemoveAccount({
 	onDeactivate: (
 		passphrase: string,
 		acknowledgement: string
-	) => Promise<{ state?: 'uncertain'; guidance?: string }>;
+	) => Promise<{ state?: 'uncertain'; guidance?: string; certain?: boolean }>;
 	/**
 	 * Clear the vault's record that an irreversible operation on this account was
 	 * left unresolved. Called only when the user says they have checked it.
@@ -65,9 +65,12 @@ export function RemoveAccount({
 	 * had said in as many words that it would not send the request a second time.
 	 * The vault remembers it now, and this is where that record is read.
 	 */
-	const [uncertain, setUncertain] = useState<string | undefined>(
+	const [uncertain, setUncertain] = useState<{ guidance: string; certain: boolean } | undefined>(
 		account.unresolvedOperation?.kind === 'deactivate'
-			? account.unresolvedOperation.guidance
+			? {
+					guidance: account.unresolvedOperation.guidance,
+					certain: account.unresolvedOperation.certain === true
+				}
 			: undefined
 	);
 	const [resolving, setResolving] = useState(false);
@@ -87,9 +90,18 @@ export function RemoveAccount({
 				 * re-enabled the button that sends the detach again — while the message
 				 * said not to. The form is replaced by the guidance instead.
 				 */
-				const outcome = result as { state?: string; guidance?: string } | undefined;
+				/*
+				 * **The cast is what dropped it.** `certain` reached this function and
+				 * was narrowed away one line before it was read, so a removal Steam is
+				 * known to have performed rendered as one nobody can be sure about.
+				 */
+				const outcome = result as
+					{ state?: string; guidance?: string; certain?: boolean } | undefined;
 				if (outcome?.state === 'uncertain') {
-					setUncertain(outcome.guidance ?? 'Steam did not answer, so the outcome is unknown.');
+					setUncertain({
+						guidance: outcome.guidance ?? 'Steam did not answer, so the outcome is unknown.',
+						certain: outcome.certain === true
+					});
 					return;
 				}
 				setPassphrase('');
@@ -102,23 +114,38 @@ export function RemoveAccount({
 
 	if (uncertain !== undefined) {
 		/*
-		 * The detach reached Steam and the reply did not, so the authenticator may
-		 * already be gone. The form is not offered again: sending it a second time
-		 * is the one thing that must not happen, and the codes this application
-		 * still shows may no longer be the ones Steam accepts.
+		 * The detach reached Steam and the reply may not have come back, so the
+		 * authenticator may already be gone. The form is not offered again:
+		 * sending it a second time is the one thing that must not happen, and the
+		 * codes this application still shows may no longer be the ones Steam
+		 * accepts.
+		 *
+		 * **And "may" is not always the right word.** The main process
+		 * distinguishes a lost reply from a removal Steam is *known* to have
+		 * performed — where the detach succeeded and only the local write failed —
+		 * and this screen dropped that distinction on the floor, telling somebody
+		 * whose account is definitely unprotected that nothing here can tell.
 		 */
 		return (
 			<main className="shell">
 				<header className="row">
-					<h1>This may already have happened</h1>
+					<h1>
+						{uncertain.certain
+							? 'Steam has already removed this'
+							: 'This may already have happened'}
+					</h1>
 				</header>
 				<p className="muted">
 					{account.accountName} <span className="muted">{account.steamId64}</span>
 				</p>
-				<p className="error">{uncertain}</p>
+				<p className="error">{uncertain.guidance}</p>
 				<p>
-					Nothing here can tell whether Steam acted on the request, so this application will not
-					send it again. Check Steam Guard on the account before doing anything else.
+					{uncertain.certain
+						? 'This application will not send the request again. The account has no second ' +
+							'factor until you add one somewhere else — do that before anything else.'
+						: 'Nothing here can tell whether Steam acted on the request, so this application ' +
+							'will not send it again. Check Steam Guard on the account before doing ' +
+							'anything else.'}
 				</p>
 				<div className="controls">
 					<button type="button" onClick={onClose}>

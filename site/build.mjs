@@ -82,17 +82,41 @@ export const SITE = {
 	updated: '2026-08-27',
 
 	/*
-	 * When 1.0 was published, from the GitHub release.
+	 * When each published version went out, from the GitHub releases.
 	 *
 	 * Here because two pages said "Version 1.0 is days old" — true when typed,
 	 * wronger every day after, and nothing to notice. It is the same failure as
 	 * the checksum-signature sentences: a fact about the release, written by
 	 * hand, with no path from the fact to the page. A date does not rot.
+	 *
+	 * **Keyed by version, and that is the whole point.** It was a single date
+	 * described in its own comment as "when 1.0 was published", and `version`
+	 * moved to 1.5.0 underneath it — so `datePublished` went on saying 1.0's
+	 * date beside `softwareVersion: 1.5.0`, in structured data, which is a false
+	 * statement about a release in the form search engines read. A version with
+	 * no entry here has not been published yet, and pages print nothing rather
+	 * than borrowing the last one's date.
 	 */
-	released: '2026-08-25',
-	/** The same date, as a person would read it. */
+	publishedOn: { '1.0.0': '2026-08-25' },
+
+	/**
+	 * The publication date of the version this build is — **undefined until it
+	 * has one**, which is the honest answer for a version that has not shipped.
+	 */
+	get released() {
+		return this.publishedOn[this.version];
+	},
+
+	/**
+	 * When the project first shipped, formatted.
+	 *
+	 * A different fact from the one above, and the two were the same value until
+	 * `version` moved. Both prose uses say "Version 1.0 was published on ..." —
+	 * an argument about how young the project is, which is anchored to the first
+	 * release and does not move when a later one goes out.
+	 */
 	get releasedOn() {
-		return formatDate(this.released);
+		return formatDate(Object.values(this.publishedOn).sort()[0]);
 	},
 	/** GA4 measurement ID. Referenced by head() and by the CSP host allowlist. */
 	analyticsId: 'G-G0GE9H5VR7',

@@ -235,6 +235,16 @@ export const accountSchema = z
 				certain: z.boolean().optional(),
 				at: z.string()
 			})
+			/*
+			 * **Passthrough, like the account around it.** The account object keeps
+			 * fields a newer build wrote, for the reason given below it: losing an
+			 * unrecognised field could mean losing a secret. A nested object without
+			 * the same rule breaks that promise one level down — zod strips what it
+			 * does not know, and the next ordinary save writes the stripped version
+			 * back, so a newer build's addition here is destroyed by an older build
+			 * merely opening the vault.
+			 */
+			.passthrough()
 			.optional()
 	})
 	// Preserve fields written by a newer build rather than dropping them on the

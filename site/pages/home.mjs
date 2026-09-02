@@ -36,7 +36,14 @@ export default {
 				applicationCategory: 'SecurityApplication',
 				operatingSystem: 'Windows 10, Windows 11, Linux',
 				softwareVersion: s.version,
-				datePublished: s.released,
+				/*
+				 * **Omitted rather than guessed.** This was a single site-wide date
+				 * described in its own comment as 1.0's, so once `version` moved it
+				 * published 1.0's date beside `softwareVersion: 1.5.0` — a false
+				 * statement about a release, in the form search engines read. A
+				 * version with no publication date yet simply does not carry one.
+				 */
+				...(s.released !== undefined ? { datePublished: s.released } : {}),
 				isAccessibleForFree: true,
 				// The repository's LICENSE is MIT. This said GPL-3.0, which is a false
 				// claim in machine-readable form — see tests in site/verify.mjs.
