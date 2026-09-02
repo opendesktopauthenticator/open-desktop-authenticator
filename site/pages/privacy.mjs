@@ -33,9 +33,10 @@ export const privacy = {
 				Short version: <strong>the application</strong> holds your secrets on your own
 				machine, sends them to nobody but Steam, and contains no analytics or telemetry of any
 				kind. <strong>This website</strong> is a separate thing and does collect a
-				little — server logs kept for 14 days, Cloudflare in front of it, and Google
-				Analytics. All of that is listed below, along with what a report holds and how
-				long it lives.
+				little — server logs kept for 14 days, Cloudflare in front of it, Google
+				Analytics, and Trustpilot on the pages that ask you for a review. All of that
+				is listed below, along with what a report holds, how long it lives, and the two
+				things the download page keeps in your own browser.
 			</p>
 
 			<div class="callout">
@@ -156,9 +157,10 @@ export const privacy = {
 				</dd>
 				<dt>Trustpilot, on the pages that ask for a review</dt>
 				<dd>
-					Seven pages carry a Trustpilot review button, and only those seven load
-					Trustpilot's script — this page does not, and neither does any page that is
-					not asking you for a review. Where it does load, Trustpilot sees the request
+					Only the pages that ask you for a review load Trustpilot's script — this page
+					does not, and neither does any page that is not asking. (No number here on
+					purpose: a count typed into a sentence is wrong the first time a page is
+					added, and this one is derived from what each page actually renders.) Where it does load, Trustpilot sees the request
 					the same way any embedded widget's host does: your IP address, your browser,
 					and which of our pages you were on. We send it nothing about you, and we
 					receive nothing back about who clicked; what we can see is the public review
@@ -167,6 +169,16 @@ export const privacy = {
 					<strong>Added 2 September 2026.</strong> It went onto every page for one
 					commit before this entry existed, including this one — a page that lists
 					everyone we talk to and then ended the list with the sentence below.
+				</dd>
+				<dt>Two things kept in your own browser</dt>
+				<dd>
+					The download page remembers two flags in your browser's local storage, and
+					nothing else does: <code>oda.review-prompt.started</code>, set when you follow
+					one of the download links, and <code>oda.review-prompt.dismissed</code>, set if
+					you turn the review prompt down. They exist so the page can ask you for a
+					review once, after you have actually fetched a build, and then stop asking.
+					They never leave your machine, nothing on the server reads them, and clearing
+					your site data removes them. Neither expires on its own.
 				</dd>
 				<dt>Nobody else</dt>
 				<dd>

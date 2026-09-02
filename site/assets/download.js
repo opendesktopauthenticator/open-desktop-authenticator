@@ -64,9 +64,16 @@
 
 	/*
 	 * Storage can throw outright — a private window, a browser set to block site
-	 * data — and this is a review prompt. It is not worth an exception that stops
-	 * the rest of the page, and "we could not remember" resolves to showing the
-	 * ask, which is the harmless direction.
+	 * data — and this is a review prompt, not worth an exception that stops the
+	 * rest of the page.
+	 *
+	 * **Which way that fails changed with the reveal.** While the ask was shown on
+	 * a timer and storage only suppressed it, "we could not remember" meant it was
+	 * shown, and this comment said so. Now that the ask is *triggered* by a
+	 * remembered flag, the same failure means it is never shown at all: nobody is
+	 * asked rather than somebody being asked twice. That is still the harmless
+	 * direction of the two, but it is the opposite one, and the sentence that used
+	 * to be here described the behaviour before the change.
 	 */
 	function remembered(key) {
 		try {

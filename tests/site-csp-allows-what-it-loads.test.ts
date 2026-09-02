@@ -145,8 +145,52 @@ describe('where the review loader is allowed to go', () => {
 
 		expect(
 			privacy,
-			'the site loads Trustpilot on seven pages and the page that lists every third party it ' +
-				'talks to does not mention it'
+			'the site loads Trustpilot and the page that lists every third party it talks to does ' +
+				'not mention it'
 		).toContain('Trustpilot');
+	});
+
+	/**
+	 * **Including in the summary somebody actually reads.**
+	 *
+	 * The check above passed on a `<dd>` far down the page while the lede — the
+	 * one paragraph most readers stop at — still enumerated "server logs,
+	 * Cloudflare and Google Analytics" and nothing else. A page can name a third
+	 * party six times below the fold and still tell its readers the wrong list.
+	 */
+	it('is in the summary at the top, not only in the table below it', () => {
+		const privacy = readFileSync(join(ROOT, 'site', 'pages', 'privacy.mjs'), 'utf8');
+		const lede = /class="lede">([\s\S]*?)<\/p>/.exec(privacy)?.[1] ?? '';
+
+		expect(lede, 'no lede was found, so this measured nothing').not.toBe('');
+		expect(
+			lede,
+			'the summary paragraph still lists the providers from before Trustpilot was added'
+		).toContain('Trustpilot');
+	});
+
+	/**
+	 * **And the page titled "What this site stores" says what it stores.**
+	 *
+	 * The download page keeps two flags in the reader's own browser so it can ask
+	 * for a review once and then stop. They were added without a word on the page
+	 * whose entire subject is what gets kept.
+	 */
+	it('names the browser storage the download page keeps', () => {
+		const privacy = readFileSync(join(ROOT, 'site', 'pages', 'privacy.mjs'), 'utf8');
+		const download = readFileSync(join(ROOT, 'site', 'assets', 'download.js'), 'utf8');
+
+		const keys = [...download.matchAll(/'(oda\.[a-z.-]+)'/g)].map((match) => match[1]);
+		expect(
+			keys.length,
+			'the download script keeps no storage keys, so this asserts nothing'
+		).toBeGreaterThan(0);
+
+		const undisclosed = keys.filter((key) => key !== undefined && !privacy.includes(key));
+		expect(
+			undisclosed,
+			'these are written to the reader browser and the page about what this site stores does ' +
+				'not mention them'
+		).toEqual([]);
 	});
 });
