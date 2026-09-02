@@ -12,7 +12,7 @@ Built and maintained by **MASTERPANEL LLC** · [opendesktopauthenticator.com](ht
 > else** — anything else claiming to be a build of this is not ours.
 >
 > The Store package is signed, because Microsoft re-signs what it distributes.
-> The direct downloads are not signed yet, so Windows warns on first run; verify
+> The direct downloads are not signed and none is planned, so Windows warns on first run; verify
 > them against `SHA256SUMS.txt` and the build provenance attestation.
 >
 > It has been **exercised end to end against live Steam accounts** by the

@@ -417,17 +417,18 @@ export const verify = {
 				<dt>A download from the release page, today</dt>
 				<dd>
 					<strong><code>Status</code> will read <code>NotSigned</code>.</strong> These
-					builds carry no code-signing certificate yet, so Windows will also warn on
-					first run. That is expected and it is stated here rather than left for you
-					to discover — but it does mean this step cannot tell you anything for now,
-					and steps 3 and 4 are doing all the work. When signing exists, the signer
-					will be ${s.publisher} and anything else is not ours.
+					builds carry no code-signing certificate, and none is planned, so Windows
+					will also warn on first run. That is expected and it is stated here rather
+					than left for you to discover — but it does mean this step cannot tell you
+					anything about our direct downloads, and steps 3 and 4 are doing all the
+					work. The Store build is the one that carries a signature, and there the
+					signer is Microsoft.
 				</dd>
 			</dl>
 			<p>
 				A build signed by a name you do not recognise is the one result that should stop
-				you outright. "Unsigned" is a gap in what we have published so far; "signed by
-				someone else" means the file is not from us at all.
+				you outright. "Unsigned" is what our direct downloads are and will stay;
+				"signed by someone else" means the file is not from us at all.
 			</p>
 
 			<h2>Going further: build it yourself</h2>

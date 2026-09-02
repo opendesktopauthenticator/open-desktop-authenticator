@@ -58,8 +58,8 @@ export const download = {
 						down, or if you would rather verify a download than be told it is fine.
 					</p>
 					<p>
-						<strong>These carry no code-signing certificate yet, so Windows warns on
-						first run.</strong> That warning is about a missing certificate, not about
+						<strong>These carry no code-signing certificate, and none is planned, so
+						Windows warns on first run.</strong> That warning is about a missing certificate, not about
 						the file being wrong — <a href="/verify">the verification steps</a> are
 						how you tell those two apart instead of guessing.
 					</p>
@@ -185,8 +185,8 @@ export const download = {
 				<li>
 					<strong>A code-signing certificate for the direct downloads.</strong> The
 					Store build is signed by Microsoft; the <code>.exe</code> and Linux builds on
-					GitHub are not, so Windows warns on first run. Until that changes, the
-					checksums and the provenance attestation are how you check them.
+					GitHub are not, so Windows warns on first run. The checksums and the
+					provenance attestation are how you check them.
 					<br />
 					<strong>No certificate is planned.</strong> We applied to the SignPath
 					Foundation and were declined — their free-certificate programme asks for

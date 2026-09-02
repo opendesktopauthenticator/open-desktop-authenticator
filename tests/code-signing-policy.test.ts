@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -84,23 +84,47 @@ describe('the code signing policy page', () => {
  * is granted" for as long as that was true, and it stopped being true the moment
  * the application was declined. The same sentence promised it would change when
  * the situation did; this is what holds it to that.
+ *
+ * **Every page, not a hand-picked few.** The first version of this listed four
+ * constants and passed while five other surfaces still said "yet" — the download
+ * page contradicted itself a hundred lines apart, `/verify` named a future
+ * signer, and the release-notes template published on every GitHub release said
+ * the same. A guard that only looks where you remembered to look is how that
+ * happened, so this reads the whole directory.
  */
-describe('what the site says about signing', () => {
-	const PAGES: [string, string][] = [
-		['the policy page', POLICY],
-		['the download page', DOWNLOAD],
-		['the home page', HOME],
-		['the build config', BUILD]
+describe('what the project says about signing', () => {
+	const SURFACES: [string, string][] = [
+		...readdirSync(join(root, 'site', 'pages'))
+			.filter((name) => name.endsWith('.mjs'))
+			.map((name): [string, string] => [`site/pages/${name}`, read('site', 'pages', name)]),
+		['site/markup.mjs', read('site', 'markup.mjs')],
+		['site/build.mjs', BUILD],
+		['README.md', read('README.md')],
+		['.github/workflows/release.yml', read('.github', 'workflows', 'release.yml')]
 	];
 
-	it.each(PAGES)('%s does not say an application is pending', (_where, source) => {
-		expect(source).not.toMatch(
-			/has not been granted yet|are applying to|application is in progress/i
-		);
+	it('has surfaces to check at all', () => {
+		expect(
+			SURFACES.length,
+			'nothing was read, so every assertion below is vacuous'
+		).toBeGreaterThan(8);
 	});
 
-	it.each(PAGES)('%s does not promise a certificate is coming', (_where, source) => {
-		expect(source).not.toMatch(/once (that|the certificate) is granted|until the SignPath/i);
+	/*
+	 * "not signed yet" about the **checksum list** is deliberately not matched:
+	 * that gap is real and still pending. What must not survive is a claim about
+	 * a *code-signing certificate* arriving.
+	 */
+	const PENDING =
+		/code[- ]signing certificate yet|certificate yet|are applying to|application is in progress|has not been granted|once (that|the certificate) is granted|until the SignPath|when signing exists|blocked on SignPath/i;
+
+	it.each(SURFACES)('%s does not say a certificate is coming', (_where, source) => {
+		const hit = PENDING.exec(source);
+		expect(
+			hit?.[0],
+			'this surface still tells the reader a code-signing certificate is on its way, which it ' +
+				'is not — the SignPath Foundation application was declined and none is planned'
+		).toBeUndefined();
 	});
 
 	/*
@@ -110,7 +134,11 @@ describe('what the site says about signing', () => {
 	 */
 	it('still tells the reader the direct downloads are unsigned', () => {
 		expect(POLICY).toMatch(/not code-signed|carry a code-signing certificate/i);
-		expect(DOWNLOAD).toMatch(/not signed by us|are not, so Windows warns/i);
+		expect(DOWNLOAD).toMatch(/no code-signing certificate, and none is planned/i);
+	});
+
+	it('says so on the verification page too, where the check comes back NotSigned', () => {
+		expect(read('site', 'pages', 'safety.mjs')).toMatch(/none is planned/i);
 	});
 
 	it('still derives that from the flag rather than prose alone', () => {
