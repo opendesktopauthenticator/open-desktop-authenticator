@@ -29,6 +29,17 @@ const state = vi.hoisted(() => ({
 	backupAttempted: false,
 	refuseBackupWrite: false,
 	refuseJournalStat: false,
+	/**
+	 * `writeEnvelope`'s own copy of the live vault to `.bak` fails.
+	 *
+	 * That copy is the first thing it does, so the failure lands with the vault
+	 * untouched — `VaultStorageError.unchanged` is true — which is the one branch
+	 * that decides nothing was written and clears the journal. `refuseBackupWrite`
+	 * cannot reach it: that knob fails the *later*, separate backup write, by
+	 * which point the vault has already been replaced and overwriting the journal
+	 * is correct.
+	 */
+	refuseVaultBackupCopy: false,
 	backupWrites: 0
 }));
 
@@ -46,6 +57,12 @@ vi.mock('node:fs', async () => {
 				throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
 			}
 			return (actual.statSync as (...args: unknown[]) => unknown)(path, ...rest);
+		},
+		copyFileSync: (src: unknown, dest: unknown, ...rest: unknown[]) => {
+			if (state.refuseVaultBackupCopy && typeof dest === 'string' && dest.endsWith('.bak')) {
+				throw Object.assign(new Error('EBUSY: resource busy or locked'), { code: 'EBUSY' });
+			}
+			return (actual.copyFileSync as (...args: unknown[]) => void)(src, dest, ...rest);
 		},
 		openSync: (path: unknown, ...rest: unknown[]) => {
 			/*
@@ -89,6 +106,7 @@ beforeEach(() => {
 	state.backupAttempted = false;
 	state.refuseBackupWrite = false;
 	state.refuseJournalStat = false;
+	state.refuseVaultBackupCopy = false;
 	state.backupWrites = 0;
 });
 
@@ -99,6 +117,7 @@ afterEach(() => {
 
 const OLD = 'the-passphrase-this-vault-was-made-with';
 const NEW = 'a-different-passphrase-long-enough-too';
+const NEWEST = 'a-third-passphrase-that-is-also-long-enough';
 
 const service = () => new VaultService({ file });
 
@@ -467,5 +486,59 @@ describe('a stale journal whose backup has gone missing', () => {
 			true
 		);
 		expect(existsSync(`${file}.bak.previous`), 'a set-aside copy was left behind').toBe(false);
+	});
+});
+
+/**
+ * **A second rotation must not throw away the first one's unpaid debt.**
+ *
+ * `writeRotationJournal` replaces whatever is there, so starting another
+ * passphrase change overwrites a journal `reconcile` has not managed to pay —
+ * something else is holding `.bak` open, which is exactly the state the tests
+ * above exercise. When that second rotation then fails without replacing
+ * anything, the "nothing was written, so there is nothing to finish" branch
+ * cleared the journal: true of this rotation, false of the one it had just
+ * overwritten.
+ *
+ * What is lost is the record that `.bak` still opens with a passphrase two
+ * changes old. The next start reads no journal, stops suspecting the backup, and
+ * offers a restore that cannot open the vault.
+ */
+describe('a rotation that fails while an earlier debt is still owed', () => {
+	it('leaves the earlier debt on disk', async () => {
+		await interruptedRotation();
+		const owed = readFileSync(`${file}.rotating`, 'utf8');
+
+		const vault = service();
+		await vault.unlock(NEW);
+
+		// The same thing that stopped the first debt being paid: `.bak` is held
+		// open, so `writeEnvelope` cannot copy the live vault aside and replaces
+		// nothing.
+		state.refuseVaultBackupCopy = true;
+		await expect(vault.changePassphrase(NEW, NEWEST)).rejects.toThrow();
+		state.refuseVaultBackupCopy = false;
+
+		expect(
+			existsSync(`${file}.rotating`),
+			'the failed rotation cleared a journal it did not write, so no later start can pay the ' +
+				'debt the first one left'
+		).toBe(true);
+		expect(
+			readFileSync(`${file}.rotating`, 'utf8'),
+			'the journal on disk is no longer the debt that was owed'
+		).toBe(owed);
+	});
+
+	it('still lets the next start pay that debt', async () => {
+		await interruptedRotation();
+
+		const vault = service();
+		await vault.unlock(NEW);
+		state.refuseVaultBackupCopy = true;
+		await expect(vault.changePassphrase(NEW, NEWEST)).rejects.toThrow();
+		state.refuseVaultBackupCopy = false;
+
+		expect(service().reconcile(), 'the debt survived but can no longer be settled').toBe(true);
 	});
 });

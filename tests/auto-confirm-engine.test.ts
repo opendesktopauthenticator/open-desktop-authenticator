@@ -2420,3 +2420,98 @@ describe('an account the scheduler is skipping because it halted', () => {
 		expect(stillHalted, 'a backing-off account was reported as halted').toEqual([]);
 	});
 });
+
+/**
+ * **A settings save puts the account back to work, halt and all.**
+ *
+ * `reset` deleted the schedule but left the id in `halted`, and `tick` walks
+ * that set on every beat and calls `onStillHalted` — the retry path for a halt
+ * notice the OS refused. So after saving auto-confirm settings the engine went
+ * on asserting "stopped after 10 consecutive failures" about an account it was
+ * polling successfully, once a beat, for as long as the app stayed open.
+ * `forgetAccount` clears both; only `reset` did not.
+ */
+describe('an account whose settings are saved after it halted', () => {
+	async function haltedEngine() {
+		const accounts = [account({ trades: true })];
+		const stillHalted: string[] = [];
+		let clock = NOW;
+		let failing = true;
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () =>
+					failing
+						? Promise.reject(new Error('steam said no'))
+						: Promise.resolve({ approved: [], held: [], unreadable: 0 })
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onStillHalted: (steamId64) => stillHalted.push(steamId64),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		// Ten consecutive failures is what halts it.
+		for (let i = 0; i < 10; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+
+		return {
+			engine,
+			stillHalted,
+			recover: () => {
+				failing = false;
+			},
+			beat: async () => {
+				clock += 20 * 60_000;
+				await engine.tick();
+			}
+		};
+	}
+
+	it('stops insisting the account is halted', async () => {
+		const h = await haltedEngine();
+		// One beat past the halt, so the retry path has actually fired once and the
+		// assertion below is measuring a change rather than a silence.
+		await h.beat();
+		expect(
+			h.stillHalted.length,
+			'the halted account never reached the retry path, so this asserts nothing'
+		).toBeGreaterThan(0);
+
+		h.recover();
+		h.engine.reset('76561198000000001');
+		const before = h.stillHalted.length;
+
+		await h.beat();
+		await h.beat();
+		await h.beat();
+
+		expect(
+			h.stillHalted.length - before,
+			'the engine kept re-firing "automatic confirmation stopped" for an account it is now ' +
+				'polling successfully, once on every beat'
+		).toBe(0);
+	});
+
+	/*
+	 * And `forgetAccount`, which always cleared it, still does — so this change
+	 * did not move the behaviour from one method to neither.
+	 */
+	it('still stops insisting after forgetAccount', async () => {
+		const h = await haltedEngine();
+		h.recover();
+		h.engine.forgetAccount('76561198000000001');
+		const before = h.stillHalted.length;
+
+		await h.beat();
+		await h.beat();
+
+		expect(h.stillHalted.length - before).toBe(0);
+	});
+});

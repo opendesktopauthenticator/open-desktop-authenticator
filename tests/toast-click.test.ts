@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { ToastClickRouter } from '../src/main/confirmations/toast-click';
 import { ConfirmationNotifier, type ToastHost } from '../src/main/confirmations/notify';
 import type { ConfirmationSummary } from '../src/shared/ipc';
@@ -403,5 +405,57 @@ describe('the clock a pending click is aged against', () => {
 		ticks += 60 * 60_000;
 
 		expect(router.peek()).toEqual({});
+	});
+});
+
+/**
+ * **A toast stays reachable while its click can still arrive.**
+ *
+ * `liveToasts` exists only to keep the `Notification` wrapper — and therefore
+ * its click listener — from being collected while the notification is still in
+ * Windows' Action Center. Releasing it on `close` did not implement that:
+ * Electron's own typings say the `close` event fires for a system timeout as
+ * well as a real dismissal, and that a notification already in the Action Center
+ * stays there afterwards. So the default five seconds of screen time ended the
+ * retention while the user had not looked yet, and the click did nothing.
+ *
+ * Asserted on the source because this is a wiring block in `index.ts` and there
+ * is no way to boot the main process here — and asserted as "nothing releases it
+ * on close", which is the property, rather than on where any line sits.
+ */
+describe('how long a shown toast is kept', () => {
+	const MAIN = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
+
+	/** The `host.show` block that builds and wires one toast. */
+	const wiring = (() => {
+		const start = MAIN.indexOf('const liveToasts = new Set<Notification>();');
+		expect(start, 'liveToasts is gone; this test needs rewriting').toBeGreaterThan(-1);
+		const end = MAIN.indexOf('onActivate:', start);
+		expect(end, 'the notifier host block changed shape').toBeGreaterThan(start);
+		return MAIN.slice(start, end);
+	})();
+
+	it('does not release the toast when the OS says it closed', () => {
+		const close = /toast\.on\('close'[\s\S]{0,200}?\)/.exec(wiring)?.[0] ?? '';
+		expect(
+			close,
+			'the toast is dropped on `close`, which Windows emits on timeout while the notification ' +
+				'is still sitting clickable in the Action Center'
+		).not.toContain('liveToasts.delete');
+	});
+
+	it('releases it once the click has been delivered', () => {
+		const click = /toast\.on\('click'[\s\S]{0,300}?\}\);/.exec(wiring)?.[0] ?? '';
+		expect(click, 'nothing releases a toast that has been clicked').toContain(
+			'liveToasts.delete(toast)'
+		);
+	});
+
+	it('bounds how many are held at once', () => {
+		expect(
+			wiring,
+			'nothing releases a toast that is never clicked, so the set grows for the life of the ' +
+				'session'
+		).toContain('MAX_LIVE_TOASTS');
 	});
 });

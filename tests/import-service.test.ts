@@ -404,6 +404,43 @@ describe('staging', () => {
 		expect(report.candidates[0]?.warnings.some((w) => w.includes('not usable'))).toBe(true);
 	});
 
+	/**
+	 * **A damaged file is not a duplicate of itself.**
+	 *
+	 * The best-per-account map is built only from usable files, so an unusable one
+	 * is never in it — and the duplicate test read `get(steamId64) !== id`, which
+	 * for a missing key is `undefined !== id`, and true. A single damaged file was
+	 * therefore stamped `duplicate: 'selection'`, and the screen told the user
+	 * another file they chose was the same account: they were sent looking for a
+	 * duplicate that does not exist instead of being shown the real reason the row
+	 * was blocked.
+	 */
+	it('does not call a lone damaged file a duplicate of the selection', () => {
+		const report = imports.stage([file({ shared_secret: 'obviously not base64 !!' })]);
+
+		expect(report.candidates).toHaveLength(1);
+		expect(
+			report.candidates[0]?.duplicate,
+			'the only file chosen was reported as a duplicate of something else in the selection'
+		).toBeUndefined();
+	});
+
+	/* And the case that must keep working: a usable file wins the account. */
+	it('still marks a damaged file as a duplicate when a usable one claims the account', () => {
+		const report = imports.stage([
+			file({}, 'good.maFile'),
+			file({ shared_secret: 'obviously not base64 !!' }, 'damaged.maFile')
+		]);
+
+		expect(report.candidates).toHaveLength(2);
+		expect(report.candidates[0]?.duplicate).toBeUndefined();
+		expect(
+			report.candidates[1]?.duplicate,
+			'a second file for the same account is no longer reported, so the user is not told why ' +
+				'it was ignored'
+		).toBe('selection');
+	});
+
 	it('accepts a hex shared secret, which some tools write', () => {
 		const report = imports.stage([file({ shared_secret: HEX_SECRET })]);
 
