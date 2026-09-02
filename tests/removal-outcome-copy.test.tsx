@@ -97,3 +97,40 @@ describe('a removal whose reply was lost', () => {
 		expect(html).toContain('This may already have happened');
 	});
 });
+
+/**
+ * **A control that can only fail is not an offer.**
+ *
+ * When the record could not be written there is no stored operation for the
+ * handler to act on, so either answer comes back refused — the previous version
+ * of this returned a cheerful `ok` and closed the screen, and the version after
+ * that showed an error for a button nobody should have been given. The
+ * paragraph above already says the warning will not survive the window; the
+ * buttons that pretend otherwise are gone.
+ */
+describe('an outcome whose record was saved', () => {
+	it('offers the resolution', () => {
+		const html = rendered(false);
+
+		expect(html).toContain('Steam Guard is off — remove this account here');
+		expect(html, 'the passphrase this path requires is not asked for').toContain(
+			'resolve-passphrase'
+		);
+	});
+});
+
+/**
+ * **What this harness cannot reach, said plainly.**
+ *
+ * When the record could not be written there is no stored operation for the
+ * handler to act on, so either answer comes back refused — and the controls are
+ * hidden rather than offered. **That gating is not covered by a test.** The
+ * unsaved state arrives only from a live `onDeactivate` result, and this project
+ * renders screens with `renderToStaticMarkup` and has no runner that can click.
+ * A test built from a stored record always seeds `persisted: true`, so it would
+ * assert the opposite branch while claiming to cover this one.
+ *
+ * The main-process half of it — that a resolution with no stored record is
+ * refused rather than reported as success — is covered, in
+ * `unresolved-operation-latch.test.ts`.
+ */

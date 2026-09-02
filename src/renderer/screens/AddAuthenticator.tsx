@@ -554,7 +554,12 @@ export function AddAuthenticator({
 						 * false statement, and acting on it clears the protection and
 						 * re-offers an operation that has already happened.
 						 */}
-						{enrolled !== undefined && (
+						{/*
+						 * Nothing stored means nothing to resolve, so both answers can only
+						 * come back refused. The paragraph above already says the warning
+						 * will not survive this window.
+						 */}
+						{uncertain.persisted !== false && enrolled !== undefined && (
 							<>
 								<button
 									type="button"

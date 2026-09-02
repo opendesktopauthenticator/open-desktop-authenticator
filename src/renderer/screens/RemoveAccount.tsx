@@ -178,14 +178,25 @@ export function RemoveAccount({
 						: 'This application will not send the request again.'}
 				</p>
 				{resolveError !== undefined && <p className="error">{resolveError}</p>}
-				<label htmlFor="resolve-passphrase">Vault passphrase, to remove this account here</label>
-				<input
-					id="resolve-passphrase"
-					type="password"
-					value={resolvePassphrase}
-					onChange={(event) => setResolvePassphrase(event.target.value)}
-					autoComplete="off"
-				/>
+				{/*
+				 * **Nothing to resolve means nothing to offer.** Where the record could
+				 * not be written there is no stored operation for the handler to act
+				 * on, so either answer can only come back refused. Offering them is an
+				 * invitation to press a button that cannot work, and the paragraph
+				 * above has already said the warning will not survive this window.
+				 */}
+				{uncertain.persisted !== false && (
+					<label htmlFor="resolve-passphrase">Vault passphrase, to remove this account here</label>
+				)}
+				{uncertain.persisted !== false && (
+					<input
+						id="resolve-passphrase"
+						type="password"
+						value={resolvePassphrase}
+						onChange={(event) => setResolvePassphrase(event.target.value)}
+						autoComplete="off"
+					/>
+				)}
 				<div className="controls">
 					<button type="button" onClick={onClose}>
 						Close
@@ -211,21 +222,23 @@ export function RemoveAccount({
 					 * would clear the protection and re-offer an operation that has
 					 * already happened.
 					 */}
-					<button
-						type="button"
-						disabled={resolving || resolvePassphrase === ''}
-						onClick={() => {
-							setResolving(true);
-							setResolveError(undefined);
-							void onResolve(true, resolvePassphrase)
-								.then(onClose)
-								.catch((err: unknown) => setResolveError(messageOf(err)))
-								.finally(() => setResolving(false));
-						}}
-					>
-						Steam Guard is off — remove this account here
-					</button>
-					{!uncertain.certain && (
+					{uncertain.persisted !== false && (
+						<button
+							type="button"
+							disabled={resolving || resolvePassphrase === ''}
+							onClick={() => {
+								setResolving(true);
+								setResolveError(undefined);
+								void onResolve(true, resolvePassphrase)
+									.then(onClose)
+									.catch((err: unknown) => setResolveError(messageOf(err)))
+									.finally(() => setResolving(false));
+							}}
+						>
+							Steam Guard is off — remove this account here
+						</button>
+					)}
+					{uncertain.persisted !== false && !uncertain.certain && (
 						<button
 							type="button"
 							disabled={resolving}
