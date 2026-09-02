@@ -220,9 +220,6 @@ export function App(): React.JSX.Element {
 	 * On `view` rather than at each `setView`: there are twenty-one of those, and
 	 * the one that gets forgotten is the bug coming back.
 	 */
-	useEffect(() => {
-		abandonPendingSignIns();
-	}, [view]);
 
 	/**
 	 * An enrolled-but-unactivated account being resumed, if any.
@@ -260,6 +257,24 @@ export function App(): React.JSX.Element {
 	 * the same thing for the same reason.
 	 */
 	const [browserSignIn, setBrowserSignIn] = useState<BrowserSignInPrompt | undefined>();
+
+	useEffect(() => {
+		abandonPendingSignIns();
+		/*
+		 * **And the prompt already held, which the counter cannot reach.**
+		 *
+		 * `abandonPendingSignIns` stops a *late* answer installing itself. A prompt
+		 * that had already arrived stayed in state: a notification opening
+		 * Confirmations over it left it there, and pressing Back re-rendered it — a
+		 * sign-in, with a password field, for a request the user began before and
+		 * has since navigated away from twice.
+		 *
+		 * The same reasoning the overlay guard beside `setBrowserSignIn` already
+		 * uses: the open belonged to the account list, so leaving discards it.
+		 * Moved below this state for the obvious reason that it needs the setter.
+		 */
+		setBrowserSignIn(undefined);
+	}, [view]);
 
 	/**
 	 * **Discarded rather than deferred.**

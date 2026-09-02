@@ -178,3 +178,41 @@ describe('an answer arriving behind an overlay', () => {
 		expect(source).toContain('const overlayOpenRef = useRef(overlayOpen);');
 	});
 });
+
+/**
+ * **Leaving the account list has to discard the prompt, not just stop new ones.**
+ *
+ * `abandonPendingSignIns` bumps a counter, which stops a *late* answer from
+ * installing itself. A prompt that had already arrived stayed in state — so a
+ * notification opening Confirmations over it left it sitting there, and pressing
+ * Back re-rendered it: a sign-in with a password field, for a request the user
+ * began earlier and has since navigated away from twice.
+ *
+ * `mayShowSignInPrompt` hides it while the user is elsewhere, which is what made
+ * this survivable rather than invisible, and also what made it come back.
+ *
+ * Asserted on the source, and on the *contents of the effect* rather than on a
+ * line or an ordering: effects do not run under `renderToStaticMarkup` and this
+ * project has no DOM runner, and a position is the thing this repository keeps
+ * being caught by.
+ */
+describe('navigating away from a held sign-in prompt', () => {
+	const source = readFileSync(join(__dirname, '..', 'src', 'renderer', 'App.tsx'), 'utf8');
+
+	/** The body of the effect that watches the view. */
+	const body = (() => {
+		const start = source.indexOf('abandonPendingSignIns();');
+		expect(start, 'nothing calls abandonPendingSignIns any more').toBeGreaterThan(-1);
+		const end = source.indexOf('}, [view]);', start);
+		expect(end, 'the view effect changed shape; this test needs rewriting').toBeGreaterThan(start);
+		return source.slice(start, end);
+	})();
+
+	it('discards the prompt already held, as well as the ones still coming', () => {
+		expect(
+			body,
+			'the counter is advanced but the prompt in state is left alone, so it is only hidden — ' +
+				'and it takes the window again the moment the user comes back to the account list'
+		).toContain('setBrowserSignIn(undefined)');
+	});
+});
