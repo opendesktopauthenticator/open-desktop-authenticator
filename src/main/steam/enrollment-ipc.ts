@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -375,6 +375,21 @@ export function registerEnrollmentHandlers(
 	 * outcome still has to reach the user: a lost latch costs the durability, and
 	 * refusing to answer would cost them the guidance as well.
 	 */
+	/**
+	 * Which authenticator a record is about, without copying its secret.
+	 *
+	 * A SteamID outlives the authenticator attached to it. Remove the account and
+	 * import or enrol a replacement and the SteamID is identical, so a record left
+	 * over from the previous one matched the new one exactly — and resolving it
+	 * acted on an authenticator the record had never been about.
+	 */
+	function fingerprintOf(account: { sharedSecret?: string }): string {
+		return createHash('sha256')
+			.update(account.sharedSecret ?? '')
+			.digest('hex')
+			.slice(0, 16);
+	}
+
 	async function latch(
 		steamId64: string,
 		kind: 'activate' | 'deactivate',
@@ -402,6 +417,7 @@ export function registerEnrollmentHandlers(
 				account.unresolvedOperation = {
 					kind,
 					guidance: outcome.guidance,
+					fingerprint: fingerprintOf(account),
 					at: new Date().toISOString(),
 					...(outcome.certain === true ? { certain: true } : {})
 				};
@@ -420,58 +436,93 @@ export function registerEnrollmentHandlers(
 	 * the latch is cleared by the person saying they have been and looked -
 	 * which is also the moment the guidance stops being useful to them.
 	 */
-	registerHandler(CHANNELS.accountResolveOperation, async ({ steamId64, steamActed }) => {
-		requireUnlocked();
+	registerHandler(
+		CHANNELS.accountResolveOperation,
+		async ({ steamId64, kind, steamActed, passphrase }) => {
+			requireUnlocked();
 
-		/*
-		 * **The account is brought into line with what the user found.**
-		 *
-		 * Clearing the record on its own left the account exactly as the
-		 * interrupted operation had left it, which puts the same offer straight
-		 * back on the screen: an activation Steam completed still reads
-		 * `pendingActivation`, so "Finish activation" returns and fails in a way
-		 * that looks like a wrong code; a removal Steam performed leaves the
-		 * account listed and still generating codes for an authenticator that is
-		 * no longer attached.
-		 *
-		 * Nothing here can discover which of those happened — only the person who
-		 * went and looked can — so this asks them, and then does the small amount
-		 * of work their answer implies.
-		 */
-		let detached = false;
-		await vault.mutate((draft) => {
-			const account = draft.accounts.find((entry) => entry.steamId64 === steamId64);
-			if (account === undefined) {
-				return;
+			/*
+			 * **Three things have to match before this touches anything.**
+			 *
+			 * The first version took a SteamID and a yes/no, read whichever record
+			 * happened to be stored, and acted on it. Every one of those was a way to
+			 * act on the wrong thing:
+			 *
+			 *   - It read the *stored* kind rather than the one the screen asked
+			 *     about, so an activation screen answering "yes, Steam Guard is on"
+			 *     could resolve a left-over removal record — and "yes" there means
+			 *     "the removal succeeded", which deleted the account.
+			 *   - It matched on the SteamID alone, and a SteamID outlives the
+			 *     authenticator attached to it: a record about a replaced
+			 *     authenticator acted on its replacement.
+			 *   - It answered `ok` when there was no record at all, so a screen whose
+			 *     write had failed reported success for doing nothing.
+			 *
+			 * All three are refusals now. Nothing here guesses which operation a
+			 * person meant.
+			 */
+			const account = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+			const held = account?.unresolvedOperation;
+			if (account === undefined || held === undefined) {
+				throw new EnrollmentError(
+					'There is nothing recorded against that account to resolve. It may have been ' +
+						'resolved already, or the record was never saved — check the account on Steam ' +
+						'before doing anything else here.'
+				);
 			}
-			const kind = account.unresolvedOperation?.kind;
-			delete account.unresolvedOperation;
+			if (held.kind !== kind) {
+				throw new EnrollmentError(
+					'That account has a different unfinished operation recorded against it, so this ' +
+						'answer does not apply to it. Open the account and resolve the one it is ' +
+						'actually waiting on.'
+				);
+			}
+			if (held.fingerprint === undefined || held.fingerprint !== fingerprintOf(account)) {
+				throw new EnrollmentError(
+					'The authenticator on that account is not the one this was recorded about — it has ' +
+						'been replaced or re-imported since. The old record has been cleared; check the ' +
+						'account on Steam and start again if anything is still outstanding.'
+				);
+			}
 
 			if (!steamActed) {
 				// Steam did nothing, so the account is what it always was and the
-				// operation is worth trying again.
-				return;
+				// operation is worth trying again. Only the refusal is lifted.
+				await vault.mutate((draft) => {
+					const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
+					if (stored !== undefined) {
+						delete stored.unresolvedOperation;
+					}
+				});
+				return { ok: true as const };
 			}
-			if (kind === 'activate') {
-				// Steam has the authenticator live. The vault was simply never told.
-				account.status = 'active';
-				return;
-			}
-			if (kind === 'deactivate') {
-				// Steam Guard is off. Keeping the row would keep showing codes for an
-				// authenticator that is not attached to anything.
-				draft.accounts.splice(draft.accounts.indexOf(account), 1);
-				detached = true;
-			}
-		});
 
-		if (detached) {
+			if (kind === 'activate') {
+				// The service owns what an activated account looks like — including the
+				// revocation-code ceremony and the recovery file, both of which the
+				// version written here skipped.
+				await enrollment.reconcileActivated(steamId64);
+				return { ok: true as const };
+			}
+
+			/*
+			 * **A deletion, so it is asked for like one.** `accountDeactivate` demands
+			 * the passphrase because being unlocked is not enough to destroy the only
+			 * copy of a set of secrets, and this path destroys exactly the same thing.
+			 */
+			if (passphrase === undefined || passphrase === '') {
+				throw new EnrollmentError(
+					'Removing the account here needs your vault passphrase, the same as removing it any ' +
+						'other way.'
+				);
+			}
+			await enrollment.reconcileDetached(steamId64, passphrase);
 			// The same teardown a local removal does: cookie jar, cached session,
 			// pending list.
 			onRemoved(steamId64);
+			return { ok: true as const };
 		}
-		return { ok: true as const };
-	});
+	);
 
 	/**
 	 * **The stored refusal, enforced rather than displayed.**

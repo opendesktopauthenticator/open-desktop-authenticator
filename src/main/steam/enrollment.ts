@@ -643,6 +643,64 @@ export class EnrollmentService {
 	 * call then failed — the same unrecoverable state enrollment works so hard to
 	 * avoid, arrived at from the other direction.
 	 */
+	/**
+	 * **Bring the vault into line with an activation the user confirmed on Steam.**
+	 *
+	 * Lives here rather than in the IPC handler because the rules it has to obey
+	 * are this file's rules, and the version that was written in the handler got
+	 * two of them wrong: it set `active` outright, skipping the revocation-code
+	 * ceremony that `pendingRevocationBackup` exists to force, and it left the
+	 * recovery file saying `pendingActivation` for an account that is now live.
+	 * Both are the same mistake — restating a rule instead of calling the code
+	 * that owns it.
+	 */
+	async reconcileActivated(steamId64: string): Promise<void> {
+		await this.vault.mutate((draft) => {
+			const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
+			if (stored === undefined) {
+				return;
+			}
+			// The same expression the activation path uses, and deliberately not a
+			// copy of its conclusion: an account whose revocation code has never been
+			// shown is not finished, however Steam feels about it.
+			stored.status = stored.revocationBackedUpAt ? 'active' : 'pendingRevocationBackup';
+			delete stored.unresolvedOperation;
+		});
+
+		// And the recovery file, which still says `pendingActivation` — written
+		// before Steam was asked, and true until this moment.
+		if (this.updateRecovery) {
+			try {
+				const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+				if (stored) {
+					this.updateRecovery(stored);
+				}
+			} catch {
+				// A stale recovery file is a smaller problem than failing a
+				// reconciliation that has already been applied to the vault.
+			}
+		}
+	}
+
+	/**
+	 * **Forget an account whose authenticator the user confirmed Steam removed.**
+	 *
+	 * The passphrase is required and verified against the file, exactly as
+	 * `deactivate` requires it. This deletes the only copy of a set of secrets,
+	 * and the handler that used to do it inline asked for nothing at all — so an
+	 * unattended unlocked machine could destroy an account through a screen whose
+	 * own removal form refuses to work without the passphrase.
+	 */
+	async reconcileDetached(steamId64: string, passphrase: string): Promise<void> {
+		await this.vault.verifyPassphrase(passphrase);
+		await this.vault.mutate((draft) => {
+			const index = draft.accounts.findIndex((entry) => entry.steamId64 === steamId64);
+			if (index >= 0) {
+				draft.accounts.splice(index, 1);
+			}
+		});
+	}
+
 	async deactivate(steamId64: string, passphrase: string): Promise<void> {
 		// One at a time per account, exactly as `activate` guards itself: the
 		// passphrase check below is deliberately slow, so a double-pressed confirm

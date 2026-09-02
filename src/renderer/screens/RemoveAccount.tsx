@@ -46,7 +46,12 @@ export function RemoveAccount({
 	 * Clear the vault's record that an irreversible operation on this account was
 	 * left unresolved. Called only when the user says they have checked it.
 	 */
-	onResolve: (steamActed: boolean) => Promise<unknown>;
+	/**
+	 * Say what was found on Steam. The passphrase is required to confirm a
+	 * removal, because that path deletes the only copy of the account's secrets
+	 * and being unlocked is not enough to do that.
+	 */
+	onResolve: (steamActed: boolean, passphrase?: string) => Promise<unknown>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [passphrase, setPassphrase] = useState('');
@@ -78,6 +83,14 @@ export function RemoveAccount({
 			: undefined
 	);
 	const [resolving, setResolving] = useState(false);
+	const [resolvePassphrase, setResolvePassphrase] = useState('');
+	/*
+	 * **A rejection has to be visible.** Both buttons went `.then(onClose)` with
+	 * no catch, so a refusal — a wrong passphrase, a record for a different
+	 * operation, an authenticator that had been replaced — closed the screen as
+	 * though it had worked and left the account exactly as it was.
+	 */
+	const [resolveError, setResolveError] = useState<string | undefined>();
 
 	const submit = (event: React.FormEvent): void => {
 		event.preventDefault();
@@ -164,6 +177,15 @@ export function RemoveAccount({
 							'mean nothing. Write down what it says above before you close it.'
 						: 'This application will not send the request again.'}
 				</p>
+				{resolveError !== undefined && <p className="error">{resolveError}</p>}
+				<label htmlFor="resolve-passphrase">Vault passphrase, to remove this account here</label>
+				<input
+					id="resolve-passphrase"
+					type="password"
+					value={resolvePassphrase}
+					onChange={(event) => setResolvePassphrase(event.target.value)}
+					autoComplete="off"
+				/>
 				<div className="controls">
 					<button type="button" onClick={onClose}>
 						Close
@@ -180,33 +202,45 @@ export function RemoveAccount({
 					 * opposite things.** One generic "I have checked" cleared the record
 					 * and left the account exactly as the interrupted removal had left
 					 * it — still listed, still showing codes for an authenticator that
-					 * may no longer be attached. What the user found is the only thing
-					 * that settles it.
+					 * may no longer be attached.
+					 *
+					 * The confirm side deletes the account, so it asks for the
+					 * passphrase the ordinary removal asks for. The deny side is offered
+					 * only when the outcome is genuinely unknown: where Steam is known to
+					 * have acted, "it did not" is a false statement, and acting on it
+					 * would clear the protection and re-offer an operation that has
+					 * already happened.
 					 */}
 					<button
 						type="button"
-						disabled={resolving}
+						disabled={resolving || resolvePassphrase === ''}
 						onClick={() => {
 							setResolving(true);
-							void onResolve(true)
+							setResolveError(undefined);
+							void onResolve(true, resolvePassphrase)
 								.then(onClose)
+								.catch((err: unknown) => setResolveError(messageOf(err)))
 								.finally(() => setResolving(false));
 						}}
 					>
 						Steam Guard is off — remove this account here
 					</button>
-					<button
-						type="button"
-						disabled={resolving}
-						onClick={() => {
-							setResolving(true);
-							void onResolve(false)
-								.then(onClose)
-								.finally(() => setResolving(false));
-						}}
-					>
-						Steam Guard is still on — let me try again
-					</button>
+					{!uncertain.certain && (
+						<button
+							type="button"
+							disabled={resolving}
+							onClick={() => {
+								setResolving(true);
+								setResolveError(undefined);
+								void onResolve(false)
+									.then(onClose)
+									.catch((err: unknown) => setResolveError(messageOf(err)))
+									.finally(() => setResolving(false));
+							}}
+						>
+							Steam Guard is still on — let me try again
+						</button>
+					)}
 				</div>
 			</main>
 		);

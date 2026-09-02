@@ -899,7 +899,9 @@ export function App(): React.JSX.Element {
 					onDeactivate={(passphrase, acknowledgement) =>
 						api.deactivateAuthenticator(removingFor.steamId64, passphrase, acknowledgement)
 					}
-					onResolve={(steamActed) => api.resolveAccountOperation(removingFor.steamId64, steamActed)}
+					onResolve={(steamActed, passphrase) =>
+						api.resolveAccountOperation(removingFor.steamId64, 'deactivate', steamActed, passphrase)
+					}
 					onClose={() => {
 						setRemovingFor(undefined);
 						void refresh();
@@ -1088,7 +1090,9 @@ export function App(): React.JSX.Element {
 							? { unresolved: resumeEnrollment.unresolvedOperation }
 							: {})
 					}
-					onResolve={(steamId64, steamActed) => api.resolveAccountOperation(steamId64, steamActed)}
+					onResolve={(steamId64, steamActed) =>
+						api.resolveAccountOperation(steamId64, 'activate', steamActed)
+					}
 					onBegin={(accountName, password, proxyUrl) =>
 						api.beginEnrollment(accountName, password, proxyUrl)
 					}

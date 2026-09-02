@@ -117,10 +117,20 @@ const api: RendererApi = {
 	submitEnrollmentEmailCode: (code: string) =>
 		ipcRenderer.invoke(CHANNELS.enrollEmailCode, { code }) as Promise<EnrollBegin>,
 	cancelEnrollment: () => ipcRenderer.invoke(CHANNELS.enrollCancel, {}) as Promise<{ ok: true }>,
-	resolveAccountOperation: (steamId64: string, steamActed: boolean) =>
-		ipcRenderer.invoke(CHANNELS.accountResolveOperation, { steamId64, steamActed }) as Promise<{
-			ok: true;
-		}>,
+	resolveAccountOperation: (
+		steamId64: string,
+		kind: 'activate' | 'deactivate',
+		steamActed: boolean,
+		passphrase?: string
+	) =>
+		ipcRenderer.invoke(CHANNELS.accountResolveOperation, {
+			steamId64,
+			// Which operation the screen asked about. The handler refuses a record of
+			// a different kind rather than reinterpreting the answer.
+			kind,
+			steamActed,
+			...(passphrase !== undefined ? { passphrase } : {})
+		}) as Promise<{ ok: true }>,
 	activateAuthenticator: (steamId64: string, code: string) =>
 		ipcRenderer.invoke(CHANNELS.enrollActivate, { steamId64, code }) as Promise<{
 			state: 'activated' | 'wantMore' | 'uncertain';

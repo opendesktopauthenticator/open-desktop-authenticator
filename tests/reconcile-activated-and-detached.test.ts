@@ -1,0 +1,180 @@
+import { describe, expect, it } from 'vitest';
+import { EnrollmentService } from '../src/main/steam/enrollment';
+import type { SteamTransportFactory } from '../src/main/net/transport';
+import type { VaultService } from '../src/main/vault/service';
+import type { Account } from '../src/shared/vault-schema';
+
+/**
+ * **Reconciliation has to obey the rules the ordinary paths obey.**
+ *
+ * When the user comes back and says what Steam actually did, the vault is
+ * brought into line with their answer. The first version of that was written
+ * inside the IPC handler and restated the rules instead of calling the code
+ * that owns them, so it got two of them wrong and skipped a third entirely:
+ *
+ *   - It set `active` outright. A real activation sets
+ *     `pendingRevocationBackup` unless the revocation code has already been
+ *     shown — the ceremony that stops somebody ending up with a live
+ *     authenticator and no way to detach it.
+ *   - It left the recovery file saying `pendingActivation`, which is what that
+ *     file says until Steam confirms. The account is live and its emergency
+ *     copy describes an account that never finished enrolling.
+ *   - It deleted accounts with no passphrase at all, while the ordinary removal
+ *     refuses to work without one, precisely so an unattended unlocked machine
+ *     cannot destroy the only copy of a set of secrets.
+ *
+ * These drive the real service.
+ */
+
+const ID = '76561198000000001';
+
+function account(overrides: Partial<Account> = {}): Account {
+	return {
+		steamId64: ID,
+		accountName: 'trader',
+		sharedSecret: 'c2hhcmVkLXNlY3JldC1ieXRlcw==',
+		identitySecret: 'aWRlbnRpdHktc2VjcmV0LWJ5dGVz',
+		revocationCode: 'R12345',
+		status: 'pendingActivation',
+		addedAt: '2026-01-01T00:00:00.000Z',
+		...overrides
+	} as unknown as Account;
+}
+
+const transports = {} as unknown as SteamTransportFactory;
+
+/** A vault that keeps what a mutate wrote and records passphrase checks. */
+function vaultHolding(accounts: Account[], options: { refuse?: boolean } = {}) {
+	const checked: string[] = [];
+	const vault = {
+		read: () => ({ accounts }),
+		verifyPassphrase: (passphrase: string) => {
+			checked.push(passphrase);
+			return options.refuse === true
+				? Promise.reject(new Error('the passphrase is not correct'))
+				: Promise.resolve(undefined);
+		},
+		mutate: (apply: (draft: { accounts: Account[] }) => void) => {
+			apply({ accounts });
+			return Promise.resolve();
+		}
+	} as unknown as VaultService;
+	return { vault, checked };
+}
+
+describe('an activation the user confirmed on Steam', () => {
+	it('does not skip the revocation-code ceremony', async () => {
+		const accounts = [account()];
+		const { vault } = vaultHolding(accounts);
+		const service = new EnrollmentService(vault, transports, {});
+
+		await service.reconcileActivated(ID);
+
+		expect(
+			accounts[0]?.status,
+			'the account was marked active without its revocation code ever being shown, which is ' +
+				'the one step that stops somebody holding a live authenticator they cannot detach'
+		).toBe('pendingRevocationBackup');
+	});
+
+	/* And where the ceremony is already done, it really is finished. */
+	it('is active when the revocation code has already been backed up', async () => {
+		const accounts = [account({ revocationBackedUpAt: '2026-01-01T00:00:00.000Z' })];
+		const { vault } = vaultHolding(accounts);
+		const service = new EnrollmentService(vault, transports, {});
+
+		await service.reconcileActivated(ID);
+
+		expect(accounts[0]?.status).toBe('active');
+	});
+
+	it('clears the record it was resolving', async () => {
+		const accounts = [account()];
+		accounts[0]!.unresolvedOperation = {
+			kind: 'activate',
+			guidance: 'check the account',
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		const { vault } = vaultHolding(accounts);
+
+		await new EnrollmentService(vault, transports, {}).reconcileActivated(ID);
+
+		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
+	});
+
+	/**
+	 * The recovery file says `pendingActivation` because that was true when it
+	 * was written. An account that is live with an emergency copy describing one
+	 * that never finished enrolling is exactly the state the update exists for.
+	 */
+	it('brings the recovery file with it', async () => {
+		const accounts = [account()];
+		const { vault } = vaultHolding(accounts);
+		const updated: Account[] = [];
+		const service = new EnrollmentService(vault, transports, {
+			updateRecovery: (stored: Account) => {
+				updated.push(stored);
+			}
+		});
+
+		await service.reconcileActivated(ID);
+
+		expect(
+			updated.map((entry) => entry.status),
+			'the vault moved on and the recovery file was left describing an account that never ' +
+				'finished enrolling'
+		).toEqual(['pendingRevocationBackup']);
+	});
+
+	/* A missing account is not an error worth failing a reconciliation over. */
+	it('does nothing for an account that is not there', async () => {
+		const { vault } = vaultHolding([]);
+
+		await expect(
+			new EnrollmentService(vault, transports, {}).reconcileActivated(ID)
+		).resolves.not.toThrow();
+	});
+});
+
+describe('a removal the user confirmed on Steam', () => {
+	it('will not delete anything without checking the passphrase', async () => {
+		const accounts = [account({ status: 'active' })];
+		const { vault, checked } = vaultHolding(accounts, { refuse: true });
+		const service = new EnrollmentService(vault, transports, {});
+
+		await expect(service.reconcileDetached(ID, 'the wrong passphrase')).rejects.toThrow();
+
+		expect(checked, 'the passphrase was never checked at all').toEqual(['the wrong passphrase']);
+		expect(
+			accounts.length,
+			'the account was deleted despite the passphrase being refused — and this path destroys ' +
+				'the only copy of its secrets'
+		).toBe(1);
+	});
+
+	it('removes it once the passphrase is accepted', async () => {
+		const accounts = [account({ status: 'active' })];
+		const { vault, checked } = vaultHolding(accounts);
+
+		await new EnrollmentService(vault, transports, {}).reconcileDetached(
+			ID,
+			'a passphrase long enough'
+		);
+
+		expect(checked).toEqual(['a passphrase long enough']);
+		expect(accounts.length).toBe(0);
+	});
+
+	it('leaves other accounts alone', async () => {
+		const other = account({ steamId64: '76561198000000002' });
+		const accounts = [account({ status: 'active' }), other];
+		const { vault } = vaultHolding(accounts);
+
+		await new EnrollmentService(vault, transports, {}).reconcileDetached(
+			ID,
+			'a passphrase long enough'
+		);
+
+		expect(accounts.map((entry) => entry.steamId64)).toEqual(['76561198000000002']);
+	});
+});

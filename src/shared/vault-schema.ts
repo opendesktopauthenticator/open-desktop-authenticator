@@ -233,6 +233,21 @@ export const accountSchema = z
 				guidance: z.string(),
 				/** `true` when Steam is known to have acted, rather than may have. */
 				certain: z.boolean().optional(),
+				/**
+				 * **Which authenticator this was about.**
+				 *
+				 * The record was keyed on the SteamID alone, and a SteamID outlives the
+				 * authenticator attached to it: remove the account and enrol or import
+				 * a replacement, and a record left over from the old one matched the
+				 * new one exactly. Resolving it then marked a brand-new authenticator
+				 * active — or, on the removal branch, deleted it.
+				 *
+				 * A digest of the shared secret rather than the secret: it identifies
+				 * the authenticator without adding another copy of the thing the whole
+				 * vault exists to protect. Optional because records written before this
+				 * existed have none, and those are refused rather than guessed at.
+				 */
+				fingerprint: z.string().optional(),
 				at: z.string()
 			})
 			/*

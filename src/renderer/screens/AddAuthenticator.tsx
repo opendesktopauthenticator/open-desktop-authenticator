@@ -127,6 +127,13 @@ export function AddAuthenticator({
 				{ guidance: unresolved.guidance, certain: unresolved.certain === true, persisted: true }
 	);
 	const [resolving, setResolving] = useState(false);
+	/*
+	 * **A rejection has to be visible.** The buttons went `.then(onClose)` with no
+	 * catch, so a refusal — a record for a different operation, an authenticator
+	 * replaced since, nothing stored at all — closed the screen as though it had
+	 * worked and changed nothing.
+	 */
+	const [resolveError, setResolveError] = useState<string | undefined>();
 	const [emailDomain, setEmailDomain] = useState<string | undefined>();
 	const [enrolled, setEnrolled] = useState<
 		{ steamId64: string; accountName: string; phoneNumberHint?: string } | undefined
@@ -523,6 +530,7 @@ export function AddAuthenticator({
 								'above before you close it.'
 							: 'This application will not send the request again.'}
 					</p>
+					{resolveError !== undefined && <p className="error">{resolveError}</p>}
 					<div className="controls">
 						<button type="button" onClick={onClose}>
 							Close
@@ -540,6 +548,12 @@ export function AddAuthenticator({
 						 * had already activated it fails in a way that looks like a wrong
 						 * code. What the user found is the only thing that settles it.
 						 */}
+						{/*
+						 * The deny side is offered only where the outcome is genuinely
+						 * unknown. When Steam is known to have acted, "it did not" is a
+						 * false statement, and acting on it clears the protection and
+						 * re-offers an operation that has already happened.
+						 */}
 						{enrolled !== undefined && (
 							<>
 								<button
@@ -547,25 +561,31 @@ export function AddAuthenticator({
 									disabled={resolving}
 									onClick={() => {
 										setResolving(true);
+										setResolveError(undefined);
 										void onResolve(enrolled.steamId64, true)
 											.then(onClose)
+											.catch((err: unknown) => setResolveError(messageOf(err)))
 											.finally(() => setResolving(false));
 									}}
 								>
 									Steam Guard is on this account now
 								</button>
-								<button
-									type="button"
-									disabled={resolving}
-									onClick={() => {
-										setResolving(true);
-										void onResolve(enrolled.steamId64, false)
-											.then(onClose)
-											.finally(() => setResolving(false));
-									}}
-								>
-									Steam Guard is not on it — let me try again
-								</button>
+								{!uncertain.certain && (
+									<button
+										type="button"
+										disabled={resolving}
+										onClick={() => {
+											setResolving(true);
+											setResolveError(undefined);
+											void onResolve(enrolled.steamId64, false)
+												.then(onClose)
+												.catch((err: unknown) => setResolveError(messageOf(err)))
+												.finally(() => setResolving(false));
+										}}
+									>
+										Steam Guard is not on it — let me try again
+									</button>
+								)}
 							</>
 						)}
 					</div>

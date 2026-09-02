@@ -913,7 +913,29 @@ export const IPC_CONTRACT = {
 		 * those and for the third case, where Steam did nothing and a retry is
 		 * exactly what is wanted.
 		 */
-		request: z.object({ steamId64: z.string(), steamActed: z.boolean() }).strict(),
+		request: z
+			.object({
+				steamId64: z.string(),
+				/**
+				 * **Which operation the user is answering about.**
+				 *
+				 * The handler read the *stored* kind and acted on it, so a screen
+				 * asking "is Steam Guard on this account now?" could resolve a
+				 * left-over removal record — and "yes" then meant "the removal
+				 * succeeded", which deleted the account. The caller states what it
+				 * asked, and a record of a different kind is refused rather than
+				 * reinterpreted.
+				 */
+				kind: z.enum(['activate', 'deactivate']),
+				steamActed: z.boolean(),
+				/**
+				 * Required to confirm a removal, exactly as `accountDeactivate`
+				 * requires it: this path deletes an account, and being unlocked is
+				 * not enough to do that.
+				 */
+				passphrase: z.string().optional()
+			})
+			.strict(),
 		response: okResponse
 	},
 
@@ -1253,7 +1275,12 @@ export interface RendererApi {
 	 * Say the account has been checked, clearing the refusal to repeat an
 	 * operation whose outcome was never established.
 	 */
-	resolveAccountOperation(steamId64: string, steamActed: boolean): Promise<{ ok: true }>;
+	resolveAccountOperation(
+		steamId64: string,
+		kind: 'activate' | 'deactivate',
+		steamActed: boolean,
+		passphrase?: string
+	): Promise<{ ok: true }>;
 	/** Abandon a sign-in that has not attached an authenticator yet. */
 	cancelEnrollment(): Promise<{ ok: true }>;
 	activateAuthenticator(
