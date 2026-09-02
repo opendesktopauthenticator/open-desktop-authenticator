@@ -26,7 +26,10 @@ const PROJECTS = [
 		domain: 'buysteamaccounts.com',
 		logo: '/assets/projects/buysteamaccounts.svg',
 		alt: 'BuySteamAccounts',
-		w: 150,
+		// Square, like the others: the file here was a 300x80 wordmark with a
+		// Steam-cloud icon that the site has not used for a long time. Replaced
+		// with the mark buysteamaccounts.com actually serves.
+		w: 40,
 		h: 40,
 		blurb:
 			'A marketplace for Steam accounts aimed at CS2 traders. Handling accounts at volume is what makes authenticator hygiene a daily operational problem rather than an abstract one.'
