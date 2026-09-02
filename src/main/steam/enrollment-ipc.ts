@@ -14,6 +14,7 @@ import type { Account } from '../../shared/vault-schema';
 import { PROXY_REQUIRED } from '../net/egress';
 import { ProxyConsent } from '../net/proxy-consent';
 import { VaultLockedError, type VaultService } from '../vault/service';
+import { noOperationJournal, type OperationJournal } from './operation-journal';
 
 /**
  * IPC for enrollment and maFile export (§12 F2, F3).
@@ -272,7 +273,16 @@ export function registerEnrollmentHandlers(
 	onRemoved: (steamId64: string) => void = () => undefined,
 	recoveryDialog: OpenRecoveryDialog = { pick: () => Promise.resolve(undefined) },
 	/** See `ProxyConsent`. Refuses by default when nothing supplies a way to ask. */
-	proxyConsent: ProxyConsent = new ProxyConsent()
+	proxyConsent: ProxyConsent = new ProxyConsent(),
+	/**
+	 * Where an irreversible call is written down **before** it goes.
+	 *
+	 * Defaults to remembering nothing so the existing call sites keep compiling.
+	 * `operation-journal.test.ts` asserts that `index.ts` supplies a real one,
+	 * because a dependency that quietly defaults to doing nothing is how
+	 * `requireProxies` shipped as a field no code read.
+	 */
+	journal: OperationJournal = noOperationJournal()
 ): void {
 	/**
 	 * Checked before a password is sent anywhere, and before a secret is read.
@@ -505,6 +515,12 @@ export function registerEnrollmentHandlers(
 			 * is the account.
 			 */
 			if (stale) {
+				// The note goes with it. A record about an authenticator that no longer
+				// exists must not be able to come back from disk after the vault copy
+				// is cleared — that is how an account ends up refusing every operation
+				// with nothing in the application able to lift it.
+				journal.clear(steamId64, 'activate');
+				journal.clear(steamId64, 'deactivate');
 				await vault.mutate((draft) => {
 					const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
 					if (stored !== undefined) {
@@ -528,6 +544,16 @@ export function registerEnrollmentHandlers(
 						'actually waiting on.'
 				);
 			}
+
+			/*
+			 * **The user has answered this operation, so the note is spent.**
+			 *
+			 * Cleared here, once the three checks above agree the answer is about this
+			 * record — and before acting, so that a failure while acting cannot leave
+			 * an answered note to be read again on the next start. The vault record,
+			 * where there is one, is cleared by the branches below.
+			 */
+			journal.clear(steamId64, kind);
 
 			if (!steamActed) {
 				// Steam did nothing, so the account is what it always was and the
@@ -615,8 +641,45 @@ export function registerEnrollmentHandlers(
 		stale: boolean;
 	} {
 		const account = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
-		const held = account?.unresolvedOperation;
+		const stored = account?.unresolvedOperation;
+
+		/*
+		 * **The floor under the vault record.**
+		 *
+		 * `latch` runs after Steam answers and writes to the vault, so a lock, a
+		 * crash or a power cut between the send and the answer left nothing at all
+		 * — and the account then looked ordinary, with the same button offering the
+		 * same irreversible call. The note on disk was written before the send and
+		 * survives all three.
+		 *
+		 * Consulted only when the vault has nothing, so the guidance a real failure
+		 * produced always wins over this generic one.
+		 */
+		const note = stored === undefined ? journal.read(steamId64) : undefined;
+		const held =
+			stored ??
+			(note === undefined
+				? undefined
+				: {
+						kind: note.kind,
+						guidance:
+							note.kind === 'activate'
+								? 'This app asked Steam to finish adding an authenticator to this account ' +
+									'and never found out what happened — it was interrupted before Steam ' +
+									'answered. Sign in to Steam and check whether Steam Guard is on this ' +
+									'account before doing anything else here.'
+								: 'This app asked Steam to remove this authenticator and never found out ' +
+									'what happened — it was interrupted before Steam answered. Sign in to ' +
+									'Steam and check whether Steam Guard is still on this account before ' +
+									'doing anything else here.',
+						fingerprint: note.fingerprint,
+						at: note.at
+					});
+
 		if (account === undefined || held === undefined) {
+			// A note with no account row left to hang it on is unreachable from here.
+			// The initial-enrolment case, where there may never have been a row, needs
+			// a surface of its own.
 			return { account, held: undefined, stale: false };
 		}
 		const stale =
@@ -646,10 +709,38 @@ export function registerEnrollmentHandlers(
 		// Sampled before the request goes, so a row replaced while Steam is failing
 		// to answer cannot be what the record ends up describing.
 		const ran = operatedOn(steamId64);
+
+		// **Written down before the request goes.** `latch` below runs after Steam
+		// answers, so a lock on the idle timer, a crash or a power cut in between
+		// left no trace at all — and the account then looked ordinary, with the same
+		// irreversible button on it.
+		journal.record({
+			steamId64,
+			kind: 'activate',
+			fingerprint: ran,
+			at: new Date().toISOString()
+		});
+
 		try {
-			return { state: await enrollment.activate(steamId64, code) };
+			const state = await enrollment.activate(steamId64, code);
+			// The outcome is known, so the note has done its job.
+			journal.clear(steamId64, 'activate');
+			return { state };
 		} catch (err) {
-			const outcome = uncertainOrRethrow(err);
+			let outcome: { state: 'uncertain'; guidance: string; certain?: boolean };
+			try {
+				outcome = uncertainOrRethrow(err);
+			} catch (known) {
+				/*
+				 * **A refusal Steam gave us is not an uncertainty.** A mistyped code or
+				 * a rejected password says plainly that nothing happened, and leaving
+				 * the note behind would turn every ordinary typo into an account that
+				 * reports an unfinished operation for ever, with a warning telling the
+				 * user to go and check Steam over nothing at all.
+				 */
+				journal.clear(steamId64, 'activate');
+				throw known;
+			}
 			/*
 			 * **Whether the refusal survives this window is part of the answer.**
 			 *
@@ -660,7 +751,15 @@ export function registerEnrollmentHandlers(
 			 * a record that does not exist: close the window and the account looks
 			 * ordinary, with the same button offering the same irreversible call.
 			 */
-			return { ...outcome, persisted: await latch(steamId64, 'activate', outcome, ran) };
+			const persisted = await latch(steamId64, 'activate', outcome, ran);
+			if (persisted) {
+				// The vault now carries the guidance the failure actually produced,
+				// which is better than the note's generic wording.
+				journal.clear(steamId64, 'activate');
+			}
+			// The promise the screen makes — that this will not be sent again — is now
+			// backed by the note whenever the vault write is the thing that failed.
+			return { ...outcome, persisted: persisted || journal.read(steamId64) !== undefined };
 		}
 	});
 
@@ -684,17 +783,37 @@ export function registerEnrollmentHandlers(
 			// Before the request goes. See `latch`.
 			const ran = operatedOn(steamId64);
 
+			// Before the request goes, for the reason given on the activation path.
+			journal.record({
+				steamId64,
+				kind: 'deactivate',
+				fingerprint: ran,
+				at: new Date().toISOString()
+			});
+
 			try {
 				await enrollment.deactivate(steamId64, passphrase);
+				journal.clear(steamId64, 'deactivate');
 			} catch (err) {
-				const outcome = uncertainOrRethrow(err);
+				let outcome: { state: 'uncertain'; guidance: string; certain?: boolean };
+				try {
+					outcome = uncertainOrRethrow(err);
+				} catch (known) {
+					// A refusal, not an uncertainty. See the activation path.
+					journal.clear(steamId64, 'deactivate');
+					throw known;
+				}
 				/*
 				 * The account is still in the vault — a removal whose outcome is
 				 * unknown does not get to delete the secrets that might still be the
 				 * live ones — so there is a row to write this on. Whether the write
 				 * landed travels with the outcome; see the activation path above.
 				 */
-				return { ...outcome, persisted: await latch(steamId64, 'deactivate', outcome, ran) };
+				const persisted = await latch(steamId64, 'deactivate', outcome, ran);
+				if (persisted) {
+					journal.clear(steamId64, 'deactivate');
+				}
+				return { ...outcome, persisted: persisted || journal.read(steamId64) !== undefined };
 			}
 
 			// The same cleanup a local removal does: cookie jar, cached session,

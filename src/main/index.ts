@@ -34,6 +34,7 @@ import { AccountBrowsers } from './browser/window';
 import { electronBrowserHost, isAccountBrowserContents } from './browser/electron-host';
 import { EnrollmentService } from './steam/enrollment';
 import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
+import { fileOperationJournal } from './steam/operation-journal';
 import { TransferService } from './steam/transfer';
 import { registerTransferHandlers } from './steam/transfer-ipc';
 import { createRecoveryHooks, reconcileRecoveryFiles, RECOVERY_EXTENSION } from './vault/recovery';
@@ -1027,7 +1028,11 @@ function start(): void {
 					}
 				}
 			},
-			proxyConsent
+			proxyConsent,
+			// Beside the recovery files, and for the same reason: what has to survive
+			// a crash cannot live in the vault, because the vault being sealed or
+			// unwritable is most of what goes wrong here.
+			fileOperationJournal(app.getPath('userData'))
 		);
 		registerCodeHandlers(codes, vault, clipboard, clock);
 
