@@ -35,6 +35,8 @@ interface FakeEl {
 	querySelector(sel: string): FakeEl | null;
 	querySelectorAll(sel: string): FakeEl[];
 	scrollIntoView(): void;
+	/** How many times something asked the page to move to this element. */
+	scrolledIntoView: number;
 	focus(): void;
 	dispatch(type: string, event: Record<string, unknown>): void;
 }
@@ -44,6 +46,7 @@ function el(attributes: Record<string, string> = {}): FakeEl {
 		attributes,
 		hidden: true,
 		textContent: '',
+		scrolledIntoView: 0,
 		onclick: null,
 		listeners: {},
 		getAttribute: (name) => node.attributes[name] ?? null,
@@ -55,7 +58,9 @@ function el(attributes: Record<string, string> = {}): FakeEl {
 		},
 		querySelector: () => null,
 		querySelectorAll: () => [],
-		scrollIntoView: () => undefined,
+		scrollIntoView: () => {
+			node.scrolledIntoView += 1;
+		},
 		focus: () => undefined,
 		dispatch: (type, event) => {
 			for (const fn of node.listeners[type] ?? []) fn.call(node, event);
@@ -79,11 +84,15 @@ function page(options: { dismissed?: boolean } = {}) {
 		options.dismissed === true ? { 'oda.review-prompt.dismissed': '1' } : {};
 
 	const navigated: string[] = [];
+	const keys: ((e: unknown) => void)[] = [];
 	const context = {
 		document: {
 			querySelector: (sel: string) =>
 				sel === '[data-download]' ? root : sel === '[data-review-prompt]' ? prompt : null,
-			querySelectorAll: (sel: string) => (sel === '[data-got-it]' ? [route] : [])
+			querySelectorAll: (sel: string) => (sel === '[data-got-it]' ? [route] : []),
+			addEventListener: (type: string, fn: (e: unknown) => void) => {
+				if (type === 'keydown') keys.push(fn);
+			}
 		},
 		navigator: { userAgent: 'Mozilla/5.0 (Windows NT 10.0)', platform: 'Win32' },
 		window: {
@@ -107,7 +116,15 @@ function page(options: { dismissed?: boolean } = {}) {
 		}
 	};
 	runInNewContext(SOURCE, context);
-	return { route, prompt, proceed, dismiss, navigated, store };
+	return {
+		route,
+		prompt,
+		proceed,
+		dismiss,
+		navigated,
+		store,
+		press: (key: string) => keys.forEach((fn) => fn({ key }))
+	};
 }
 
 /** A plain left click, as a mouse makes one. */
@@ -209,7 +226,8 @@ describe('the page without the prompt in it', () => {
 		runInNewContext(SOURCE, {
 			document: {
 				querySelector: (sel: string) => (sel === '[data-download]' ? root : null),
-				querySelectorAll: () => []
+				querySelectorAll: () => [],
+				addEventListener: () => undefined
 			},
 			navigator: { userAgent: 'Mozilla/5.0 (Windows NT 10.0)', platform: 'Win32' },
 			window: {
@@ -222,5 +240,78 @@ describe('the page without the prompt in it', () => {
 		route.dispatch('click', click.event);
 
 		expect(click.wasPrevented(), 'a page with no prompt still cancelled the download').toBe(false);
+	});
+});
+
+/**
+ * **It opens where the reader is standing.**
+ *
+ * The prompt is the last element in the article and the download buttons are
+ * near the top. Measured on the built page at 1920x889: pressing "Get it from
+ * the Microsoft Store" scrolled the reader 3,798px to the very bottom, leaving
+ * the button they had just pressed 3,335px above the fold and the card sitting
+ * beside the review section it duplicated.
+ *
+ * It is a fixed dialog now, so the page behind it does not move — which means
+ * nothing may ask it to.
+ */
+describe('showing the prompt', () => {
+	it('does not drag the page anywhere', () => {
+		const { route, prompt } = page();
+		route.dispatch('click', plainClick().event);
+
+		expect(
+			prompt.scrolledIntoView,
+			'the page was scrolled to the prompt, which on this page means throwing the reader ' +
+				'thousands of pixels away from the button they just pressed'
+		).toBe(0);
+	});
+});
+
+/**
+ * **Escape leaves without answering.**
+ *
+ * The dialog covers the page while it is open, so without this the only ways
+ * out are to go to the store or to say "never ask again" — and a reader who
+ * wants neither right now has been cornered by a review request, which is the
+ * opposite of what it is for.
+ *
+ * Nothing is remembered, so pressing the download button again asks again.
+ * That is the harmless direction: an extra ask, never a blocked download.
+ */
+describe('pressing Escape', () => {
+	it('closes the prompt', () => {
+		const { route, prompt, press } = page();
+		route.dispatch('click', plainClick().event);
+		expect(prompt.hidden).toBe(false);
+
+		press('Escape');
+
+		expect(prompt.hidden, 'the reader is held in a review request they cannot leave').toBe(true);
+	});
+
+	it('does not count as an answer', () => {
+		const { route, prompt, press, store } = page();
+		route.dispatch('click', plainClick().event);
+		press('Escape');
+
+		expect(
+			store['oda.review-prompt.dismissed'],
+			'backing out of the ask was recorded as turning it down, so somebody who meant "not now" ' +
+				'is never asked again'
+		).toBeUndefined();
+
+		route.dispatch('click', plainClick().event);
+		expect(prompt.hidden, 'and it never came back').toBe(false);
+	});
+
+	it('leaves other keys alone', () => {
+		const { route, prompt, press } = page();
+		route.dispatch('click', plainClick().event);
+
+		press('a');
+		press('Enter');
+
+		expect(prompt.hidden).toBe(false);
 	});
 });

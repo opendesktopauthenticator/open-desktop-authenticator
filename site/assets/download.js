@@ -108,6 +108,21 @@
 		});
 	}
 
+	/*
+	 * Escape closes it without answering.
+	 *
+	 * It covers the page while it is open, so without this the only ways out are
+	 * to go to the store or to say "never ask again" — and a reader who wants
+	 * neither right now has been cornered by a review request, which is the
+	 * opposite of what it is for. Nothing is remembered: press the button again
+	 * and it asks again.
+	 */
+	document.addEventListener('keydown', function (event) {
+		if (event.key === 'Escape' && !prompt.hidden) {
+			prompt.hidden = true;
+		}
+	});
+
 	var routes = document.querySelectorAll('[data-got-it]');
 	for (var i = 0; i < routes.length; i += 1) {
 		routes[i].addEventListener('click', function (event) {
@@ -135,8 +150,13 @@
 					window.location.href = href;
 				};
 			}
+			/*
+			 * No `scrollIntoView`. The prompt is fixed while it is open — see
+			 * `.ask-prompt:not([hidden])` — so it arrives in front of whatever the
+			 * reader is looking at. Scrolling to it was what dragged them 3,798px
+			 * down the page to reach it, which is the thing being fixed.
+			 */
 			prompt.hidden = false;
-			prompt.scrollIntoView({ block: 'center' });
 			if (proceed) proceed.focus();
 		});
 	}

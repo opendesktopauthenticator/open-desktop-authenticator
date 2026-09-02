@@ -289,14 +289,11 @@ ${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
 					</p>
 					<div class="ask-actions">
 						<a class="button" href="#" data-review-continue rel="noopener">Continue to the download →</a>
+						<a class="button button-quiet" href="${s.reviews.write}" rel="noopener nofollow">Write a review →</a>
 						<button type="button" class="button button-quiet" data-review-dismiss>
 							Do not ask again
 						</button>
 					</div>
-					<div class="ask-collector" data-review-prompt-collector>${reviewCollector(s)}</div>
-					<p class="hint">
-						Already used it? The box above goes straight to the review form.
-					</p>
 				</div>
 			</aside>
 		</article>`

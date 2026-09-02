@@ -980,27 +980,6 @@ main.has-hero {
 }
 
 /*
- * The Trustpilot box.
- *
- * `min-height` holds the space the iframe will take, so the paragraph below it
- * does not jump when the widget finishes loading — and the reader's eye is on
- * this block at exactly the moment it would move. It collapses to nothing when
- * the script is blocked, leaving the anchor inside it as an ordinary link.
- */
-/*
- * **Sized to the button, not to the column.**
- *
- * The widget was given the full width of the card, and Trustpilot centres a
- * small button inside whatever box it is handed — so a dark page carried a
- * white slab the width of the article with a button floating in the middle of
- * it. The frame is the widget's own background, which no rule here can reach
- * into, so the fix is to stop giving it room to be a slab.
- *
- * `min-height` holds the space the iframe will occupy so the paragraph below it
- * does not jump when it loads, and the reader's eye is on this block at exactly
- * the moment it would move.
- */
-/*
  * **Sized to the button inside it, not to the column.**
  *
  * Trustpilot's Review Collector is a fixed white button, and it ignores
@@ -1015,6 +994,10 @@ main.has-hero {
  *
  * `min-height` holds the space before the frame loads, so the line below it
  * does not jump while the reader is looking at it.
+ *
+ * One of these, on the review section. The download prompt used to carry a
+ * second copy directly below it, so the foot of the page showed two identical
+ * white boxes; the prompt asks with an ordinary button now.
  */
 .ask-collector {
 	margin: 10px 0 6px;
@@ -1028,13 +1011,51 @@ main.has-hero {
 }
 
 /*
- * The prompt shown after a download starts. Marked out a little more than the
- * ordinary ask because it appears rather than being scrolled to, and something
- * that appears without saying why reads as an advertisement.
+ * **The prompt is a dialog, because of where the reader is standing.**
+ *
+ * It is the last element in the article and the download buttons are near the
+ * top. Measured on the built page at a 1920x889 viewport: pressing "Get it from
+ * the Microsoft Store" at y=463 scrolled the reader 3,798px to a card at the
+ * very bottom, immediately below the review section it duplicated, and left the
+ * button they had just pressed 3,335px above the fold. An ask that teleports
+ * somebody to the far end of the page reads as the page breaking, not as a
+ * question.
+ *
+ * So it opens where they already are — whichever button they pressed, wherever
+ * they had scrolled to — and the page behind it does not move at all.
+ *
+ * Only while it is open. `hidden` keeps it out of the flow entirely, and if the
+ * stylesheet never arrives it is an ordinary block at the end of the article
+ * with a working link in it, which is the same failure mode the script has.
+ *
+ * `safe center` rather than plain centring: a short window would otherwise
+ * centre a tall card by pushing its top out of reach, and the heading is the
+ * part that explains why the thing appeared.
  */
 .ask-prompt {
 	border-color: var(--line-strong);
 	margin-top: 28px;
+}
+.ask-prompt:not([hidden]) {
+	position: fixed;
+	inset: 0;
+	z-index: 60;
+	display: grid;
+	place-items: safe center;
+	margin: 0;
+	padding: 24px;
+	border: 0;
+	border-radius: 0;
+	background: rgba(3, 6, 9, 0.72);
+	overflow-y: auto;
+}
+.ask-prompt:not([hidden]) .ask-body {
+	width: min(560px, 100%);
+	padding: 26px 28px;
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius);
+	background: var(--panel);
+	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
 }
 
 /* ------------------------------------------------------------------ give -- */
