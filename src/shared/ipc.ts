@@ -933,7 +933,12 @@ export const IPC_CONTRACT = {
 				 * requires it: this path deletes an account, and being unlocked is
 				 * not enough to do that.
 				 */
-				passphrase: z.string().optional()
+				/*
+				 * Bounded like every other passphrase in the contract. This one reaches
+				 * scrypt, and an unbounded string reaches it with whatever length the
+				 * caller chose — a megabyte of it verified as readily as a sentence.
+				 */
+				passphrase: z.string().min(1).max(1024).optional()
 			})
 			.strict(),
 		response: okResponse

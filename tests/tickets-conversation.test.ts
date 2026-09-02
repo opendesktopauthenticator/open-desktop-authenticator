@@ -379,16 +379,35 @@ describe('a rejected report keeps what was written', () => {
 		// This form is a second copy of the one in site/pages/guides.mjs. The copies
 		// drifting apart is the cost of having two; this is what stops it happening
 		// silently — a field added to one and not the other fails here.
-		const { readFileSync, existsSync } = await import('node:fs');
-		const built = 'site/dist/support.html';
-		if (!existsSync(built)) return; // Nothing to compare against until a build runs.
+		/*
+		 * **Rendered here rather than read from `site/dist`.**
+		 *
+		 * This read the built page and returned silently when it was absent, which
+		 * on a clean checkout is always: both workflows run `npm test` before
+		 * `node site/build.mjs`, so the one assertion that stops the two copies
+		 * drifting has never run in CI. It passed on developer machines with a
+		 * stale build lying about, which is the worst place for a guard to work.
+		 */
+		const pages = await import('../site/pages/index.mjs');
+		const support = (pages.PAGES as { slug: string; body?: (s: unknown) => string }[]).find(
+			(page) => page.slug === 'support'
+		);
+		if (support?.body === undefined) {
+			expect.fail('the support page is no longer in PAGES, so this compares nothing');
+		}
 		const names = (html: string) =>
 			new Set(
 				[...html.matchAll(/<(?:input|textarea|select)[^>]*\sname="([^"]+)"/g)]
 					.map((m) => m[1])
 					.filter((n) => n !== 'attachments')
 			);
-		const published = names(readFileSync(built, 'utf8'));
+		/*
+		 * A stub, not the real `SITE` — importing `site/build.mjs` writes the whole
+		 * site as a side effect, thirty-two files on every test run, which is the
+		 * other half of the mistake this test was making. The support page's body
+		 * reads nothing off the site object, so an empty one renders it exactly.
+		 */
+		const published = names(support.body({}));
 		const retry = names((await reject({ kind: 'bug', summary: 'x', detail: 'short' })).body);
 		expect([...retry].sort()).toEqual([...published].sort());
 	});

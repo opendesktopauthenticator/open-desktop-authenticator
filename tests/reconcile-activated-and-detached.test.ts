@@ -306,3 +306,109 @@ describe('a row replaced while the reconciliation was in flight', () => {
 		).toBe('pendingActivation');
 	});
 });
+
+/**
+ * **One authenticator, one irreversible operation at a time.**
+ *
+ * Activation and removal had a mutex each. Each refused a second of its own
+ * kind and neither could see the other — and they concern the same
+ * authenticator. Both could reach Steam at once, and when both came back
+ * uncertain the second record overwrote the first, losing the durable warning
+ * about the operation that started earlier.
+ *
+ * Reachable without contrivance: a notification click navigates away from the
+ * activation screen while it is still waiting on Steam, and Remove is available
+ * from the account list the moment it lands.
+ */
+describe('an activation and a removal for the same authenticator', () => {
+	/**
+	 * A token the service will accept, and a transport that hands one back.
+	 *
+	 * The file-level `transports` is an empty object, which is fine for the
+	 * reconciliations above — they never reach Steam. These do.
+	 */
+	const jwt = (claims: Record<string, unknown>): string => {
+		const encode = (value: unknown): string =>
+			Buffer.from(JSON.stringify(value)).toString('base64url');
+		return `${encode({ typ: 'JWT' })}.${encode(claims)}.sig`;
+	};
+	const TOKEN = jwt({ aud: ['web', 'mobile'], exp: Math.floor(Date.now() / 1000) + 86_400 });
+	const live = {
+		forAccount: () =>
+			Promise.resolve(() =>
+				Promise.resolve({
+					status: 200,
+					text: JSON.stringify({ response: { access_token: TOKEN } })
+				})
+			)
+	} as unknown as SteamTransportFactory;
+
+	/**
+	 * A service whose activation hangs inside Steam until released.
+	 *
+	 * `atSteam` resolves when `finalizeEnrollment` is actually entered, which is
+	 * several awaits after `activate` is called — the token mint happens first.
+	 * Releasing before that point leaves the activation hanging for ever, which
+	 * is how the first version of these timed out rather than asserting.
+	 */
+	function hanging() {
+		// `activate` refuses anything but pendingActivation before it reaches the
+		// mutex, so an active account would never engage the guard under test.
+		const accounts = [account({ status: 'pendingActivation', refreshToken: TOKEN })];
+		let releaseFinalize: (() => void) | undefined;
+		let arrived: () => void = () => undefined;
+		const atSteam = new Promise<void>((resolve) => {
+			arrived = resolve;
+		});
+		const service = new EnrollmentService(vaultHolding(accounts).vault, live, {
+			finalizeEnrollment: () =>
+				new Promise((resolve) => {
+					releaseFinalize = () => resolve({ state: 'activated' as const });
+					arrived();
+				}),
+			removeAuthenticator: () => Promise.resolve()
+		});
+		return { service, accounts, atSteam, release: () => releaseFinalize?.() };
+	}
+
+	it('cannot both be in flight at once', async () => {
+		const { service, release, atSteam } = hanging();
+
+		// The activation reaches Steam and hangs there.
+		const activating = service.activate(ID, '12345');
+		await atSteam;
+
+		await expect(
+			service.deactivate(ID, 'a passphrase long enough'),
+			'the removal reached Steam while the activation was still waiting on it, and the record ' +
+				'the second one wrote overwrote the first'
+		).rejects.toThrow(/being activated/i);
+
+		release();
+		await activating.catch(() => undefined);
+	});
+
+	/* And the refusal says which operation is holding it. */
+	it('says what is already running', async () => {
+		const { service, release, atSteam } = hanging();
+		const activating = service.activate(ID, '12345');
+		await atSteam;
+
+		const err = await service.deactivate(ID, 'a passphrase long enough').catch((e: unknown) => e);
+
+		expect((err as Error).message).toMatch(/wait for that to finish/i);
+		release();
+		await activating.catch(() => undefined);
+	});
+
+	/* And once it settles, the other operation is allowed. */
+	it('lets the other one run once the first has finished', async () => {
+		const { service, release, atSteam } = hanging();
+		const activating = service.activate(ID, '12345');
+		await atSteam;
+		release();
+		await activating.catch(() => undefined);
+
+		await expect(service.deactivate(ID, 'a passphrase long enough')).resolves.not.toThrow();
+	});
+});

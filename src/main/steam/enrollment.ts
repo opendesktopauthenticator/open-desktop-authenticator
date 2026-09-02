@@ -150,11 +150,23 @@ export class EnrollmentService {
 	/** Access tokens for accounts mid-enrollment, so activation need not sign in again. */
 	private readonly tokens = new Map<string, string>();
 
-	/** Accounts with an activation in flight. See the guard in `activate`. */
-	private readonly activating = new Set<string>();
-
-	/** Accounts with a removal in flight. See the guard in `deactivate`. */
-	private readonly deactivating = new Set<string>();
+	/**
+	 * **Accounts with an irreversible Steam operation in flight.**
+	 *
+	 * One set for both, and that is the whole point. Activation and removal had a
+	 * mutex each, so each refused a second of its own kind and neither could see
+	 * the other — and they concern the same authenticator. Both could reach Steam
+	 * at once, and when both outcomes came back uncertain the second record
+	 * overwrote the first, losing the durable warning about the operation that
+	 * started earlier.
+	 *
+	 * It is reachable without contrivance: a notification click navigates away
+	 * from the activation screen while it is still waiting on Steam, and Remove
+	 * is available from the account list the moment it lands.
+	 *
+	 * The value is what is running, so the refusal can say which.
+	 */
+	private readonly inFlight = new Map<string, 'activation' | 'removal'>();
 
 	/**
 	 * True from the first line of `begin` until it settles.
@@ -504,14 +516,20 @@ export class EnrollmentService {
 		// two `finalizeEnrollment` calls racing on one account send Steam two codes
 		// for the same window, and the loser's failure is indistinguishable from a
 		// wrong code.
-		if (this.activating.has(steamId64)) {
-			throw new EnrollmentError('that account is already being activated.');
+		const running = this.inFlight.get(steamId64);
+		if (running !== undefined) {
+			throw new EnrollmentError(
+				running === 'activation'
+					? 'that account is already being activated.'
+					: 'that account is having its authenticator removed from Steam. Wait for that to ' +
+							'finish before activating it.'
+			);
 		}
-		this.activating.add(steamId64);
+		this.inFlight.set(steamId64, 'activation');
 		try {
 			return await this.finishActivation(account, steamId64, activationCode);
 		} finally {
-			this.activating.delete(steamId64);
+			this.inFlight.delete(steamId64);
 		}
 	}
 
@@ -727,6 +745,13 @@ export class EnrollmentService {
 				// reconciliation that has already been applied to the vault.
 			}
 		}
+
+		// The same teardown the ordinary activation does. An access token and the
+		// SMS marker for an account that is finished are credentials and state
+		// nothing needs, and leaving them until the next lock is a difference from
+		// the path this mirrors with no reason behind it.
+		this.tokens.delete(steamId64);
+		this.textedTheCode.delete(steamId64);
 		return true;
 	}
 
@@ -774,14 +799,20 @@ export class EnrollmentService {
 		// sent `RemoveAuthenticator` twice — the second answered for an
 		// authenticator already gone, and its failure surfaced as an error for an
 		// operation that had in fact succeeded.
-		if (this.deactivating.has(steamId64)) {
-			throw new EnrollmentError('that account is already being removed.');
+		const running = this.inFlight.get(steamId64);
+		if (running !== undefined) {
+			throw new EnrollmentError(
+				running === 'removal'
+					? 'that account is already being removed.'
+					: 'that account is being activated. Wait for that to finish before removing its ' +
+							'authenticator from Steam.'
+			);
 		}
-		this.deactivating.add(steamId64);
+		this.inFlight.set(steamId64, 'removal');
 		try {
 			await this.deactivateOnce(steamId64, passphrase);
 		} finally {
-			this.deactivating.delete(steamId64);
+			this.inFlight.delete(steamId64);
 		}
 	}
 
@@ -971,10 +1002,10 @@ export class EnrollmentService {
 		}
 		this.tokens.clear();
 		this.textedTheCode.clear();
-		// An activation in flight will clear its own entry when it settles, but a
+		// An operation in flight will clear its own entry when it settles, but a
 		// lock means nobody is waiting on it — and a stale marker would refuse the
 		// retry after the next unlock.
-		this.activating.clear();
+		this.inFlight.clear();
 	}
 
 	/**
