@@ -1,4 +1,4 @@
-import { statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { deriveKey, sealWithKey, unseal, VaultCryptoError, wipe } from './crypto';
 import {
@@ -259,13 +259,14 @@ export class VaultService {
 		 * the same rotation, so the vault carrying that salt is exactly the
 		 * statement "the main write landed". Nothing else has to be recorded.
 		 */
-		let vaultKdf;
+		let vaultEnvelope;
 		try {
-			vaultKdf = readEnvelope(this.file).kdf;
+			vaultEnvelope = readEnvelope(this.file);
 		} catch {
 			this.backupSuspect = true;
 			return false;
 		}
+		const vaultKdf = vaultEnvelope.kdf;
 		if (vaultKdf.salt !== journal.backup.kdf.salt) {
 			// The rotation never reached the vault. Nothing is owed, and the backup
 			// beside it is the one that belongs to the key still in use.
@@ -294,10 +295,40 @@ export class VaultService {
 		 * vault's own salt is the statement "this debt was paid", whatever the
 		 * journal is still saying.
 		 */
+		/*
+		 * **A nonce settles it outright**, where the salt could not.
+		 *
+		 * Every seal gets a fresh nonce, so a vault still carrying the one this
+		 * rotation wrote is the statement "nothing has been written since". A
+		 * different one means a save has landed and the rotation is long finished:
+		 * the journal outlived it, and replaying would put a rotation-era backup
+		 * over one those saves had moved on.
+		 */
+		if (journal.vaultNonce !== undefined && vaultEnvelope.cipher.nonce !== journal.vaultNonce) {
+			clearRotationJournal(this.file);
+			this.backupSuspect = false;
+			return false;
+		}
+
 		const backupOnDisk = readBackupEnvelope(this.file);
 		if (backupOnDisk !== undefined && backupOnDisk.kdf.salt === vaultKdf.salt) {
 			clearRotationJournal(this.file);
 			this.backupSuspect = false;
+			return false;
+		}
+
+		/*
+		 * **A journal from before the nonce existed, with no backup left to compare
+		 * against.**
+		 *
+		 * The check above needs a readable `.bak`. Without one, and without a
+		 * nonce, nothing on disk separates a stale journal from a real debt — so
+		 * this does not fabricate an answer. An absent backup already tells the
+		 * user there is nothing to restore; standing a possibly-obsolete one in its
+		 * place would be a worse kind of nothing.
+		 */
+		if (backupOnDisk === undefined && journal.vaultNonce === undefined) {
+			this.backupSuspect = existsSync(`${this.file}.bak`);
 			return false;
 		}
 
@@ -841,7 +872,10 @@ export class VaultService {
 		// reason to skip this.
 		this.reconcileFailed = false;
 		try {
-			writeRotationJournal(this.file, rotatedBackup);
+			// The nonce of the vault this rotation is about to write. Fresh for every
+			// seal, so a later start can tell "nothing has been written since" from
+			// "this debt was paid and the journal outlived it".
+			writeRotationJournal(this.file, rotatedBackup, rotatedVault.cipher.nonce);
 		} catch (err) {
 			wipe(newKey);
 			throw err;

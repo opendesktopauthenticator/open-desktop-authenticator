@@ -264,8 +264,17 @@ function syncDirectory(dir: string): void {
 const journalPath = (file: string): string => `${file}.rotating`;
 
 /** Record the backup a rotation is about to write. */
-export function writeRotationJournal(file: string, envelope: Envelope): void {
-	const serialised = `${JSON.stringify(envelope, null, 2)}
+export function writeRotationJournal(file: string, envelope: Envelope, vaultNonce?: string): void {
+	/*
+	 * Wrapped rather than bare, so the nonce of the vault this rotation is about
+	 * to write travels with the backup it owes. `readRotationJournal` still
+	 * accepts the bare envelope a previous build wrote.
+	 */
+	const serialised = `${JSON.stringify(
+		vaultNonce === undefined ? envelope : { backup: envelope, vaultNonce },
+		null,
+		2
+	)}
 `;
 	const temp = `${journalPath(file)}.tmp`;
 	try {
@@ -320,10 +329,25 @@ export function readRotationJournal(file: string): RotationJournal {
 		return { state: 'unreadable' };
 	}
 	try {
-		return {
-			state: 'owed',
-			backup: envelopeSchema.parse(JSON.parse(readFileSync(journalPath(file), 'utf8')))
-		};
+		const parsed: unknown = JSON.parse(readFileSync(journalPath(file), 'utf8'));
+		/*
+		 * Two shapes, and they cannot be confused: an envelope requires `version`,
+		 * `kdf`, `cipher`, `ciphertext` and `modifiedAt`, none of which the wrapper
+		 * has. The bare form is what builds before the nonce existed wrote.
+		 */
+		if (
+			typeof parsed === 'object' &&
+			parsed !== null &&
+			'backup' in parsed &&
+			typeof (parsed as { vaultNonce?: unknown }).vaultNonce === 'string'
+		) {
+			return {
+				state: 'owed',
+				backup: envelopeSchema.parse(parsed.backup),
+				vaultNonce: (parsed as unknown as { vaultNonce: string }).vaultNonce
+			};
+		}
+		return { state: 'owed', backup: envelopeSchema.parse(parsed) };
 	} catch {
 		/*
 		 * **Unreadable is not absent.**
@@ -350,7 +374,31 @@ export function readRotationJournal(file: string): RotationJournal {
  *     may still open with a retired passphrase and nothing can put that right.
  */
 export type RotationJournal =
-	{ state: 'none' } | { state: 'owed'; backup: Envelope } | { state: 'unreadable' };
+	| { state: 'none' }
+	| {
+			state: 'owed';
+			backup: Envelope;
+			/**
+			 * The nonce of the vault this rotation wrote, when the journal records
+			 * one.
+			 *
+			 * **The salt cannot tell a paid debt from an owed one.** A finished
+			 * rotation leaves the vault carrying exactly the salt the journal names,
+			 * and so does every ordinary save after it — so one failed `unlink` made
+			 * the debt look owed for ever, and a later start wrote the rotation-era
+			 * backup over a `.bak` the saves had moved on. Comparing the backup on
+			 * disk covers that until the backup goes missing, and then there is
+			 * nothing left to compare.
+			 *
+			 * The nonce is fresh for every seal, so a vault still carrying the
+			 * rotation's own nonce is the statement "nothing has been written since"
+			 * — which makes installing this backup correct whether the rotation was
+			 * interrupted or merely failed to tidy up. Undefined for journals written
+			 * before this field existed.
+			 */
+			vaultNonce?: string;
+	  }
+	| { state: 'unreadable' };
 
 /** The rotation is finished, one way or another. */
 export function clearRotationJournal(file: string): void {

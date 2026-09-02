@@ -391,3 +391,81 @@ describe('a journal the process cannot look at', () => {
 		expect(service().backupAvailable()).toBeDefined();
 	});
 });
+
+/**
+ * **A journal that outlived its rotation, and no backup left to compare it to.**
+ *
+ * `clearRotationJournal` unlinks and swallows the failure. The salt cannot see
+ * the difference — a finished rotation leaves the vault carrying exactly the
+ * salt the journal names, and so does every ordinary save after it — so the
+ * backup on disk was made the discriminator: already under the current key
+ * means the debt was paid.
+ *
+ * That needs a backup to look at. Take it away and the fallback was to pay a
+ * debt already paid, writing a rotation-era copy over whatever later saves had
+ * produced.
+ *
+ * The vault's nonce settles it without `.bak` at all: every seal gets a fresh
+ * one, so a vault still carrying the rotation's own nonce is the statement
+ * "nothing has been written since".
+ */
+describe('a stale journal whose backup has gone missing', () => {
+	it('is not replayed over a vault that has moved on', async () => {
+		const vault = await vaultWithAnAccount();
+		await vault.changePassphrase(OLD, NEW);
+
+		/*
+		 * Exactly what a failed unlink leaves behind: the journal this rotation
+		 * wrote, still on disk after the rotation completed. Rebuilt from the state
+		 * the rotation produced rather than by stubbing `unlinkSync`, so the case
+		 * does not depend on how the deletion happens to be written.
+		 */
+		const staleJournal = JSON.stringify({
+			backup: JSON.parse(readFileSync(`${file}.bak`, 'utf8')) as unknown,
+			vaultNonce: (JSON.parse(readFileSync(file, 'utf8')) as { cipher: { nonce: string } }).cipher
+				.nonce
+		});
+
+		// Two ordinary saves after the rotation, then the backup goes missing.
+		await vault.mutate((draft) => {
+			draft.accounts.push({
+				steamId64: '76561199000000002',
+				accountName: 'second',
+				sharedSecret: 'c2hhcmVkLXNlY3JldC1ieXRlcw==',
+				identitySecret: 'aWRlbnRpdHktc2VjcmV0LWJ5dGVz',
+				status: 'active',
+				addedAt: '2026-01-02T00:00:00.000Z'
+			} as never);
+		});
+		await vault.mutate((draft) => {
+			draft.settings.autoLockMinutes = 15;
+		});
+		rmSync(`${file}.bak`, { force: true });
+		writeFileSync(`${file}.rotating`, staleJournal);
+
+		expect(
+			service().reconcile(),
+			'a journal that outlived its rotation was replayed once the backup it would have been ' +
+				'compared against was gone, so a rotation-era copy stood in for two later saves'
+		).toBe(false);
+		expect(
+			existsSync(`${file}.bak`),
+			'and an obsolete backup was fabricated where there had been none'
+		).toBe(false);
+	});
+
+	/*
+	 * And the debt that is genuinely owed is still paid, even with no readable
+	 * backup to compare against — which is the case a blanket refusal would get
+	 * wrong.
+	 */
+	it('still finishes a rotation that really was interrupted', async () => {
+		await interruptedRotation();
+		writeFileSync(`${file}.bak`, '{ "version": 1, "kdf');
+
+		expect(service().reconcile(), 'a real debt went unpaid because the backup was damaged').toBe(
+			true
+		);
+		expect(existsSync(`${file}.bak.previous`), 'a set-aside copy was left behind').toBe(false);
+	});
+});
