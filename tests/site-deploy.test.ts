@@ -91,6 +91,10 @@ function archiveBytes(members: TarMember[]): Buffer {
 
 describe('the checked-in site deploy helper', () => {
 	it('keeps cached-page assets, deletes retired pages, and retries from an empty stage', () => {
+		// `tmp/` is gitignored, so it is present on a machine that has run this
+		// before and absent from every fresh checkout. See the same note in
+		// `tests/infra-runtime.test.ts`.
+		mkdirSync(join(ROOT, 'tmp'), { recursive: true });
 		const root = mkdtempSync(join(ROOT, 'tmp', 'oda-site-deploy-'));
 		roots.push(root);
 		const source = join(root, 'source');

@@ -41,6 +41,13 @@ function native(path: string): string {
 function temp(name: string): string {
 	// Git Bash is sandboxed from writing through its /c mount in the desktop
 	// runner. Keep the executable fixture inside this writable workspace.
+	//
+	// **And create it.** `tmp/` is gitignored, so it exists on a machine that has
+	// run this before and never in a fresh clone — which is every CI checkout.
+	// Nineteen cases here failed as `ENOENT ... mkdtemp` on windows-latest, before
+	// reaching a single assertion, the first time this file ran anywhere but its
+	// author's desktop.
+	mkdirSync(join(ROOT, 'tmp'), { recursive: true });
 	const value = mkdtempSync(join(ROOT, 'tmp', `${name}-`));
 	roots.push(value);
 	return value;
