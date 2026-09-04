@@ -40,6 +40,23 @@ is substituting the taskbar image specifically for this `BaseWindow` path. An
 identity-only change therefore passes API tests but does not fix the reported
 behavior.
 
+### Second manual-gate correction — 2026-09-05
+
+`Screenshot_3893.png` proves the first implementation still did not meet the
+visible acceptance check: replacing `BaseWindow` removed the generic white
+window, but the account `BrowserWindow` appeared under Electron's gray atom.
+The earlier verification mistook an unchanged taskbar crop for successful
+grouping; it never identified the account button itself.
+
+A new live matrix held the BrowserWindow class, ICO bytes and window behavior
+constant. Supplying those bytes as either the generated `windowImage()` or a
+`NativeImage` loaded from `build/icon.ico` produced Electron's atom. Supplying
+the absolute `build/icon.ico` **string path** directly as the constructor's
+`icon` produced the green ODA shield. Full development AppDetails remains
+compatible but is not the controlled variable. Therefore the remaining defect
+is the representation passed to Electron, not another window-class or refresh
+ordering problem.
+
 ## Related release identities found during the pre-fix review
 
 The same helper is used by four materially different Windows environments, so
@@ -47,7 +64,7 @@ the corrective change must not treat `app.isPackaged` as the whole decision:
 
 | Environment               | Shell identity                                  | Durable icon / relaunch target                                                              |
 | ------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Development               | no process/window ID in the ordinary run        | each real `BrowserWindow`'s source-tree product icon                                        |
+| Development               | no process/window ID in the ordinary run        | absolute source-tree `build/icon.ico` string passed to each real `BrowserWindow`            |
 | Installed / unpacked NSIS | the desktop product ID used by Electron Builder | the packaged executable and installer shortcut; no per-window override                      |
 | Portable                  | a portable-specific per-window ID               | `PORTABLE_EXECUTABLE_FILE`, the stable outer launcher, never the temporary inner executable |
 | Microsoft Store           | the package manifest's identity                 | Windows package metadata; no desktop AppUserModelID override                                |
@@ -116,11 +133,14 @@ event without making the window visible. Reveal it with `showInactive()` and
 then `focus()` on Windows. Keep `show()` followed by `focus()` on Linux and
 macOS, because `showInactive()` is explicitly unsupported on Wayland.
 
-Ordinary development then needs no explicit per-window AppUserModelID: both
-top-level windows are real `BrowserWindow`s carrying the product icon. Only the
-development notification opt-in and portable channel need explicit relaunch
-details. For those two cases, apply one complete details object and repeat the
-ID:
+Ordinary development needs no explicit per-window AppUserModelID, but both
+top-level BrowserWindow constructors must receive the absolute source-tree ICO
+as a **string**. Do not convert it to `NativeImage`; the live taskbar matrix
+proves that apparently equivalent representation falls back to Electron's
+atom. Packaged and non-Windows windows keep the generated native image because
+the source-tree path is not durable there. Only the development notification
+opt-in and portable channel need explicit relaunch details. For those two
+cases, apply one complete details object and repeat the ID:
 
 1. store `{ appId, appIconPath, appIconIndex, relaunchCommand,
 relaunchDisplayName }`;
@@ -174,6 +194,10 @@ security regression.
   none.
 - Assert both calls happen before the main window and account browser are
   shown.
+- Prove the shared constructor-icon resolver returns an absolute
+  `build/icon.ico` string only for unpackaged Windows and a generated
+  `NativeImage` for packaged or non-Windows runs. Assert both top-level window
+  call sites use it.
 - Cover the complete development / installed / portable / Store matrix.
 - Parse or inspect the AppX configuration and prove the Store path never writes
   the desktop AppUserModelID.
@@ -183,12 +207,17 @@ security regression.
 - Run the focused identity/browser-host tests, format, lint, both typechecks,
   the full suite, and the build.
 - The final release gate remains a manual Windows check with both taskbar
-  windows open. Restarting the running development process is required before
-  that check because it cannot hot-reload main-process code.
+  windows open. The evidence must identify the account button itself; absence
+  of a new button or an unchanged crop is not a pass. Restarting the running
+  development process is required because it cannot hot-reload main-process
+  code.
 
 ## Commit strategy
 
 1. Commit this corrective plan by itself.
 2. Commit the account-shell migration, channel-specific identity policy,
    regression tests, and corrected changelog wording together.
-3. Leave the unrelated untracked audit and release documents untouched.
+3. Commit this second, screenshot-driven plan correction by itself.
+4. Commit the constructor-icon fix, non-vacuous regression tests and changelog
+   correction together.
+5. Leave the unrelated untracked audit and release documents untouched.
