@@ -47,7 +47,7 @@ the corrective change must not treat `app.isPackaged` as the whole decision:
 
 | Environment               | Shell identity                                  | Durable icon / relaunch target                                                              |
 | ------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Development               | no process/window ID in the ordinary run        | each real `BrowserWindow`'s source-tree product icon                                         |
+| Development               | no process/window ID in the ordinary run        | each real `BrowserWindow`'s source-tree product icon                                        |
 | Installed / unpacked NSIS | the desktop product ID used by Electron Builder | the packaged executable and installer shortcut; no per-window override                      |
 | Portable                  | a portable-specific per-window ID               | `PORTABLE_EXECUTABLE_FILE`, the stable outer launcher, never the temporary inner executable |
 | Microsoft Store           | the package manifest's identity                 | Windows package metadata; no desktop AppUserModelID override                                |
@@ -84,6 +84,10 @@ no preload and no vault IPC. The visible layering remains:
 This removes the `BaseWindow` path Explorer renders generically while retaining
 the two security domains and the existing tab/session lifecycle. It does not
 add an unused `BrowserWindow` renderer.
+
+Unlike `BaseWindow`, a development `BrowserWindow` inherits Electron's native
+application menu. Remove the account shell's menu explicitly in every build so
+Alt cannot reveal a third navigation/control surface over the trusted toolbar.
 
 The migration changes one global fact: account shells now appear in
 `BrowserWindow.getAllWindows()` and can become `getFocusedWindow()`. Introduce a
@@ -147,6 +151,7 @@ security regression.
 - Assert the production account shell is a `BrowserWindow`, its owned
   `webContents` is the toolbar, and no separate toolbar `WebContentsView` is
   constructed.
+- Assert its native application menu is removed before the window is shown.
 - Preserve toolbar/site partition separation, permission denial, hardened web
   preferences, no site preload, tab bounds below the toolbar, popup adoption,
   proxy authentication, and teardown of every child view.
