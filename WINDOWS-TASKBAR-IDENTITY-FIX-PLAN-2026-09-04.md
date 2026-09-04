@@ -39,7 +39,7 @@ the corrective change must not treat `app.isPackaged` as the whole decision:
 | Environment | Shell identity | Durable icon / relaunch target |
 | --- | --- | --- |
 | Development | a development-only per-window ID | source-tree `build/icon.ico`; no installed shortcut assumed |
-| Installed / unpacked NSIS | the desktop product ID used by Electron Builder | the packaged executable |
+| Installed / unpacked NSIS | the desktop product ID used by Electron Builder | the packaged executable and installer shortcut; no per-window override |
 | Portable | a portable-specific per-window ID | `PORTABLE_EXECUTABLE_FILE`, the stable outer launcher, never the temporary inner executable |
 | Microsoft Store | the package manifest's identity | Windows package metadata; no desktop AppUserModelID override |
 
@@ -61,17 +61,33 @@ taskbar group.
 ## Concrete fix
 
 Keep a shared per-window policy and apply it to both `BrowserWindow` and
-`BaseWindow` before either is shown. For environments that need explicit
-window details, split the write into two ordered calls:
+`BaseWindow` before either is shown. Development and portable windows need
+explicit details. Apply one complete details object and then repeat the ID:
 
-1. store `{ appIconPath, appIconIndex }`;
-2. store `{ appId }`, causing Windows to refresh only after the icon exists.
+1. store `{ appId, appIconPath, appIconIndex, relaunchCommand,
+   relaunchDisplayName }`;
+2. store `{ appId }` again, causing Windows to refresh after the icon and
+   relaunch metadata from the first call exists.
 
-For development, include a development-specific ID and source ICO, but do not
-restore the process-global production AppUserModelID or write production
-registry identity. For portable, include the outer launcher's stable path as
-the icon resource and relaunch command, with the product display name. For
-Store, return no per-window override. Preserve the installed desktop identity.
+The second call is deliberate. Chromium changes only the non-empty properties
+it receives, so it does not erase the first call's metadata. Using a complete
+first call also remains safe if Electron later starts enforcing its documented
+statement that an AppUserModelID is required for the other options to have an
+effect.
+
+For development, include a development-specific ID, source ICO and a relaunch
+command containing Electron plus the application path, but do not restore the
+process-global production AppUserModelID or write production registry
+identity. For portable, include the outer launcher's stable path as the icon
+resource and relaunch command, with the product display name. For Store, return
+no per-window override. Installed/unpacked NSIS uses its process-level product
+ID and branded executable/shortcut, so it needs no per-window override.
+
+The process-level policy must make the same distinctions: desktop ID for NSIS,
+portable ID for portable, no desktop override for Store or ordinary
+development. Store still receives its manifest-matched toast activator; that
+decision must no longer be coupled to whether the desktop AppUserModelID is
+claimed. Registry display/icon metadata remains non-Store and non-portable.
 
 Do not replace `BaseWindow`, add a timed refresh, or spoof process metadata.
 Those changes do not address the confirmed property-order defect and would
@@ -80,8 +96,10 @@ reopen earlier grouping or notification behavior.
 ## Regression boundary
 
 - Model the Windows property-store refresh in the unit test: writing the ID
-  snapshots the icon available at that moment. One combined call must fail.
-- Assert exactly two calls, icon first and AppUserModelID second, on Windows.
+  snapshots the icon available at that moment. One combined call without the
+  final ID refresh must fail.
+- Assert exactly two calls, full metadata first and AppUserModelID-only second,
+  for development and portable windows.
 - Assert both calls happen before the main window and account browser are
   shown.
 - Cover the complete development / installed / portable / Store matrix.
