@@ -79,11 +79,25 @@ no preload and no vault IPC. The visible layering remains:
    trusted browser-chrome preload;
 2. the selected site view is bounded below `CHROME_HEIGHT` and overlays only
    the content region;
-3. inactive site views remain detached exactly as before.
+3. inactive site views remain attached but hidden exactly as before.
 
 This removes the `BaseWindow` path Explorer renders generically while retaining
 the two security domains and the existing tab/session lifecycle. It does not
 add an unused `BrowserWindow` renderer.
+
+The migration changes one global fact: account shells now appear in
+`BrowserWindow.getAllWindows()` and can become `getFocusedWindow()`. Introduce a
+shared weak window-role registry and mark each account shell at construction.
+Every main-app-only consumer must select or iterate windows through that role:
+
+- file/recovery/vault pickers remain parented to the main application window,
+  never a trading browser that happened to have focus;
+- vault-lock renderer reload and confirmation-toast IPC target only the main
+  renderer, never the browser toolbar;
+- tray/Dock main-window lookup cannot mistake an account browser for the app
+  home window;
+- OS `session-end` listeners still cover every real `BrowserWindow`, including
+  account shells, because ending secrets on shutdown is intentionally global.
 
 Ordinary development then needs no explicit per-window AppUserModelID: both
 top-level windows are real `BrowserWindow`s carrying the product icon. Only the
@@ -129,6 +143,10 @@ security regression.
 - Preserve toolbar/site partition separation, permission denial, hardened web
   preferences, no site preload, tab bounds below the toolbar, popup adoption,
   proxy authentication, and teardown of every child view.
+- Prove the shared window-role selector prefers a focused main window, falls
+  back to a live main window when an account browser is focused, and never
+  returns an account browser. Exercise every main-only enumeration listed
+  above.
 - Model the Windows property-store refresh for the opt-in development and
   portable paths. One combined call without the final ID refresh must fail.
 - Assert exactly two calls, full metadata first and AppUserModelID-only second,
