@@ -99,6 +99,13 @@ Every main-app-only consumer must select or iterate windows through that role:
 - OS `session-end` listeners still cover every real `BrowserWindow`, including
   account shells, because ending secrets on shutdown is intentionally global.
 
+A real migration probe also confirmed that Windows focuses the owned toolbar
+contents when an account `BrowserWindow` is reactivated, even if the active site
+held focus before Alt-Tab/taskbar deactivation. Record whether the page or
+toolbar was last intentionally focused when the window blurs, and restore that
+surface on activation. Do not always force the site: a user who left the address
+bar focused expects to return to it.
+
 Ordinary development then needs no explicit per-window AppUserModelID: both
 top-level windows are real `BrowserWindow`s carrying the product icon. Only the
 development notification opt-in and portable channel need explicit relaunch
@@ -147,6 +154,8 @@ security regression.
   back to a live main window when an account browser is focused, and never
   returns an account browser. Exercise every main-only enumeration listed
   above.
+- Drive both focus histories: page -> deactivate -> activate restores the active
+  page, while toolbar -> deactivate -> activate leaves focus in the toolbar.
 - Model the Windows property-store refresh for the opt-in development and
   portable paths. One combined call without the final ID refresh must fail.
 - Assert exactly two calls, full metadata first and AppUserModelID-only second,
