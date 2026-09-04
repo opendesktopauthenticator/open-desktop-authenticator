@@ -713,11 +713,7 @@ export async function openAccountBrowser(
 			throw cause;
 		}
 		if (cause instanceof InitialNavigationTimeoutError) {
-			throw new BrowserSessionError(
-				`Steam did not finish loading within ${INITIAL_NAVIGATION_TIMEOUT_MS / 1_000} seconds. ` +
-					"The browser was closed; check this account's proxy or network and try again.",
-				{ cause }
-			);
+			throw new BrowserSessionError(initialNavigationTimeoutMessage(options), { cause });
 		}
 		if (stage === 'initial-navigation') {
 			throw new BrowserSessionError('the browser could not reach Steam, so it was closed', {
@@ -728,6 +724,33 @@ export async function openAccountBrowser(
 			cause
 		});
 	}
+}
+
+/**
+ * What to tell someone whose window never finished loading.
+ *
+ * **Name the route this window actually used.** This was fixed prose telling
+ * every reader to "check this account's proxy", and an account that has none
+ * then goes looking for a setting that is not there — or concludes the
+ * application is routing through something it was never given. Both are worse
+ * than saying nothing, because the sentence appears at the moment the user is
+ * already trying to work out what went wrong.
+ *
+ * A window with no proxy that times out is an ordinary network failure and says
+ * so. Only a genuinely routed one mentions the proxy, and it still names the
+ * network too, because the timeout cannot tell which of the two hops failed.
+ */
+export function initialNavigationTimeoutMessage(options: {
+	route: BrowserRoute;
+	proxyUrl?: string | undefined;
+}): string {
+	const routed = options.route !== 'direct' && (options.proxyUrl ?? '') !== '';
+	return (
+		`Steam did not finish loading within ${INITIAL_NAVIGATION_TIMEOUT_MS / 1_000} seconds. ` +
+		'The browser was closed; check ' +
+		(routed ? "this account's proxy and your network" : 'your network connection') +
+		' and try again.'
+	);
 }
 
 /** Steam's own hosts, and the only ones a signed-in landing may be on. */
