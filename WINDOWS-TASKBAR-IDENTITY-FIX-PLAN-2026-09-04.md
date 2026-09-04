@@ -96,14 +96,15 @@ The third conclusion was therefore incomplete, not wholly wrong. Process and
 per-window AppUserModelID metadata controls a multi-window **group**. When that
 group collapses to one window, Explorer can draw the native icon of the
 remaining window instead. The current generated `NativeImage` does not displace
-the `electron.exe` icon on that singleton path. Conversely, an absolute ICO
-without the group identity fixed a singleton in the earlier matrix but failed
-as soon as two windows grouped. The product needs both layers.
+the `electron.exe` icon on that singleton path. The interactive, uniquely named
+lifecycle matrix then proved that an absolute constructor ICO preserves the
+singleton icon but still needs the existing group identity for two windows. The
+product needs both layers.
 
-No source change is accepted from that inference alone. Before implementation,
-a native transition probe must hold the current process ID and AppDetails
-policy constant, change only the constructor icon to the real absolute ICO,
-and identify the exact taskbar button through all of these states:
+Before implementation, a native transition probe held the current process ID
+and AppDetails policy constant, changed only the constructor icon to the real
+absolute ICO, and identified the exact taskbar button through all of these
+states:
 
 1. main window alone;
 2. main plus account browser, with the account browser foreground;
@@ -111,8 +112,31 @@ and identify the exact taskbar button through all of these states:
 4. account browser reopened, then main closed so the account browser remains;
 5. both windows closed and a fresh main window opened.
 
-Every live state must show the ODA shield. A green sample at only one state is
-not a pass.
+Every live state showed the ODA shield under a fresh AppUserModelID. Stages were
+captured by exact UI Automation AppID and bounds rather than by the position of
+a nearby icon. A green sample at only one state would not have been a pass.
+
+### Fifth manual-gate correction — 2026-09-05
+
+The exact production-helper run then used the already-seen stable
+`.development` AppUserModelID. Its first singleton had the real ICO, complete
+AppDetails, a matching foreground HWND and the correct taskbar AutomationId —
+but Explorer still drew the atom. The same construction under fresh, unique
+development IDs drew the ODA shield. Windows had retained the image selected by
+the earlier broken implementation for the old development group ID.
+
+Do not make the user restart Explorer, erase the global icon cache, write an
+unrequested shortcut, or manually edit the registry. Give only the
+unreleased/development channel a one-time semantic identity revision:
+`.development.icon1`. Process and window details must use the same revised ID.
+Installed, portable and Store identities remain byte-for-byte unchanged. The
+revised development ID is stable across ordinary runs; it is not random per
+launch, so windows still group and notification testing can still register one
+predictable identity when explicitly enabled.
+
+The final production-helper acceptance must use that exact revised ID through
+all five lifecycle states. A fresh random probe ID is supporting evidence, not
+the release gate.
 
 ## Related release identities found during the pre-fix review
 
@@ -217,10 +241,12 @@ relaunch command containing Electron plus the application path. Remove the
 `ODA_WINDOWS_IDENTITY=1` gate from process and window taskbar identity: leaving
 either optional recreates the reported bug in the normal run. Retain that flag
 only for development's persistent notification registration; the taskbar fix
-does not need to leave registry or toast-activation state behind. For portable,
-include the outer launcher's stable path as the icon resource and relaunch
-command, with the product display name. For Store, return no per-window
-override. Installed/unpacked NSIS uses its process-level product ID and branded
+does not need to leave registry or toast-activation state behind. Use the
+stable `.development.icon1` revision so Explorer cannot reuse the atom cached
+under the earlier `.development` experiment. For portable, include the outer
+launcher's stable path as the icon resource and relaunch command, with the
+product display name. For Store, return no per-window override.
+Installed/unpacked NSIS uses its process-level product ID and branded
 executable/shortcut, so it needs no per-window override.
 
 The process-level policy must make the same distinctions: desktop ID for NSIS,
@@ -262,8 +288,9 @@ security regression.
   the shell-group fix, so the process ID and complete AppDetails assertions must
   remain alongside it.
 - Assert ordinary Windows development always selects the development process
-  ID and both call sites pass the inputs that produce complete per-window
-  AppDetails. The old environment gate must not survive.
+  ID, pin the `.development.icon1` revision, and assert both call sites pass the
+  inputs that produce complete per-window AppDetails. The old environment gate
+  and old cache-poisoned `.development` ID must not survive.
 - Cover the complete development / installed / portable / Store matrix.
 - Parse or inspect the AppX configuration and prove the Store path never writes
   the desktop AppUserModelID.
@@ -289,5 +316,6 @@ security regression.
    non-vacuous regression tests and changelog correction together.
 6. Commit this lifecycle correction by itself before changing product code.
 7. Commit the Windows constructor-ICO selector, lifecycle regression tests and
-   changelog correction together only after the five-state native probe passes.
+   changelog correction together only after the five-state native probe passes
+   under the exact revised development ID.
 8. Leave the unrelated untracked audit and release documents untouched.
