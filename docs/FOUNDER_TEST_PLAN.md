@@ -386,16 +386,21 @@ your own eyes.
    address.
 2. In the same window, open one of the trade sites the mode lets out — the list
    is in `DIRECT_CONTENT_DOMAINS` in `src/main/net/egress.ts`.
+3. If that site presents a Cloudflare or reCAPTCHA check, complete it manually.
+   Exact OpenID returns and support hosts are listed in `DIRECT_CALLBACK_HOSTS`
+   and `CHALLENGE_SUPPORT_HOSTS` beside the trade-site list; the app must never
+   click or solve the check for you.
 
 **Pass:** Steam sees the **proxy's** address, and the trade site sees your
-machine's. **Fails if** Steam sees yours — that is the whole promise of the mode
-and the one thing it must never get wrong.
+machine's. A challenge shown by the trade site is interactive rather than blank
+or stuck in an immediate loop. **Fails if** Steam sees yours — that is the whole
+promise of the mode and the one thing it must never get wrong.
 
 > [!NOTE]
 > Anything the mode does not recognise goes through the proxy, not around it.
 > So an unfamiliar site loading slowly here is the design working, not a fault.
 
-3. Press **Direct** on the same account and check the address again.
+4. Press **Direct** on the same account and check the address again.
 
 **Pass:** it is the address this machine normally browses from. **If you are
 behind a company or system proxy it will be that proxy's address, not your

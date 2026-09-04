@@ -79,6 +79,7 @@ Acceptance:
   remains absolute.
 
 ### 3. Opening Trade creates a second Windows taskbar window without a stable
+
 per-window identity
 
 Both the main `BrowserWindow` and account `BaseWindow` have the correct native

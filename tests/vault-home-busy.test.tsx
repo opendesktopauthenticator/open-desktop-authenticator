@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { finished, noted, running } from '../src/renderer/screens/VaultHome';
+import {
+	browserFinished,
+	browserStarted,
+	finished,
+	noted,
+	running
+} from '../src/renderer/screens/VaultHome';
 
 /**
  * Which accounts are mid-operation, and why one name was not enough.
@@ -58,45 +64,34 @@ describe('accounts with an operation in flight', () => {
 	});
 });
 
-/*
- * **Trade and Open were left on a single name after Copy and Export were fixed.**
- *
- * The previous pass converted the two that were filed and stopped there, so
- * starting a browser for account B re-enabled A's button while A's request was
- * still running — and if A then failed, the global attempt counter called it
- * stale and threw its error away. A's browser did not open and nothing on
- * screen said why.
- */
-describe('the browser buttons across two accounts', () => {
-	it('keeps both accounts busy at once', () => {
-		const both = running(B)(running(A)(new Set()));
-		expect(both.has(A), 'opening B released A').toBe(true);
-		expect(both.has(B)).toBe(true);
+describe('the browser routes in flight', () => {
+	it('keeps the selected route for both accounts', () => {
+		const one = browserStarted(A, 'proxy', 1)(new Map());
+		const both = browserStarted(B, 'direct', 1)(one);
+
+		expect(both.get(A)).toEqual({ attempt: 1, route: 'proxy' });
+		expect(both.get(B)).toEqual({ attempt: 1, route: 'direct' });
 	});
 
-	/*
-	 * The per-account attempt counter, in the shape the screen uses it: claim,
-	 * then ask whether this is still the newest press *for that account*.
-	 */
-	it('does not let one account’s press stale another’s failure', () => {
-		const attempts = new Map<string, number>();
-		const claim = (id: string): (() => boolean) => {
-			const mine = (attempts.get(id) ?? 0) + 1;
-			attempts.set(id, mine);
-			return () => attempts.get(id) === mine;
-		};
+	it('does not let an older completion release a newer route on the same account', () => {
+		const first = browserStarted(A, 'steam-only', 1)(new Map());
+		const second = browserStarted(A, 'direct', 2)(first);
+		const afterOldFinishes = browserFinished(A, 1)(second);
 
-		const firstA = claim(A);
-		const firstB = claim(B);
+		expect(afterOldFinishes, 'the stale completion caused an unnecessary render').toBe(second);
+		expect(afterOldFinishes.get(A), 'the newer Direct attempt stopped looking busy').toEqual({
+			attempt: 2,
+			route: 'direct'
+		});
+		expect(browserFinished(A, 2)(afterOldFinishes).has(A)).toBe(false);
+	});
 
-		expect(firstA(), 'starting B discarded A’s failure as stale').toBe(true);
-		expect(firstB()).toBe(true);
+	it('releases only the account and attempt that finished', () => {
+		const both = browserStarted(B, 'steam-only', 4)(browserStarted(A, 'proxy', 3)(new Map()));
+		const after = browserFinished(A, 3)(both);
 
-		// A second press on A *does* stale the first, which is the point of it.
-		const secondA = claim(A);
-		expect(firstA()).toBe(false);
-		expect(secondA()).toBe(true);
-		expect(firstB(), 'a press on A staled B').toBe(true);
+		expect(after.has(A)).toBe(false);
+		expect(after.get(B)).toEqual({ attempt: 4, route: 'steam-only' });
 	});
 });
 

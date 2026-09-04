@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
 	AccountBrowsers,
-	BROWSER_USER_AGENT,
 	addressToUrl,
 	BrowserSessionError,
 	BrowserSignInRequired,
@@ -21,9 +20,12 @@ import {
 	type BrowserWindowOptions
 } from '../src/main/browser/window';
 import {
+	CHALLENGE_SUPPORT_HOSTS,
+	DIRECT_CALLBACK_HOSTS,
 	DIRECT_CONTENT_DOMAINS,
 	STEAM_ROUTED_DOMAINS,
-	STEAM_USER_AGENT,
+	isChallengeSupportHost,
+	isDirectCallbackHost,
 	isDirectContentHost,
 	isSteamRoutedHost
 } from '../src/main/net/egress';
@@ -40,7 +42,6 @@ import {
 interface Recorded {
 	partitions: string[];
 	proxies: unknown[];
-	userAgents: string[];
 	cookies: { url: string; name: string; value: string }[];
 	windows: BrowserWindowOptions[];
 	loaded: string[];
@@ -63,6 +64,28 @@ interface Recorded {
 	permissionsDenied: number;
 	/** Every URL `resolveProxy` was asked about, in order. */
 	resolved: string[];
+}
+
+type AppliedProxy = { mode?: string; proxyRules?: string; proxyBypassRules?: string };
+
+/** Minimal fixed-server bypass semantics for the injected session fakes. */
+function fakeResolvedRoute(proxy: AppliedProxy | undefined, target: string): string {
+	if (proxy?.mode !== 'fixed_servers' || proxy.proxyRules === undefined) {
+		return 'DIRECT';
+	}
+	const hostname = new URL(target).hostname.toLowerCase().replace(/\.$/, '');
+	const bypassed = (proxy.proxyBypassRules ?? '')
+		.split(',')
+		.map((rule) => rule.trim().toLowerCase())
+		.some((rule) => {
+			if (rule === '' || rule === '<-loopback>') return false;
+			if (rule.startsWith('*.')) {
+				return hostname.endsWith(`.${rule.slice(2)}`);
+			}
+			return hostname === rule;
+		});
+	if (bypassed) return 'DIRECT';
+	return `PROXY ${proxy.proxyRules.replace(/^[a-z0-9]+:\/\//, '')}`;
 }
 
 function harness(
@@ -113,7 +136,6 @@ function harness(
 	const recorded: Recorded = {
 		partitions: [],
 		proxies: [],
-		userAgents: [],
 		cookies: [],
 		windows: [],
 		loaded: [],
@@ -160,11 +182,9 @@ function harness(
 			if (overrides.resolvesDirectFor?.(url)) {
 				return Promise.resolve('DIRECT');
 			}
-			const last = recorded.proxies.at(-1) as { mode?: string; proxyRules?: string } | undefined;
-			if (!last || last.mode !== 'fixed_servers' || last.proxyRules === undefined) {
-				return Promise.resolve('DIRECT');
-			}
-			return Promise.resolve(`PROXY ${last.proxyRules.replace(/^[a-z0-9]+:\/\//, '')}`);
+			return Promise.resolve(
+				fakeResolvedRoute(recorded.proxies.at(-1) as AppliedProxy | undefined, url)
+			);
 		},
 		setProxy:
 			overrides.setProxy ??
@@ -172,7 +192,6 @@ function harness(
 				recorded.proxies.push(config);
 				return Promise.resolve();
 			}),
-		setUserAgent: (ua) => recorded.userAgents.push(ua),
 		clearStorageData: () => {
 			recorded.wiped.push(partitionName);
 			// A wipe that rejects is the case the manager used to swallow: the
@@ -421,20 +440,6 @@ describe('the in-app browser', () => {
 		// No `persist:` prefix means in-memory: a signed-in Steam session must not
 		// outlive the process, let alone survive on disk.
 		expect(browserPartitionFor(ACCOUNT.steamId64)).not.toContain('persist:');
-	});
-
-	/*
-	 * The whole reason for a second session. `okhttp/4.9.2` is a deliberate lie
-	 * told by the transport so accounts do not stand out from one another; told
-	 * by a browser it produces a page that does not work.
-	 */
-	it('presents as a real browser, not as the mobile app', async () => {
-		const { host, recorded } = harness();
-		await openAccountBrowser(host, ACCOUNT);
-
-		expect(recorded.userAgents).toContain(BROWSER_USER_AGENT);
-		expect(recorded.userAgents).not.toContain(STEAM_USER_AGENT);
-		expect(BROWSER_USER_AGENT).not.toContain('okhttp');
 	});
 
 	/*
@@ -1017,7 +1022,6 @@ describe('closing every browser when the vault locks', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
-				setUserAgent: () => undefined,
 				clearStorageData: () => {
 					order.push('wipe');
 					return Promise.resolve();
@@ -1065,7 +1069,6 @@ describe('closing every browser when the vault locks', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
-				setUserAgent: () => undefined,
 				clearStorageData: () => {
 					cleared.push(partition);
 					return Promise.resolve();
@@ -1103,7 +1106,6 @@ describe('closing every browser when the vault locks', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
-				setUserAgent: () => undefined,
 				clearStorageData: () => Promise.reject(new Error('session gone')),
 				cookies: { set: () => Promise.resolve() }
 			}),
@@ -1158,7 +1160,6 @@ function lockHarness(cleared: string[], closed: string[]): BrowserHost {
 			denyPermissions: () => undefined,
 			resolveProxy: () => Promise.resolve('DIRECT'),
 			setProxy: () => Promise.resolve(),
-			setUserAgent: () => undefined,
 			clearStorageData: () => {
 				cleared.push(partition);
 				return Promise.resolve();
@@ -1257,7 +1258,6 @@ function slowHarness(options: { gateLoad?: boolean; gateResolve?: boolean } = {}
 					proxies.push(config);
 					gates.push(resolve);
 				}),
-			setUserAgent: () => undefined,
 			clearStorageData: () => {
 				wiped.push(partition);
 				return Promise.resolve();
@@ -1525,7 +1525,6 @@ describe('a browser whose account changed underneath it', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
-				setUserAgent: () => undefined,
 				clearStorageData: () => Promise.resolve(),
 				cookies: { set: () => Promise.resolve() }
 			}),
@@ -1731,18 +1730,13 @@ function routingHarness() {
 	const host: BrowserHost = {
 		sessionFromPartition: (partition) => ({
 			denyPermissions: () => undefined,
-			resolveProxy: () => {
-				const last = proxies.at(-1) as { mode?: string; proxyRules?: string } | undefined;
-				if (!last || last.mode !== 'fixed_servers' || last.proxyRules === undefined) {
-					return Promise.resolve('DIRECT');
-				}
-				return Promise.resolve(`PROXY ${last.proxyRules.replace(/^[a-z0-9]+:\/\//, '')}`);
+			resolveProxy: (url) => {
+				return Promise.resolve(fakeResolvedRoute(proxies.at(-1) as AppliedProxy | undefined, url));
 			},
 			setProxy: (config) => {
 				proxies.push(config);
 				return Promise.resolve();
 			},
-			setUserAgent: () => undefined,
 			clearStorageData: () => {
 				wiped.push(partition);
 				return Promise.resolve();
@@ -2235,7 +2229,6 @@ describe('a browser opened while the previous session is still being wiped', () 
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
-				setUserAgent: () => undefined,
 				clearStorageData: () =>
 					new Promise<void>((resolve) => {
 						order.push(`wipe:${partition}`);
@@ -2341,7 +2334,6 @@ describe('a retired browser attempt that settles after its replacement was reque
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
-				setUserAgent: () => undefined,
 				clearStorageData: () => {
 					cookiePresent = false;
 					return Promise.resolve();
@@ -2420,7 +2412,6 @@ describe('a retired browser attempt that settles after its replacement was reque
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
-				setUserAgent: () => undefined,
 				clearStorageData: () => {
 					if (failWipes) {
 						return Promise.reject(new Error('partition is busy'));
@@ -2710,6 +2701,72 @@ describe('routing only Steam through the proxy', () => {
 		}
 	);
 
+	it.each(CHALLENGE_SUPPORT_HOSTS.map((host) => [host]))(
+		'lets the exact challenge dependency %s follow the trade site direct',
+		async (host) => {
+			const { host: browserHost, proxies } = routingHarness();
+			await new AccountBrowsers(browserHost).open(STEAM_ONLY);
+			const rules = bypassOf(proxies).split(',');
+
+			expect(rules).toContain(host);
+			expect(rules, 'an exact compatibility exception became a suffix wildcard').not.toContain(
+				`*.${host}`
+			);
+			expect(isChallengeSupportHost(host)).toBe(true);
+		}
+	);
+
+	it.each(DIRECT_CALLBACK_HOSTS.map((host) => [host]))(
+		'lets only the observed callback host %s follow CSGOEmpire direct',
+		async (host) => {
+			const { host: browserHost, proxies } = routingHarness();
+			await new AccountBrowsers(browserHost).open(STEAM_ONLY);
+			const rules = bypassOf(proxies).split(',');
+
+			expect(rules).toContain(host);
+			expect(rules, 'an exact callback exception became a suffix wildcard').not.toContain(
+				`*.${host}`
+			);
+			expect(isDirectCallbackHost(host)).toBe(true);
+		}
+	);
+
+	it('keeps unobserved, sibling, subdomain and lookalike callback hosts on the proxy', async () => {
+		const { host, proxies } = routingHarness();
+		await new AccountBrowsers(host).open(STEAM_ONLY);
+		const rules = bypassOf(proxies).split(',');
+		const candidates = [
+			'csgoempirelogin1.com',
+			'csgoempirelogin3.com',
+			'www.csgoempirelogin2.com',
+			'auth.csgoempirelogin7.com',
+			'evil-csgoempirelogin2.com',
+			'csgoempirelogin7.com.attacker.test'
+		];
+
+		for (const candidate of candidates) {
+			expect(rules, `${candidate} received a direct exception`).not.toContain(candidate);
+			expect(isDirectCallbackHost(candidate)).toBe(false);
+		}
+	});
+
+	it('keeps sibling and lookalike challenge-provider hosts on the proxy', async () => {
+		const { host, proxies } = routingHarness();
+		await new AccountBrowsers(host).open(STEAM_ONLY);
+		const rules = bypassOf(proxies).split(',');
+
+		for (const candidate of [
+			'google.com',
+			'accounts.google.com',
+			'cloudflare.com',
+			'recaptcha.net',
+			...CHALLENGE_SUPPORT_HOSTS.flatMap((known) => [`evil-${known}`, `${known}.attacker.test`])
+		]) {
+			expect(rules, `${candidate} received a direct exception`).not.toContain(candidate);
+			expect(isChallengeSupportHost(candidate)).toBe(false);
+		}
+	});
+
 	/**
 	 * **Nothing Steam owns may appear in the bypass list.**
 	 *
@@ -2728,7 +2785,10 @@ describe('routing only Steam through the proxy', () => {
 			}
 			const bare = rule.replace(/^\*\./, '');
 			expect(isSteamRoutedHost(bare), `${rule} exempts a Steam domain`).toBe(false);
-			expect(isDirectContentHost(bare), `${rule} is on neither list`).toBe(true);
+			expect(
+				isDirectContentHost(bare) || isDirectCallbackHost(bare) || isChallengeSupportHost(bare),
+				`${rule} is on neither direct list`
+			).toBe(true);
 		}
 	});
 
@@ -2742,6 +2802,12 @@ describe('routing only Steam through the proxy', () => {
 		}
 		for (const domain of DIRECT_CONTENT_DOMAINS) {
 			expect(isSteamRoutedHost(domain), `${domain} was treated as Steam`).toBe(false);
+		}
+		for (const host of CHALLENGE_SUPPORT_HOSTS) {
+			expect(isSteamRoutedHost(host), `${host} was treated as Steam`).toBe(false);
+		}
+		for (const host of DIRECT_CALLBACK_HOSTS) {
+			expect(isSteamRoutedHost(host), `${host} was treated as Steam`).toBe(false);
 		}
 	});
 
@@ -2787,6 +2853,21 @@ describe('routing only Steam through the proxy', () => {
 		expect(recorded.windows).toHaveLength(0);
 	});
 
+	it('refuses an all-proxy Steam-only session before a cookie or window exists', async () => {
+		const { host, recorded } = harness({ resolvesTo: 'PROXY 10.0.0.9:8080' });
+
+		await expect(
+			openAccountBrowser(host, {
+				...ACCOUNT,
+				proxyUrl: 'http://10.0.0.9:8080',
+				route: 'steam-only'
+			})
+		).rejects.toThrow(/direct site exception/i);
+
+		expect(recorded.cookies, 'the refusal wrote a signed-in Steam cookie').toHaveLength(0);
+		expect(recorded.windows, 'the refusal opened a browser window').toHaveLength(0);
+	});
+
 	/**
 	 * And the one the PAC design failed, on both routed choices.
 	 *
@@ -2813,7 +2894,7 @@ describe('routing only Steam through the proxy', () => {
 		expect(recorded.windows).toHaveLength(0);
 	});
 
-	it('asks about every Steam domain, and about one host on no list at all', async () => {
+	it('asks about every promised proxied and direct spelling', async () => {
 		const { host, recorded } = harness();
 		await openAccountBrowser(host, {
 			...ACCOUNT,
@@ -2828,6 +2909,17 @@ describe('routing only Steam through the proxy', () => {
 			recorded.resolved.some((url) => url.endsWith('.invalid/')),
 			'the fail-closed default was never checked'
 		).toBe(true);
+		for (const domain of DIRECT_CONTENT_DOMAINS) {
+			expect(recorded.resolved, `${domain} apex was never checked`).toContain(`https://${domain}/`);
+			expect(recorded.resolved, `${domain} www spelling was never checked`).toContain(
+				`https://www.${domain}/`
+			);
+		}
+		for (const exact of [...DIRECT_CALLBACK_HOSTS, ...CHALLENGE_SUPPORT_HOSTS]) {
+			expect(recorded.resolved, `${exact} exact exception was never checked`).toContain(
+				`https://${exact}/`
+			);
+		}
 	});
 
 	it('checks the loopback and link-local addresses on both routed choices', async () => {
@@ -3001,7 +3093,6 @@ describe('closing the windows a new policy forbids', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
-				setUserAgent: () => undefined,
 				clearStorageData: () =>
 					partition === browserPartitionFor(first) ? slowWipe : Promise.resolve(),
 				cookies: { set: () => Promise.resolve() }
@@ -3818,7 +3909,6 @@ describe('an account close during cookie handoff', () => {
 			denyPermissions: () => undefined,
 			resolveProxy: () => Promise.resolve('DIRECT'),
 			setProxy: () => Promise.resolve(),
-			setUserAgent: () => undefined,
 			clearStorageData: () => {
 				wipes += 1;
 				cookiePresent = false;

@@ -16,10 +16,31 @@
  */
 import { app, BaseWindow, webContents } from 'electron';
 import { createServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
 
 import { electronBrowserHost } from '../src/main/browser/electron-host.ts';
 import { loadInitialBrowserPage } from '../src/main/browser/window.ts';
-import { DIRECT_CONTENT_DOMAINS, planProxy, steamOnlyBypass } from '../src/main/net/egress.ts';
+import {
+	CHALLENGE_SUPPORT_HOSTS,
+	DIRECT_CALLBACK_HOSTS,
+	DIRECT_CONTENT_DOMAINS,
+	planProxy,
+	steamOnlyBypass
+} from '../src/main/net/egress.ts';
+
+const DIRECT_SITE_FIXTURE_HOST = 'csgoempire.com';
+const DIRECT_CHALLENGE_FIXTURE_HOST = 'challenges.cloudflare.com';
+
+/*
+ * These two real hostnames are mapped to loopback only inside this smoke
+ * process. The original URL therefore still drives Chromium's proxy decision,
+ * while a correct direct decision reaches a local socket and nothing leaves
+ * the machine. If either URL is proxied, the local proxy sees it instead.
+ */
+app.commandLine.appendSwitch(
+	'host-resolver-rules',
+	`MAP ${DIRECT_SITE_FIXTURE_HOST} 127.0.0.1, MAP ${DIRECT_CHALLENGE_FIXTURE_HOST} 127.0.0.1`
+);
 
 const results = [];
 const problems = [];
@@ -81,7 +102,6 @@ const main = async () => {
 	const partition = 'browser-smoke';
 	const session = electronBrowserHost.sessionFromPartition(partition, { cache: false });
 
-	session.setUserAgent?.('Mozilla/5.0 (Windows NT 10.0; Win64; x64) SmokeTest/1');
 	session.denyPermissions();
 	await session.setProxy({ mode: 'direct' });
 	check('a browser session can be built and hardened', true);
@@ -98,7 +118,11 @@ const main = async () => {
 	const beforeHiddenContents = new Set(
 		webContents.getAllWebContents().map((candidate) => candidate.id)
 	);
+	let landingUserAgent;
 	const hiddenLanding = createServer((request, response) => {
+		if (request.url === '/landing') {
+			landingUserAgent = request.headers['user-agent'];
+		}
 		response.setHeader('content-type', 'text/html');
 		if (request.url === '/partial') {
 			// Headers and useful-looking body bytes arrive, but the response never
@@ -123,7 +147,6 @@ const main = async () => {
 		height: 500,
 		title: 'unjudged landing',
 		partition: 'browser-smoke-hidden',
-		userAgent: 'SmokeTest/1',
 		show: false
 	});
 	hidden.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -136,6 +159,52 @@ const main = async () => {
 	);
 	const exactLanding = await hidden.loadURL(passwordPage);
 	await wait(300);
+	/*
+	 * **One browser identity, owned by Chromium.**
+	 *
+	 * The application used to replace the account session's user agent and then
+	 * repeat the replacement on every tab. That makes the browser identify as a
+	 * hand-built profile even though no automation drives it. A source check can
+	 * prove the calls are gone; this local request proves the shipped adapter now
+	 * leaves the network header and the page-visible value on Electron's native
+	 * identity. The local server keeps the proof offline.
+	 */
+	const hiddenContents = webContents
+		.getAllWebContents()
+		.find(
+			(candidate) => !beforeHiddenContents.has(candidate.id) && candidate.getURL() === passwordPage
+		);
+	const identity = await run2(
+		hiddenContents,
+		'({ userAgent: navigator.userAgent, webdriver: navigator.webdriver })'
+	);
+	const nativeUserAgent = electronBrowserHost
+		.sessionFromPartition('browser-smoke-hidden', { cache: false })
+		.getUserAgent();
+	check(
+		'the HTTP and JavaScript user agents are the same native Chromium identity',
+		typeof identity === 'object' &&
+			identity !== null &&
+			landingUserAgent === nativeUserAgent &&
+			identity.userAgent === nativeUserAgent,
+		`native=${JSON.stringify(nativeUserAgent)} header=${JSON.stringify(landingUserAgent)} page=${JSON.stringify(typeof identity === 'object' && identity !== null ? identity.userAgent : identity)}`
+	);
+	check(
+		'the page is not exposed as WebDriver-controlled',
+		typeof identity === 'object' && identity !== null && identity.webdriver === false,
+		JSON.stringify(identity)
+	);
+	const automationSwitches = [
+		'enable-automation',
+		'remote-debugging-port',
+		'remote-debugging-pipe'
+	].filter((name) => app.commandLine.hasSwitch(name));
+	const blinkFeatures = app.commandLine.getSwitchValue('disable-blink-features');
+	check(
+		'the process carries no automation or remote-debugging switch',
+		automationSwitches.length === 0 && !blinkFeatures.includes('AutomationControlled'),
+		[...automationSwitches, blinkFeatures].filter(Boolean).join(', ')
+	);
 	check(
 		'a parsed password page remains hidden until the caller accepts the landing',
 		hidden.currentUrl() === passwordPage && hiddenNative !== undefined && !hiddenNative.isVisible()
@@ -168,7 +237,6 @@ const main = async () => {
 		height: 500,
 		title: 'bounded partial landing',
 		partition: 'browser-smoke-partial',
-		userAgent: 'SmokeTest/1',
 		show: false
 	});
 	const partialOutcome = await loadInitialBrowserPage(
@@ -207,7 +275,6 @@ const main = async () => {
 		height: 500,
 		title: 'retry after partial landing',
 		partition: 'browser-smoke-partial',
-		userAgent: 'SmokeTest/1',
 		show: false
 	});
 	const retryLanding = await loadInitialBrowserPage(
@@ -233,8 +300,7 @@ const main = async () => {
 		width: 1100,
 		height: 700,
 		title: 'smoke — browser',
-		partition,
-		userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) SmokeTest/1'
+		partition
 	});
 	// Keep one native window alive before retiring the probe: Electron exits when
 	// its last window closes, which would turn the rest of this run into a false
@@ -457,8 +523,7 @@ const main = async () => {
 		width: 900,
 		height: 600,
 		title: 'closing — browser',
-		partition,
-		userAgent: 'SmokeTest/1'
+		partition
 	});
 	doomed.on('navigated', () => doomed.setTitle('still here'));
 	/*
@@ -607,8 +672,7 @@ const main = async () => {
 			width: 600,
 			height: 400,
 			title: 'first-load probe',
-			partition,
-			userAgent: 'SmokeTest/1'
+			partition
 		});
 		const target = 'data:text/html,' + encodeURIComponent('<title>Landed</title>');
 		await probe.loadURL(target);
@@ -627,8 +691,7 @@ const main = async () => {
 		width: 800,
 		height: 600,
 		title: 'posture — browser',
-		partition,
-		userAgent: 'SmokeTest/1'
+		partition
 	});
 	await posture.loadURL('data:text/html,' + encodeURIComponent('<title>Posture</title>'));
 	await wait(400);
@@ -667,8 +730,7 @@ const main = async () => {
 		width: 800,
 		height: 600,
 		title: 'leak — browser',
-		partition,
-		userAgent: 'SmokeTest/1'
+		partition
 	});
 	await leaky.loadURL('data:text/html,' + encodeURIComponent('<title>Leak</title>'));
 	await wait(400);
@@ -722,8 +784,7 @@ const main = async () => {
 		width: 900,
 		height: 600,
 		title: 'popups — browser',
-		partition,
-		userAgent: 'SmokeTest/1'
+		partition
 	});
 	/*
 	 * A real origin, not a `data:` URL. Chromium refuses `window.open` from an
@@ -863,8 +924,7 @@ const main = async () => {
 		width: 800,
 		height: 600,
 		title: 'posting — browser',
-		partition,
-		userAgent: 'SmokeTest/1'
+		partition
 	});
 	await poster.loadURL(`http://localhost:${openerPort}/opener`);
 	await wait(900);
@@ -996,8 +1056,7 @@ const main = async () => {
 		width: 800,
 		height: 600,
 		title: 'self-closing — browser',
-		partition,
-		userAgent: 'SmokeTest/1'
+		partition
 	});
 	await selfClose.loadURL('data:text/html,' + encodeURIComponent('<title>Host</title>'));
 	await wait(500);
@@ -1105,8 +1164,7 @@ const main = async () => {
 		width: 800,
 		height: 600,
 		title: 'proxy — browser',
-		partition: 'browser-proxy-smoke',
-		userAgent: 'SmokeTest/1'
+		partition: 'browser-proxy-smoke'
 	});
 	authed.setProxyCredentials({ username: 'proxyuser', password: 'proxypass' });
 	await authed.loadURL('http://oda-smoke.invalid/').catch(() => undefined);
@@ -1153,8 +1211,37 @@ const main = async () => {
 		response.writeHead(200, { 'Content-Type': 'text/html' });
 		response.end('<title>routed</title>');
 	});
+	pacProxy.on('connect', (request, socket) => {
+		routedThrough.push(`CONNECT ${request.url}`);
+		socket.destroy();
+	});
 	await new Promise((resolve) => pacProxy.listen(0, '127.0.0.1', resolve));
 	const pacPort = pacProxy.address().port;
+
+	/*
+	 * A raw socket fixture handles either spelling Chromium chooses: ordinary
+	 * HTTP bytes, or a TLS ClientHello after an HSTS upgrade. Receiving bytes is
+	 * the proof that Chromium connected directly. Completing a synthetic TLS
+	 * handshake would add certificate bypasses to a compatibility test and prove
+	 * nothing more about the route.
+	 */
+	const directTraffic = [];
+	const startDirectFixture = async (label) => {
+		const fixture = createTcpServer((socket) => {
+			socket.once('data', (data) => {
+				directTraffic.push(label);
+				if (data[0] === 0x16) {
+					socket.destroy();
+					return;
+				}
+				socket.end('HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n');
+			});
+		});
+		await new Promise((resolve) => fixture.listen(0, '127.0.0.1', resolve));
+		return fixture;
+	};
+	const siteFixture = await startDirectFixture('site');
+	const challengeFixture = await startDirectFixture('challenge');
 
 	const steamOnly = electronBrowserHost.sessionFromPartition('browser-pac-smoke', {
 		cache: false
@@ -1172,6 +1259,29 @@ const main = async () => {
 	const toProxy = `PROXY 127.0.0.1:${pacPort}`;
 	const listedDirect = DIRECT_CONTENT_DOMAINS[0];
 	const ask = async (url) => steamOnly.resolveProxy(url);
+	const challengeRoutes = Object.fromEntries(
+		await Promise.all(
+			CHALLENGE_SUPPORT_HOSTS.map(async (host) => [host, await ask(`https://${host}/`)])
+		)
+	);
+	const callbackRoutes = Object.fromEntries(
+		await Promise.all(
+			DIRECT_CALLBACK_HOSTS.map(async (host) => [host, await ask(`https://${host}/`)])
+		)
+	);
+	const callbackLookalikes = {
+		unobservedNumber: await ask('https://csgoempirelogin3.com/'),
+		subdomain: await ask('https://www.csgoempirelogin2.com/'),
+		prefix: await ask('https://evil-csgoempirelogin7.com/'),
+		suffix: await ask('https://csgoempirelogin2.com.attacker.invalid/')
+	};
+	const challengeLookalikes = {
+		googleParent: await ask('https://google.com/'),
+		googleSibling: await ask('https://accounts.google.com/'),
+		cloudflareParent: await ask('https://cloudflare.com/'),
+		cloudflarePrefix: await ask('https://evil-challenges.cloudflare.com/'),
+		googleSuffix: await ask('https://www.google.com.attacker.invalid/')
+	};
 
 	/*
 	 * The addresses that were wrong. Each one is a request a page can make: a
@@ -1218,6 +1328,28 @@ const main = async () => {
 		`apex=${asked.listedApex} www=${asked.listedSub}`
 	);
 	check(
+		'and gives each exact challenge runtime the same direct route',
+		Object.values(challengeRoutes).every((route) => route === 'DIRECT'),
+		Object.entries(challengeRoutes)
+			.map(([host, route]) => `${host}=${route}`)
+			.join(' ')
+	);
+	check(
+		'without widening a challenge exception to a parent, sibling, prefix or suffix lookalike',
+		Object.values(challengeLookalikes).every((route) => route === toProxy),
+		Object.entries(challengeLookalikes)
+			.map(([host, route]) => `${host}=${route}`)
+			.join(' ')
+	);
+	check(
+		'and gives only the two observed CSGOEmpire callback hosts the direct route',
+		Object.values(callbackRoutes).every((route) => route === 'DIRECT') &&
+			Object.values(callbackLookalikes).every((route) => route === toProxy),
+		[...Object.entries(callbackRoutes), ...Object.entries(callbackLookalikes)]
+			.map(([host, route]) => `${host}=${route}`)
+			.join(' ')
+	);
+	check(
 		'and sends an unrecognised host through the proxy rather than around it',
 		asked.unknown === toProxy,
 		asked.unknown
@@ -1241,6 +1373,12 @@ const main = async () => {
 	const fullyAsked = [
 		await fully.resolveProxy('https://steamcommunity.com/'),
 		await fully.resolveProxy(`https://${listedDirect}/`),
+		...(await Promise.all(
+			CHALLENGE_SUPPORT_HOSTS.map((host) => fully.resolveProxy(`https://${host}/`))
+		)),
+		...(await Promise.all(
+			DIRECT_CALLBACK_HOSTS.map((host) => fully.resolveProxy(`https://${host}/`))
+		)),
 		await fully.resolveProxy('http://127.0.0.1:7777/'),
 		await fully.resolveProxy('http://169.254.169.254/')
 	];
@@ -1259,9 +1397,39 @@ const main = async () => {
 		width: 800,
 		height: 600,
 		title: 'steam-only — browser',
-		partition: 'browser-pac-smoke',
-		userAgent: 'SmokeTest/1'
+		partition: 'browser-pac-smoke'
 	});
+	const proxyBeforeDirectFixtures = routedThrough.length;
+	await pacWindow
+		.loadURL(`http://${DIRECT_SITE_FIXTURE_HOST}:${siteFixture.address().port}/oda-site`)
+		.catch(() => undefined);
+	await waitFor(() => directTraffic.includes('site'));
+	await pacWindow
+		.loadURL(
+			`http://${DIRECT_CHALLENGE_FIXTURE_HOST}:${challengeFixture.address().port}/oda-challenge`
+		)
+		.catch(() => undefined);
+	await waitFor(() => directTraffic.includes('challenge'));
+	const proxyDuringDirectFixtures = routedThrough.slice(proxyBeforeDirectFixtures);
+	check(
+		'the Steam-only trade-site fixture is reached as real direct traffic',
+		directTraffic.includes('site'),
+		directTraffic.join(', ') || 'the direct fixture saw no bytes'
+	);
+	check(
+		'its exact challenge dependency is also reached as real direct traffic',
+		directTraffic.includes('challenge'),
+		directTraffic.join(', ') || 'the direct fixture saw no bytes'
+	);
+	check(
+		'the local account proxy sees neither direct fixture',
+		!proxyDuringDirectFixtures.some(
+			(url) =>
+				String(url).includes(DIRECT_SITE_FIXTURE_HOST) ||
+				String(url).includes(DIRECT_CHALLENGE_FIXTURE_HOST)
+		),
+		proxyDuringDirectFixtures.join(', ') || 'no proxy observation'
+	);
 	await pacWindow.loadURL('http://store.steampowered.com/oda-smoke').catch(() => undefined);
 	await wait(800);
 	await pacWindow.loadURL('http://oda-smoke.invalid/not-steam').catch(() => undefined);
@@ -1288,6 +1456,8 @@ const main = async () => {
 		routedThrough.join(', ')
 	);
 	pacWindow.close();
+	siteFixture.close();
+	challengeFixture.close();
 	pacProxy.close();
 
 	check('no unhandled errors in the main process', problems.length === 0, problems.join(' | '));

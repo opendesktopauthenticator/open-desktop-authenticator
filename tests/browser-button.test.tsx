@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { CopyCodeButton, VaultHome } from '../src/renderer/screens/VaultHome';
+import { BrowserRouteButton, CopyCodeButton, VaultHome } from '../src/renderer/screens/VaultHome';
 import { AddAuthenticator } from '../src/renderer/screens/AddAuthenticator';
 import { accountSummary, type AccountSummary } from '../src/shared/ipc';
 
@@ -215,6 +215,8 @@ describe('the trading-browser button', () => {
 	it('does not claim everything else goes direct, because it does not', () => {
 		const routed = render([account({ hasProxy: true, routing: 'verified' })]);
 		expect(steamOnlyButton(routed)).not.toMatch(/everything else[^.]*direct/i);
+		expect(steamOnlyButton(routed)).toMatch(/exact sign-in callback hosts/i);
+		expect(steamOnlyButton(routed)).toMatch(/exact challenge-service hosts goes direct/i);
 		expect(steamOnlyButton(routed)).toMatch(/anything else still goes through the proxy/i);
 	});
 
@@ -271,6 +273,69 @@ describe('the trading-browser button', () => {
 	});
 });
 
+function renderRouteButtons(openingRoute: 'proxy' | 'steam-only' | 'direct' | undefined): string {
+	return renderToStaticMarkup(
+		<>
+			<BrowserRouteButton
+				route="proxy"
+				openingRoute={openingRoute}
+				label="Open trading browser (proxied)"
+				className="browser-primary"
+				title="Fully proxied"
+				onOpen={noop}
+			/>
+			<BrowserRouteButton
+				route="steam-only"
+				openingRoute={openingRoute}
+				label="Steam only"
+				className="secondary"
+				title="Steam proxied"
+				onOpen={noop}
+			/>
+			<BrowserRouteButton
+				route="direct"
+				openingRoute={openingRoute}
+				label="Direct"
+				className="secondary"
+				title="Machine route"
+				onOpen={noop}
+			/>
+		</>
+	);
+}
+
+describe('browser-route progress', () => {
+	it.each([
+		['proxy', 0],
+		['steam-only', 1],
+		['direct', 2]
+	] as const)('shows progress only on the %s button that was pressed', (route, selectedAt) => {
+		const rendered = buttons(renderRouteButtons(route));
+		expect(rendered).toHaveLength(3);
+		expect(rendered.filter((button) => button.includes('Opening browser…'))).toHaveLength(1);
+		expect(rendered[selectedAt]).toContain('Opening browser…');
+		expect(rendered[selectedAt]).toMatch(/aria-busy="true"/);
+		for (const [at, button] of rendered.entries()) {
+			expect(button).toMatch(/disabled/);
+			if (at !== selectedAt) {
+				expect(button).not.toMatch(/aria-busy/);
+			}
+		}
+	});
+
+	it('leaves every route enabled and labelled normally while none is opening', () => {
+		const rendered = buttons(renderRouteButtons(undefined));
+		expect(rendered.map((button) => button.match(/>([^<]+)<\/button>/)?.[1])).toEqual([
+			'Open trading browser (proxied)',
+			'Steam only',
+			'Direct'
+		]);
+		for (const button of rendered) {
+			expect(button).not.toMatch(/disabled|aria-busy/);
+		}
+	});
+});
+
 /**
  * **The vault-wide switch, on the screen it changes.**
  *
@@ -292,7 +357,7 @@ describe('the account list when the vault requires proxies', () => {
 
 	/*
 	 * Steam-only goes too. It keeps Steam on the proxy, and it sends a short list
-	 * of trade sites straight out from this machine — which is a direct request,
+	 * of trade, callback and challenge-service hosts straight out from this machine — which is a direct request,
 	 * which is what the setting forbids. Leaving the button up would offer a
 	 * choice the main process refuses.
 	 */

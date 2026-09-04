@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { electronBrowserHost } from '../src/main/browser/electron-host';
 import { SECURE_WEB_PREFERENCES } from '../src/shared/security-policy';
+import { windowsTaskbarDetails } from '../src/main/windows-taskbar-identity';
 
 /**
  * The window this application opens onto the open web, and how it is locked down.
@@ -65,11 +66,15 @@ const record = vi.hoisted(() => ({
 	views: [] as { options: ViewOptions; loaded: string[] }[],
 	/** The window-open handlers tabs installed, so the popup path can be driven. */
 	windowOpenHandlers: [] as WindowOpenHandler[],
+	/** Explicit page-identity overrides attempted by the adapter. */
+	userAgentOverrides: [] as string[],
 	/** Native-window options and explicit reveals observed by the Electron fake. */
 	nativeWindows: [] as {
 		options: Record<string, unknown>;
 		shown: number;
 		closed: boolean;
+		appDetails: Record<string, unknown>[];
+		events: string[];
 	}[],
 	/**
 	 * Preloads registered on a *session*. Electron offers this as well, and it
@@ -141,7 +146,9 @@ vi.mock('electron', () => {
 		isLoading(): boolean {
 			return false;
 		}
-		setUserAgent(): void {}
+		setUserAgent(userAgent: string): void {
+			record.userAgentOverrides.push(userAgent);
+		}
 		setWebRTCIPHandlingPolicy(): void {}
 		setWindowOpenHandler(handler: WindowOpenHandler): void {
 			record.windowOpenHandlers.push(handler);
@@ -196,8 +203,18 @@ vi.mock('electron', () => {
 			removeChildView: () => undefined
 		};
 		constructor(options: Record<string, unknown>) {
-			this.recorded = { options: { ...options }, shown: 0, closed: false };
+			this.recorded = {
+				options: { ...options },
+				shown: 0,
+				closed: false,
+				appDetails: [],
+				events: []
+			};
 			record.nativeWindows.push(this.recorded);
+		}
+		setAppDetails(details: Record<string, unknown>): void {
+			this.recorded.appDetails.push({ ...details });
+			this.recorded.events.push('app-details');
 		}
 		on(): this {
 			return this;
@@ -215,6 +232,7 @@ vi.mock('electron', () => {
 		focus(): void {}
 		show(): void {
 			this.recorded.shown += 1;
+			this.recorded.events.push('show');
 		}
 		setTitle(): void {}
 		close(): void {
@@ -233,7 +251,7 @@ vi.mock('electron', () => {
 		nativeImage: { createEmpty: () => ({ addRepresentation: () => undefined }) },
 		// Imported by `security.ts`, which the adapter pulls in for the canonical
 		// posture and for `denyAllPermissions`.
-		app: { isPackaged: false },
+		app: { isPackaged: false, getAppPath: () => process.cwd() },
 		shell: { openExternal: () => Promise.resolve() }
 	};
 });
@@ -249,6 +267,7 @@ vi.mock('electron', () => {
 function openWindow(): { toolbar: { options: ViewOptions } | undefined; pages: ViewOptions[] } {
 	record.views.length = 0;
 	record.windowOpenHandlers.length = 0;
+	record.userAgentOverrides.length = 0;
 	record.sessionPreloads.length = 0;
 	record.nativeWindows.length = 0;
 
@@ -256,8 +275,7 @@ function openWindow(): { toolbar: { options: ViewOptions } | undefined; pages: V
 		width: 1280,
 		height: 860,
 		title: 'Steam — demo_trader',
-		partition: 'persist:account-demo',
-		userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+		partition: 'persist:account-demo'
 	});
 	// The first tab, opened the way `openAccountBrowser` opens it.
 	void handle.loadURL('https://steamcommunity.com/my/tradeoffers/');
@@ -632,7 +650,6 @@ describe('the Electron adapter for the in-app browser', () => {
 			height: 860,
 			title: 'unjudged landing',
 			partition: 'browser-hidden-test',
-			userAgent: 'test',
 			show: false
 		});
 
@@ -650,11 +667,32 @@ describe('the Electron adapter for the in-app browser', () => {
 			width: 800,
 			height: 600,
 			title: 'direct host user',
-			partition: 'browser-visible-test',
-			userAgent: 'test'
+			partition: 'browser-visible-test'
 		});
 
 		expect(record.nativeWindows.at(-1)?.options.show).toBe(true);
+	});
+
+	it('gives the account window the product taskbar identity exactly once', () => {
+		record.nativeWindows.length = 0;
+		const handle = electronBrowserHost.createWindow({
+			width: 800,
+			height: 600,
+			title: 'identified account browser',
+			partition: 'browser-taskbar-identity-test',
+			show: false
+		});
+		handle.show();
+
+		const native = record.nativeWindows.at(-1);
+		const expected = windowsTaskbarDetails({
+			platform: process.platform,
+			packaged: false,
+			applicationPath: process.cwd(),
+			executablePath: process.execPath
+		});
+		expect(native?.appDetails).toEqual(expected ? [expected] : []);
+		expect(native?.events).toEqual(expected ? ['app-details', 'show'] : ['show']);
 	});
 
 	/*
@@ -686,8 +724,8 @@ describe('the Electron adapter for the in-app browser', () => {
 	 * **One function builds every tab, and it is the only thing that may.**
 	 *
 	 * The dangerous version of tabs is one where the first is hardened and the
-	 * ones a website opens are not. So the user agent, the WebRTC policy and the
-	 * window-open handler are all applied in `openTab`, and nothing else
+	 * ones a website opens are not. So the WebRTC policy and the window-open
+	 * handler are both applied in `openTab`, and nothing else
 	 * constructs a tab view.
 	 */
 	it('hardens every tab in one place', () => {
@@ -697,9 +735,19 @@ describe('the Electron adapter for the in-app browser', () => {
 		const body = open.slice(0, open.indexOf('const closeTab'));
 		expect(ADAPTER).toMatch(/\.\.\.HARDENED/);
 		expect(ADAPTER).toMatch(/partition: options\.partition/);
-		expect(ADAPTER).toMatch(/setUserAgent\(options\.userAgent\)/);
+		expect(ADAPTER).not.toMatch(/setUserAgent/);
 		expect(body).toMatch(/setWebRTCIPHandlingPolicy\(webRtcPolicy\)/);
 		expect(body).toMatch(/setWindowOpenHandler/);
+	});
+
+	it('leaves Chromium to present one native identity in the first tab and an adopted popup', () => {
+		const { pages } = openWindow();
+
+		expect(pages).toHaveLength(2);
+		expect(
+			record.userAgentOverrides,
+			'an explicit user agent makes the HTTP and JavaScript identity a modified browser profile'
+		).toEqual([]);
 	});
 
 	/*

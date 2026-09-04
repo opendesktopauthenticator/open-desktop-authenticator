@@ -60,6 +60,69 @@ export const noted =
 		return next;
 	};
 
+export interface BrowserOpening {
+	readonly attempt: number;
+	readonly route: BrowserRoute;
+}
+
+/** Record the route and attempt that currently own one account's browser controls. */
+export const browserStarted =
+	(steamId64: string, route: BrowserRoute, attempt: number) =>
+	(prev: ReadonlyMap<string, BrowserOpening>): ReadonlyMap<string, BrowserOpening> => {
+		const next = new Map(prev);
+		next.set(steamId64, { attempt, route });
+		return next;
+	};
+
+/**
+ * Release the controls only when the attempt finishing is still their owner.
+ *
+ * Two presses can land before React commits the disabled state. If the older
+ * promise settles last, deleting by account alone would make the newer route
+ * look idle while it is still opening.
+ */
+export const browserFinished =
+	(steamId64: string, attempt: number) =>
+	(prev: ReadonlyMap<string, BrowserOpening>): ReadonlyMap<string, BrowserOpening> => {
+		if (prev.get(steamId64)?.attempt !== attempt) {
+			return prev;
+		}
+		const next = new Map(prev);
+		next.delete(steamId64);
+		return next;
+	};
+
+/** A route button that distinguishes the selected attempt from its disabled siblings. */
+export function BrowserRouteButton({
+	route,
+	openingRoute,
+	label,
+	className,
+	title,
+	onOpen
+}: {
+	route: BrowserRoute;
+	openingRoute: BrowserRoute | undefined;
+	label: string;
+	className: string;
+	title: string;
+	onOpen: (route: BrowserRoute) => void;
+}): React.JSX.Element {
+	const selected = openingRoute === route;
+	return (
+		<button
+			type="button"
+			className={className}
+			disabled={openingRoute !== undefined}
+			aria-busy={selected ? 'true' : undefined}
+			title={title}
+			onClick={() => onOpen(route)}
+		>
+			{selected ? 'Opening browser…' : label}
+		</button>
+	);
+}
+
 /**
  * The copy action and the short-lived clipboard notice that belongs to it.
  *
@@ -232,8 +295,8 @@ export function VaultHome({
 	 */
 	const copyAttempt = useRef(0);
 
-	/** The account whose browser is being opened, and why the last one was not. */
-	const [opening, setOpening] = useState<ReadonlySet<string>>(() => new Set());
+	/** Which route and attempt currently own each account's browser controls. */
+	const [opening, setOpening] = useState<ReadonlyMap<string, BrowserOpening>>(() => new Map());
 	/**
 	 * Why each account's browser did not open, keyed by account.
 	 *
@@ -264,10 +327,15 @@ export function VaultHome({
 	 * A's failure was then discarded as stale. A's browser had not opened and
 	 * nothing on screen said why.
 	 */
-	const claimBrowser = (steamId64: string): (() => boolean) => {
+	const claimBrowser = (
+		steamId64: string
+	): { readonly attempt: number; readonly isCurrent: () => boolean } => {
 		const mine = (browserAttempt.current.get(steamId64) ?? 0) + 1;
 		browserAttempt.current.set(steamId64, mine);
-		return () => browserAttempt.current.get(steamId64) === mine;
+		return {
+			attempt: mine,
+			isCurrent: () => browserAttempt.current.get(steamId64) === mine
+		};
 	};
 
 	/**
@@ -275,31 +343,25 @@ export function VaultHome({
 	 * that account's row.
 	 *
 	 * Shared by all three buttons deliberately. It was written out per button
-	 * while there were two, and the second copy had already lost the note
-	 * explaining why `finally` clears one account's flag rather than all of
-	 * them — three copies would have been three chances to lose the `newest()`
-	 * check that keeps a stale failure off a row that has since succeeded.
+	 * while there were two, and the second copy had already lost the ownership
+	 * checks. Three copies would be three chances to let a stale failure replace
+	 * a newer result, or a stale `finally` release a route still being opened.
 	 */
 	const openBrowserAs = (account: AccountSummary, route: BrowserRoute): void => {
-		const newest = claimBrowser(account.steamId64);
+		const claim = claimBrowser(account.steamId64);
 		setBrowserError(noted(account.steamId64, undefined));
-		setOpening(running(account.steamId64));
+		setOpening(browserStarted(account.steamId64, route, claim.attempt));
 		onOpenBrowser(account, route)
 			.catch((err: unknown) => {
 				// A sign-in is not an error and never arrives here — it comes back
 				// as a state and the caller shows the form. What reaches this is
 				// routing that could not be applied, or Steam being unreachable.
-				if (!newest()) {
+				if (!claim.isCurrent()) {
 					return;
 				}
 				setBrowserError(noted(account.steamId64, messageOf(err)));
 			})
-			.finally(() =>
-				// Only this account's flag, for the reason the copy button
-				// documents: clearing unconditionally re-enables a row whose own
-				// open is still in flight.
-				setOpening(finished(account.steamId64))
-			);
+			.finally(() => setOpening(browserFinished(account.steamId64, claim.attempt)));
 	};
 
 	// Retire the message when the clipboard clear it describes has happened.
@@ -491,6 +553,8 @@ export function VaultHome({
 						const code = byAccount.get(account.steamId64);
 						const failure = failures.get(account.steamId64);
 						const justCopied = copied?.steamId64 === account.steamId64;
+						const openingRoute = opening.get(account.steamId64)?.route;
+						const primaryBrowserRoute: BrowserRoute = account.hasProxy ? 'proxy' : 'direct';
 
 						/* Steam Guard codes run on a thirty-second window. Set once per row
 						   and inherited, so the drain under the glyphs and the ring around the
@@ -657,59 +721,55 @@ export function VaultHome({
 
 									    "Steam only" is the middle answer: Steam and everything
 									    unrecognised keep going through the proxy, and a short list of
-									    known third-party trade sites goes direct. Those are the pages
-									    that make a proxied window unbearable, and none of them is where
-									    the account lives. Unknown stays proxied on purpose — see
-									    `steamOnlyBypass`. */}
-									<button
-										type="button"
+									    known third-party trade sites plus exact callback and challenge-service
+									 hosts goes direct. Fixed-server bypasses apply to the whole session, so
+									 those support hosts are direct even when another page requested
+									 them. Unknown stays proxied on purpose — see `steamOnlyBypass`. */}
+									<BrowserRouteButton
+										route={primaryBrowserRoute}
+										openingRoute={openingRoute}
+										label={
+											account.hasProxy ? 'Open trading browser (proxied)' : 'Open trading browser'
+										}
 										className="browser-primary"
-										disabled={opening.has(account.steamId64)}
 										title={
 											account.hasProxy
 												? 'Open a signed-in browser routed through this account’s proxy. Everything in the window goes through it. Starts at your trade offers.'
 												: 'Open a signed-in browser for this account using this machine’s network settings. If its system proxy asks for a username and password, add that proxy to this account’s Proxy field first. Starts at your trade offers.'
 										}
-										onClick={() =>
+										onOpen={(route) =>
 											// A routed account's first button is the fully proxied one. An
 											// unrouted account has no proxy to route through, so its only
 											// button is the direct one — and saying that outright, rather
 											// than passing a route meaning "proxy if there is one", keeps
 											// the token mint on the same session the window will use.
-											openBrowserAs(account, account.hasProxy ? 'proxy' : 'direct')
+											openBrowserAs(account, route)
 										}
-									>
-										{opening.has(account.steamId64)
-											? 'Opening browser…'
-											: account.hasProxy
-												? 'Open trading browser (proxied)'
-												: 'Open trading browser'}
-									</button>
+									/>
 									{/* Both of the alternatives go under `Require proxies`, not just
 									    Direct. "Steam only" keeps Steam on the proxy but sends a short
-									    list of trade sites straight out from this machine, and a
+									    list of trade, callback and challenge-service hosts straight out from this
+									    machine, and a
 									    deliberate direct request is the thing that setting forbids. The
 									    main process refuses both; this only stops offering them. */}
 									{account.hasProxy && !requireProxies && (
 										<>
-											<button
-												type="button"
+											<BrowserRouteButton
+												route="steam-only"
+												openingRoute={openingRoute}
+												label="Steam only"
 												className="secondary"
-												disabled={opening.has(account.steamId64)}
-												title="Open the same browser with Steam — including its image and video hosts — still going through the proxy, while a short list of known trade sites goes direct so they load at full speed. Anything else still goes through the proxy. Steam never sees your real address."
-												onClick={() => openBrowserAs(account, 'steam-only')}
-											>
-												Steam only
-											</button>
-											<button
-												type="button"
+												title="Open the same browser with Steam — including its image and video hosts — still going through the proxy. A short list of known trade sites, exact sign-in callback hosts and exact challenge-service hosts goes direct for this whole browser session so each third-party flow stays on one connection. Anything else still goes through the proxy. Steam never sees your real address."
+												onOpen={(route) => openBrowserAs(account, route)}
+											/>
+											<BrowserRouteButton
+												route="direct"
+												openingRoute={openingRoute}
+												label="Direct"
 												className="secondary"
-												disabled={opening.has(account.steamId64)}
 												title="Open the same browser without this account’s proxy. Your machine’s own network settings still apply — including a system or company proxy, if this machine has one — so Steam sees whatever address this machine normally uses. If that proxy asks for a username and password, add it to this account’s Proxy field and use the proxied route instead."
-												onClick={() => openBrowserAs(account, 'direct')}
-											>
-												Direct
-											</button>
+												onOpen={(route) => openBrowserAs(account, route)}
+											/>
 										</>
 									)}
 									{/* Last, and visually quietest of the three. It is the only one

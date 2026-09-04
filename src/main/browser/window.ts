@@ -1,4 +1,7 @@
 import {
+	CHALLENGE_SUPPORT_HOSTS,
+	DIRECT_CALLBACK_HOSTS,
+	DIRECT_CONTENT_DOMAINS,
 	STEAM_ROUTED_DOMAINS,
 	describesDirectRoute,
 	planProxy,
@@ -80,7 +83,6 @@ export interface BrowserSessionHandle {
 	 * Steam account.
 	 */
 	denyPermissions(): void;
-	setUserAgent?(userAgent: string): void;
 	clearStorageData?(): Promise<void>;
 	cookies: {
 		set(cookie: {
@@ -100,7 +102,6 @@ export interface BrowserWindowOptions {
 	height: number;
 	title: string;
 	partition: string;
-	userAgent: string;
 	/** False while the first landing is being judged. Defaults to visible for direct host users. */
 	show?: boolean;
 }
@@ -193,51 +194,6 @@ export interface InitialNavigationTimer {
 	cancel(handle: InitialNavigationTimerHandle): void;
 }
 
-/**
- * Identify the browser as the Chromium it actually embeds, without adding the
- * Electron product token.
- *
- * The old value froze both Windows and one Chrome version into every build.
- * That made Linux claim the wrong operating system and made every Electron
- * upgrade leave the browser claiming an older engine than the one sites were
- * executing. Chromium keeps a compatibility token on macOS; Windows and Linux
- * expose the architecture their builds actually target.
- */
-export function browserUserAgent(
-	chromiumVersion: string,
-	platform: NodeJS.Platform,
-	architecture: NodeJS.Architecture
-): string {
-	let platformToken: string;
-	switch (platform) {
-		case 'win32':
-			platformToken =
-				architecture === 'arm64' ? 'Windows NT 10.0; ARM64' : 'Windows NT 10.0; Win64; x64';
-			break;
-		case 'darwin':
-			platformToken = 'Macintosh; Intel Mac OS X 10_15_7';
-			break;
-		case 'linux':
-			platformToken = architecture === 'arm64' ? 'X11; Linux aarch64' : 'X11; Linux x86_64';
-			break;
-		default:
-			// No release target currently reaches this branch. Keeping the real
-			// platform and architecture is still more honest than claiming Windows.
-			platformToken = `${platform}; ${architecture}`;
-	}
-
-	return (
-		`Mozilla/5.0 (${platformToken}) AppleWebKit/537.36 ` +
-		`(KHTML, like Gecko) Chrome/${chromiumVersion} Safari/537.36`
-	);
-}
-
-export const BROWSER_USER_AGENT = browserUserAgent(
-	process.versions.chrome ?? process.versions.node,
-	process.platform,
-	process.arch
-);
-
 /** Where a signed-in browsing session starts. */
 export const START_URL = 'https://steamcommunity.com/my/tradeoffers/';
 
@@ -320,6 +276,21 @@ const IMPLICIT_BYPASS_PROBES = [
 	'http://127.0.0.1/',
 	'http://[::1]/',
 	'http://169.254.169.254/'
+];
+
+/**
+ * Every spelling the Steam-only control promises will leave directly.
+ *
+ * Content domains deliberately carry both entries because Chromium treats an
+ * apex and its `www` child as separate bypass rules. Callback and challenge
+ * origins are exact exceptions, so they get one probe each and no invented
+ * subdomain. Asking `resolveProxy` is local and makes the visible routing choice
+ * an enforced precondition rather than copy resting on a configuration write.
+ */
+const STEAM_ONLY_DIRECT_PROBES = [
+	...DIRECT_CONTENT_DOMAINS.flatMap((domain) => [`https://${domain}/`, `https://www.${domain}/`]),
+	...DIRECT_CALLBACK_HOSTS.map((host) => `https://${host}/`),
+	...CHALLENGE_SUPPORT_HOSTS.map((host) => `https://${host}/`)
 ];
 
 /**
@@ -458,8 +429,6 @@ export async function openAccountBrowser(
 			options.onWipe?.(cleared);
 		}
 	};
-	session.setUserAgent?.(BROWSER_USER_AGENT);
-
 	/*
 	 * Before anything loads. A page cannot be asked to wait while we decide
 	 * whether it may use the camera, and Steam needs none of these to work.
@@ -571,6 +540,8 @@ export async function openAccountBrowser(
 		 * the account is this machine's. So every domain the mode promises to
 		 * route is asked about individually, plus one host on no list at all,
 		 * which is the fail-closed default being checked rather than assumed.
+		 * The other half is checked below too: every explicitly direct spelling
+		 * must resolve to DIRECT, rather than merely appearing in the configuration.
 		 */
 		const mustRoute = [
 			START_URL,
@@ -615,6 +586,29 @@ export async function openAccountBrowser(
 				);
 			}
 		}
+
+		if (steamOnly) {
+			for (const target of STEAM_ONLY_DIRECT_PROBES) {
+				let resolved: string;
+				try {
+					resolved = await session.resolveProxy(target);
+				} catch (cause) {
+					throw new BrowserSessionError(
+						`the Steam-only direct route could not be checked, so no window was opened`,
+						{ cause }
+					);
+				}
+				options.stillWanted?.();
+				// A proxy-first list ending in DIRECT is not the promised direct route.
+				// Exact equality also refuses an empty or otherwise malformed answer.
+				if (resolved.trim().toUpperCase() !== 'DIRECT') {
+					throw new BrowserSessionError(
+						'The Steam-only route could not apply every direct site exception, so no ' +
+							'window was opened. Use the fully proxied browser or Direct instead.'
+					);
+				}
+			}
+		}
 	}
 
 	/*
@@ -653,7 +647,6 @@ export async function openAccountBrowser(
 			height: 860,
 			title: `${options.accountName} — browser`,
 			partition,
-			userAgent: BROWSER_USER_AGENT,
 			// A rejected landing is commonly a real password form. Judge it hidden.
 			show: false
 		});

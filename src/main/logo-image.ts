@@ -11,9 +11,10 @@ import { premultipliedBgra } from '../shared/logo';
  * property the tray has always had here: the artwork the running application
  * draws is code, not a binary.
  *
- * The `.ico` files still matter — they are what stamps the executable and the
- * installer, which Electron never gets a say in — but nothing at runtime reads
- * them.
+ * The `.ico` files still matter. They stamp the executable and installer, and
+ * development windows also hand `build/icon.ico` to Windows as the taskbar
+ * group's explicit icon resource. The pixels Electron draws inside native
+ * windows and notifications still come from this module.
  *
  * ## Why several representations
  *
@@ -57,23 +58,13 @@ export const trayImage = (): NativeImage => logoImage(16, [1, 1.25, 1.5, 2]);
 export const notificationImage = (): NativeImage => logoImage(256, [1]);
 
 /**
- * The window icon: Alt-Tab and the window list.
+ * The native window icon: title-bar, Alt-Tab, and the window list.
  *
- * **Not the Windows taskbar button, whatever this used to say.** `index.ts` calls
- * `app.setAppUserModelId` before any window exists, and from then on Windows
- * resolves the taskbar button's icon through that AppUserModelID rather than
- * through the window. Unpackaged there is nothing registered against it that the
- * shell can draw — `windows-identity.ts` writes an `IconUri`, but that is a PNG
- * for toast captions and not something a taskbar button will take — so Windows
- * falls back to the icon of the running executable, which in development is
- * `electron.exe`. Hence the Electron mark on the taskbar during `npm start`.
- *
- * Measured, not assumed: commenting out that one `setAppUserModelId` call and
- * relaunching puts this image on the taskbar button.
- *
- * A packaged build is unaffected in both halves — the executable carries
- * `build/icon.ico`, and the installer's Start Menu shortcut carries the same
- * AppUserModelID — so this is a development-only appearance and not worth
- * trading away the notification identity to fix.
+ * Windows taskbar grouping is a separate shell identity. In development the
+ * process executable is Electron, so opening the account browser can make a
+ * newly formed two-window group fall back to Electron's mark even though both
+ * windows carry this image. `windows-taskbar-identity.ts` gives every top-level
+ * window the product AppUserModelID and a real ICO resource before it is shown;
+ * this image remains the correct source for Electron's own window surfaces.
  */
 export const windowImage = (): NativeImage => logoImage(32, [1, 1.5, 2, 4, 8]);

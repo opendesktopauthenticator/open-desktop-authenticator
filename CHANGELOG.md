@@ -67,6 +67,14 @@ never have to think about.
 
 ### Fixed
 
+- The account browser no longer replaces Chromium's user agent with a
+  Chrome-only identity. In Steam-only mode, supported trade sites, their exact
+  challenge-service hosts and observed sign-in callbacks now stay on the same
+  direct route; the fully proxied mode still sends every destination through
+  the account proxy.
+- Opening the account browser no longer makes a multi-window Windows taskbar
+  group fall back to Electron's icon. Both top-level windows now carry the same
+  explicit product identity and icon resource.
 - A passphrase change that could not finish no longer leaves the file and the
   running session disagreeing about which passphrase opens it.
 - The backup beside your vault is re-sealed under the new passphrase when you

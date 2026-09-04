@@ -90,8 +90,7 @@ function makeWindow(title) {
 		width: 900,
 		height: 620,
 		title,
-		partition: PARTITION,
-		userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) StressTest/1'
+		partition: PARTITION
 	});
 }
 

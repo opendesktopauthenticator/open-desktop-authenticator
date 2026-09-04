@@ -66,6 +66,7 @@ import {
 } from './confirmations/windows-toast-activation';
 import { createTray } from './tray';
 import { claimsWindowsShellIdentity, registerWindowsIdentity } from './windows-identity';
+import { applyWindowsTaskbarIdentity } from './windows-taskbar-identity';
 import { registerConfirmationHandlers } from './confirmations/ipc';
 import { SteamClock } from './steam/clock';
 import {
@@ -152,6 +153,18 @@ function createMainWindow(): BrowserWindow {
 			devTools: isDev,
 			preload: join(__dirname, '../preload/index.js')
 		}
+	});
+
+	// `icon` supplies the native window mark. The taskbar group is a separate
+	// Windows property: when Trade adds a second top-level window, an unpackaged
+	// run is otherwise grouped under electron.exe and the group changes to
+	// Electron's icon. Give every top-level window the same explicit identity
+	// before it can be shown; the account browser uses this helper too.
+	applyWindowsTaskbarIdentity(window, {
+		platform: process.platform,
+		packaged: app.isPackaged,
+		applicationPath: app.getAppPath(),
+		executablePath: process.execPath
 	});
 
 	// Show only once painted, so the user never sees an empty frame.

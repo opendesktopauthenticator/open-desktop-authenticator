@@ -790,21 +790,19 @@ export const STEAM_ROUTED_DOMAINS = [
  * Hosts the "Steam only" route is willing to send straight out.
  *
  * **An allowlist, and a short one.** The route's default is the proxy — see
- * `steamOnlyBypass` — so this list is the *entire* set of addresses that mode
- * lets out directly, and every entry is a deliberate decision that this host
- * seeing the machine's own address costs nothing the user cares about.
+ * `steamOnlyBypass` — so this list, together with the two exact-host lists
+ * below, is the entire set of addresses that mode lets out directly. Every
+ * entry is a deliberate decision that this host seeing the machine's own
+ * address costs nothing the user cares about.
  *
  * They are the third-party trade and case sites people open beside Steam.
  * Those are the pages that make a proxied window unbearable: heavy, chatty,
  * and behind Cloudflare, which challenges a shared proxy address far more
  * readily than a home connection. None of them is where the account lives.
  *
- * **`challenges.cloudflare.com` is deliberately absent.** Turnstile has to
- * egress from the same address as the page being challenged, or the clearance
- * cookie is issued to an address that never browses and the challenge loops.
- * This window opens on Steam, which is proxied — so Turnstile must be proxied
- * too, and the default does that without an entry here. A user who needs a
- * challenged third-party site has the Direct button.
+ * Challenge providers are kept in the exact-host list below instead of here.
+ * They must follow these direct trade sites in this mode: splitting the page
+ * and its challenge across two IP addresses makes a legitimate solve invalid.
  */
 export const DIRECT_CONTENT_DOMAINS = [
 	'csfloat.com',
@@ -817,6 +815,38 @@ export const DIRECT_CONTENT_DOMAINS = [
 	'buff.163.com',
 	'dmarket.com',
 	'bitskins.com'
+] as const;
+
+/**
+ * Exact callback hosts a direct trade site has used while returning from Steam.
+ *
+ * CSGOEmpire's numbered OpenID callback origins were observed in MasterBridge's
+ * real-profile redirect history. They follow the direct site so the return does
+ * not unexpectedly switch IP mid-flow. They are intentionally not suffix rules:
+ * only these two observed hosts receive the exception, never a numbered guess,
+ * subdomain, or lookalike.
+ */
+export const DIRECT_CALLBACK_HOSTS = ['csgoempirelogin2.com', 'csgoempirelogin7.com'] as const;
+
+/**
+ * Exact challenge-service hosts needed by the direct trade sites above.
+ *
+ * Exact means exact. A suffix entry for `google.com` or `gstatic.com` would let
+ * unrelated Google properties bypass the account proxy, turning a compatibility
+ * exception into an open-ended route.
+ *
+ * Chromium's fixed-server bypass list cannot see which top-level page initiated
+ * a request. These are therefore session-wide exceptions in Steam-only mode,
+ * not rules conditional on the user currently visiting a direct trade site.
+ * Keeping the list exact is the narrowest rule that can keep those sites and
+ * their challenge runtime on the same route without changing the session model.
+ */
+export const CHALLENGE_SUPPORT_HOSTS = [
+	'challenges.cloudflare.com',
+	'www.google.com',
+	'www.gstatic.com',
+	'recaptcha.google.com',
+	'www.recaptcha.net'
 ] as const;
 
 /**
@@ -859,6 +889,8 @@ export const DIRECT_CONTENT_DOMAINS = [
 export function steamOnlyBypass(): string {
 	return [
 		...DIRECT_CONTENT_DOMAINS.flatMap((domain) => [domain, `*.${domain}`]),
+		...DIRECT_CALLBACK_HOSTS,
+		...CHALLENGE_SUPPORT_HOSTS,
 		'<-loopback>'
 	].join(',');
 }
@@ -900,6 +932,18 @@ export function isSteamRoutedHost(host: string): boolean {
  */
 export function isDirectContentHost(host: string): boolean {
 	return !isSteamRoutedHost(host) && hostIsUnder(host, DIRECT_CONTENT_DOMAINS);
+}
+
+/** Whether this is one observed, exact trade-site callback allowed to stay direct. */
+export function isDirectCallbackHost(host: string): boolean {
+	const lower = host.toLowerCase().replace(/\.$/, '');
+	return !isSteamRoutedHost(lower) && DIRECT_CALLBACK_HOSTS.some((known) => lower === known);
+}
+
+/** Whether this is one exact challenge dependency allowed to follow a trade site direct. */
+export function isChallengeSupportHost(host: string): boolean {
+	const lower = host.toLowerCase().replace(/\.$/, '');
+	return !isSteamRoutedHost(lower) && CHALLENGE_SUPPORT_HOSTS.some((known) => lower === known);
 }
 
 export function planProxy(proxyUrl: string): ProxyPlan {

@@ -1,4 +1,5 @@
 import {
+	app,
 	BaseWindow,
 	ipcMain,
 	screen,
@@ -15,6 +16,7 @@ import { addressToUrl, isSteamHost } from './window';
 
 import { denyAllPermissions, SECURE_WEB_PREFERENCES } from '../security';
 import { windowImage } from '../logo-image';
+import { applyWindowsTaskbarIdentity } from '../windows-taskbar-identity';
 
 import type {
 	BrowserHost,
@@ -35,9 +37,8 @@ import type {
  * Electron API and two parts of it were wrong:
  *
  *  - `setWindowOpenHandler` is on `WebContents`, not on `BrowserWindow`.
- *  - `partition` and `userAgent` are not `BrowserWindow` constructor options.
- *    `partition` belongs to `webPreferences`; a user agent is set on the
- *    contents or passed to `loadURL`.
+ *  - `partition` is not a `BrowserWindow` constructor option. It belongs to
+ *    `webPreferences` on each tab.
  *
  * Neither would have been caught by the unit tests, because the tests implement
  * the port rather than Electron — which is the same trap that let a `login`
@@ -182,6 +183,12 @@ export const electronBrowserHost: BrowserHost = {
 			// the taskbar, while holding a live Steam session.
 			icon: windowImage(),
 			autoHideMenuBar: true
+		});
+		applyWindowsTaskbarIdentity(window, {
+			platform: process.platform,
+			packaged: app.isPackaged,
+			applicationPath: app.getAppPath(),
+			executablePath: process.execPath
 		});
 
 		/*
@@ -434,9 +441,13 @@ export const electronBrowserHost: BrowserHost = {
 			const id = nextId++;
 			tabs.set(id, view);
 
-			// The same three things every tab gets, in the same order, because a
+			// The same two things every tab gets, in the same order, because a
 			// tab that missed one would be a hole shaped exactly like a new tab.
-			view.webContents.setUserAgent(options.userAgent);
+			//
+			// The user agent is deliberately absent. The running Chromium owns its
+			// HTTP and JavaScript-visible identity; replacing it produces the modified
+			// browser profile challenge systems warn about, even though this window is
+			// not automated.
 			view.webContents.setWebRTCIPHandlingPolicy(webRtcPolicy);
 			view.webContents.setWindowOpenHandler((details) => {
 				/*

@@ -339,9 +339,9 @@ describe('per-account status on the account list', () => {
 		 * button have one. A third button added without its own claim would have
 		 * satisfied a count of two and opened without ever claiming — its failure
 		 * then discarded as stale, or worse, shown on top of a different route's.
-		 * A single helper cannot be forgotten by a button that calls it.
+		 * A single helper cannot be forgotten by a route button that calls it.
 		 */
-		expect(source.match(/const newest = claimBrowser\(account\.steamId64\);/g) ?? []).toHaveLength(
+		expect(source.match(/const claim = claimBrowser\(account\.steamId64\);/g) ?? []).toHaveLength(
 			1
 		);
 		expect(source).toMatch(
@@ -360,18 +360,21 @@ describe('per-account status on the account list', () => {
 		 * routing the same way. The Steam-only button would have opened a fully
 		 * proxied window — the mode the user pressed it to get away from — while
 		 * every other test in the suite stayed green. So the label, the tooltip
-		 * and the route are asserted as one string rather than three facts that
-		 * happen to be true separately.
+		 * and the route are asserted in the same component invocation rather than
+		 * as three facts that happen to be true separately.
 		 */
 		expect(source).toMatch(
-			/onClick=\{\(\) => openBrowserAs\(account, 'steam-only'\)\}\s*>\s*Steam only\s*</
+			/<BrowserRouteButton\s+route="steam-only"\s+openingRoute=\{openingRoute\}\s+label="Steam only"[\s\S]*?onOpen=\{\(route\) => openBrowserAs\(account, route\)\}\s+\/>/
 		);
 		expect(source).toMatch(
-			/onClick=\{\(\) => openBrowserAs\(account, 'direct'\)\}\s*>\s*Direct\s*</
+			/<BrowserRouteButton\s+route="direct"\s+openingRoute=\{openingRoute\}\s+label="Direct"[\s\S]*?onOpen=\{\(route\) => openBrowserAs\(account, route\)\}\s+\/>/
 		);
 		// The first button is the only one that reads the account: an unrouted
 		// account has no proxy to send anything through.
-		expect(source).toMatch(/openBrowserAs\(account, account\.hasProxy \? 'proxy' : 'direct'\)/);
+		expect(source).toMatch(
+			/const primaryBrowserRoute: BrowserRoute = account\.hasProxy \? 'proxy' : 'direct';/
+		);
+		expect(source).toMatch(/<BrowserRouteButton\s+route=\{primaryBrowserRoute\}/);
 
 		/*
 		 * And the failure itself is per account. One object served the whole list,
@@ -398,10 +401,12 @@ describe('per-account status on the account list', () => {
 		// `attempt` would be the shared one coming back.
 		expect(source).not.toMatch(/[^a-zA-Z]attempt\.current/);
 
-		// Every asynchronous row-local writer is guarded: two for copy and one for
-		// the browser. Export's resolve/reject pair is behavior-tested through its
-		// shared `current()` gate in export-navigation-survival.test.tsx.
-		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(3);
+		// Every asynchronous row-local writer is guarded: the two copy writers use
+		// their local `newest`, and the browser writer uses the attempt claim that
+		// also owns its selected-route busy state. Export's resolve/reject pair is
+		// behavior-tested through `current()` in export-navigation-survival.test.tsx.
+		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(2);
+		expect(source.match(/if \(!claim\.isCurrent\(\)\) \{/g) ?? []).toHaveLength(1);
 	});
 });
 
