@@ -14,9 +14,9 @@ generic Electron icon. The running process is the current development build
 (`electron.exe .`), so this is not an old packaged binary or a stale source
 checkout.
 
-The previous implementation gave both top-level windows one combined
-`setAppDetails({ appId, appIconPath, appIconIndex })` call. That looks atomic at
-the TypeScript boundary, but Electron forwards the values to Chromium in this
+The first source review found a real ordering problem in the previous helper.
+Electron forwards a combined
+`setAppDetails({ appId, appIconPath, appIconIndex })` call to Chromium in this
 order:
 
 1. `System.AppUserModel.ID`
@@ -24,24 +24,33 @@ order:
 
 Windows documents the opposite dependency: relaunch properties must be stored
 before `System.AppUserModel.ID`, because committing the ID tells the taskbar to
-refresh. The current call therefore refreshes the group while its relaunch
-icon is absent and leaves the generic host icon selected.
+refresh. The current call therefore refreshes the group while its relaunch icon
+is absent.
 
-This also explains why setting the constructor `icon` was insufficient. That
-sets the native window's small and large icons, while an explicit taskbar group
-uses the relaunch icon resource associated with its AppUserModelID.
+That was not the whole defect. A native two-window probe then compared three
+real Electron 43.3.0 variants on this Windows host: combined details,
+AppUserModelID alone, and complete details followed by an ID refresh. All three
+produced the same result as the user's screenshot: the `BrowserWindow` carried
+the product icon and the `BaseWindow` carried the generic white-window icon.
+
+The probe rendered each window's `WM_GETICON` handle and compared its pixels.
+The `BaseWindow` handle is the actual ODA artwork, not a missing or generic
+native icon, and its property store contains the written shell fields. Explorer
+is substituting the taskbar image specifically for this `BaseWindow` path. An
+identity-only change therefore passes API tests but does not fix the reported
+behavior.
 
 ## Related release identities found during the pre-fix review
 
 The same helper is used by four materially different Windows environments, so
 the corrective change must not treat `app.isPackaged` as the whole decision:
 
-| Environment | Shell identity | Durable icon / relaunch target |
-| --- | --- | --- |
-| Development | a development-only per-window ID | source-tree `build/icon.ico`; no installed shortcut assumed |
-| Installed / unpacked NSIS | the desktop product ID used by Electron Builder | the packaged executable and installer shortcut; no per-window override |
-| Portable | a portable-specific per-window ID | `PORTABLE_EXECUTABLE_FILE`, the stable outer launcher, never the temporary inner executable |
-| Microsoft Store | the package manifest's identity | Windows package metadata; no desktop AppUserModelID override |
+| Environment               | Shell identity                                  | Durable icon / relaunch target                                                              |
+| ------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| Development               | no process/window ID in the ordinary run        | each real `BrowserWindow`'s source-tree product icon                                         |
+| Installed / unpacked NSIS | the desktop product ID used by Electron Builder | the packaged executable and installer shortcut; no per-window override                      |
+| Portable                  | a portable-specific per-window ID               | `PORTABLE_EXECUTABLE_FILE`, the stable outer launcher, never the temporary inner executable |
+| Microsoft Store           | the package manifest's identity                 | Windows package metadata; no desktop AppUserModelID override                                |
 
 Two additional defects are confirmed by this matrix:
 
@@ -60,12 +69,30 @@ taskbar group.
 
 ## Concrete fix
 
-Keep a shared per-window policy and apply it to both `BrowserWindow` and
-`BaseWindow` before either is shown. Development and portable windows need
-explicit details. Apply one complete details object and then repeat the ID:
+Replace only the account window shell from `BaseWindow` to `BrowserWindow`.
+Use the `BrowserWindow`'s existing owned `webContents` for the hardened toolbar,
+instead of creating a third-party page there or adding another renderer. Keep
+every Steam/trading page in its existing isolated child `WebContentsView`, with
+no preload and no vault IPC. The visible layering remains:
+
+1. the owned toolbar renderer fills the shell background and receives the
+   trusted browser-chrome preload;
+2. the selected site view is bounded below `CHROME_HEIGHT` and overlays only
+   the content region;
+3. inactive site views remain detached exactly as before.
+
+This removes the `BaseWindow` path Explorer renders generically while retaining
+the two security domains and the existing tab/session lifecycle. It does not
+add an unused `BrowserWindow` renderer.
+
+Ordinary development then needs no explicit per-window AppUserModelID: both
+top-level windows are real `BrowserWindow`s carrying the product icon. Only the
+development notification opt-in and portable channel need explicit relaunch
+details. For those two cases, apply one complete details object and repeat the
+ID:
 
 1. store `{ appId, appIconPath, appIconIndex, relaunchCommand,
-   relaunchDisplayName }`;
+relaunchDisplayName }`;
 2. store `{ appId }` again, causing Windows to refresh after the icon and
    relaunch metadata from the first call exists.
 
@@ -75,13 +102,13 @@ first call also remains safe if Electron later starts enforcing its documented
 statement that an AppUserModelID is required for the other options to have an
 effect.
 
-For development, include a development-specific ID, source ICO and a relaunch
-command containing Electron plus the application path, but do not restore the
-process-global production AppUserModelID or write production registry
-identity. For portable, include the outer launcher's stable path as the icon
-resource and relaunch command, with the product display name. For Store, return
-no per-window override. Installed/unpacked NSIS uses its process-level product
-ID and branded executable/shortcut, so it needs no per-window override.
+For development with `ODA_WINDOWS_IDENTITY=1`, include a development-specific
+ID, source ICO and a relaunch command containing Electron plus the application
+path. Ordinary development sets none of those properties. For portable,
+include the outer launcher's stable path as the icon resource and relaunch
+command, with the product display name. For Store, return no per-window
+override. Installed/unpacked NSIS uses its process-level product ID and branded
+executable/shortcut, so it needs no per-window override.
 
 The process-level policy must make the same distinctions: desktop ID for NSIS,
 portable ID for portable, no desktop override for Store or ordinary
@@ -89,17 +116,24 @@ development. Store still receives its manifest-matched toast activator; that
 decision must no longer be coupled to whether the desktop AppUserModelID is
 claimed. Registry display/icon metadata remains non-Store and non-portable.
 
-Do not replace `BaseWindow`, add a timed refresh, or spoof process metadata.
-Those changes do not address the confirmed property-order defect and would
-reopen earlier grouping or notification behavior.
+Do not add a timed refresh, hide the account browser from the taskbar, retain an
+unused renderer, or spoof process metadata. Each would either leave the
+confirmed rendering path in place or trade the icon for a task-switching or
+security regression.
 
 ## Regression boundary
 
-- Model the Windows property-store refresh in the unit test: writing the ID
-  snapshots the icon available at that moment. One combined call without the
-  final ID refresh must fail.
+- Assert the production account shell is a `BrowserWindow`, its owned
+  `webContents` is the toolbar, and no separate toolbar `WebContentsView` is
+  constructed.
+- Preserve toolbar/site partition separation, permission denial, hardened web
+  preferences, no site preload, tab bounds below the toolbar, popup adoption,
+  proxy authentication, and teardown of every child view.
+- Model the Windows property-store refresh for the opt-in development and
+  portable paths. One combined call without the final ID refresh must fail.
 - Assert exactly two calls, full metadata first and AppUserModelID-only second,
-  for development and portable windows.
+  for opted-in development and portable windows; ordinary development gets
+  none.
 - Assert both calls happen before the main window and account browser are
   shown.
 - Cover the complete development / installed / portable / Store matrix.
@@ -117,6 +151,6 @@ reopen earlier grouping or notification behavior.
 ## Commit strategy
 
 1. Commit this corrective plan by itself.
-2. Commit the ordered property writes, regression tests, and corrected
-   changelog wording together.
+2. Commit the account-shell migration, channel-specific identity policy,
+   regression tests, and corrected changelog wording together.
 3. Leave the unrelated untracked audit and release documents untouched.
