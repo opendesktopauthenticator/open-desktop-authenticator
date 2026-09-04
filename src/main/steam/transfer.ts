@@ -1,5 +1,6 @@
-import { signIn, type LoginSessionFactory } from './login';
-import { redactCredentials } from '../net/egress';
+import { PROXY_POLICY_STOPPED, signIn, type LoginSessionFactory } from './login';
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { EgressError, redactCredentials } from '../net/egress';
 import { mintAccessToken } from './access-token';
 import {
 	continueTransfer,
@@ -7,16 +8,30 @@ import {
 	TransferApiError,
 	type StartChallengeResult
 } from './transfer-api';
-import type { ReplacementToken } from './transfer-proto';
+import { boundedReplacementToken, type ReplacementToken } from './transfer-proto';
 import {
 	accountFromReplacement,
 	offsetFrom,
 	storedFaithfully,
 	validateReplacement
 } from './transfer-store';
-import type { Account } from '../../shared/vault-schema';
+import { accountSchema, type Account } from '../../shared/vault-schema';
 import type { SteamTransportFactory } from '../net/transport';
 import type { VaultService } from '../vault/service';
+import { wipe } from '../vault/crypto';
+import { VaultKeyOperationCoordinator } from '../vault/key-operation-coordinator';
+import { finishRecoveryBackup, markRecoveryBackupNeeded } from '../vault/recovery-state';
+import {
+	noWorkflowJournal,
+	type SealedTransferReplacement,
+	type TransferWorkflowRecord,
+	type WorkflowJournal
+} from './workflow-journal';
+import {
+	authenticatorSecretProblem,
+	authenticatorFingerprint,
+	describeAuthenticatorSecretProblem
+} from './authenticator-secrets';
 
 /**
  * Moving an existing authenticator off the Steam mobile app and into this one.
@@ -103,12 +118,14 @@ function requireSession(refreshToken: string | undefined): string {
 /**
  * A transfer that ended without a usable authenticator.
  *
- * Two shapes, and the difference is the whole point of recording it:
+ * Three shapes, and the difference is the whole point of recording it:
  *
  *  - `unanswered` — the request went out and nothing came back. Steam may or may
  *    not have acted. The user has to look at their phone to find out.
  *  - `unreadable` — Steam answered, so it rotated, and this build cannot use
  *    what it sent. That is a dead end, and the account needs Steam Support.
+ *  - `not-replaced` — Steam provably made no change, but the local safety record
+ *    could not be cleared. Retrying is blocked until that cleanup succeeds.
  *
  * Holds a name and an id, never a credential, so it can outlive a lock — losing
  * it would cost the user the only record that either happened.
@@ -116,7 +133,181 @@ function requireSession(refreshToken: string | undefined): string {
 interface TerminalTransfer {
 	steamId64: string;
 	accountName: string;
-	kind: 'unanswered' | 'unreadable';
+	kind: 'unanswered' | 'unreadable' | 'not-replaced';
+}
+
+type HeldReplacement = { account: Account; timeOffsetSeconds: number };
+const MAX_PROXY_URL_LENGTH = 8 * 1024;
+
+/**
+ * A decoded reply that must be retained but must never enter the normal vault
+ * persistence path. `reason` is the validation failure that made it unusable.
+ *
+ * This is deliberately separate from `unsaved`: `unsaved` means "a usable
+ * authenticator whose storage may be retried", while this means "ciphertext
+ * safety-record write only". Mixing the two lets a retry turn a missing
+ * revocation code, server time, or unsupported scheme into a stored account.
+ */
+type RetainedUnreadablePayload = {
+	replacementToken: ReplacementToken;
+	accountName: string;
+	proxyUrl?: string;
+	receivedAt: string;
+	reason: string;
+};
+
+type HeldUnreadableReplacement = {
+	/** Already encrypted; no Steam secret remains in the held retry object. */
+	replacement: SealedTransferReplacement;
+	accountName: string;
+	reason: string;
+};
+
+function transferAad(
+	record: Pick<
+		TransferWorkflowRecord,
+		'version' | 'kind' | 'attemptId' | 'steamId64' | 'accountName' | 'at'
+	>
+): Buffer {
+	return Buffer.from(
+		JSON.stringify([
+			'oda-transfer',
+			record.version,
+			record.kind,
+			record.attemptId,
+			record.steamId64,
+			record.accountName,
+			record.at
+		]),
+		'utf8'
+	);
+}
+
+function sealTransferPayload(
+	value: unknown,
+	key: Buffer,
+	record: TransferWorkflowRecord
+): SealedTransferReplacement {
+	const nonce = randomBytes(12);
+	const plaintext = Buffer.from(JSON.stringify(value), 'utf8');
+	try {
+		const cipher = createCipheriv('aes-256-gcm', key, nonce);
+		cipher.setAAD(transferAad(record));
+		const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+		return {
+			nonce: nonce.toString('base64'),
+			tag: cipher.getAuthTag().toString('base64'),
+			ciphertext: ciphertext.toString('base64')
+		};
+	} finally {
+		wipe(plaintext);
+	}
+}
+
+function sealReplacement(
+	held: HeldReplacement,
+	key: Buffer,
+	record: TransferWorkflowRecord
+): SealedTransferReplacement {
+	return sealTransferPayload(held, key, record);
+}
+
+function hasRetainableReplacementMaterial(
+	token: ReplacementToken | undefined,
+	expectedSteamId64: string
+): token is ReplacementToken & { steamId64: string } {
+	return (
+		token?.steamId64 === expectedSteamId64 &&
+		[
+			token.sharedSecret,
+			token.identitySecret,
+			token.secret1,
+			token.revocationCode,
+			token.uri,
+			token.tokenGid,
+			token.serialNumber
+		].some((value) => value !== undefined)
+	);
+}
+
+function unreadableFromHeld(
+	held: HeldReplacement,
+	reason: string,
+	replacement: SealedTransferReplacement
+): HeldUnreadableReplacement {
+	const account = held.account;
+	return {
+		accountName: account.accountName,
+		reason,
+		replacement
+	};
+}
+
+function unreadablePayloadFromHeld(
+	held: HeldReplacement,
+	reason: string
+): RetainedUnreadablePayload {
+	const account = held.account;
+	return {
+		replacementToken: {
+			steamId64: account.steamId64,
+			sharedSecret: account.sharedSecret,
+			identitySecret: account.identitySecret,
+			revocationCode: account.revocationCode,
+			serialNumber: account.serialNumber,
+			tokenGid: account.tokenGid,
+			uri: account.uri,
+			secret1: account.secret1
+		},
+		accountName: account.accountName,
+		...(account.proxyUrl === undefined ? {} : { proxyUrl: account.proxyUrl }),
+		receivedAt: account.addedAt,
+		reason
+	};
+}
+
+function openReplacement(
+	sealed: SealedTransferReplacement,
+	key: Buffer,
+	record: TransferWorkflowRecord
+): HeldReplacement {
+	const nonce = Buffer.from(sealed.nonce, 'base64');
+	const tag = Buffer.from(sealed.tag, 'base64');
+	if (key.length !== 32 || nonce.length !== 12 || tag.length !== 16) {
+		throw new TransferError('The saved transfer recovery material has invalid encryption fields.');
+	}
+	let plaintext: Buffer | undefined;
+	let update: Buffer | undefined;
+	let final: Buffer | undefined;
+	try {
+		const decipher = createDecipheriv('aes-256-gcm', key, nonce);
+		decipher.setAAD(transferAad(record));
+		decipher.setAuthTag(tag);
+		// `update` exposes unauthenticated plaintext before `final` verifies the tag.
+		// Keep and wipe both intermediates even when `final` throws.
+		update = decipher.update(Buffer.from(sealed.ciphertext, 'base64'));
+		final = decipher.final();
+		plaintext = Buffer.allocUnsafe(update.length + final.length);
+		update.copy(plaintext, 0);
+		final.copy(plaintext, update.length);
+		const decoded = JSON.parse(plaintext.toString('utf8')) as unknown;
+		if (typeof decoded !== 'object' || decoded === null) throw new Error('not an object');
+		const value = decoded as { account?: unknown; timeOffsetSeconds?: unknown };
+		const account = accountSchema.parse(value.account);
+		if (account.steamId64 !== record.steamId64) throw new Error('SteamID mismatch');
+		if (!Number.isFinite(value.timeOffsetSeconds)) throw new Error('invalid time offset');
+		return { account, timeOffsetSeconds: value.timeOffsetSeconds as number };
+	} catch (err) {
+		if (err instanceof TransferError) throw err;
+		throw new TransferError(
+			'The saved replacement could not be decrypted or validated. Do not start another ' +
+				'transfer; restore this vault or contact support.'
+		);
+	} finally {
+		if (update !== undefined) wipe(update);
+		if (final !== undefined) wipe(final);
+		if (plaintext !== undefined) wipe(plaintext);
+	}
 }
 
 /**
@@ -132,12 +323,14 @@ interface TerminalTransfer {
  * to read it. Offering a recovery that cannot recover is worse than saying
  * plainly that there is none.
  */
-function unreadableMessage(accountName: string, reason?: string): string {
+function unreadableMessage(accountName: string, reason?: string, retained = false): string {
 	return (
 		`Steam replaced the authenticator on ${accountName}, and this version could not read what ` +
-		`it sent back${reason ? ` (${reason})` : ''}. That cannot be recovered here. The account ` +
-		'still has Steam Guard — it is now an authenticator nothing holds — so Steam Support is ' +
-		'the route back into it.'
+		`it sent back${reason ? ` (${reason})` : ''}. ` +
+		(retained
+			? 'Its encrypted reply was retained for diagnosis, but this version cannot turn it into a working authenticator. '
+			: 'No usable replacement secrets could be retained. ') +
+		'The account still has Steam Guard, so Steam Support is the route back into it.'
 	);
 }
 
@@ -168,6 +361,8 @@ export type TransferComplete = {
 	revocationCode: string;
 	/** Steam's clock minus this machine's, from the replacement itself. */
 	timeOffsetSeconds: number;
+	/** Vault success with a retained, locally retryable recovery-publication debt. */
+	recoveryWarning?: string;
 };
 
 export type AuthenticateOutcome = {
@@ -178,6 +373,8 @@ export type AuthenticateOutcome = {
 
 export interface TransferServiceOptions {
 	now?: () => number;
+	/** Elapsed time for the pre-submit credential lifetime. */
+	monotonicNow?: () => number;
 	loginSession?: LoginSessionFactory;
 	signIn?: typeof signIn;
 	startChallenge?: typeof startTransferChallenge;
@@ -190,7 +387,27 @@ export interface TransferServiceOptions {
 	 * secret bundle Steam will never reissue, written *before* the vault so that
 	 * a vault failure is survivable.
 	 */
-	writeRecovery?: (account: Account) => void;
+	writeRecovery?: (account: Account) => string;
+	/** Rewrites the exact recovery file owned by a persisted account marker. */
+	updateRecovery?: (account: Account) => unknown;
+	/** Required durable state across process exit for the irreversible submission. */
+	workflowJournal?: WorkflowJournal;
+	/** Shared with vault IPC so a key change cannot race the irreversible request. */
+	keyCoordinator?: VaultKeyOperationCoordinator;
+	/**
+	 * Process-only enrollment cleanup debt is absent from the on-disk journal after
+	 * unlink succeeds but its directory flush fails. It still excludes every
+	 * transfer until the exact enrollment record is reconciled.
+	 */
+	enrollmentCleanupBlocked?: () => boolean;
+	/**
+	 * Tears down every process-local session and cache after recovery commits an
+	 * account deletion. It is invoked before journal cleanup so a later cleanup
+	 * failure cannot leave a deleted account signed in.
+	 */
+	onAccountRemoved?: (steamId64: string, removed: true) => void;
+	/** Drops sessions tied to a pre-transfer authenticator after it is replaced. */
+	onAccountReplaced?: (steamId64: string) => void;
 }
 
 /**
@@ -209,30 +426,47 @@ interface PendingTransfer {
 	 *
 	 * `forgetIfIdle` refuses to clear `pending` while a submission is in the air,
 	 * because `pending` is the identity a retained reply is validated against —
-	 * but it also holds a refresh token and an access token, and nothing stripped
+	 * but it also holds a refresh token, and nothing stripped
 	 * those when the request settled. A lock therefore left a live Steam session
 	 * behind, usable to start another challenge, for as long as the vault stayed
 	 * shut. What recovery needs is the identity; what it does not need is the
 	 * credentials.
 	 */
 	refreshToken: string | undefined;
-	accessToken: string | undefined;
 	/** Carried so every later call in this transfer takes the same route. */
 	proxyUrl: string | undefined;
-	startedAtMs: number;
+	startedAtElapsedMs: number;
 }
 
 export class TransferService {
 	private readonly vault: VaultService;
 	private readonly transports: SteamTransportFactory;
 	private readonly now: () => number;
+	private readonly monotonicNow: () => number;
 	private readonly offset: () => number;
 	private readonly loginSession: LoginSessionFactory | undefined;
 	private readonly performSignIn: typeof signIn;
 	private readonly performStart: typeof startTransferChallenge;
 	private readonly mint: typeof mintAccessToken;
 	private readonly performContinue: typeof continueTransfer;
-	private readonly writeRecovery: ((account: Account) => void) | undefined;
+	private readonly writeRecovery: ((account: Account) => string) | undefined;
+	private readonly updateRecovery: ((account: Account) => unknown) | undefined;
+	private readonly workflowJournal: WorkflowJournal;
+	private readonly keyCoordinator: VaultKeyOperationCoordinator;
+	private readonly enrollmentCleanupBlocked: () => boolean;
+	private readonly onAccountRemoved: (steamId64: string, removed: true) => void;
+	private readonly onAccountReplaced: (steamId64: string) => void;
+	private workflow: TransferWorkflowRecord | undefined;
+	private workflowProblem: string | undefined;
+	/**
+	 * A workflow whose file was removed but whose directory flush did not finish.
+	 *
+	 * The record remains usable in this process, while the on-disk journal can no
+	 * longer protect it from an older vault restore. Keep that distinction
+	 * explicit: an ordinary durable transfer is allowed to restore its matching
+	 * backup, but this process-only state is not.
+	 */
+	private cleanupDebt: TransferWorkflowRecord | undefined;
 
 	/** At most one transfer at a time. A second would race the first over storage. */
 	private pending: PendingTransfer | undefined;
@@ -269,6 +503,7 @@ export class TransferService {
 
 	/** And for the code, where a double press costs an authenticator. */
 	private submitting = false;
+	private recovering = false;
 
 	/**
 	 * A replacement Steam has issued that is not yet safely stored.
@@ -278,7 +513,13 @@ export class TransferService {
 	 * which is impossible, because the code is spent and the secrets are issued
 	 * once.
 	 */
-	private unsaved: { account: Account; token: ReplacementToken } | undefined;
+	private unsaved: HeldReplacement | undefined;
+
+	/**
+	 * An unusable replacement waiting only for its encrypted safety-record write.
+	 * It is never passed to `persist()` and therefore can never become an account.
+	 */
+	private unreadableHeld: HeldUnreadableReplacement | undefined;
 
 	constructor(
 		vault: VaultService,
@@ -290,12 +531,78 @@ export class TransferService {
 		this.transports = transports;
 		this.offset = timeOffsetSeconds;
 		this.now = options.now ?? (() => Date.now());
+		this.monotonicNow = options.monotonicNow ?? (() => performance.now());
 		this.loginSession = options.loginSession;
 		this.performSignIn = options.signIn ?? signIn;
 		this.performStart = options.startChallenge ?? startTransferChallenge;
 		this.mint = options.mintAccessToken ?? mintAccessToken;
 		this.performContinue = options.continueChallenge ?? continueTransfer;
 		this.writeRecovery = options.writeRecovery;
+		this.updateRecovery = options.updateRecovery;
+		this.workflowJournal = options.workflowJournal ?? noWorkflowJournal();
+		this.keyCoordinator = options.keyCoordinator ?? new VaultKeyOperationCoordinator();
+		this.enrollmentCleanupBlocked = options.enrollmentCleanupBlocked ?? (() => false);
+		this.onAccountRemoved = options.onAccountRemoved ?? (() => undefined);
+		this.onAccountReplaced = options.onAccountReplaced ?? (() => undefined);
+		try {
+			const records = this.workflowJournal.transfers();
+			if (records.length > 1) {
+				this.workflowProblem =
+					'More than one unfinished transfer is saved. No Steam operation will be started until ' +
+					'the application data is repaired.';
+			} else if (records[0] !== undefined) {
+				this.workflow = records[0];
+				if (records[0].state !== 'replacement') {
+					this.terminal = {
+						steamId64: records[0].steamId64,
+						accountName: records[0].accountName,
+						kind:
+							records[0].state === 'unreadable'
+								? 'unreadable'
+								: records[0].state === 'not-replaced'
+									? 'not-replaced'
+									: 'unanswered'
+					};
+				}
+			}
+		} catch {
+			this.workflowProblem =
+				'A saved transfer safety record cannot be read. No new transfer will be started until ' +
+				'the application data is repaired or this app is updated.';
+		}
+	}
+
+	private ensureNoEnrollmentWorkflow(): void {
+		let cleanupBlocked: boolean;
+		try {
+			cleanupBlocked = this.enrollmentCleanupBlocked();
+		} catch {
+			throw new TransferError(
+				'An enrollment cleanup state could not be checked. This transfer will not continue and no authenticator change was requested; repair the application data folder or reopen the app first.',
+				false
+			);
+		}
+		if (cleanupBlocked) {
+			throw new TransferError(
+				'An authenticator enrollment still owes an exact local cleanup. Finish or resolve it before starting or continuing a transfer.',
+				false
+			);
+		}
+		let enrollmentAccount: string | undefined;
+		try {
+			enrollmentAccount = this.workflowJournal.enrollments()[0]?.accountName;
+		} catch {
+			throw new TransferError(
+				'A saved enrollment workflow cannot be read. This transfer will not continue and no authenticator change was requested; repair the application data folder or update the app first.',
+				false
+			);
+		}
+		if (enrollmentAccount !== undefined) {
+			throw new TransferError(
+				`An authenticator enrollment for ${enrollmentAccount} is unresolved. Finish or resolve it before starting a transfer.`,
+				false
+			);
+		}
 	}
 
 	/**
@@ -309,14 +616,49 @@ export class TransferService {
 	 * Nothing about the Steam account changes here. This call is safe to repeat
 	 * and safe to abandon.
 	 */
+	/**
+	 * The sign-in this transfer is running, while it is running.
+	 *
+	 * `routed` is the route it actually took, not what the account has stored —
+	 * there is no stored account yet, so the form's proxy field is the only
+	 * answer there is.
+	 */
+	private authenticatingAttempt: { cancel: (reason?: string) => void; routed: boolean } | undefined;
+
+	/**
+	 * Abandon an authentication `Require proxies` has just forbidden.
+	 *
+	 * Narrow on purpose: see the note where the callback is registered. Only the
+	 * stage that has changed nothing is stopped.
+	 */
+	cancelUnroutedAuthentication(): void {
+		const attempt = this.authenticatingAttempt;
+		if (attempt === undefined || attempt.routed) {
+			return;
+		}
+		this.authenticatingAttempt = undefined;
+		try {
+			attempt.cancel(PROXY_POLICY_STOPPED);
+		} catch {
+			// Already finished. Nothing left to stop.
+		}
+	}
+
 	async authenticate(
 		accountName: string,
 		password: string,
 		steamGuardCode: string,
 		proxyUrl?: string
 	): Promise<AuthenticateOutcome> {
+		if (proxyUrl !== undefined && proxyUrl.length > MAX_PROXY_URL_LENGTH) {
+			throw new TransferError('The proxy address is too long to use safely.', false);
+		}
+		this.ensureNoEnrollmentWorkflow();
 		if (this.authenticating) {
 			throw new TransferError('A sign-in for this transfer is already in progress.', false);
+		}
+		if (this.workflowProblem !== undefined) {
+			throw new TransferError(this.workflowProblem, false);
 		}
 		// **Refused while a replacement is still held.**
 		//
@@ -342,10 +684,15 @@ export class TransferService {
 				false
 			);
 		}
-		if (this.unsaved !== undefined || this.terminal !== undefined) {
+		if (
+			this.unsaved !== undefined ||
+			this.unreadableHeld !== undefined ||
+			this.terminal !== undefined ||
+			this.workflow !== undefined
+		) {
 			throw new TransferError(
-				'Another transfer has not finished: Steam has already replaced an authenticator and it ' +
-					'is not saved yet. Finish that one before signing in to a different account.',
+				'Another transfer has an unresolved safety record. Finish or resolve that transfer ' +
+					'before signing in again.',
 				false
 			);
 		}
@@ -369,7 +716,27 @@ export class TransferService {
 				},
 				proxyUrl,
 				this.loginSession,
-				this.now
+				this.now,
+				/*
+				 * **Only this stage registers a cancellation, and deliberately.**
+				 *
+				 * `authenticate` changes nothing on Steam — the docblock above says
+				 * so — which makes it the one transfer stage safe to abandon. It
+				 * sends a password *and* a Steam Guard code, so a policy change that
+				 * cannot reach it leaves both travelling unrouted for as long as the
+				 * sign-in timeout allows.
+				 *
+				 * The later stages are the opposite: by then Steam may have rotated
+				 * the authenticator and `pending` holds the only route back to
+				 * secrets Steam will not reissue. `cancel()` refuses during those for
+				 * that reason, and nothing here overrides it.
+				 */
+				(cancel) => {
+					this.authenticatingAttempt = {
+						cancel,
+						routed: proxyUrl !== undefined && proxyUrl !== ''
+					};
+				}
 			).catch((err: unknown) => {
 				throw new TransferError(
 					scrub(err instanceof Error ? err.message : String(err), [password, code]),
@@ -383,6 +750,10 @@ export class TransferService {
 					'Steam completed the sign-in without saying which account it was for.'
 				);
 			}
+			// Enrollment cleanup can become outstanding while Steam is answering the
+			// sign-in. Refuse the result before retaining its session; no account-side
+			// change has happened at this stage, so abandoning it is exact.
+			this.ensureNoEnrollmentWorkflow();
 
 			/*
 			 * The duplicate check belongs here, before anything irreversible.
@@ -416,7 +787,12 @@ export class TransferService {
 			// awaited Steam, and another transfer can reach a terminal state or leave
 			// a replacement unstored in that window — installing over it would attach
 			// one account's outcome to another account's session.
-			if (this.unsaved !== undefined || this.terminal !== undefined || this.submitting) {
+			if (
+				this.unsaved !== undefined ||
+				this.unreadableHeld !== undefined ||
+				this.terminal !== undefined ||
+				this.submitting
+			) {
 				throw new TransferError(
 					'Another transfer finished while this sign-in was in progress, and it has not been ' +
 						'dealt with yet. Nothing was kept here; finish that one first.',
@@ -428,14 +804,15 @@ export class TransferService {
 				steamId64,
 				accountName,
 				refreshToken: result.refreshToken,
-				accessToken: result.accessToken,
 				proxyUrl,
-				startedAtMs: this.now()
+				startedAtElapsedMs: this.monotonicNow()
 			};
 
 			return { state: 'authenticated', steamId64, accountName };
 		} finally {
 			this.authenticating = false;
+			// Whatever happened, nothing is in the air for this stage any more.
+			this.authenticatingAttempt = undefined;
 		}
 	}
 
@@ -455,7 +832,14 @@ export class TransferService {
 				false
 			);
 		}
-		if (this.unsaved !== undefined || this.terminal !== undefined) {
+		// The account may have entered enrollment cleanup after transfer sign-in.
+		// Re-check before spending a text message or minting another Steam token.
+		this.ensureNoEnrollmentWorkflow();
+		if (
+			this.unsaved !== undefined ||
+			this.unreadableHeld !== undefined ||
+			this.terminal !== undefined
+		) {
 			throw new TransferError(
 				'This transfer has not finished. Asking Steam to text another code cannot help, and ' +
 					'spends a message and a rate limit that the unfinished one may still need.',
@@ -508,7 +892,6 @@ export class TransferService {
 				requireSession(pending.refreshToken),
 				this.now()
 			);
-			pending.accessToken = accessToken;
 			return await this.performStart(transport, accessToken);
 		} finally {
 			this.challenging = false;
@@ -523,16 +906,18 @@ export class TransferService {
 	 *
 	 * 1. Everything that can refuse, refuses first — while refusing is free.
 	 * 2. Steam is asked, once, and never asked again automatically.
-	 * 3. The recovery file is written *before* the vault, because it is the copy
-	 *    that survives a vault this process cannot write.
-	 * 4. The vault is written, then read back, and only a faithful read-back is
-	 *    reported as success.
+	 * 3. Steam's replacement is encrypted into the durable workflow before the
+	 *    vault can contain it, so a failed vault write remains locally recoverable.
+	 * 4. The vault is written with recovery-publication debt, then read back. The
+	 *    separate recovery file is published locally and only its exact generation
+	 *    may clear that debt.
 	 *
 	 * If any step after Steam answers fails, the bundle stays in memory and the
 	 * transfer enters a state `retryPersist` can finish. Nothing is discarded and
 	 * nothing claims to have worked.
 	 */
 	async completeTransfer(smsCode: string): Promise<TransferComplete> {
+		this.ensureNoEnrollmentWorkflow();
 		// **Before `live()`.** A lock clears `pending` while keeping `uncertain`, so
 		// placed after the expiry check this said "that transfer has expired" for a
 		// submission whose outcome is unknown — technically true and exactly the
@@ -546,7 +931,14 @@ export class TransferService {
 					? 'The last submission was never answered, so this application cannot tell whether ' +
 							'the authenticator was replaced. Check the Steam mobile app before trying ' +
 							'anything else.'
-					: unreadableMessage(this.terminal.accountName),
+					: this.terminal.kind === 'not-replaced'
+						? 'Steam did not replace the authenticator, but its local safety record still needs ' +
+							'to be cleared before trying again.'
+						: unreadableMessage(
+								this.terminal.accountName,
+								undefined,
+								this.workflow?.state === 'unreadable' && this.workflow.replacement !== undefined
+							),
 				false
 			);
 		}
@@ -581,10 +973,15 @@ export class TransferService {
 		 *
 		 * The screen no longer offers the button; this is the channel behind it.
 		 */
-		if (this.unsaved !== undefined || this.terminal !== undefined) {
+		if (
+			this.unsaved !== undefined ||
+			this.unreadableHeld !== undefined ||
+			this.terminal !== undefined ||
+			this.workflow !== undefined
+		) {
 			throw new TransferError(
-				'Steam has already replaced this authenticator and the result is still unsaved. ' +
-					'Sending the code again cannot help and would discard what it sent back.',
+				'This transfer already has an unresolved outcome or an unsaved replacement. Sending ' +
+					'the code again is unsafe; finish or resolve the saved recovery record instead.',
 				false
 			);
 		}
@@ -597,7 +994,17 @@ export class TransferService {
 		// warnings may have passed, and this is the last moment refusing is free.
 		this.refuseIfAlreadyHeld(pending.steamId64);
 
+		let releaseVaultKey: (() => void) | undefined;
+		try {
+			releaseVaultKey = this.keyCoordinator.beginTransferSubmission(pending.steamId64);
+		} catch (err) {
+			throw new TransferError(
+				err instanceof Error ? err.message : 'The vault is being changed.',
+				false
+			);
+		}
 		this.submitting = true;
+		let contentKey: Buffer | undefined;
 		try {
 			const transport = await this.transports.forAccount({
 				steamId64: pending.steamId64,
@@ -611,6 +1018,36 @@ export class TransferService {
 				requireSession(pending.refreshToken),
 				this.now()
 			);
+
+			/*
+			 * Durable intent before the irreversible request, with a fresh content
+			 * key wrapped by the vault. The raw key stays only in this stack frame so
+			 * a reply can still be encrypted if the idle lock lands while Steam is
+			 * answering; it is wiped at settlement on every path.
+			 */
+			contentKey = randomBytes(32);
+			let workflow: TransferWorkflowRecord;
+			try {
+				const wrappedKey = this.vault.sealScopedKey(contentKey);
+				const priorAuthenticatorFingerprint = this.vault.backupAuthenticatorFingerprint?.(
+					pending.steamId64
+				);
+				workflow = this.workflowJournal.beginTransfer({
+					steamId64: pending.steamId64,
+					accountName: pending.accountName,
+					at: new Date(this.now()).toISOString(),
+					wrappedKey,
+					...(priorAuthenticatorFingerprint === undefined ? {} : { priorAuthenticatorFingerprint })
+				});
+				this.workflow = workflow;
+			} catch {
+				throw new TransferError(
+					'This application could not write and verify the safety record required before ' +
+						'asking Steam to replace the authenticator. Nothing was sent. Free some disk ' +
+						'space or repair the application data folder, then try again.',
+					false
+				);
+			}
 
 			/*
 			 * From here until the vault is written, a failure is expensive.
@@ -632,22 +1069,41 @@ export class TransferService {
 			 */
 			let bodyArrived = false;
 
-			const result = await this.performContinue(transport, accessToken, code, () => {
+			const rawResult = await this.performContinue(transport, accessToken, code, () => {
 				bodyArrived = true;
 			}).catch((err: unknown) => {
 				/*
 				 * Two very different failures arrive here, and telling them apart is
 				 * the difference between a shrug and an emergency.
 				 *
-				 * A `TransferApiError` means Steam declined to act — rate limit,
-				 * expired token, malformed request. It answered with a status and did
-				 * nothing, so the authenticator is untouched and its own message is
-				 * both accurate and actionable. Dressing that up as "your
-				 * authenticator has probably been replaced" would be false, and
-				 * frightening in a way that invites the wrong reaction.
+				 * An HTTP status is not itself proof that the irreversible request was
+				 * rolled back: a gateway can answer after Steam acted. Only an
+				 * application-level negative result carried by `TransferApiError` is a
+				 * known no-change outcome. Everything else remains restart-safe.
 				 */
 				if (err instanceof TransferApiError) {
-					throw new TransferError(err.message, false);
+					if (err.provesNoChange) {
+						this.clearKnownNoChange(workflow);
+						throw new TransferError(err.message, false);
+					}
+					this.finish(pending, 'unanswered');
+					throw new TransferError(
+						'Steam did not provide a conclusive transfer result, so this application cannot ' +
+							'tell whether the authenticator was replaced. Do not retry until you have checked ' +
+							'the Steam mobile app or resolved the saved recovery record.',
+						false
+					);
+				}
+
+				/* A transport refusal that explicitly says zero bytes crossed the send
+				 * boundary is the one network failure safe to retry. This is intentionally
+				 * an exact `=== false`; unknown errors remain conservative. */
+				if (err instanceof EgressError && err.sent === false) {
+					this.clearKnownNoChange(workflow);
+					throw new TransferError(
+						`${err.message}. The replacement request did not leave this machine, so it is safe to retry.`,
+						false
+					);
 				}
 
 				/*
@@ -681,10 +1137,26 @@ export class TransferService {
 				this.finish(pending, 'unreadable');
 				throw new TransferError(unreadableMessage(pending.accountName), false);
 			});
-			if (!result.success) {
-				// Steam read the request and refused it, so nothing rotated.
+			const result =
+				rawResult.replacementToken === undefined
+					? rawResult
+					: {
+							...rawResult,
+							replacementToken: boundedReplacementToken(rawResult.replacementToken)
+						};
+			if (result.success === false && result.replacementToken === undefined) {
+				// The field was present on the wire and explicitly false.
+				this.clearKnownNoChange(workflow);
 				throw new TransferError(
 					'Steam did not accept that code. Nothing has changed — check the code and try again.',
+					false
+				);
+			}
+			if (result.success !== true && result.replacementToken === undefined) {
+				this.finish(pending, 'unanswered');
+				throw new TransferError(
+					'Steam answered without saying whether the authenticator was replaced. Do not retry ' +
+						'until you have checked the Steam mobile app or resolved the saved recovery record.',
 					false
 				);
 			}
@@ -698,6 +1170,10 @@ export class TransferService {
 			 * are still the only copy of what replaced it. Saving only on a decoder
 			 * exception left exactly this case in memory, to be lost on quit.
 			 */
+			// Steam has answered with whatever replacement it will issue. Validation and
+			// storage are local from here, so its session credentials have no reason to
+			// survive either the usable or the retained-unreadable branch.
+			this.dropCredentials();
 			let account: Account;
 			try {
 				validateReplacement(result.replacementToken, pending.steamId64);
@@ -708,25 +1184,107 @@ export class TransferService {
 					new Date(this.now()).toISOString()
 				);
 			} catch (err) {
-				// Decoded and still unusable — a SteamID that does not match, or a Guard
-				// scheme this build does not know. Steam rotated the authenticator
-				// either way, so this is the same dead end as a reply that would not
-				// parse, and it gets the same answer.
+				// Decoded and still unusable — a SteamID that does not match, invalid
+				// key material, or a Guard scheme this build does not know. Steam
+				// rotated the authenticator either way. When the reply still contains a
+				// complete account for the expected SteamID, retain those exact bytes
+				// encrypted: unusable is not the same thing as disposable.
 				//
 				// The reason is carried through: "a replacement issued for a different
 				// account" and "no login secret" say different things about what went
 				// wrong, and a support conversation starts from whichever it was.
-				this.finish(pending, 'unreadable');
+				const reason = err instanceof Error ? err.message : 'the replacement was invalid';
+				const token = result.replacementToken;
+				if (hasRetainableReplacementMaterial(token, pending.steamId64)) {
+					const payload: RetainedUnreadablePayload = {
+						replacementToken: { ...token },
+						accountName: pending.accountName,
+						...(pending.proxyUrl === undefined ? {} : { proxyUrl: pending.proxyUrl }),
+						receivedAt: new Date(this.now()).toISOString(),
+						reason
+					};
+					const held: HeldUnreadableReplacement = {
+						accountName: pending.accountName,
+						reason,
+						replacement: sealTransferPayload(payload, contentKey, workflow)
+					};
+					this.unreadableHeld = held;
+					try {
+						this.retainUnreadableReplacement(workflow, held);
+					} catch {
+						this.terminal = {
+							steamId64: pending.steamId64,
+							accountName: pending.accountName,
+							kind: 'unreadable'
+						};
+						this.pending = undefined;
+						throw new TransferError(
+							`Steam replaced the authenticator on ${pending.accountName} with a reply this ` +
+								`version cannot use (${held.reason}). Its encrypted reply is held only by this running app because ` +
+								'the safety record could not be saved. Do not quit; repair the application data ' +
+								'folder and choose “Save it now” to retry the safety-record write.',
+							false
+						);
+					}
+					this.unreadableHeld = undefined;
+					this.terminal = {
+						steamId64: pending.steamId64,
+						accountName: pending.accountName,
+						kind: 'unreadable'
+					};
+					this.pending = undefined;
+				} else if (result.success !== true) {
+					// A contradictory/missing success bit is not allowed to discard a
+					// concrete exact-account replacement above. With no retainable token,
+					// however, Steam's action genuinely remains unknown.
+					this.finish(pending, 'unanswered');
+					throw new TransferError(
+						'Steam returned an incomplete replacement without confirming that it changed the ' +
+							'authenticator. Do not retry until you have checked the Steam mobile app or resolved ' +
+							'the saved recovery record.',
+						false
+					);
+				} else {
+					this.finish(pending, 'unreadable');
+				}
 				throw new TransferError(
-					unreadableMessage(pending.accountName, err instanceof Error ? err.message : undefined),
+					unreadableMessage(
+						pending.accountName,
+						reason,
+						this.workflow?.state === 'unreadable' && this.workflow.replacement !== undefined
+					),
 					false
 				);
 			}
-			this.unsaved = { account, token: result.replacementToken };
+			const held: HeldReplacement = {
+				account,
+				timeOffsetSeconds: offsetFrom(result.replacementToken, this.now())
+			};
+			this.unsaved = held;
+			try {
+				workflow = this.workflowJournal.updateTransfer(workflow, {
+					state: 'replacement',
+					wrappedKey: workflow.wrappedKey as NonNullable<typeof workflow.wrappedKey>,
+					replacement: sealReplacement(held, contentKey, workflow)
+				});
+				this.workflow = workflow;
+			} catch {
+				throw new TransferError(
+					`Steam replaced the authenticator on ${pending.accountName}, but its encrypted ` +
+						'recovery record could not be saved. Do not close this app. Use “Finish recovery” ' +
+						'to store the replacement in the vault.'
+				);
+			}
 
-			return await this.persist();
+			// The ciphertext is now the durable source. Do not retain a second plaintext
+			// copy across a vault lock or a failed disk write; retryPersist decrypts it
+			// only for the duration of the next save attempt.
+			this.unsaved = undefined;
+			return await this.retryPersistUnderReservation();
 		} finally {
+			if (contentKey !== undefined) wipe(contentKey);
 			this.submitting = false;
+			releaseVaultKey?.();
 			// The lock could not clear `pending` while this was running, so it does it
 			// here instead — keeping the identity a retained reply needs and dropping
 			// the session that has no business outliving the lock.
@@ -750,31 +1308,98 @@ export class TransferService {
 	 * Afterwards `retryPersist` still works — it needs a name, a SteamID and a
 	 * route — while nothing can talk to Steam again without a fresh sign-in.
 	 */
-	private finish(pending: PendingTransfer, kind: TerminalTransfer['kind']): void {
+	private finish(pending: PendingTransfer, kind: 'unanswered' | 'unreadable'): void {
 		// The session goes with `pending`: there is nothing left to ask Steam, and a
 		// refresh token sitting in memory after a dead end is exactly the credential
 		// a lock exists to remove.
 		this.terminal = { steamId64: pending.steamId64, accountName: pending.accountName, kind };
+		if (this.workflow !== undefined) {
+			try {
+				this.workflow = this.workflowJournal.updateTransfer(this.workflow, { state: kind });
+			} catch {
+				// The verified `sending` record is deliberately left in place. On restart
+				// it says the outcome is unknown, which is conservative and still blocks.
+			}
+		}
 		this.pending = undefined;
+	}
+
+	/**
+	 * Clear one exact transfer record and remember when the only surviving copy
+	 * is now in this process.
+	 *
+	 * A clear can fail before unlinking or during the directory flush after it.
+	 * Re-reading the exact attempt distinguishes those cases. An unreadable
+	 * journal is treated as process-only because permitting a vault replacement
+	 * on an unknown answer is the irreversible direction.
+	 */
+	private clearWorkflowRecord(record: TransferWorkflowRecord): void {
+		try {
+			this.workflowJournal.clearTransfer(record);
+			if (this.cleanupDebt?.attemptId === record.attemptId) this.cleanupDebt = undefined;
+		} catch (err) {
+			let stillDurable = false;
+			try {
+				stillDurable = this.workflowJournal
+					.transfers(record.steamId64)
+					.some((entry) => entry.attemptId === record.attemptId);
+			} catch {
+				// Unknown is kept as debt; restore must fail closed on it.
+			}
+			if (stillDurable) {
+				if (this.cleanupDebt?.attemptId === record.attemptId) this.cleanupDebt = undefined;
+			} else {
+				this.cleanupDebt = record;
+			}
+			throw err;
+		}
+	}
+
+	private clearKnownNoChange(record: TransferWorkflowRecord): void {
+		try {
+			this.clearWorkflowRecord(record);
+			if (this.workflow?.attemptId === record.attemptId) this.workflow = undefined;
+		} catch {
+			try {
+				this.workflow = this.workflowJournal.updateTransfer(record, { state: 'not-replaced' });
+				if (this.cleanupDebt?.attemptId === record.attemptId) this.cleanupDebt = undefined;
+			} catch {
+				// The already-verified sending intent stays conservative on disk. In this
+				// process the terminal state below still prevents a duplicate request.
+			}
+			this.terminal = {
+				steamId64: record.steamId64,
+				accountName: record.accountName,
+				kind: 'not-replaced'
+			};
+			throw new TransferError(
+				'Steam did not replace the authenticator, but the safety record could not be ' +
+					'cleared. Re-open this screen and resolve that record before retrying.',
+				false
+			);
+		}
 	}
 
 	private dropCredentials(): void {
 		if (this.pending) {
 			this.pending.refreshToken = undefined;
-			this.pending.accessToken = undefined;
 		}
 	}
 
-	awaiting(): 'persist' | 'unanswered' | 'unreadable' | undefined {
+	awaiting():
+		'persist' | 'unreadablePersist' | 'unanswered' | 'unreadable' | 'cleanup' | undefined {
 		// The one state that can still be recovered: decoded, and the vault refused
 		// it. Retrying storage genuinely works.
-		if (this.unsaved !== undefined) {
+		if (this.unreadableHeld !== undefined) {
+			return 'unreadablePersist';
+		}
+		if (this.unsaved !== undefined || this.workflow?.state === 'replacement') {
 			return 'persist';
 		}
 		// The two that cannot. Reported so the screen can say which, because they
 		// call for different things from the user — one is "go and look at your
 		// phone", the other is "this account needs Steam Support".
-		return this.terminal?.kind;
+		return this.terminal?.kind === 'not-replaced' ? 'cleanup' : this.terminal?.kind;
 	}
 
 	/**
@@ -840,7 +1465,12 @@ export class TransferService {
 		// The credentials go regardless — `dropCredentials` above runs first — so
 		// what survives is the identity and nothing that can reach Steam again
 		// without a fresh sign-in.
-		if (this.submitting || this.challenging || this.unsaved !== undefined) {
+		if (
+			this.submitting ||
+			this.challenging ||
+			this.unsaved !== undefined ||
+			this.unreadableHeld !== undefined
+		) {
 			return false;
 		}
 		this.pending = undefined;
@@ -857,72 +1487,429 @@ export class TransferService {
 	 * nothing and is the only way out of a failed write that does not end in a
 	 * support ticket.
 	 */
-	async retryPersist(): Promise<TransferComplete> {
-		if (!this.unsaved) {
+	async retryPersist(passphrase?: string): Promise<TransferComplete> {
+		if (this.recovering || this.submitting) {
+			throw new TransferError('This authenticator transfer is already being saved.', false);
+		}
+		let releaseVaultKey: (() => void) | undefined;
+		const recoverySteamId64 = this.current()?.steamId64;
+		if (recoverySteamId64 === undefined) {
 			throw new TransferError('There is no unsaved authenticator to store.', false);
 		}
-		return this.persist();
+		try {
+			releaseVaultKey = this.keyCoordinator.beginTransferRecovery(recoverySteamId64);
+		} catch (err) {
+			throw new TransferError(
+				err instanceof Error ? err.message : 'The vault is being replaced.',
+				false
+			);
+		}
+		this.recovering = true;
+		try {
+			return await this.retryPersistUnderReservation(passphrase);
+		} finally {
+			this.recovering = false;
+			releaseVaultKey();
+		}
+	}
+
+	private async retryPersistUnderReservation(passphrase?: string): Promise<TransferComplete> {
+		const unreadable = this.unreadableHeld;
+		if (unreadable !== undefined) {
+			const record = this.workflow;
+			if (record === undefined) {
+				throw new TransferError(
+					'The unusable replacement is still held in memory, but its safety-record identity is missing. Do not quit; repair the application data folder before retrying.',
+					false
+				);
+			}
+			try {
+				this.retainUnreadableReplacement(record, unreadable);
+			} catch {
+				throw new TransferError(
+					`The encrypted safety record for ${unreadable.accountName} still could not be saved. ` +
+						'Do not quit; repair the application data folder and choose “Save it now” again.',
+					false
+				);
+			}
+			this.unreadableHeld = undefined;
+			throw new TransferError(
+				unreadableMessage(unreadable.accountName, unreadable.reason, true),
+				false
+			);
+		}
+		this.hydrateReplacement();
+		if (!this.unsaved)
+			throw new TransferError('There is no unsaved authenticator to store.', false);
+		try {
+			return await this.persist(passphrase);
+		} finally {
+			// A durable replacement can be decrypted again after unlock. Keeping its
+			// plaintext account object in memory after a failed attempt would defeat the
+			// lock boundary this journal was added to survive.
+			if (this.workflow?.state === 'replacement') {
+				this.unsaved = undefined;
+			}
+		}
 	}
 
 	/** True when secrets are held that the vault has not accepted yet. */
 	hasUnsaved(): boolean {
-		return this.unsaved !== undefined;
+		return (
+			this.unsaved !== undefined ||
+			this.unreadableHeld !== undefined ||
+			this.workflow?.state === 'replacement'
+		);
 	}
 
-	private async persist(): Promise<TransferComplete> {
+	private hydrateReplacement(): void {
+		if (this.unsaved !== undefined) return;
+		const record = this.workflow;
+		if (
+			record?.state !== 'replacement' ||
+			record.wrappedKey === undefined ||
+			record.replacement === undefined
+		) {
+			return;
+		}
+		if (!this.vault.isUnlocked()) {
+			throw new TransferError(
+				'The replacement is saved in its encrypted recovery record, but the vault is locked. ' +
+					'Unlock this vault and choose “Finish recovery”; Steam will not be contacted again.',
+				false
+			);
+		}
+		let key: Buffer | undefined;
+		try {
+			key = this.vault.openScopedEnvelope(record.wrappedKey);
+			this.unsaved = openReplacement(record.replacement, key, record);
+		} finally {
+			if (key !== undefined) wipe(key);
+		}
+	}
+
+	/** Encrypt a decoded-but-unusable replacement without making it saveable. */
+	private retainUnreadableReplacement(
+		record: TransferWorkflowRecord,
+		held: HeldUnreadableReplacement
+	): void {
+		if (record.wrappedKey === undefined) {
+			throw new TransferError('The transfer safety record has no wrapped recovery key.', false);
+		}
+		this.workflow = this.workflowJournal.updateTransfer(record, {
+			state: 'unreadable',
+			wrappedKey: record.wrappedKey,
+			replacement: held.replacement
+		});
+	}
+
+	/**
+	 * Make the usable replacement independently recoverable before the vault is
+	 * allowed to contain it.
+	 *
+	 * A failed first promotion deliberately leaves `unsaved` in memory and stops
+	 * here. On a later retry we re-read the journal first: an update can have
+	 * reached its final filename before its directory flush reported failure, so
+	 * retrying from the stale in-memory `sending` object would manufacture a
+	 * conflicting replacement ciphertext for the same attempt.
+	 */
+	private promoteReplacementBeforeVaultWrite(held: HeldReplacement): TransferWorkflowRecord {
+		const remembered = this.workflow;
+		if (remembered === undefined || remembered.wrappedKey === undefined) {
+			throw new TransferError(
+				'The replacement is still held in memory, but its transfer safety-record identity is missing. Nothing was written to the vault.',
+				false
+			);
+		}
+
+		let records: TransferWorkflowRecord[];
+		try {
+			records = this.workflowJournal.transfers(remembered.steamId64);
+		} catch {
+			throw new TransferError(
+				'The replacement is still held in memory, but its transfer safety record could not be verified. Nothing was written to the vault.',
+				false
+			);
+		}
+		const exact = records.find((entry) => entry.attemptId === remembered.attemptId);
+		const processOnly =
+			this.cleanupDebt?.attemptId === remembered.attemptId &&
+			this.cleanupDebt.steamId64 === remembered.steamId64
+				? this.cleanupDebt
+				: undefined;
+		if (
+			records.length > 1 ||
+			(records.length === 1 && exact === undefined) ||
+			(exact !== undefined && exact.steamId64 !== remembered.steamId64)
+		) {
+			throw new TransferError(
+				'The replacement is still held in memory, but its exact transfer safety record is missing or ambiguous. Nothing was written to the vault.',
+				false
+			);
+		}
+		const record = exact ?? processOnly;
+		if (record === undefined) {
+			throw new TransferError(
+				'The replacement is still held in memory, but its exact transfer safety record is missing or ambiguous. Nothing was written to the vault.',
+				false
+			);
+		}
+
+		if (record.state === 'replacement') {
+			if (record.wrappedKey === undefined || record.replacement === undefined) {
+				throw new TransferError('The saved replacement safety record is incomplete.', false);
+			}
+			let key: Buffer | undefined;
+			try {
+				key = this.vault.openScopedEnvelope(record.wrappedKey);
+				const recovered = openReplacement(record.replacement, key, record);
+				if (
+					!storedFaithfully(recovered.account, held.account) ||
+					recovered.timeOffsetSeconds !== held.timeOffsetSeconds
+				) {
+					throw new TransferError(
+						'The saved transfer replacement does not match the replacement held by this process. Nothing was written to the vault.',
+						false
+					);
+				}
+			} finally {
+				if (key !== undefined) wipe(key);
+			}
+			this.workflow = record;
+			return record;
+		}
+
+		if (record.state !== 'sending') {
+			throw new TransferError(
+				`The transfer safety record is already classified as ${record.state}; it cannot be promoted from the in-memory replacement. Nothing was written to the vault.`,
+				false
+			);
+		}
+		const wrappedKey = record.wrappedKey;
+		if (wrappedKey === undefined) {
+			throw new TransferError('The sending transfer safety record has no recovery key.', false);
+		}
+
+		let key: Buffer | undefined;
+		try {
+			key = this.vault.openScopedEnvelope(wrappedKey);
+			const promoted = this.workflowJournal.updateTransfer(record, {
+				state: 'replacement',
+				wrappedKey,
+				replacement: sealReplacement(held, key, record)
+			});
+			this.workflow = promoted;
+			return promoted;
+		} catch (err) {
+			if (err instanceof TransferError) throw err;
+			throw new TransferError(
+				`Steam replaced the authenticator on ${held.account.accountName}, but its encrypted recovery record still could not be saved. Nothing was written to the vault; do not close this app and choose “Finish recovery” again after repairing the application data folder.`,
+				false
+			);
+		} finally {
+			if (key !== undefined) wipe(key);
+		}
+	}
+
+	private async persist(passphrase?: string): Promise<TransferComplete> {
 		const held = this.unsaved;
 		if (!held) {
 			throw new TransferError('There is no unsaved authenticator to store.', false);
 		}
-		const { account, token } = held;
+		const { account, timeOffsetSeconds } = held;
+		const invalidSecret = authenticatorSecretProblem(account);
+		if (invalidSecret !== undefined) {
+			const reason = describeAuthenticatorSecretProblem(invalidSecret);
+			const record = this.workflow;
+			if (record === undefined || record.wrappedKey === undefined) {
+				throw new TransferError('The transfer safety record has no wrapped recovery key.', false);
+			}
+			let openedKey: Buffer | undefined;
+			let replacement = record.replacement;
+			try {
+				if (replacement === undefined) {
+					openedKey = this.vault.openScopedEnvelope(record.wrappedKey);
+					replacement = sealTransferPayload(
+						unreadablePayloadFromHeld(held, reason),
+						openedKey,
+						record
+					);
+				}
+			} finally {
+				if (openedKey !== undefined) wipe(openedKey);
+			}
+			const unreadable = unreadableFromHeld(held, reason, replacement);
+			this.unreadableHeld = unreadable;
+			this.unsaved = undefined;
+			try {
+				this.retainUnreadableReplacement(record, unreadable);
+				this.unreadableHeld = undefined;
+			} catch {
+				// Only encrypted ciphertext remains for another explicit retry. It is
+				// never offered to the vault and no plaintext survives a lock.
+			}
+			this.terminal = {
+				steamId64: account.steamId64,
+				accountName: account.accountName,
+				kind: 'unreadable'
+			};
+			this.pending = undefined;
+			throw new TransferError(
+				`The retained replacement cannot be stored as a working authenticator because ${reason}. ` +
+					'The safety record has been kept; resolve it through Steam or Steam Support.',
+				false
+			);
+		}
+		const movedOn = (): TransferError =>
+			new TransferError(
+				`This vault now holds a different authenticator for ${account.accountName}. The saved ` +
+					'transfer replacement was not written over it, and its encrypted workflow was kept.',
+				false
+			);
+		const notSaved = (): TransferError =>
+			new TransferError(
+				`Steam has moved the authenticator for ${account.accountName} to this app, but it ` +
+					'could not be saved. Its encrypted workflow is intact. Unlock this same vault and ' +
+					'choose “Finish recovery”; Steam will not be contacted again.'
+			);
+
+		// The encrypted workflow must become authoritative before the first vault
+		// write. Otherwise a successful vault write followed by a failed journal
+		// clear leaves a `sending` record indistinguishable from an old account
+		// resurrected by backup restore.
+		let replacementRecord = this.promoteReplacementBeforeVaultWrite(held);
 
 		/*
-		 * The recovery file first.
-		 *
-		 * It is written with the vault's own key, so it is no less protected — and
-		 * it is the copy that survives if the vault write is the thing that fails.
-		 * Best-effort: a backup that cannot be written is not a reason to abandon
-		 * secrets that exist nowhere else.
+		 * A restart-time retry may be old. Inspect the current row before either
+		 * destination: overwriting the vault is bad, but overwriting that newer
+		 * authenticator's recovery file first is the same loss one file later.
+		 * An exact row is cleanup debt only; preserving it also preserves activation,
+		 * routing, auto-confirm settings and future passthrough fields.
 		 */
-		let recovered = false;
+		let before: Account | undefined;
 		try {
-			this.writeRecovery?.(account);
-			recovered = this.writeRecovery !== undefined;
+			before = this.vault.read().accounts.find((entry) => entry.steamId64 === account.steamId64);
 		} catch {
-			// Already false. A backup that cannot be written is not a reason to
-			// abandon secrets that exist nowhere else.
+			throw notSaved();
 		}
+		let replaceFingerprint: string | undefined;
+		if (before !== undefined && !storedFaithfully(before, account)) {
+			const candidateFingerprint = authenticatorFingerprint(before);
+			if (
+				replacementRecord.priorAuthenticatorFingerprint !== undefined &&
+				replacementRecord.priorAuthenticatorFingerprint !== candidateFingerprint
+			) {
+				throw movedOn();
+			}
+			if (passphrase === undefined || passphrase === '') {
+				throw new TransferError(
+					`This vault contains a different authenticator for ${account.accountName}. If a backup restored that older copy, enter the vault passphrase to replace it with Steam's saved replacement.`,
+					false
+				);
+			}
+			replaceFingerprint = candidateFingerprint;
+			await this.vault.verifyPassphrase(passphrase);
 
-		try {
-			await this.vault.mutate((draft) => {
-				/*
-				 * Replace, never blindly append.
-				 *
-				 * `persist` is deliberately re-runnable: a failed read-back keeps the
-				 * secrets and invites a retry. But the vault write may well have
-				 * succeeded on the attempt that failed its read-back, so a retry that
-				 * pushed unconditionally would leave two records for one SteamID —
-				 * holding the same live secrets, shown twice everywhere, and with
-				 * "remove the account" leaving a copy behind.
-				 */
-				const existing = draft.accounts.findIndex((a) => a.steamId64 === account.steamId64);
-				if (existing >= 0) {
-					draft.accounts[existing] = account;
-				} else {
-					draft.accounts.push(account);
-				}
-			});
-		} catch {
-			throw new TransferError(
-				`Steam has moved the authenticator for ${account.accountName} to this app, but it ` +
-					'could not be saved' +
-					(recovered
-						? '. A recovery file was written first, so nothing is lost. Unlock the vault and ' +
-							'try again from this screen.'
-						: ', and the recovery file could not be written either. Do not close this window: ' +
-							`write down this recovery code now, it is the only way to detach the ` +
-							`authenticator yourself — ${account.revocationCode}.`)
-			);
+			// The proof above is intentionally slow. Re-read both sources afterwards:
+			// a changed workflow or authenticator identity invalidates the authority to
+			// replace what was inspected before the await.
+			replacementRecord = this.promoteReplacementBeforeVaultWrite(held);
+			if (
+				replacementRecord.priorAuthenticatorFingerprint !== undefined &&
+				replacementRecord.priorAuthenticatorFingerprint !== replaceFingerprint
+			) {
+				throw movedOn();
+			}
+			let afterProof: Account | undefined;
+			try {
+				afterProof = this.vault
+					.read()
+					.accounts.find((entry) => entry.steamId64 === account.steamId64);
+			} catch {
+				throw notSaved();
+			}
+			if (
+				afterProof === undefined ||
+				storedFaithfully(afterProof, account) ||
+				authenticatorFingerprint(afterProof) !== replaceFingerprint
+			) {
+				throw movedOn();
+			}
+		}
+		let replacedObsolete = false;
+
+		if (before === undefined || replaceFingerprint !== undefined) {
+			try {
+				await this.vault.mutate((draft) => {
+					/*
+					 * Replace, never blindly append.
+					 *
+					 * `persist` is deliberately re-runnable: a failed read-back keeps the
+					 * secrets and invites a retry. But the vault write may well have
+					 * succeeded on the attempt that failed its read-back, so a retry that
+					 * pushed unconditionally would leave two records for one SteamID —
+					 * holding the same live secrets, shown twice everywhere, and with
+					 * "remove the account" leaving a copy behind.
+					 */
+					const existing = draft.accounts.findIndex((a) => a.steamId64 === account.steamId64);
+					if (existing >= 0) {
+						if (!storedFaithfully(draft.accounts[existing], account)) {
+							if (
+								replaceFingerprint === undefined ||
+								authenticatorFingerprint(draft.accounts[existing]!) !== replaceFingerprint
+							) {
+								throw movedOn();
+							}
+							const stored = { ...account };
+							if (this.writeRecovery !== undefined) {
+								markRecoveryBackupNeeded(
+									stored,
+									draft.accounts[existing]!.recoveryBackup,
+									new Date(this.now()).toISOString()
+								);
+							}
+							draft.accounts[existing] = stored;
+							replacedObsolete = true;
+						}
+					} else {
+						if (replaceFingerprint !== undefined) throw movedOn();
+						const stored = { ...account };
+						if (this.writeRecovery !== undefined) {
+							markRecoveryBackupNeeded(stored, undefined, new Date(this.now()).toISOString());
+						}
+						draft.accounts.push(stored);
+					}
+				});
+			} catch (err) {
+				if (err instanceof TransferError) throw err;
+				throw notSaved();
+			}
+		} else if (
+			this.writeRecovery !== undefined &&
+			this.workflow?.recoveryPublished !== true &&
+			before.recoveryBackup === undefined
+		) {
+			// Backfill durable publication debt for a retained transfer written by a
+			// build that did not yet store recovery ownership on the account.
+			try {
+				await this.vault.mutate((draft) => {
+					const current = draft.accounts.find(
+						(entry) => entry.steamId64 === account.steamId64 && storedFaithfully(entry, account)
+					);
+					if (current === undefined) throw movedOn();
+					if (current.recoveryBackup === undefined) {
+						markRecoveryBackupNeeded(current, undefined, new Date(this.now()).toISOString());
+					}
+				});
+			} catch (err) {
+				if (err instanceof TransferError) throw err;
+				throw notSaved();
+			}
+		}
+		if (replacedObsolete) {
+			// The vault commit has retired the old authenticator and route. Drop its
+			// browser/session state before any later recovery-file or journal failure.
+			this.onAccountReplaced(account.steamId64);
 		}
 
 		/*
@@ -932,8 +1919,14 @@ export class TransferService {
 		 * are different claims. Only the second one is safe to tell somebody whose
 		 * phone stopped being their authenticator a moment ago.
 		 */
-		const stored = this.vault.read().accounts.find((a) => a.steamId64 === account.steamId64);
-		if (!storedFaithfully(stored, account)) {
+		let stored: Account | undefined;
+		try {
+			stored = this.vault.read().accounts.find((a) => a.steamId64 === account.steamId64);
+		} catch {
+			throw notSaved();
+		}
+		if (stored !== undefined && !storedFaithfully(stored, account)) throw movedOn();
+		if (stored === undefined || !storedFaithfully(stored, account)) {
 			throw new TransferError(
 				`Steam has moved the authenticator for ${account.accountName}, but what was saved does ` +
 					'not read back correctly. Nothing has been discarded — try again from this screen. ' +
@@ -941,14 +1934,53 @@ export class TransferService {
 			);
 		}
 
+		let recoveryWarning: string | undefined;
+		if (
+			this.workflow !== undefined &&
+			(this.workflow.recoveryPublished !== true || stored.recoveryBackup?.state !== 'current')
+		) {
+			try {
+				if (stored.recoveryBackup !== undefined && stored.recoveryBackup.state !== 'current') {
+					const result = await finishRecoveryBackup(this.vault, {
+						steamId64: stored.steamId64,
+						expectedId: stored.recoveryBackup.id,
+						writeRecovery: this.writeRecovery,
+						updateRecovery: this.updateRecovery,
+						now: this.now
+					});
+					if (result !== 'current') throw new Error(`recovery publication is ${result}`);
+				}
+				this.workflow = this.workflowJournal.markTransferRecovery(this.workflow, true);
+			} catch {
+				recoveryWarning =
+					'The replacement authenticator is safely stored in this vault, but its separate encrypted recovery backup could not be written. The encrypted transfer record was kept. Repair the application data folder and choose “Finish recovery”; Steam will not be contacted again.';
+				// The account marker remains the authority. Do not write `false` here:
+				// this catch can run after the file and account marker succeeded but the
+				// journal update failed.
+			}
+		}
+
 		this.unsaved = undefined;
 		this.pending = undefined;
+		if (recoveryWarning === undefined && this.workflow !== undefined) {
+			try {
+				this.clearWorkflowRecord(this.workflow);
+				this.workflow = undefined;
+			} catch {
+				throw new TransferError(
+					`The replacement authenticator for ${account.accountName} is safely stored in this vault, but its local transfer safety record could not be cleared. ` +
+						'Do not start another transfer. Repair the application data folder, then choose “Finish recovery”; Steam will not be contacted again.',
+					false
+				);
+			}
+		}
 
 		return {
 			steamId64: account.steamId64,
 			accountName: account.accountName,
 			revocationCode: account.revocationCode ?? '',
-			timeOffsetSeconds: offsetFrom(token, this.now())
+			timeOffsetSeconds,
+			...(recoveryWarning === undefined ? {} : { recoveryWarning })
 		};
 	}
 
@@ -967,7 +1999,359 @@ export class TransferService {
 		// the account it is telling the user to go and check.
 		return this.terminal
 			? { steamId64: this.terminal.steamId64, accountName: this.terminal.accountName }
-			: undefined;
+			: this.workflow
+				? { steamId64: this.workflow.steamId64, accountName: this.workflow.accountName }
+				: undefined;
+	}
+
+	/** A malformed/newer durable record is a blocking, user-visible state. */
+	problem(): string | undefined {
+		return this.workflowProblem;
+	}
+
+	/** A key-changing vault operation would orphan the wrapped transfer key. */
+	hasDurableWorkflow(): boolean {
+		return (
+			this.submitting ||
+			this.recovering ||
+			this.workflow?.wrappedKey !== undefined ||
+			this.workflowProblem !== undefined
+		);
+	}
+
+	/** A failed clear left this process holding the only exact transfer record. */
+	hasTransferCleanupDebt(steamId64?: string): boolean {
+		return (
+			this.cleanupDebt !== undefined &&
+			(steamId64 === undefined || this.cleanupDebt.steamId64 === steamId64)
+		);
+	}
+
+	recovery():
+		| {
+				attemptId: string;
+				state: TransferWorkflowRecord['state'];
+				at: string;
+				retained: boolean;
+				requiresPassphrase?: boolean;
+		  }
+		| undefined {
+		if (this.workflow === undefined) return undefined;
+		const record = this.workflow;
+		let requiresPassphrase = false;
+		try {
+			const current = this.vault
+				.read()
+				.accounts.find((account) => account.steamId64 === record.steamId64);
+			if (current !== undefined) {
+				const currentFingerprint = authenticatorFingerprint(current);
+				if (
+					record.state === 'replacement' &&
+					record.wrappedKey !== undefined &&
+					record.replacement !== undefined
+				) {
+					let key: Buffer | undefined;
+					try {
+						key = this.vault.openScopedEnvelope(record.wrappedKey);
+						const replacement = openReplacement(record.replacement, key, record);
+						requiresPassphrase =
+							!storedFaithfully(current, replacement.account) &&
+							(record.priorAuthenticatorFingerprint === undefined ||
+								record.priorAuthenticatorFingerprint === currentFingerprint);
+					} finally {
+						if (key !== undefined) wipe(key);
+					}
+				} else if (
+					record.priorAuthenticatorFingerprint === currentFingerprint &&
+					record.state !== 'sending' &&
+					record.state !== 'not-replaced' &&
+					!(record.state === 'unreadable' && record.replacement !== undefined)
+				) {
+					requiresPassphrase = true;
+				}
+			}
+		} catch {
+			// Status remains non-authoritative while the vault or recovery material
+			// cannot be read. The service still requires proof before any mutation.
+		}
+		return {
+			attemptId: this.workflow.attemptId,
+			state: this.workflow.state,
+			at: this.workflow.at,
+			retained: this.workflow.state === 'unreadable' && this.workflow.replacement !== undefined,
+			...(requiresPassphrase ? { requiresPassphrase: true } : {})
+		};
+	}
+
+	/**
+	 * Resolve the exact durable transfer after the user checked the phone/Steam.
+	 * No generic close button calls this: each choice has a different meaning.
+	 */
+	async resolve(
+		attemptId: string,
+		resolution: 'notReplaced' | 'replaced' | 'resolvedOutsideApp',
+		passphrase?: string
+	): Promise<void> {
+		if (
+			this.submitting ||
+			this.recovering ||
+			this.unsaved !== undefined ||
+			this.unreadableHeld !== undefined
+		) {
+			throw new TransferError(
+				'This transfer still holds or is saving replacement secrets. Its safety record cannot be resolved or discarded.',
+				false
+			);
+		}
+		const remembered =
+			this.workflow?.attemptId === attemptId
+				? this.workflow
+				: this.cleanupDebt?.attemptId === attemptId
+					? this.cleanupDebt
+					: undefined;
+		if (remembered === undefined) {
+			throw new TransferError(
+				'That transfer safety record is no longer current. Re-open this screen before changing it.',
+				false
+			);
+		}
+
+		let releaseAccountMutation: () => void;
+		try {
+			releaseAccountMutation = this.keyCoordinator.beginAccountMutation(remembered.steamId64);
+		} catch (err) {
+			throw new TransferError(
+				err instanceof Error ? err.message : 'Another protected account change is in progress.',
+				false
+			);
+		}
+
+		try {
+			/*
+			 * Re-read the exact durable record after taking the shared account
+			 * reservation. Process-only cleanup debt is the one valid exception to an
+			 * absent file. The same function is called again after passphrase derivation,
+			 * because that await must not turn an old renderer choice into authority over
+			 * a newer workflow state.
+			 */
+			const readExact = (): TransferWorkflowRecord => {
+				let durable: TransferWorkflowRecord[];
+				try {
+					durable = this.workflowJournal.transfers();
+				} catch {
+					throw new TransferError(
+						'The saved transfer safety record could not be verified, so nothing was changed. Repair the application data folder and try again.',
+						false
+					);
+				}
+				const exact = durable.find((entry) => entry.attemptId === attemptId);
+				if (
+					durable.length > 1 ||
+					(durable.length === 1 && exact === undefined) ||
+					(exact !== undefined && exact.steamId64 !== remembered.steamId64)
+				) {
+					throw new TransferError(
+						'The saved transfer state is ambiguous, so nothing was changed. Repair the application data folder before resolving it.',
+						false
+					);
+				}
+				const record =
+					exact ??
+					(this.cleanupDebt?.attemptId === attemptId &&
+					this.cleanupDebt.steamId64 === remembered.steamId64
+						? this.cleanupDebt
+						: undefined);
+				if (record === undefined) {
+					throw new TransferError(
+						'That transfer safety record is no longer current. Re-open this screen before changing it.',
+						false
+					);
+				}
+				return record;
+			};
+
+			let record = readExact();
+			this.workflow = record;
+
+			if (record.state === 'not-replaced') {
+				if (resolution !== 'notReplaced') {
+					throw new TransferError(
+						'This safety record proves Steam did not replace the authenticator. Re-open the screen and clear only that exact no-change record.',
+						false
+					);
+				}
+				this.clearKnownNoChange(record);
+				this.terminal = undefined;
+				this.pending = undefined;
+				return;
+			}
+
+			if (resolution === 'notReplaced') {
+				if (record.state !== 'sending' && record.state !== 'unanswered') {
+					throw new TransferError(
+						'Steam is known to have issued a replacement, so this cannot be cleared as a safe retry.',
+						false
+					);
+				}
+				this.clearKnownNoChange(record);
+				this.terminal = undefined;
+				this.pending = undefined;
+				return;
+			}
+
+			if (record.state === 'replacement') {
+				throw new TransferError(
+					resolution === 'replaced'
+						? 'The replacement secrets are recoverable here. Finish recovery instead of discarding them.'
+						: 'This record contains a recoverable replacement. Finish recovery; it cannot be discarded through the ordinary recovery acknowledgement.',
+					false
+				);
+			}
+			if (
+				(resolution === 'replaced' &&
+					record.state !== 'sending' &&
+					record.state !== 'unanswered' &&
+					!(record.state === 'unreadable' && record.replacement === undefined)) ||
+				(resolution === 'resolvedOutsideApp' &&
+					record.state !== 'unanswered' &&
+					record.state !== 'unreadable')
+			) {
+				throw new TransferError(
+					'That resolution does not match the transfer state now on disk. Re-open this screen before changing it.',
+					false
+				);
+			}
+
+			/*
+			 * `unanswered` and an unretained `unreadable` record were published while
+			 * this SteamID was absent from the vault. A row that later appears beside one
+			 * therefore came from a compatible pre-transfer backup. A raw `sending`
+			 * record is different: it does not prove whether a usable reply was received,
+			 * so a same-ID row is ambiguous and may never be deleted. Likewise retained
+			 * ciphertext can describe secrets this build cannot compare safely.
+			 */
+			const restored = this.vault
+				.read()
+				.accounts.find((account) => account.steamId64 === record.steamId64);
+			if (
+				restored !== undefined &&
+				(record.state === 'sending' ||
+					record.replacement !== undefined ||
+					record.priorAuthenticatorFingerprint === undefined ||
+					authenticatorFingerprint(restored) !== record.priorAuthenticatorFingerprint)
+			) {
+				throw new TransferError(
+					'This vault contains an authenticator for that account, but the saved transfer cannot prove which secrets are current. Nothing was removed; finish recovery or repair the safety record first.',
+					false
+				);
+			}
+
+			if (restored !== undefined) {
+				if (passphrase === undefined || passphrase === '') {
+					throw new TransferError(
+						'Removing the obsolete authenticator from this vault needs your vault passphrase, the same as removing an account any other way.',
+						false
+					);
+				}
+				const fingerprint = authenticatorFingerprint(restored);
+				await this.vault.verifyPassphrase(passphrase);
+
+				const afterProof = readExact();
+				if (JSON.stringify(afterProof) !== JSON.stringify(record)) {
+					throw new TransferError(
+						'The transfer safety record changed while the passphrase was being checked. Nothing was removed; re-open this screen and try again.',
+						false
+					);
+				}
+				record = afterProof;
+				this.workflow = record;
+
+				let removed = false;
+				try {
+					await this.vault.mutate((draft) => {
+						const index = draft.accounts.findIndex(
+							(account) => account.steamId64 === record.steamId64
+						);
+						if (index < 0) return;
+						if (authenticatorFingerprint(draft.accounts[index]!) !== fingerprint) {
+							throw new TransferError(
+								'This vault now holds a different authenticator for that account. Nothing was removed; re-open the recovery screen.',
+								false
+							);
+						}
+						draft.accounts.splice(index, 1);
+						removed = true;
+					});
+				} catch (err) {
+					if (err instanceof TransferError) throw err;
+					throw new TransferError(
+						'The obsolete pre-transfer authenticator could not be removed from this vault, so its transfer safety record was kept. Repair vault storage and try the same resolution again.',
+						false
+					);
+				}
+				if (removed) {
+					this.onAccountRemoved(record.steamId64, true);
+				}
+			}
+
+			if (resolution === 'replaced') {
+				if (record.state !== 'unreadable') {
+					try {
+						this.workflow = this.workflowJournal.updateTransfer(record, { state: 'unreadable' });
+					} catch {
+						/*
+						 * A replace can reach its final filename and then fail the directory
+						 * flush. Re-read before reporting it: the renderer asks status after
+						 * every failed resolution, and must see the state actually on disk
+						 * rather than keep offering actions for the old `unanswered` object.
+						 */
+						try {
+							const durable = this.workflowJournal.transfers(record.steamId64);
+							const exact = durable.find((entry) => entry.attemptId === record.attemptId);
+							if (durable.length === 1 && exact?.state === 'unreadable') {
+								this.workflow = exact;
+								this.terminal = {
+									steamId64: exact.steamId64,
+									accountName: exact.accountName,
+									kind: 'unreadable'
+								};
+							}
+						} catch {
+							// Preserve the conservative in-memory state when the durable answer
+							// itself cannot be verified.
+						}
+						throw new TransferError(
+							'The obsolete authenticator was removed, but the transfer safety record could not be updated. Repair the application data folder and choose the same resolution again.',
+							false
+						);
+					}
+				}
+				this.terminal = {
+					steamId64: record.steamId64,
+					accountName: record.accountName,
+					kind: 'unreadable'
+				};
+				return;
+			}
+
+			// The user explicitly says Steam/Support has repaired or removed the
+			// replacement outside this app. Reconcile the vault first, then retire only
+			// this exact record; a failed clear remains available for an exact retry.
+			try {
+				this.clearWorkflowRecord(record);
+			} catch {
+				throw new TransferError(
+					'The vault was reconciled, but its transfer safety record could not be cleared. Repair the application data folder and choose the same resolution again.',
+					false
+				);
+			}
+			this.workflow = undefined;
+			this.terminal = undefined;
+			this.unsaved = undefined;
+			this.unreadableHeld = undefined;
+		} finally {
+			releaseAccountMutation();
+		}
 	}
 
 	/**
@@ -1003,16 +2387,18 @@ export class TransferService {
 		// and cancelling is how the user says "I have read this and checked my
 		// phone". Guarding on it too would trap them on a screen whose only button
 		// calls this.
-		if (this.unsaved !== undefined) {
+		if (
+			this.unsaved !== undefined ||
+			this.unreadableHeld !== undefined ||
+			this.workflow !== undefined
+		) {
 			throw new TransferError(
-				'This transfer cannot be abandoned: Steam has already replaced the authenticator and ' +
-					'the new one is not saved yet. Use the retry on this screen.',
+				'This transfer cannot be abandoned: its durable safety record cannot be dismissed as a generic cancel. ' +
+					'Use the answer on the recovery screen that matches what you found on Steam.',
 				false
 			);
 		}
 		this.pending = undefined;
-		// The user's way out of an unresolved submission: they have checked their
-		// phone and are telling this application to stop asking.
 		this.terminal = undefined;
 	}
 
@@ -1040,10 +2426,14 @@ export class TransferService {
 		 * decode would clear the record and leave the reply unreadable, while the
 		 * user was still reading the error telling them not to close the window.
 		 */
-		if (this.unsaved !== undefined || this.terminal !== undefined) {
+		if (
+			this.unsaved !== undefined ||
+			this.unreadableHeld !== undefined ||
+			this.terminal !== undefined
+		) {
 			return this.pending;
 		}
-		if (this.now() - this.pending.startedAtMs > PENDING_TTL_MS) {
+		if (this.monotonicNow() - this.pending.startedAtElapsedMs > PENDING_TTL_MS) {
 			this.pending = undefined;
 			return undefined;
 		}

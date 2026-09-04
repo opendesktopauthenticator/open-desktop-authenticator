@@ -72,6 +72,15 @@ jobs:
       - name: Verify the website
         run: node site/verify.mjs
 
+      # And that the verifier itself still catches what it claims to. It is a
+      # table of regexes over rendered prose, so it fails silently in both
+      # directions — missing an overclaim, or failing honest copy — and the step
+      # above is green either way. Three defects lived in one entry at once
+      # while it passed. This substitutes sentences into a real page, rebuilds,
+      # and asserts the exit code each one deserves.
+      - name: Check the website verifier catches what it claims to
+        run: node site/selftest.mjs
+
   spike:
     name: spike (reference code)
     runs-on: ubuntu-latest

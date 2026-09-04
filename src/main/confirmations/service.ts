@@ -1,12 +1,18 @@
 import { ConfirmationsClient, buildSessionCookie, type ConfirmationAccount } from './client';
 import { describeType, isAutoConfirmable, isSecurityCritical } from './policy';
+import { ConfirmationProtocolError } from './protocol';
 import type { Confirmation, ConfirmationAction } from './protocol';
 import { AccessTokenError, mintAccessToken } from '../steam/access-token';
-import { signIn, SteamLoginError } from '../steam/login';
+import {
+	PROXY_POLICY_STOPPED,
+	signIn,
+	SteamLoginError,
+	type LoginSessionFactory
+} from '../steam/login';
 import { isUsableMobileToken, jwtExpiry } from '../steam-jwt';
 import type { VaultService } from '../vault/service';
 import type { SteamTransportFactory } from '../net/transport';
-import type { ConfirmationSummary } from '../../shared/ipc';
+import type { BrowserRoute, ConfirmationSummary } from '../../shared/ipc';
 
 /**
  * Confirmations, joined up (§12 F5).
@@ -52,6 +58,15 @@ export interface ConfirmationsServiceOptions {
 	 * a caching rule nobody can prove.
 	 */
 	signIn?: typeof signIn;
+	/** System-aware session construction for accounts with no stored proxy. */
+	loginSession?: LoginSessionFactory;
+	/**
+	 * Whether the vault refuses to talk to Steam without a proxy.
+	 *
+	 * Needed before constructing even the system-routed sign-in transport: under
+	 * the strict setting, an account without its own proxy must emit no request.
+	 */
+	requireProxies?: () => boolean;
 }
 
 /** Re-mint this long before expiry rather than discovering it mid-request. */
@@ -123,8 +138,28 @@ export class ConfirmationsService {
 	private readonly now: () => number;
 	private readonly offset: () => number;
 	private readonly performSignIn: typeof signIn;
+	private readonly loginSession: LoginSessionFactory | undefined;
+	private readonly requireProxies: () => boolean;
 
 	private readonly sessions = new Map<string, SessionState>();
+
+	/**
+	 * Sign-ins currently talking to Steam, and how to stop each one.
+	 *
+	 * **Refusing a result is not the same as stopping the work.** `forget` bumps
+	 * the generation, so a token that arrives after a lock is thrown away — and
+	 * that was the whole of it. A sign-in takes as long as Steam takes, up to the
+	 * ninety-second timeout, and the vault can lock in the middle of one by the
+	 * idle timer alone. Underneath, `steam-session` polls; the closure holding
+	 * the user's password stays alive with it. So the account went on
+	 * authenticating over its proxy, with a password in memory, for up to a
+	 * minute and a half after the user had locked the vault — which is the exact
+	 * shape of thing every other `forget` in this file exists to prevent.
+	 */
+	private readonly signingIn = new Map<
+		string,
+		{ cancel: (reason?: string) => void; routed: boolean }
+	>();
 	/**
 	 * steamId64 → (confirmation id → what acting on it needs), from the last fetch.
 	 *
@@ -179,9 +214,39 @@ export class ConfirmationsService {
 		this.now = options.now ?? (() => Date.now());
 		this.offset = options.timeOffsetSeconds ?? ((): number => 0);
 		this.performSignIn = options.signIn ?? signIn;
+		this.loginSession = options.loginSession;
+		this.requireProxies = options.requireProxies ?? (() => false);
 	}
 
 	/** Pending confirmations for one account, as the renderer may see them. */
+	/**
+	 * Run work that talks to Steam, translating an expired session on the way out.
+	 *
+	 * **Steam signals expiry with an HTTP status, and nothing was reading it.**
+	 * A real 401 or 403 becomes `ConfirmationProtocolError({ kind:
+	 * 'sessionExpired' })` in the client, while both consumers ask only about
+	 * `ConfirmationsError.needsSignIn`. So the one condition a person can
+	 * actually fix arrived as an anonymous error: the confirmations screen
+	 * printed a generic message instead of the password form, and the poller
+	 * counted it as an ordinary failure — backing off, and halting the account
+	 * after ten of them.
+	 *
+	 * Translated here rather than at each call site, and rather than in the
+	 * client: the client's job is to say what Steam sent, and this is the
+	 * boundary where that becomes something the rest of the app acts on. It
+	 * mirrors what already happens one layer down for `AccessTokenError`.
+	 */
+	private async translating<T>(work: () => Promise<T>): Promise<T> {
+		try {
+			return await work();
+		} catch (err) {
+			if (err instanceof ConfirmationProtocolError && err.failure.kind === 'sessionExpired') {
+				throw new ConfirmationsError(err.failure.message, true);
+			}
+			throw err;
+		}
+	}
+
 	async list(steamId64: string): Promise<ConfirmationListing> {
 		// Captured here, at the call, rather than inside the queued work. Work that
 		// has not started yet was still *requested* before the lock, and reading the
@@ -189,23 +254,27 @@ export class ConfirmationsService {
 		// changed — making the guard agree with itself and catch nothing.
 		const grant = this.grantFor(steamId64);
 
-		return this.serialise(steamId64, async () => {
-			const { account, client, cookie } = await this.connect(steamId64, grant);
-			const { confirmations, unreadable } = await client.list(account, cookie);
+		return this.translating(() =>
+			this.serialise(steamId64, async () => {
+				const { account, client, cookie } = await this.connect(steamId64, grant);
+				const { confirmations, unreadable } = await client.list(account, cookie);
 
-			// Checked *after* the await, before anything is written back. If the vault
-			// locked while this was in flight, these nonces are no longer ours to keep.
-			this.requireGrant(steamId64, grant);
+				// Checked *after* the await, before anything is written back. If the vault
+				// locked while this was in flight, these nonces are no longer ours to keep.
+				this.requireGrant(steamId64, grant);
 
-			// Remembered so `act` can resolve an id back to its nonce and type without
-			// the renderer ever holding either.
-			this.pending.set(
-				steamId64,
-				new Map(confirmations.map((entry) => [entry.id, { nonce: entry.nonce, type: entry.type }]))
-			);
+				// Remembered so `act` can resolve an id back to its nonce and type without
+				// the renderer ever holding either.
+				this.pending.set(
+					steamId64,
+					new Map(
+						confirmations.map((entry) => [entry.id, { nonce: entry.nonce, type: entry.type }])
+					)
+				);
 
-			return { confirmations: confirmations.map(toSummary), unreadable };
-		});
+				return { confirmations: confirmations.map(toSummary), unreadable };
+			})
+		);
 	}
 
 	/**
@@ -223,32 +292,34 @@ export class ConfirmationsService {
 
 		const grant = this.grantFor(steamId64);
 
-		return this.serialise(steamId64, async () => {
-			const resolved: Confirmation[] = [];
-			for (const id of ids) {
-				const entry = this.pending.get(steamId64)?.get(id);
-				if (entry === undefined) {
-					throw new ConfirmationsError('this list is out of date. Refresh it and choose again.');
+		return this.translating(() =>
+			this.serialise(steamId64, async () => {
+				const resolved: Confirmation[] = [];
+				for (const id of ids) {
+					const entry = this.pending.get(steamId64)?.get(id);
+					if (entry === undefined) {
+						throw new ConfirmationsError('this list is out of date. Refresh it and choose again.');
+					}
+					// The type comes from what Steam actually sent, not from the renderer —
+					// so S16's batch rule cannot be sidestepped by a caller claiming a
+					// recovery confirmation is a trade.
+					resolved.push({ id, nonce: entry.nonce, type: entry.type });
 				}
-				// The type comes from what Steam actually sent, not from the renderer —
-				// so S16's batch rule cannot be sidestepped by a caller claiming a
-				// recovery confirmation is a trade.
-				resolved.push({ id, nonce: entry.nonce, type: entry.type });
-			}
 
-			const { account, client, cookie } = await this.connect(steamId64, grant);
-			await client.act(account, cookie, action, resolved);
+				const { account, client, cookie } = await this.connect(steamId64, grant);
+				await client.act(account, cookie, action, resolved);
 
-			this.requireGrant(steamId64, grant);
+				this.requireGrant(steamId64, grant);
 
-			// Acted on, so no longer pending. Read fresh rather than held across the
-			// await: a map captured beforehand could have been replaced, leaving the
-			// removal to land on an orphan while the live one still held the nonce.
-			const current = this.pending.get(steamId64);
-			for (const id of ids) {
-				current?.delete(id);
-			}
-		});
+				// Acted on, so no longer pending. Read fresh rather than held across the
+				// await: a map captured beforehand could have been replaced, leaving the
+				// removal to land on an orphan while the live one still held the nonce.
+				const current = this.pending.get(steamId64);
+				for (const id of ids) {
+					current?.delete(id);
+				}
+			})
+		);
 	}
 
 	/**
@@ -267,75 +338,78 @@ export class ConfirmationsService {
 	async runAutoConfirm(steamId64: string): Promise<AutoConfirmOutcome> {
 		const grant = this.grantFor(steamId64);
 
-		return this.serialise(steamId64, async () => {
-			const { account, client, cookie } = await this.connect(steamId64, grant);
+		return this.translating(() =>
+			this.serialise(steamId64, async () => {
+				const { account, client, cookie } = await this.connect(steamId64, grant);
 
-			// Nothing enabled means nothing to do, and no reason to have asked Steam.
-			if (!account.autoConfirm.marketListings && !account.autoConfirm.trades) {
-				return { approved: [], held: [], unreadable: 0 };
-			}
+				// Nothing enabled means nothing to do, and no reason to have asked Steam.
+				if (!account.autoConfirm.marketListings && !account.autoConfirm.trades) {
+					return { approved: [], held: [], unreadable: 0 };
+				}
 
-			// `unreadable` travels with the outcome. It has no `ConfirmationSummary` to
-			// attach to and must not go through `onFailure`, which counts toward the
-			// ten-strike halt — so the activity log gets an entry kind of its own.
-			//
-			// It was briefly dropped here, on the reasoning that the interactive list
-			// already warns. That is the wrong way round for this path: automatic
-			// confirmation is the one that runs while nobody is watching, and an entry
-			// that failed to parse could be the account-recovery confirmation. Silence
-			// is the one response that cannot be right.
-			const { confirmations, unreadable } = await client.list(account, cookie);
-			this.requireGrant(steamId64, grant);
+				// `unreadable` travels with the outcome. It has no `ConfirmationSummary` to
+				// attach to and must not go through `onFailure`, which counts toward the
+				// ten-strike halt — so the activity log gets an entry kind of its own.
+				//
+				// It was briefly dropped here, on the reasoning that the interactive list
+				// already warns. That is the wrong way round for this path: automatic
+				// confirmation is the one that runs while nobody is watching, and an entry
+				// that failed to parse could be the account-recovery confirmation. Silence
+				// is the one response that cannot be right.
+				const { confirmations, unreadable } = await client.list(account, cookie);
+				this.requireGrant(steamId64, grant);
 
-			// **The settings are re-read here, after the await.** `connect` copied
-			// them before the list request went out, and that request takes as long
-			// as Steam takes — long enough for somebody to open Settings and turn
-			// automatic confirmation off. Approving from the copy meant "disable"
-			// did not apply to the pass already in flight: the toggle saved, the
-			// screen said off, and the trade was approved anyway. Reading the vault
-			// again costs nothing and makes the setting mean what it says.
-			const fresh = this.vault
-				.read()
-				.accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm;
-			if (fresh === undefined) {
-				// Removed from the vault while the list was loading. Nothing may be
-				// approved for an account that no longer exists here.
-				return { approved: [], held: [], unreadable };
-			}
-			account.autoConfirm = {
-				marketListings: fresh.marketListings,
-				trades: fresh.trades
-			};
+				// **The settings are re-read here, after the await.** `connect` copied
+				// them before the list request went out, and that request takes as long
+				// as Steam takes — long enough for somebody to open Settings and turn
+				// automatic confirmation off. Approving from the copy meant "disable"
+				// did not apply to the pass already in flight: the toggle saved, the
+				// screen said off, and the trade was approved anyway. Reading the vault
+				// again costs nothing and makes the setting mean what it says.
+				const fresh = this.vault
+					.read()
+					.accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm;
+				if (fresh === undefined) {
+					// Removed from the vault while the list was loading. Nothing may be
+					// approved for an account that no longer exists here.
+					return { approved: [], held: [], unreadable };
+				}
+				account.autoConfirm = {
+					marketListings: fresh.marketListings,
+					trades: fresh.trades
+				};
 
-			const { approved, held } = await client.autoConfirm(
-				account,
-				cookie,
-				confirmations,
-				// Read from the vault each time it is asked, so the answer is the
-				// setting as it stands at the moment the request goes out — not the
-				// copy taken when the pass began, nor even the reread above.
-				() => this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm
-			);
-			this.requireGrant(steamId64, grant);
+				const { approved, held } = await client.autoConfirm(
+					account,
+					cookie,
+					confirmations,
+					// Read from the vault each time it is asked, so the answer is the
+					// setting as it stands at the moment the request goes out — not the
+					// copy taken when the pass began, nor even the reread above.
+					() =>
+						this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64)?.autoConfirm
+				);
+				this.requireGrant(steamId64, grant);
 
-			// The full list is remembered so the UI can act on what was held back
-			// without fetching again, minus anything just approved.
-			const remaining = new Map(
-				confirmations
-					.filter((entry) => !approved.some((done) => done.id === entry.id))
-					.map((entry) => [entry.id, { nonce: entry.nonce, type: entry.type }])
-			);
-			this.pending.set(steamId64, remaining);
+				// The full list is remembered so the UI can act on what was held back
+				// without fetching again, minus anything just approved.
+				const remaining = new Map(
+					confirmations
+						.filter((entry) => !approved.some((done) => done.id === entry.id))
+						.map((entry) => [entry.id, { nonce: entry.nonce, type: entry.type }])
+				);
+				this.pending.set(steamId64, remaining);
 
-			return {
-				approved: approved.map(toSummary),
-				held: held.map((entry) => ({
-					confirmation: toSummary(entry.confirmation),
-					reason: entry.reason
-				})),
-				unreadable
-			};
-		});
+				return {
+					approved: approved.map(toSummary),
+					held: held.map((entry) => ({
+						confirmation: toSummary(entry.confirmation),
+						reason: entry.reason
+					})),
+					unreadable
+				};
+			})
+		);
 	}
 
 	/**
@@ -351,19 +425,56 @@ export class ConfirmationsService {
 	 * credential to disk would add exposure and buy a saved round trip after a
 	 * restart.
 	 */
-	async signIn(steamId64: string, password: string): Promise<void> {
+	async signIn(steamId64: string, password: string, route: BrowserRoute = 'proxy'): Promise<void> {
 		const grant = this.grantFor(steamId64);
 
 		return this.serialise(steamId64, async () => {
+			/*
+			 * **Before Steam is contacted, not only before the answer is kept.**
+			 *
+			 * The grant is captured at the call and checked after the sign-in
+			 * returns, which refuses the *token* — and `forget` cancels attempts
+			 * that are already running. Neither reaches one still sitting in this
+			 * queue behind another request: it had no session to cancel, so a lock
+			 * passed straight over it, and when the queue drained it went on to
+			 * authenticate against Steam with a password captured before the vault
+			 * closed. The result was thrown away afterwards, by which point Steam
+			 * had been asked.
+			 *
+			 * Checked here, one line inside the queue, so work that was queued
+			 * before a lock never starts after one.
+			 */
+			this.requireGrant(steamId64, grant);
+
 			const stored = this.vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
 			if (!stored) {
 				throw new ConfirmationsError('no such account in this vault');
 			}
 
-			// No transport is built here. `steam-session` speaks to Steam over Node's
-			// own HTTP stack, so it takes the proxy URL directly and authenticates to
-			// the proxy itself — the Electron transport is for confirmations, which
-			// are still ours.
+			/*
+			 * **`Require proxies`, on the one Steam path that has no transport.**
+			 *
+			 * The IPC handler above this refuses a `route` of `direct`, and that is
+			 * not enough twice over. The Confirmations screen sends no route at all,
+			 * so the check saw `undefined` and passed — and the account it was
+			 * signing in might have no proxy stored, in which case the route was
+			 * never the thing that made it unrouted.
+			 *
+			 * So the stored account is what decides, and the route only adds to it.
+			 * What travels on this request is a password, which makes it the worst
+			 * of the paths that were unguarded.
+			 */
+			if (this.requireProxies() && (route !== 'proxy' || !stored.proxyUrl)) {
+				throw new ConfirmationsError(
+					'this vault is set to require proxies, so this account cannot sign in to Steam ' +
+						'without one. Give the account a proxy, or turn off "Require proxies" in ' +
+						'Settings.'
+				);
+			}
+
+			// Explicit account proxies stay on steam-session's agent. An absent route
+			// receives the injected Electron system transport, including Direct browser
+			// re-authentication; neither case may silently become a plain Node request.
 			let result;
 			try {
 				result = await this.performSignIn(
@@ -373,12 +484,42 @@ export class ConfirmationsService {
 						sharedSecret: stored.sharedSecret,
 						unixSeconds: Math.floor(this.now() / 1000) + this.offset()
 					},
-					stored.proxyUrl
+					/*
+					 * The account's route, unless the caller asked for the machine's.
+					 *
+					 * Only the browser's *Direct* option asks, and only because the
+					 * stored proxy is the thing it is trying to get past — so a re-auth
+					 * that insisted on it failed at exactly the step Direct was chosen
+					 * to avoid. Defaulting to `true` keeps every other caller, and
+					 * every stored account, on its own routing.
+					 */
+					// Both proxied routes mint through the account's proxy: "Steam only"
+					// still sends every Steam request that way, and a sign-in is one.
+					route === 'direct' ? undefined : stored.proxyUrl,
+					this.loginSession,
+					undefined,
+					/*
+					 * Kept only while this attempt is in the air. See `signingIn`.
+					 *
+					 * **With the route it is actually taking**, which is not the same
+					 * question as whether the account has a proxy stored. A Direct
+					 * sign-in on a routed account is unrouted, and a cancellation that
+					 * consulted the vault saw the stored proxy and left it running —
+					 * so turning `Require proxies` on mid-flight did nothing about the
+					 * one sign-in it most needed to stop.
+					 */
+					(cancel) =>
+						this.signingIn.set(steamId64, {
+							cancel,
+							routed: route === 'proxy' && !!stored.proxyUrl
+						})
 				);
 			} catch (err) {
 				throw err instanceof SteamLoginError
 					? new ConfirmationsError(err.message, true, err.permanent)
 					: err;
+			} finally {
+				this.signingIn.delete(steamId64);
 			}
 
 			this.requireGrant(steamId64, grant);
@@ -429,6 +570,9 @@ export class ConfirmationsService {
 		this.epochs.set(steamId64, (this.epochs.get(steamId64) ?? 0) + 1);
 		this.sessions.delete(steamId64);
 		this.pending.delete(steamId64);
+		// A sign-in still in the air is being authenticated over the route that
+		// just stopped being this account's. Stopping it is the point.
+		this.cancelSignIn(steamId64);
 	}
 
 	/** Drop cached sessions and lists. Called when the vault locks. */
@@ -438,6 +582,51 @@ export class ConfirmationsService {
 		this.generation++;
 		this.sessions.clear();
 		this.pending.clear();
+		// And anything still talking to Steam is told to stop, rather than merely
+		// having its answer discarded when it eventually arrives.
+		for (const steamId64 of [...this.signingIn.keys()]) {
+			this.cancelSignIn(steamId64);
+		}
+	}
+
+	/**
+	 * Abandon sign-ins that `Require proxies` has just forbidden.
+	 *
+	 * **Turning the rule on has to stop what is already on the wire.** The guard
+	 * in `signIn` refuses new attempts; an attempt already talking to Steam was
+	 * untouched, so a password kept travelling unrouted from a vault that had
+	 * just been told never to allow that, and the switch reported success.
+	 *
+	 * Targeted rather than a `forget()`: a sign-in through the account's own
+	 * proxy still satisfies the new rule, and cancelling it would make enabling
+	 * the setting destroy exactly the work it exists to protect.
+	 */
+	cancelUnroutedSignIns(): void {
+		for (const [steamId64, attempt] of [...this.signingIn]) {
+			if (!attempt.routed) {
+				// Named, or the user is told their vault locked — which it did not,
+				// and which sends them to unlock something already open.
+				this.cancelSignIn(steamId64, PROXY_POLICY_STOPPED);
+			}
+		}
+	}
+
+	/**
+	 * Abandon a sign-in that is still running, if there is one.
+	 *
+	 * Swallowing is deliberate: this is called from lock handling, where every
+	 * other step is synchronous and unconditional, and a library that has already
+	 * finished is not a problem worth reporting to somebody who just locked their
+	 * vault.
+	 */
+	private cancelSignIn(steamId64: string, reason?: string): void {
+		const attempt = this.signingIn.get(steamId64);
+		this.signingIn.delete(steamId64);
+		try {
+			attempt?.cancel(reason);
+		} catch {
+			// Already finished, or never started.
+		}
 	}
 
 	/**

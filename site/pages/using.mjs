@@ -14,6 +14,8 @@
  * an honest description of the trade, and the rest are better served elsewhere.
  */
 
+import { reviewAsk } from '../markup.mjs';
+
 /** Valve's own pages, cited wherever this makes a claim about Steam's behaviour. */
 const VALVE = {
 	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31',
@@ -218,6 +220,8 @@ export const confirmationsOnDesktop = {
 					<span>What signs a confirmation, and what else sits in the same file.</span></a>
 				</li>
 			</ul>
+
+${reviewAsk(s, { got: 'Did this get your confirmations working on the desktop?' })}
 		</article>`
 };
 
@@ -870,5 +874,7 @@ export const openMafile = {
 					<span>Bringing accounts into this application, and exporting them back out.</span></a>
 				</li>
 			</ul>
+
+${reviewAsk(s, { got: 'Did this let you open your maFile?' })}
 		</article>`
 };

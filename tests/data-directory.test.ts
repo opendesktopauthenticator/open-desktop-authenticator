@@ -54,10 +54,10 @@ describe('the vault directory is pinned, not inherited', () => {
 	});
 
 	it('keeps a portable build out of AppData entirely', () => {
-		// The portable target promises "no writes outside its own directory", which
-		// is the whole reason to run it from a stick on a machine you do not own.
+		// The portable target promises that user data stays beside the executable.
 		// It wrote the vault to %APPDATA% like every other build, leaving encrypted
-		// account data on the host and sharing it with any installed copy.
+		// account data on the host and sharing it with any installed copy. Launcher
+		// runtime extraction in Windows Temp is a separate, non-secret boundary.
 		//
 		// electron-builder sets this variable for that target and nothing else, so
 		// it is the only signal available — the binary is otherwise identical.
@@ -66,7 +66,9 @@ describe('the vault directory is pinned, not inherited', () => {
 			mainSource.indexOf('hardenApp()')
 		);
 		expect(mainSource).toContain('PORTABLE_EXECUTABLE_DIR');
-		expect(call).toContain('portableDir');
+		expect(call).toMatch(
+			/portableDir\s*\?\s*join\(portableDir,\s*branding\.dataDirectory\)\s*:\s*join\(app\.getPath\('appData'\),\s*branding\.dataDirectory\)/
+		);
 	});
 
 	it('is pinned before the single-instance lock, which also derives from it', () => {

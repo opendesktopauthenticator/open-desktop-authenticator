@@ -72,25 +72,35 @@ export function generateConfirmationKey(
 	// shared secret was broken when confirmations failed, which sends them
 	// repairing the wrong field.
 	const key = decodeIdentitySecret(identitySecret);
+	let tagBytes: Buffer | undefined;
+	let buffer: Buffer | undefined;
+	let digest: Buffer | undefined;
+	try {
+		if (!Number.isFinite(unixSeconds) || unixSeconds < 0) {
+			throw new ConfirmationKeyError('cannot sign a confirmation for a nonsensical time');
+		}
 
-	if (!Number.isFinite(unixSeconds) || unixSeconds < 0) {
-		throw new ConfirmationKeyError('cannot sign a confirmation for a nonsensical time');
+		tagBytes = Buffer.from(tag, 'utf8');
+		if (tagBytes.length === 0) {
+			throw new ConfirmationKeyError('a confirmation key must name the operation it authorises');
+		}
+
+		const used = Math.min(tagBytes.length, MAX_TAG_BYTES);
+		buffer = Buffer.alloc(8 + used);
+		// Big-endian 64-bit time. Written as two halves for the same reason as the
+		// TOTP counter: the value is a JavaScript number and cannot reach 2^53.
+		buffer.writeUInt32BE(Math.floor(unixSeconds / 2 ** 32), 0);
+		buffer.writeUInt32BE(Math.floor(unixSeconds) >>> 0, 4);
+		tagBytes.copy(buffer, 8, 0, used);
+
+		digest = createHmac('sha1', key).update(buffer).digest();
+		return digest.toString('base64');
+	} finally {
+		key.fill(0);
+		tagBytes?.fill(0);
+		buffer?.fill(0);
+		digest?.fill(0);
 	}
-
-	const tagBytes = Buffer.from(tag, 'utf8');
-	if (tagBytes.length === 0) {
-		throw new ConfirmationKeyError('a confirmation key must name the operation it authorises');
-	}
-
-	const used = Math.min(tagBytes.length, MAX_TAG_BYTES);
-	const buffer = Buffer.alloc(8 + used);
-	// Big-endian 64-bit time. Written as two halves for the same reason as the
-	// TOTP counter: the value is a JavaScript number and cannot reach 2^53.
-	buffer.writeUInt32BE(Math.floor(unixSeconds / 2 ** 32), 0);
-	buffer.writeUInt32BE(Math.floor(unixSeconds) >>> 0, 4);
-	tagBytes.copy(buffer, 8, 0, used);
-
-	return createHmac('sha1', key).update(buffer).digest('base64');
 }
 
 /** Decode an identity secret, naming it correctly in any refusal. */

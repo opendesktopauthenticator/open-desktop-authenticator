@@ -57,10 +57,23 @@ export const trayImage = (): NativeImage => logoImage(16, [1, 1.25, 1.5, 2]);
 export const notificationImage = (): NativeImage => logoImage(256, [1]);
 
 /**
- * The window icon: Alt-Tab, the taskbar button, and the window list.
+ * The window icon: Alt-Tab and the window list.
  *
- * Only visible unpackaged on Windows, where a packaged build takes its icon from
- * the executable instead — but "only in development" is where a wrong icon is
- * seen most often by the people working on it.
+ * **Not the Windows taskbar button, whatever this used to say.** `index.ts` calls
+ * `app.setAppUserModelId` before any window exists, and from then on Windows
+ * resolves the taskbar button's icon through that AppUserModelID rather than
+ * through the window. Unpackaged there is nothing registered against it that the
+ * shell can draw — `windows-identity.ts` writes an `IconUri`, but that is a PNG
+ * for toast captions and not something a taskbar button will take — so Windows
+ * falls back to the icon of the running executable, which in development is
+ * `electron.exe`. Hence the Electron mark on the taskbar during `npm start`.
+ *
+ * Measured, not assumed: commenting out that one `setAppUserModelId` call and
+ * relaunching puts this image on the taskbar button.
+ *
+ * A packaged build is unaffected in both halves — the executable carries
+ * `build/icon.ico`, and the installer's Start Menu shortcut carries the same
+ * AppUserModelID — so this is a development-only appearance and not worth
+ * trading away the notification identity to fix.
  */
 export const windowImage = (): NativeImage => logoImage(32, [1, 1.5, 2, 4, 8]);

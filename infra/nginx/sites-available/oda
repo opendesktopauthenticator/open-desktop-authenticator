@@ -246,6 +246,15 @@ server {
 		# Four files per report, and a person files few reports: 30/minute with a
 		# burst of 8 is unnoticeable to a human and useless for filling a disk.
 		limit_req  zone=uploads burst=8 nodelay;
+		# **This number multiplies against `client_max_body_size` below, and the
+		# product has to stay under the unit's `MemoryMax`.** Eight connections at
+		# 21m each is 168 MB of body in flight from one address, and the service
+		# used to hold every byte of it in memory and then duplicate it: measured,
+		# eight concurrent uploads took it from 75 MiB to 398 MiB against a 256M
+		# cap, so systemd killed the whole support service on eight unauthenticated
+		# requests. The service now streams a body to disk as it arrives and keeps
+		# sixty-four bytes of it, so the product no longer buys anybody anything —
+		# but raising either number is only safe for as long as that stays true.
 		limit_conn perip 8;
 
 		proxy_pass http://127.0.0.1:8787;
@@ -262,6 +271,12 @@ server {
 		# One byte over the largest thing the service accepts. The service checks
 		# again; this is so an oversized body dies at the edge rather than after a
 		# proxy hop.
+		#
+		# Left where it is rather than lowered, deliberately. The memory this used
+		# to cost was a property of how the service read the body, not of how big
+		# the body was, and lowering the limit would have hidden that while making
+		# a legitimate twenty-megabyte clip unattachable. See the note on
+		# `limit_conn` above for the arithmetic.
 		client_max_body_size 21m;
 		client_body_timeout  60s;
 		proxy_read_timeout   60s;

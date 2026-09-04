@@ -25,6 +25,7 @@ afterwards. That is a real limitation and worth fixing if the setup grows.
 | `sshd_config.d/00-hardening.conf`        | `/etc/ssh/sshd_config.d/00-hardening.conf`    |
 | `fail2ban/jail.local`                    | `/etc/fail2ban/jail.local`                    |
 | `sysctl.d/99-hardening.conf`             | `/etc/sysctl.d/99-hardening.conf`             |
+| `deploy-site.sh`                         | `/usr/local/sbin/deploy-oda-site`             |
 
 Both `sites-available` files need a symlink into `sites-enabled` to take effect.
 
@@ -147,21 +148,18 @@ node site/build.mjs                       # -> site/dist
 node site/verify.mjs                      # structure, metadata, links, claims
 tar -czf /tmp/oda-site.tgz -C site/dist .
 scp /tmp/oda-site.tgz root@HOST:/tmp/
-ssh root@HOST '
-  mkdir -p /tmp/oda-new
-  tar -xzf /tmp/oda-site.tgz -C /tmp/oda-new
-  rsync -a --delete /tmp/oda-new/ /var/www/oda/public/
-  chown -R www-data:www-data /var/www/oda/public
-  rm -rf /tmp/oda-new /tmp/oda-site.tgz
-'
+ssh root@HOST 'bash /usr/local/sbin/deploy-oda-site /tmp/oda-site.tgz'
 node site/verify.mjs https://opendesktopauthenticator.com
 ```
 
-**`rsync --delete`, not `tar -x` over the top.** Extracting an archive on top of
-the live directory overwrites what is in it and removes nothing, so a page
-retired from the site stays served and indexable for ever. This is what the
-deploys actually do; the older single-line `tar` recipe that used to be
-documented here did not, and the documentation was the stale half.
+Install `infra/deploy-site.sh` at the host path in the table before using this
+recipe. The helper extracts into a new, empty directory on every attempt. It
+first adds the new content-addressed assets without deleting older hashes, then
+advances the pages and removes retired non-asset paths. That order means an
+older cached page can still load its assets and a failed first phase cannot
+publish HTML whose assets are absent. The uploaded archive is removed only
+after success, so the same command is also the recovery procedure after an
+interrupted attempt.
 
 The second `verify` run is not the same check as the first. One reads the files;
 the other asks the server for them and inspects status codes, content types and

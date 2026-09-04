@@ -4,7 +4,7 @@ import { SteamLoginError } from '../src/main/steam/login';
 import type { SteamRequest, SteamResponse } from '../src/main/confirmations/client';
 import type { SteamTransportFactory } from '../src/main/net/transport';
 import type { VaultService } from '../src/main/vault/service';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * Confirmations, joined up to the vault and the network.
@@ -39,7 +39,7 @@ function account(overrides: Partial<Account> = {}): Account {
 		refreshToken: REFRESH,
 		status: 'active',
 		addedAt: '2026-08-01T00:00:00.000Z',
-		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 },
+		autoConfirm: newAutoConfirm(),
 		...overrides
 	};
 }
@@ -593,7 +593,7 @@ describe('the account queue map drains', () => {
  */
 describe('what an automatic pass reports about entries it could not read', () => {
 	const enabled = (): Account =>
-		account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } });
+		account({ autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true } });
 
 	it('carries the count out of the pass', async () => {
 		const { transports } = fakeNetwork([TRADE, { id: '77', nonce: 'n', type: '6' }]);
@@ -640,7 +640,7 @@ describe('what an automatic pass reports about entries it could not read', () =>
  */
 describe('a permission disabled while the list is in flight', () => {
 	const enabled = (): Account =>
-		account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } });
+		account({ autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true } });
 
 	it('holds the trade instead of approving it from the stale copy', async () => {
 		const accounts = [enabled()];
@@ -682,11 +682,7 @@ describe('a permission disabled while the list is in flight', () => {
 
 		// Saved while the list request is provably in the air.
 		await listRequested;
-		(accounts[0] as Account).autoConfirm = {
-			marketListings: false,
-			trades: false,
-			pollIntervalSeconds: 15
-		};
+		(accounts[0] as Account).autoConfirm = newAutoConfirm();
 		releaseList?.();
 
 		const outcome = await pass;
@@ -754,7 +750,7 @@ describe('a routing change during another account’s pass', () => {
 		account({
 			steamId64: '76561198000000002',
 			accountName: 'other',
-			autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 }
+			autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true }
 		});
 
 	function gatedNetwork(): {
@@ -831,7 +827,7 @@ describe('a routing change during another account’s pass', () => {
  */
 describe('consent withdrawn during route verification', () => {
 	const enabled = (): Account =>
-		account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } });
+		account({ autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true } });
 
 	it('sends no approval when the setting went off during the routing await', async () => {
 		const accounts = [enabled()];
@@ -868,11 +864,7 @@ describe('consent withdrawn during route verification', () => {
 		await atRouting;
 
 		// Saved while the approval request is verifying its route.
-		(accounts[0] as Account).autoConfirm = {
-			marketListings: false,
-			trades: false,
-			pollIntervalSeconds: 15
-		};
+		(accounts[0] as Account).autoConfirm = newAutoConfirm();
 		releaseRouting?.();
 
 		await expect(pass).rejects.toThrow(/switched off/i);
@@ -921,7 +913,7 @@ describe('consent withdrawn during route verification', () => {
 describe('the account removed while the approval is being prepared', () => {
 	it('sends nothing', async () => {
 		const accounts = [
-			account({ autoConfirm: { marketListings: true, trades: true, pollIntervalSeconds: 15 } })
+			account({ autoConfirm: { ...newAutoConfirm(), marketListings: true, trades: true } })
 		];
 		let releaseRouting: (() => void) | undefined;
 		const routingGate = new Promise<void>((resolve) => {
@@ -959,5 +951,556 @@ describe('the account removed while the approval is being prepared', () => {
 
 		await expect(pass).rejects.toThrow(/removed from the vault/i);
 		expect(sent).toHaveLength(0);
+	});
+});
+
+/*
+ * **The lock stopped the answer and not the question.**
+ *
+ * `forget` bumped the generation so a token arriving after a lock was thrown
+ * away — the important half, and the only half there was. Underneath,
+ * `steam-session` kept polling Steam over the account's proxy, with the user's
+ * password alive in a closure, until Steam answered or the ninety-second
+ * timeout fired. Everything else in `forget` stops work; this went on doing it.
+ */
+describe('a sign-in caught by the lock', () => {
+	/** A sign-in that hangs until it is cancelled, like a real slow one. */
+	const stalling = () => {
+		let stop: (() => void) | undefined;
+		let cancels = 0;
+		const signIn = (
+			_request: unknown,
+			_proxyUrl: unknown,
+			_factory: unknown,
+			_now: unknown,
+			onAttempt?: (cancel: () => void) => void
+		): Promise<never> =>
+			new Promise((_resolve, reject) => {
+				stop = () => {
+					cancels += 1;
+					reject(new SteamLoginError('The vault locked before Steam finished signing in.', false));
+				};
+				onAttempt?.(stop);
+			});
+		return { signIn, cancels: () => cancels, started: () => stop !== undefined };
+	};
+
+	it('is cancelled when the vault locks', async () => {
+		const { transports } = fakeNetwork();
+		const attempt = stalling();
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: attempt.signIn
+		});
+
+		const pending = confirmations.signIn('76561198000000001', 'a-password');
+		// Let the queued work reach the sign-in.
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(attempt.started(), 'the sign-in never started').toBe(true);
+
+		confirmations.forget();
+
+		await expect(pending).rejects.toBeInstanceOf(ConfirmationsError);
+		expect(attempt.cancels(), 'Steam was still being polled after the lock').toBe(1);
+	});
+
+	it('is cancelled when the account’s routing changes underneath it', async () => {
+		const { transports } = fakeNetwork();
+		const attempt = stalling();
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: attempt.signIn
+		});
+
+		const pending = confirmations.signIn('76561198000000001', 'a-password');
+		await Promise.resolve();
+		await Promise.resolve();
+
+		confirmations.forgetAccount('76561198000000001');
+
+		await expect(pending).rejects.toBeInstanceOf(ConfirmationsError);
+		expect(attempt.cancels()).toBe(1);
+	});
+
+	it('leaves nothing behind to cancel twice', async () => {
+		const { transports } = fakeNetwork();
+		const attempt = stalling();
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: attempt.signIn
+		});
+
+		const pending = confirmations.signIn('76561198000000001', 'a-password');
+		await Promise.resolve();
+		await Promise.resolve();
+
+		confirmations.forget();
+		await expect(pending).rejects.toBeInstanceOf(ConfirmationsError);
+		// A second lock, or a routing change after one, must not reach into a
+		// sign-in that has already ended.
+		confirmations.forget();
+		confirmations.forgetAccount('76561198000000001');
+
+		expect(attempt.cancels()).toBe(1);
+	});
+});
+
+/*
+ * **A sign-in queued behind another had nothing to cancel.**
+ *
+ * `forget` stops attempts that are already running, and the grant captured at
+ * the call refuses the *token* once one comes back. Neither reaches a request
+ * still sitting in the per-account queue: it holds a password captured before
+ * the lock, no session exists yet to cancel, so the lock passed straight over
+ * it — and when the queue drained it went on to authenticate against Steam. The
+ * answer was thrown away afterwards, by which point Steam had been asked.
+ */
+describe('a sign-in still queued when the vault locks', () => {
+	it('never reaches Steam', async () => {
+		const { transports } = fakeNetwork();
+		let release: (() => void) | undefined;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const attempts: string[] = [];
+
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: async (request: { password: string }) => {
+				attempts.push(request.password);
+				await held;
+				return { refreshToken: REFRESH, accessToken: ACCESS };
+			}
+		});
+
+		// One in flight, one queued behind it on the same account.
+		const first = confirmations.signIn('76561198000000001', 'first-password');
+		const queued = confirmations.signIn('76561198000000001', 'second-password');
+		await Promise.resolve();
+		expect(attempts).toEqual(['first-password']);
+
+		// The lock lands while the second is still waiting its turn.
+		confirmations.forget();
+		release?.();
+
+		await first.catch(() => undefined);
+		await expect(queued).rejects.toBeInstanceOf(ConfirmationsError);
+
+		expect(attempts, 'a queued password was sent to Steam after the lock').toEqual([
+			'first-password'
+		]);
+	});
+
+	it('still runs a sign-in queued after the lock', async () => {
+		const { transports } = fakeNetwork();
+		const attempts: string[] = [];
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			signIn: (request: { password: string }) => {
+				attempts.push(request.password);
+				return Promise.resolve({ refreshToken: REFRESH, accessToken: ACCESS });
+			}
+		});
+
+		confirmations.forget();
+		await confirmations.signIn('76561198000000001', 'after-the-lock');
+
+		expect(attempts).toEqual(['after-the-lock']);
+	});
+});
+
+/*
+ * **Re-authentication has to leave by the route the window will.**
+ *
+ * When Steam declines a saved session the user is asked to sign in again — and
+ * that sign-in went through the account's stored proxy whatever they had
+ * chosen. *Direct* exists because that proxy is rate-limited, blocked or dead,
+ * so the fallback failed at exactly the step it was picked to get past.
+ */
+describe('the route a re-authentication takes', () => {
+	const routed = () =>
+		account({ steamId64: '76561198000000001', proxyUrl: 'http://10.0.0.9:8080' });
+
+	function harness() {
+		const { transports } = fakeNetwork();
+		const routes: (string | undefined)[] = [];
+		const confirmations = new ConfirmationsService(fakeVault([routed()]), transports, {
+			now: () => NOW,
+			signIn: (_request: unknown, proxyUrl: string | undefined) => {
+				routes.push(proxyUrl);
+				return Promise.resolve({ refreshToken: REFRESH, accessToken: ACCESS });
+			}
+		});
+		return { confirmations, routes };
+	}
+
+	it('uses the account’s proxy by default', async () => {
+		const { confirmations, routes } = harness();
+		await confirmations.signIn('76561198000000001', 'a-password');
+		expect(routes).toEqual(['http://10.0.0.9:8080']);
+	});
+
+	it('uses it when the proxy was explicitly chosen', async () => {
+		const { confirmations, routes } = harness();
+		await confirmations.signIn('76561198000000001', 'a-password', 'proxy');
+		expect(routes).toEqual(['http://10.0.0.9:8080']);
+	});
+
+	/*
+	 * **"Steam only" is a proxied route, not a half-direct one.**
+	 *
+	 * The sign-in this performs *is* a Steam request — it is the one that puts
+	 * the account's address on record with Steam's login servers. Reading the
+	 * name as "less proxying" and skipping the proxy here would hand Steam this
+	 * machine's address at the single moment the user most wanted routed, and
+	 * would do it invisibly: the window that opened afterwards would be routed
+	 * correctly and look completely normal.
+	 */
+	it('uses it for Steam-only too, because a sign-in is a Steam request', async () => {
+		const { confirmations, routes } = harness();
+		await confirmations.signIn('76561198000000001', 'a-password', 'steam-only');
+		expect(routes, 'Steam-only signed in to Steam without the proxy').toEqual([
+			'http://10.0.0.9:8080'
+		]);
+	});
+
+	it('goes without one when Direct was chosen', async () => {
+		const { confirmations, routes } = harness();
+		await confirmations.signIn('76561198000000001', 'a-password', 'direct');
+		expect(routes, 'Direct signed in through the proxy it was avoiding').toEqual([undefined]);
+	});
+
+	it('hands the injected system-aware session factory to signIn', async () => {
+		const { transports } = fakeNetwork();
+		const loginSession = () => {
+			throw new Error('the sign-in fake should not construct a session');
+		};
+		let received: unknown;
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			loginSession,
+			signIn: (_request, _proxyUrl, factory) => {
+				received = factory;
+				return Promise.resolve({ refreshToken: REFRESH, accessToken: ACCESS });
+			}
+		});
+
+		await confirmations.signIn('76561198000000001', 'a-password', 'direct');
+		expect(received).toBe(loginSession);
+	});
+});
+
+/**
+ * **System routing is still not an account proxy.**
+ *
+ * The system-aware login transport correctly follows machine policy when
+ * Direct is allowed. `Require proxies` is stricter: it requires this account to
+ * carry its own proxy, so the service must refuse before constructing either
+ * route — and what would travel here is a password.
+ *
+ * The IPC handler above it refuses a `route` of `direct`, and that was not
+ * enough twice over. The Confirmations screen sends no route at all, so the
+ * check saw `undefined` and passed; and the account being signed in might have
+ * no proxy stored, in which case the route was never what made it unrouted.
+ */
+describe('signing in under Require proxies', () => {
+	function harness(stored: Account, requireProxies = true) {
+		const routes: (string | undefined)[] = [];
+		const { transports } = fakeNetwork();
+		const confirmations = new ConfirmationsService(fakeVault([stored]), transports, {
+			now: () => NOW,
+			requireProxies: () => requireProxies,
+			signIn: (_request: unknown, proxyUrl: string | undefined) => {
+				routes.push(proxyUrl);
+				return Promise.resolve({ refreshToken: REFRESH, accessToken: ACCESS });
+			}
+		});
+		return { confirmations, routes };
+	}
+
+	const unrouted = account();
+	const routed = account({ proxyUrl: 'http://10.0.0.9:8080' });
+
+	/**
+	 * The exact shape the audit's probe reproduced: `requireProxies: true`, no
+	 * route argument, an account with no proxy — and the sign-in went through
+	 * with `proxyUrl: undefined` and returned success.
+	 */
+	it('refuses an account with no proxy when no route is given at all', async () => {
+		const { confirmations, routes } = harness(unrouted);
+		await expect(confirmations.signIn('76561198000000001', 'a-password')).rejects.toThrow(
+			/require proxies/i
+		);
+		expect(routes, 'the password was sent unrouted').toEqual([]);
+	});
+
+	it('refuses it however the route is spelled', async () => {
+		for (const route of ['proxy', 'steam-only', 'direct'] as const) {
+			const { confirmations, routes } = harness(unrouted);
+			await expect(confirmations.signIn('76561198000000001', 'a-password', route)).rejects.toThrow(
+				/require proxies/i
+			);
+			expect(routes).toEqual([]);
+		}
+	});
+
+	/*
+	 * A routed account is still refused on the two routes that are not fully
+	 * proxied — the same rule the browser applies, for the same reason.
+	 */
+	it('refuses a routed account on a partially direct route', async () => {
+		for (const route of ['steam-only', 'direct'] as const) {
+			const { confirmations, routes } = harness(routed);
+			await expect(confirmations.signIn('76561198000000001', 'a-password', route)).rejects.toThrow(
+				/require proxies/i
+			);
+			expect(routes).toEqual([]);
+		}
+	});
+
+	it('allows a routed account on the fully proxied route', async () => {
+		const { confirmations, routes } = harness(routed);
+		await confirmations.signIn('76561198000000001', 'a-password', 'proxy');
+		expect(routes).toEqual(['http://10.0.0.9:8080']);
+	});
+
+	it('allows the default route, which is the fully proxied one', async () => {
+		const { confirmations, routes } = harness(routed);
+		await confirmations.signIn('76561198000000001', 'a-password');
+		expect(routes).toEqual(['http://10.0.0.9:8080']);
+	});
+
+	it('changes nothing when the setting is off', async () => {
+		const { confirmations, routes } = harness(unrouted, false);
+		await confirmations.signIn('76561198000000001', 'a-password');
+		expect(routes).toEqual([undefined]);
+	});
+});
+
+/**
+ * **Turning the rule on has to stop the password already on the wire.**
+ *
+ * The guard in `signIn` refuses new attempts. One already talking to Steam was
+ * untouched, so a password kept travelling unrouted from a vault that had just
+ * been told never to allow that — and the switch reported success.
+ */
+describe('cancelling unrouted sign-ins when the policy changes', () => {
+	function harness(stored: Account[]) {
+		const cancelled: string[] = [];
+		/** Why each cancellation said it happened. */
+		const reasons: (string | undefined)[] = [];
+		const { transports } = fakeNetwork();
+		const confirmations = new ConfirmationsService(fakeVault(stored), transports, {
+			now: () => NOW,
+			signIn: (request: unknown, _proxyUrl, _a, _b, onCancel?: (cancel: () => void) => void) => {
+				const name = (request as { accountName: string }).accountName;
+				onCancel?.((reason?: string) => {
+					cancelled.push(name);
+					reasons.push(reason);
+				});
+				// Never settles: the point is what happens to it mid-flight.
+				return new Promise(() => undefined);
+			}
+		});
+		return { confirmations, cancelled, reasons };
+	}
+
+	const unrouted = account({ steamId64: '76561198000000001', accountName: 'plain' });
+	const routed = account({
+		steamId64: '76561198000000002',
+		accountName: 'routed',
+		proxyUrl: 'http://10.0.0.9:8080'
+	});
+
+	it('cancels a sign-in for an account with no proxy', async () => {
+		const { confirmations, cancelled } = harness([unrouted]);
+		void confirmations.signIn('76561198000000001', 'a-password');
+		await Promise.resolve();
+
+		confirmations.cancelUnroutedSignIns();
+
+		expect(cancelled, 'the password kept going after the rule was turned on').toEqual(['plain']);
+	});
+
+	/*
+	 * And leaves the proxied one alone. A sign-in through the account's own proxy
+	 * satisfies the new rule; cancelling it would make enabling the setting
+	 * destroy exactly the work it exists to protect.
+	 */
+	it('leaves a sign-in that is already routed running', async () => {
+		const { confirmations, cancelled } = harness([routed]);
+		void confirmations.signIn('76561198000000002', 'a-password');
+		await Promise.resolve();
+
+		confirmations.cancelUnroutedSignIns();
+
+		expect(cancelled).toEqual([]);
+	});
+
+	it('sorts them when both are running', async () => {
+		const { confirmations, cancelled } = harness([unrouted, routed]);
+		void confirmations.signIn('76561198000000001', 'a-password');
+		void confirmations.signIn('76561198000000002', 'a-password');
+		await Promise.resolve();
+
+		confirmations.cancelUnroutedSignIns();
+
+		expect(cancelled).toEqual(['plain']);
+	});
+
+	/**
+	 * **The route the sign-in is taking, not the proxy the account has stored.**
+	 *
+	 * These are different questions, and the first implementation asked the
+	 * second. A Direct sign-in on a routed account is unrouted — the whole point
+	 * of Direct is that the stored proxy is skipped — so consulting the vault
+	 * found a proxy and left it running. Started before the switch was flipped
+	 * (which is the only way to start one), it carried a password unrouted for
+	 * as long as Steam took to answer, on a vault that by then forbade it.
+	 */
+	it('cancels a Direct sign-in even when the account has a proxy stored', async () => {
+		const { confirmations, cancelled } = harness([routed]);
+		void confirmations.signIn('76561198000000002', 'a-password', 'direct');
+		await Promise.resolve();
+
+		confirmations.cancelUnroutedSignIns();
+
+		expect(cancelled, 'a Direct sign-in survived because the account had a proxy').toEqual([
+			'routed'
+		]);
+	});
+
+	/*
+	 * Steam-only is a proxied route for a sign-in — `service.ts` refuses it under
+	 * strict mode, but one begun beforehand did go through the proxy, so it is
+	 * not what this sweep is for.
+	 */
+	it('cancels a Steam-only sign-in, which is not fully proxied either', async () => {
+		const { confirmations, cancelled } = harness([routed]);
+		void confirmations.signIn('76561198000000002', 'a-password', 'steam-only');
+		await Promise.resolve();
+
+		confirmations.cancelUnroutedSignIns();
+
+		expect(cancelled).toEqual(['routed']);
+	});
+
+	/**
+	 * **And it says why, rather than blaming the vault.**
+	 *
+	 * The cancellation callback in `login.ts` hard-coded "The vault locked before
+	 * Steam finished signing in" — the only sentence it could produce, written
+	 * when a lock was the only thing that cancelled. The policy sweep now uses
+	 * the same callback, so a user who turned `Require proxies` on was told
+	 * their vault had locked: an explanation that is false, and one that sends
+	 * them to unlock a vault that is already open.
+	 */
+	it('tells the user the policy stopped it, not that the vault locked', async () => {
+		const { confirmations, reasons } = harness([unrouted]);
+		void confirmations.signIn('76561198000000001', 'a-password');
+		await Promise.resolve();
+
+		confirmations.cancelUnroutedSignIns();
+
+		expect(reasons[0], 'the user was told the wrong thing').toMatch(/require proxies/i);
+		expect(reasons[0]).not.toMatch(/vault locked/i);
+	});
+
+	it('does nothing when no sign-in is running', () => {
+		const { confirmations, cancelled } = harness([unrouted]);
+		expect(() => confirmations.cancelUnroutedSignIns()).not.toThrow();
+		expect(cancelled).toEqual([]);
+	});
+});
+
+/**
+ * **Steam signals an expired session with an HTTP status, and nothing read it.**
+ *
+ * A real 401 or 403 becomes `ConfirmationProtocolError({ kind: 'sessionExpired'
+ * })` in the client, while both consumers of this service ask only about
+ * `ConfirmationsError.needsSignIn`. So the one condition a person can actually
+ * fix arrived as an anonymous error: the confirmations screen printed a generic
+ * message instead of the password form, and the poller counted it as an
+ * ordinary failure — backing off, and halting the account after ten of them.
+ *
+ * These go through the real client, from an HTTP status to what the service
+ * throws, because the translation is the whole point and a fake that threw
+ * `ConfirmationsError` directly would prove nothing.
+ */
+describe('a session Steam has stopped accepting', () => {
+	/** Answers the token endpoint, then refuses mobileconf with `status`. */
+	function refusing(status: number): SteamTransportFactory {
+		const transport = (request: SteamRequest): Promise<SteamResponse> => {
+			if (request.url.includes('GenerateAccessTokenForApp')) {
+				return Promise.resolve({
+					status: 200,
+					text: JSON.stringify({ response: { access_token: ACCESS } })
+				});
+			}
+			return Promise.resolve({ status, text: '' });
+		};
+		return { forAccount: () => Promise.resolve(transport) } as unknown as SteamTransportFactory;
+	}
+
+	it.each([401, 403])('is reported as needing a sign-in, not as an error (%i)', async (status) => {
+		const svc = service(fakeVault([account()]), refusing(status));
+		const outcome = await svc.list('76561198000000001').then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		expect(outcome, `HTTP ${status} did not surface as a sign-in`).toBeInstanceOf(
+			ConfirmationsError
+		);
+		expect(
+			(outcome as ConfirmationsError).needsSignIn,
+			'the screen would show a generic error instead of the password form'
+		).toBe(true);
+	});
+
+	/*
+	 * The poller's path, which is the one that compounds. Without the
+	 * translation it is an ordinary failure: backoff, then a halt after ten —
+	 * for a condition no amount of retrying resolves.
+	 */
+	it('is reported the same way on the auto-confirm path', async () => {
+		const svc = service(
+			fakeVault([account({ autoConfirm: { ...newAutoConfirm(), trades: true } })]),
+			refusing(401)
+		);
+		const outcome = await svc.runAutoConfirm('76561198000000001').then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		expect(outcome).toBeInstanceOf(ConfirmationsError);
+		expect((outcome as ConfirmationsError).needsSignIn).toBe(true);
+	});
+
+	it('is reported the same way when acting on a confirmation', async () => {
+		const svc = service(fakeVault([account()]), refusing(403));
+		// `act` needs a listed id, and listing is what fails here — so the refusal
+		// surfaces from the list this call performs first.
+		const outcome = await svc.act('76561198000000001', 'allow', ['11']).then(
+			() => undefined,
+			(err: unknown) => err
+		);
+		expect(outcome).toBeInstanceOf(ConfirmationsError);
+	});
+
+	/*
+	 * And an ordinary Steam failure must not be mistaken for one. Translating too
+	 * eagerly would send somebody to a password form over a 500.
+	 */
+	it('does not treat an ordinary failure as a sign-in', async () => {
+		const svc = service(fakeVault([account()]), refusing(500));
+		const outcome = await svc.list('76561198000000001').then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		const needsSignIn = outcome instanceof ConfirmationsError ? outcome.needsSignIn : false;
+		expect(needsSignIn, 'a server error sent the user to a password form').toBe(false);
 	});
 });

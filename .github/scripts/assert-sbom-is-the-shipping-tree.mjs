@@ -1,0 +1,582 @@
+#!/usr/bin/env node
+// The SBOM published beside a release must be a list of what the installer
+// contains. Twice now it has been something else, and both times the document
+// was well-formed, published, and wrong.
+//
+// First it was generated from `path: .`, so it catalogued `spike/` — the Phase
+// 0 proof of concept whose own package.json says "Not shipped" — and told the
+// world this product carries `request` and `steamcommunity`, eleven advisories
+// with no fix between them, while §2.3 of docs/THREAT_MODEL.md exists to say
+// exactly the opposite. The same scan left `electron` out, because the scanner
+// skips devDependencies and electron lives there, so the document was silent
+// about the single largest thing in the download.
+//
+// The assembly step was fixed. The check that guarded it was not, and an
+// adversarial review then walked through it three separate ways:
+//
+//   1. Delete `--omit=dev` from the assembly's `npm ci`. The SBOM becomes 495
+//      packages of eslint, vitest, typescript, prettier and electron-builder —
+//      the original defect, whole — and the old check printed success.
+//   2. Rename the contaminant. The old check named `request`,
+//      `steamcommunity` and `spike-cli` as literal strings, so `phase0-spike`
+//      and `steam-totp` walked straight past it. A deny-list of three names is
+//      defeated by a fourth name.
+//   3. Hand it an SBOM of a different application entirely — jquery, lodash,
+//      express, moment, axios, uuid, twelve invented names and one correct
+//      electron entry. It passed, because the only positive claims were
+//      "at least ten packages" and "electron is in here somewhere".
+//
+// All three are the same hole: the check described what must not be present.
+// Absence is unbounded and cannot be enumerated. So this script states what
+// SHIPS instead, and it does not take the SBOM's word for any of it — the
+// expected set is derived from package.json and package-lock.json, which the
+// assembly step never touches, by walking the production dependency graph the
+// way npm resolves it. The SBOM then has to match that set exactly: nothing
+// outside it, nothing missing from it. Dev packages are outside it. A renamed
+// spike package is outside it. Another application's packages are outside it
+// and this one's are all missing. One comparison, and none of the three
+// escapes had to be predicted by name.
+
+import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { basename, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { excludedPackagesFrom } from './builder-exclusions.mjs';
+import { carriesCode, strippedExtensionsFrom } from './shipping-contents.mjs';
+
+const sbomPath = process.env.SBOM || process.argv[2];
+const manifestPath = process.env.MANIFEST || 'package.json';
+const lockfilePath = process.env.LOCKFILE || 'package-lock.json';
+const builderConfigPath = process.env.BUILDER_CONFIG || 'electron-builder.config.mjs';
+// Where to leave proof that this ran and approved the file it was given. See
+// the note over the receipt at the bottom; in short, it is what stops
+// `continue-on-error: true` on the step that invokes this script from turning a
+// release gate into a suggestion.
+const receiptPath = process.env.RECEIPT || '';
+
+// Removed before anything else, and unconditionally. A receipt left behind by
+// an earlier attempt in the same job would otherwise vouch for an SBOM that
+// this run never looked at — a check that passes because it passed once is the
+// same class of defect as a check that describes what must not be present.
+if (receiptPath) {
+	rmSync(receiptPath, { force: true });
+}
+
+function fail(message) {
+	console.log(`::error::${message}`);
+	process.exit(1);
+}
+
+function readJson(label, path) {
+	if (!path) {
+		fail(`${label} was not given a path, so nothing would be checked at all`);
+	}
+	try {
+		return JSON.parse(readFileSync(path, 'utf8'));
+	} catch (error) {
+		fail(`${label} could not be read from ${path}: ${error.message}`);
+	}
+}
+
+// `node-bignumber` publishes its own version as the string "v1.2.2" while the
+// lockfile records "1.2.2" for the same tarball. Both are that package, and a
+// release must not fail over a leading letter, so every comparison below runs
+// on versions with that prefix removed rather than on whatever each file typed.
+function version(value) {
+	return String(value ?? '')
+		.trim()
+		.replace(/^v/, '');
+}
+
+// ---------------------------------------------------------------------------
+// What ships. Derived from the lockfile, never read off the SBOM.
+// ---------------------------------------------------------------------------
+
+const manifest = readJson('the manifest', manifestPath);
+const lock = readJson('the lockfile', lockfilePath);
+
+const entries = lock.packages;
+if (!entries || typeof entries !== 'object' || !entries['']) {
+	fail(
+		`${lockfilePath} has no "packages" map with a root entry, so the shipping tree cannot be derived and every comparison below would pass on an empty expectation`
+	);
+}
+
+// npm's own resolution: a package at node_modules/a/node_modules/b that
+// requires c is served by the nearest node_modules walking up. Reproducing that
+// here is what lets this follow the real graph instead of trusting the `dev`
+// flags npm wrote into the file. The flags and the walk agree on this tree
+// today; if a future npm changes how it writes them, the walk still describes
+// the closure and the flags are nobody's promise.
+function resolveFrom(fromPath, name) {
+	let dir = fromPath;
+	for (;;) {
+		const candidate = `${dir === '' ? '' : `${dir}/`}node_modules/${name}`;
+		if (Object.hasOwn(entries, candidate)) {
+			return candidate;
+		}
+		if (dir === '') {
+			return null;
+		}
+		const cut = dir.lastIndexOf('/node_modules/');
+		dir = cut === -1 ? '' : dir.slice(0, cut);
+	}
+}
+
+// Two answers per package, because they are not the same question. `required`
+// is what must appear: reachable from `dependencies` along edges npm cannot
+// skip. `allowed` also holds what npm may legitimately leave out — an
+// optionalDependency with no build for this runner, an optional peer. This tree
+// has none of those today. That it has none today is not a thing to build on,
+// and the alternative is a release going red on Linux over a package that only
+// installs on Windows.
+const reached = new Map();
+const queue = [];
+
+function enqueue(path, mandatory) {
+	const before = reached.get(path);
+	if (before === undefined || (mandatory && !before)) {
+		reached.set(path, mandatory);
+		queue.push({ path, mandatory });
+	}
+}
+
+const root = entries[''];
+for (const name of Object.keys(root.dependencies ?? {})) {
+	const path = resolveFrom('', name);
+	if (!path) {
+		fail(
+			`${manifestPath} depends on ${name} but ${lockfilePath} has no entry for it: the lockfile is stale, and a stale lockfile means this check is comparing the SBOM against an application that does not exist`
+		);
+	}
+	enqueue(path, true);
+}
+for (const name of Object.keys(root.optionalDependencies ?? {})) {
+	const path = resolveFrom('', name);
+	if (path) {
+		enqueue(path, false);
+	}
+}
+
+while (queue.length > 0) {
+	const { path, mandatory } = queue.shift();
+	const entry = entries[path] ?? {};
+	const optionalPeers = entry.peerDependenciesMeta ?? {};
+	const edges = [];
+	for (const name of Object.keys(entry.dependencies ?? {})) {
+		edges.push([name, mandatory]);
+	}
+	for (const name of Object.keys(entry.peerDependencies ?? {})) {
+		edges.push([name, mandatory && optionalPeers[name]?.optional !== true]);
+	}
+	for (const name of Object.keys(entry.optionalDependencies ?? {})) {
+		edges.push([name, false]);
+	}
+	for (const [name, childMandatory] of edges) {
+		const childPath = resolveFrom(path, name);
+		if (childPath) {
+			enqueue(childPath, childMandatory);
+		}
+	}
+}
+
+const allowed = new Set();
+const required = new Set();
+/**
+ * How many places each package is installed, which is how many records the
+ * document is entitled to.
+ *
+ * Not a flat "no duplicates" rule, and the difference matters. npm genuinely
+ * installs one version of one package at two paths when a nested dependency
+ * pins what the top level already has — this tree has none today, and a tree
+ * with one is not a defect. A cataloger reading the lockfile emits a record per
+ * entry, so the honest expectation is the count, not the absence.
+ *
+ * Derived here rather than assumed to be 1, because the version that assumed it
+ * would have failed a correct document on the first day npm produced that shape,
+ * and a release gate that goes red for being right is a release gate people
+ * learn to delete.
+ */
+const installs = new Map();
+for (const [path, mandatory] of reached) {
+	const entry = entries[path];
+	// An aliased install carries its real name in the entry; everything else is
+	// named by the directory it lands in.
+	const name = entry.name ?? path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
+	const id = `${name}@${version(entry.version)}`;
+	allowed.add(id);
+	installs.set(id, (installs.get(id) ?? 0) + 1);
+	if (mandatory) {
+		required.add(id);
+	}
+}
+
+// Electron is the exception the whole assembly step exists for: it sits in
+// devDependencies because at build time it is a build tool, and it is the
+// runtime the installer embeds. The version comes from the manifest so the
+// SBOM cannot quietly name a different runtime than the packaging job used.
+const pinned = (manifest.devDependencies ?? {}).electron;
+if (!pinned) {
+	fail(
+		`${manifestPath} no longer pins electron in devDependencies, so this check cannot say which runtime the installer embeds`
+	);
+}
+if (!/^\d+\.\d+\.\d+/.test(pinned)) {
+	fail(
+		`electron is pinned as "${pinned}", which is a range rather than one version: the SBOM names the version that was packaged, and a range cannot be compared against it`
+	);
+}
+allowed.add(`electron@${version(pinned)}`);
+required.add(`electron@${version(pinned)}`);
+
+// The application's own manifest sits at the top of the scanned tree and
+// scanners generally catalogue it. Generally is not always, and which entry a
+// scanner writes for the directory it was pointed at is scanner-version trivia,
+// so this is permitted rather than demanded. The positive claim this check
+// rests on is the dependency closure above, which is dozens of packages deep
+// and cannot be satisfied by accident.
+allowed.add(`${manifest.name}@${version(manifest.version)}`);
+
+// A derivation that silently produced nothing would make every comparison below
+// pass vacuously — which is the exact shape of the failure this script exists
+// to stop, one level up.
+if (required.size < 10) {
+	fail(
+		`only ${required.size} packages were derived from ${lockfilePath} as shipping; this project ships dozens, so the walk is broken, and an expectation of nothing accepts anything`
+	);
+}
+
+// ---------------------------------------------------------------------------
+// How the closure reaches the user, which is not one way for all of it.
+//
+// This script used to say the SBOM "omits N packages the installer contains",
+// and for three of them that sentence was false. `electron-builder.config.mjs`
+// carries `!node_modules/{react,react-dom,scheduler}/**` in its `files` list,
+// so those three package directories are not in the asar at all: Vite compiles
+// the renderer into a single file that already holds them, and shipping the
+// packages as well duplicated about half the archive.
+//
+// Their code still ships — that is why they stay in the SBOM and stay required
+// here. What was wrong was only the claim about the shape it ships in, and a
+// guard whose stated reason is false is a guard nobody can check. So the
+// exclusions are read out of the packaging configuration rather than assumed,
+// and the two groups are named separately in every message below.
+//
+// Read as a property of the imported configuration object, not by matching text
+// in the file: the `files` array is what electron-builder acts on, and a
+// comment or a reordering must not be able to change what this believes.
+// ---------------------------------------------------------------------------
+
+let builderConfig;
+try {
+	builderConfig = (await import(pathToFileURL(resolve(builderConfigPath)).href)).default;
+} catch (error) {
+	fail(
+		`${builderConfigPath} could not be loaded (${error.message}), so this check cannot tell which packages the installer carries as directories and which are compiled into the renderer bundle, and it must not guess`
+	);
+}
+
+const builderFiles = Array.isArray(builderConfig?.files) ? builderConfig.files : null;
+if (!builderFiles) {
+	fail(
+		`${builderConfigPath} exports no "files" array, so the packaging rules this check reports on are not there to read`
+	);
+}
+
+// Only whole-package exclusions count. `!node_modules/**/*.d.{ts,cts,mts}` and
+// the test-directory pattern trim files out of packages that still ship as
+// directories, and folding those in here would claim react's fate for every
+// dependency in the tree.
+/*
+ * Read by `builder-exclusions.mjs`, which is unit-tested — this is the part
+ * that decides what the published report *claims* about every dependency, and
+ * a verifier defeated the first version of it with an equivalent glob.
+ */
+/** `zod@4.1.5` -> `zod`, `@types/node@24.13.3` -> `@types/node`. */
+const packageName = (id) => id.slice(0, id.lastIndexOf('@'));
+
+let excludedPackages;
+try {
+	/*
+	 * The closure is handed over so a scope-wide exclusion — `!node_modules/@types/**`
+	 * — can be answered with the packages it actually removes. Those names exist
+	 * nowhere else, and the parser refuses rather than guessing without them.
+	 */
+	excludedPackages = excludedPackagesFrom(builderFiles, [...required].map(packageName));
+} catch (err) {
+	fail(
+		`${builderConfigPath}: ${err instanceof Error ? err.message : String(err)} The report below ` +
+			'says how each dependency reaches the user, and it must not guess.'
+	);
+}
+
+const bundled = [...required].filter((id) => excludedPackages.has(packageName(id)));
+// An exclusion naming something outside the production closure is not a
+// failure — a dev-only package can be excluded harmlessly — but it is also not
+// something this check should quietly absorb, because the next reader will want
+// to know why the two lists disagree.
+const excludedButNotShipping = [...excludedPackages]
+	.filter((excluded) => ![...required].some((id) => packageName(id) === excluded))
+	.sort();
+
+/*
+ * **A third way a dependency reaches the user: not at all.**
+ *
+ * `@types/node` and `undici-types` are in the closure — `protobufjs` depends on
+ * the first and it depends on the second — and every file either one holds is a
+ * TypeScript declaration that the `files` rules strip. The directory ships;
+ * `package.json` and `LICENSE` ship; no loadable byte does. Calling that a
+ * package directory inside the asar, in the same breath as `zod`, overstated the
+ * installer's contents by two packages in a published document.
+ *
+ * Decided by reading the installed tree, because that is where the answer is.
+ * `assemble-shipping-tree.mjs` builds `sbom-root` in the same job and it is the
+ * exact tree the scanner was pointed at, so the classification and the SBOM
+ * describe the same bytes. Without a tree the split is not guessed and not
+ * silently dropped — the report says it could not be determined, and every
+ * package stays in the group that claims more.
+ */
+const treePath = process.env.TREE || 'sbom-root';
+const treeModules = join(treePath, 'node_modules');
+const strippedExtensions = strippedExtensionsFrom(builderFiles);
+const treeIsReadable = existsSync(treeModules);
+
+/**
+ * **Electron is not one of the things in the asar; it is what opens the asar.**
+ *
+ * It reaches the closure through the pin in `package.json` rather than through
+ * the dependency graph, and the tree the scanner is pointed at holds a synthetic
+ * directory for it containing one hand-written `package.json`. `carriesCode`
+ * looked at that directory, found a manifest and nothing else, and filed the
+ * application runtime beside `@types/node` as shipping no loadable code — a
+ * hundred and forty megabytes of Chromium described as a manifest and a licence.
+ *
+ * True about the directory it was given and nonsense about the installer, which
+ * is the same defect the metadata-only group was added to fix, committed by that
+ * group. It gets its own line: the split below is about what goes *inside* the
+ * archive, and Electron is the thing outside it.
+ */
+const electronId = `electron@${version(pinned)}`;
+
+const shipped = [...required].filter((id) => !bundled.includes(id) && id !== electronId);
+const metadataOnly = treeIsReadable
+	? shipped
+			.filter((id) => !carriesCode(join(treeModules, packageName(id)), strippedExtensions))
+			.sort()
+	: [];
+const withCode = shipped.length - metadataOnly.length;
+
+function shape() {
+	const parts = [];
+	if (metadataOnly.length === 0 && bundled.length === 0) {
+		parts.push(`all ${withCode} as package directories inside the asar`);
+	} else if (withCode > 0) {
+		parts.push(`${withCode} as package directories inside the asar`);
+	}
+	if (bundled.length > 0) {
+		parts.push(
+			`${bundled.length} compiled into the renderer bundle, which is where ${builderConfigPath} sends ${bundled.sort().join(', ')}`
+		);
+	}
+	parts.push(
+		`electron ${version(pinned)} as the application runtime itself, outside the asar rather than in it`
+	);
+	if (metadataOnly.length > 0) {
+		parts.push(
+			`${metadataOnly.length} as a manifest and a licence with no loadable file at all, the packaging rules having stripped every file they contain (${metadataOnly.join(', ')})`
+		);
+	}
+	if (!treeIsReadable) {
+		parts.push(
+			`with no split between the ones that carry code and the ones stripped to a manifest, because ${treeModules} is not there to read`
+		);
+	}
+	return parts.join(', and ');
+}
+
+// ---------------------------------------------------------------------------
+// What the SBOM says.
+// ---------------------------------------------------------------------------
+
+const sbom = readJson('the SBOM', sbomPath);
+const packages = Array.isArray(sbom.packages) ? sbom.packages : null;
+if (!packages) {
+	fail(`${sbomPath} has no "packages" array: it is not an SPDX document this check can read`);
+}
+
+// SPDX names the thing the document is about, and for a directory scan that is
+// the directory itself, not a package that ships. It is identified here by the
+// document's own DESCRIBES relationship rather than by guessing the name the
+// scanner gives it, because the name is scanner-version trivia and the
+// relationship is in the spec.
+const described = new Set(sbom.documentDescribes ?? []);
+for (const relationship of sbom.relationships ?? []) {
+	if (
+		relationship.spdxElementId === 'SPDXRef-DOCUMENT' &&
+		relationship.relationshipType === 'DESCRIBES'
+	) {
+		described.add(relationship.relatedSpdxElement);
+	}
+}
+
+function purl(entry) {
+	const refs = Array.isArray(entry.externalRefs) ? entry.externalRefs : [];
+	return refs.find((ref) => ref.referenceType === 'purl')?.referenceLocator ?? '';
+}
+
+// A tolerance, not an assertion. Syft writes its directory entry as
+// `SPDXRef-DocumentRoot-Directory-sbom-root` and also points DESCRIBES at it,
+// so the check above already skips it — but if a future version of the action
+// writes one and forgets the other, the only symptom would be a red release
+// over an entry that was never a package. Recognising the identifier shape too
+// costs a version-less, purl-less entry's worth of laxity and saves somebody
+// from "fixing" that red by loosening the comparison that actually matters.
+function isScannedDirectory(entry) {
+	return (
+		described.has(entry.SPDXID) ||
+		(/^SPDXRef-DocumentRoot-/i.test(String(entry.SPDXID ?? '')) &&
+			purl(entry) === '' &&
+			version(entry.versionInfo) === '')
+	);
+}
+
+const catalogued = new Set();
+const foreign = new Set();
+/**
+ * How many records each npm component got, so a document that lists everything
+ * twice cannot pass as one that lists everything once.
+ *
+ * `catalogued` is a Set, which is right for the comparison it feeds and wrong as
+ * a description of the file: the exact pinned scanner produced **82 npm records
+ * for 41 components** and this collapsed them silently. The tree was correct and
+ * the guard was correct; the published document said every dependency twice, and
+ * an SBOM is read by tools that count.
+ *
+ * The cause was upstream — both JavaScript catalogers were enabled deliberately,
+ * so the lockfile and the installed files each answered — and that is fixed in
+ * `assemble-shipping-tree.mjs`. This is the half that would have said so.
+ */
+const records = new Map();
+for (const entry of packages) {
+	if (isScannedDirectory(entry)) {
+		continue;
+	}
+	const id = `${typeof entry.name === 'string' ? entry.name : ''}@${version(entry.versionInfo)}`;
+	// Sorted into two buckets rather than one, because they fail differently.
+	// An npm entry is a claim about the shipping tree and is compared against
+	// it. Anything else means a cataloguer other than the JavaScript one found
+	// something in a tree that holds nothing but package metadata — and it is
+	// also how contamination hides from a purl-based comparison, by arriving
+	// without a purl.
+	if (purl(entry).startsWith('pkg:npm/')) {
+		catalogued.add(id);
+		records.set(id, (records.get(id) ?? 0) + 1);
+	} else {
+		foreign.add(id);
+	}
+}
+
+const duplicated = [...records]
+	.filter(([id, count]) => count > (installs.get(id) ?? 1))
+	.map(([id, count]) => `${id} (${count} records, installed in ${installs.get(id) ?? 1} place(s))`)
+	.sort();
+
+const extra = [...catalogued].filter((id) => !allowed.has(id)).sort();
+const missing = [...required].filter((id) => !catalogued.has(id)).sort();
+const problems = [];
+
+/*
+ * **An empty npm inventory is one specific mistake, so it says which.**
+ *
+ * Without this the failure is "the SBOM omits 40 packages", which reads as a
+ * packaging problem and sends the next reader to the wrong file. There is only
+ * one way a scan of this tree catalogues nothing: the cataloger selection
+ * matched no cataloger. It was `javascript`, a tag; it is now
+ * `javascript-lock-cataloger`, a name — both are valid selector forms, and a
+ * name that ever stops existing selects nothing at all rather than erroring.
+ */
+if (catalogued.size === 0) {
+	problems.push(
+		`the SBOM catalogues no npm packages at all, so the scan produced no inventory rather than ` +
+			`a wrong one. The first thing to check is the cataloger selection written by ` +
+			`assemble-shipping-tree.mjs into the scanner config: a cataloger name that matches ` +
+			`nothing selects nothing, and every other check below will then report the whole tree ` +
+			`as missing.`
+	);
+}
+if (extra.length > 0) {
+	problems.push(
+		`the SBOM lists ${extra.length} package(s) that ${lockfilePath} says this application does not ship: ${extra.join(', ')}`
+	);
+}
+if (missing.length > 0) {
+	problems.push(
+		// Not "whose code the installer ships". Two of them ship no code — see the
+		// note over `metadataOnly` — and they still belong in the document, because
+		// an SBOM lists what is in the artifact and their licences are in it.
+		`the SBOM omits ${missing.length} package(s) the installer carries: ${missing.join(', ')}`
+	);
+}
+if (duplicated.length > 0) {
+	problems.push(
+		`the SBOM lists ${duplicated.length} package(s) more often than they are installed: ` +
+			`${duplicated.join(', ')}. A published SBOM is read by tools that count, and one record ` +
+			'per install location is what those tools are entitled to. This is what two catalogers ' +
+			'answering about the same tree looks like — see the cataloger selection in ' +
+			'assemble-shipping-tree.mjs.'
+	);
+}
+if (foreign.size > 0) {
+	problems.push(
+		`the SBOM lists ${foreign.size} entries that are not npm packages, and the tree that was scanned holds nothing else: ${[...foreign].sort().join(', ')}`
+	);
+}
+
+if (problems.length > 0) {
+	for (const problem of problems) {
+		console.log(`::error::${problem}`);
+	}
+	console.log(
+		`This SBOM is not a description of what ships. Expected exactly the ${required.size} packages in the production closure of ${manifestPath} plus electron ${version(pinned)} — ${shape()} — and the document catalogues ${catalogued.size} npm entries.`
+	);
+	console.log(
+		'If the difference is legitimate then the lockfile is what changed, and this check follows the lockfile. Do not widen the check.'
+	);
+	process.exit(1);
+}
+
+console.log(
+	`SBOM matches the shipping tree exactly: ${catalogued.size} npm entries, every one of the ${required.size} packages in the production closure of ${manifestPath}, electron ${version(pinned)} among them, and nothing else.`
+);
+console.log(`How that reaches the user: ${shape()}.`);
+if (excludedButNotShipping.length > 0) {
+	console.log(
+		`${builderConfigPath} also excludes ${excludedButNotShipping.join(', ')}, which the production closure does not contain — harmless, and worth knowing when the two lists are compared.`
+	);
+}
+
+// ---------------------------------------------------------------------------
+// The receipt.
+//
+// Everything above is a check, and a check is only a gate if the job stops when
+// it fails. `continue-on-error: true` turns any step into a suggestion, the
+// release workflow uses that idiom three times for genuinely optional things
+// (the Store package and its upload), and it is one line away from the step
+// that runs this script. Nothing in this file could notice.
+//
+// So success is recorded as a `sha256sum`-format line naming the exact bytes
+// that were approved, written outside the staging directory, and the step that
+// generates SHA256SUMS.txt refuses to run without it. That step cannot itself
+// be made advisory: cosign signs its output and the verify step checks that
+// signature, so a release that skips it produces no signed checksum list and
+// dies later anyway.
+//
+// Naming the digest rather than just touching a file buys the other half — an
+// SBOM rewritten between this check and publication no longer matches the
+// receipt, so what ships is the document that was actually inspected.
+// ---------------------------------------------------------------------------
+if (receiptPath) {
+	const digest = createHash('sha256').update(readFileSync(sbomPath)).digest('hex');
+	writeFileSync(receiptPath, `${digest}  ${basename(sbomPath)}\n`);
+	console.log(`Receipt written to ${receiptPath}: ${digest}`);
+}

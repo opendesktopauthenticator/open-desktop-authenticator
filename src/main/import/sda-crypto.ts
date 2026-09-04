@@ -1,5 +1,6 @@
 import { createDecipheriv, pbkdf2Sync } from 'node:crypto';
 import { z } from 'zod';
+import { wipe } from '../vault/crypto';
 
 /**
  * Reading SDA's encrypted maFiles (§12 F2).
@@ -149,13 +150,20 @@ export function decryptSdaMaFile(options: {
 	const key = pbkdf2Sync(options.passphrase, salt, PBKDF2_ITERATIONS, KEY_BYTES, PBKDF2_DIGEST);
 
 	let plaintext: string;
+	let update: Buffer | undefined;
+	let final: Buffer | undefined;
+	let plaintextBytes: Buffer | undefined;
 	try {
 		const decipher = createDecipheriv('aes-256-cbc', key, iv);
 		// PKCS7 is Node's default padding for CBC, and is what SDA writes.
-		plaintext = Buffer.concat([
-			decipher.update(Buffer.from(options.ciphertextBase64.trim(), 'base64')),
-			decipher.final()
-		]).toString('utf8');
+		// `update` can return most of the plaintext before `final` rejects bad
+		// padding. Retain each Buffer so both success and failure can wipe it.
+		update = decipher.update(Buffer.from(options.ciphertextBase64.trim(), 'base64'));
+		final = decipher.final();
+		plaintextBytes = Buffer.allocUnsafe(update.length + final.length);
+		update.copy(plaintextBytes, 0);
+		final.copy(plaintextBytes, update.length);
+		plaintext = plaintextBytes.toString('utf8');
 	} catch {
 		// **CBC is not authenticated**, so this is the *only* signal a wrong
 		// passphrase gives — and it is not a reliable one. Roughly 1 in 256 wrong
@@ -166,6 +174,11 @@ export function decryptSdaMaFile(options: {
 			'that passphrase did not decrypt this file. Check it, and check the manifest belongs to ' +
 				'these maFiles.'
 		);
+	} finally {
+		wipe(key);
+		if (update !== undefined) wipe(update);
+		if (final !== undefined) wipe(final);
+		if (plaintextBytes !== undefined) wipe(plaintextBytes);
 	}
 
 	// The real integrity check, standing in for the authentication tag the format

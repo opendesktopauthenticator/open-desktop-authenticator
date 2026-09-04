@@ -1,4 +1,5 @@
 import { reviewAsk } from '../markup.mjs';
+import { browserFeatureCopy } from '../publication.mjs';
 
 /** The three pages that exist to stop somebody being robbed. */
 
@@ -167,10 +168,11 @@ export const scamClones = {
 					check only ever tells you a version exists and links you to it.
 				</li>
 				<li>
-					An installer that writes only where it says it will. Our portable build goes
-					further and writes nothing outside its own folder; the ordinary installed
-					build does use the normal application-data directory, because that is where
-					your vault has to live.
+					An installer that writes only where it says it will. Our portable build keeps
+					vaults, settings and recovery data beside its executable; its single-file
+					launcher extracts Electron and Chromium runtime files to Windows Temp while
+					it runs and normally removes them on exit. The ordinary installed build uses
+					the normal application-data directory, because that is where its vault lives.
 				</li>
 			</ul>
 			<p><a href="/verify">Step-by-step instructions for checking all of that</a>.</p>
@@ -248,7 +250,13 @@ export const verify = {
 
 			<div class="callout">
 				<p>
-					<strong>These commands apply to 1.0, which is out now.</strong> Run them
+					<strong>${
+						s.publication.github.current
+							? `These commands apply to ${s.version}, which is published on GitHub.`
+							: s.publication.store.current
+								? `${s.version} is published in the Microsoft Store, but its GitHub release is still pending. These commands apply to GitHub's published ${s.publication.github.latestVersion}.`
+								: `${s.version} is the upcoming source version. These commands apply to GitHub's published ${s.publication.github.latestVersion}.`
+					}</strong> Run them
 					against what you actually downloaded rather than reading them and moving on
 					— a verification step you have never performed is not a habit, and the
 					moment you need it is the worst moment to learn it.
@@ -293,9 +301,9 @@ export const verify = {
 
 			<h2>2. Compute the hash of what you downloaded</h2>
 			<h3>Windows (PowerShell)</h3>
-			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-1.0.0-x64-setup.exe</code></pre>
+			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-${s.publication.github.latestVersion}-x64-setup.exe</code></pre>
 			<h3>Linux</h3>
-			<pre><code>sha256sum open-desktop-authenticator-1.0.0-x86_64.AppImage</code></pre>
+			<pre><code>sha256sum open-desktop-authenticator-${s.publication.github.latestVersion}-x86_64.AppImage</code></pre>
 			<h3>macOS</h3>
 			<p>
 				macOS ships <code>shasum</code> rather than <code>sha256sum</code>, so the Linux
@@ -303,7 +311,7 @@ export const verify = {
 				macOS build of this application — this is here for someone checking a download
 				on a Mac before moving it to the machine that will run it.
 			</p>
-			<pre><code>shasum -a 256 open-desktop-authenticator-1.0.0-x86_64.AppImage</code></pre>
+			<pre><code>shasum -a 256 open-desktop-authenticator-${s.publication.github.latestVersion}-x86_64.AppImage</code></pre>
 			<p>Or check everything you downloaded at once, from that folder (Linux):</p>
 			<pre><code>sha256sum --check --ignore-missing SHA256SUMS.txt</code></pre>
 			<p>On macOS, the same thing:</p>
@@ -349,6 +357,9 @@ export const verify = {
 				only tool here you may not already have.
 			</p>
 
+			${
+				s.release.signed
+					? `
 			<h2>5. Check the checksum list is ours</h2>
 			<p>
 				Step 1 told you to take <code>SHA256SUMS.txt</code> from the release page rather
@@ -356,7 +367,16 @@ export const verify = {
 				work: a hash file proves nothing about itself. Anyone who could swap a binary on
 				a page could usually swap the list beside it. That list is now signed.
 			</p>
-			<pre><code>cosign verify-blob SHA256SUMS.txt   --signature SHA256SUMS.txt.sig   --certificate SHA256SUMS.txt.pem   --certificate-identity-regexp '^https://github.com/${s.githubOrg}/'   --certificate-oidc-issuer https://token.actions.githubusercontent.com</code></pre>
+			<pre><code>cosign verify-blob SHA256SUMS.txt   --signature SHA256SUMS.txt.sig   --certificate SHA256SUMS.txt.pem   --certificate-identity '${s.repo}/.github/workflows/release.yml@refs/tags/vX.Y.Z'   --certificate-oidc-issuer https://token.actions.githubusercontent.com</code></pre>
+			<p>
+				Replace <code>vX.Y.Z</code> with the version you downloaded — the identity names
+				the exact tag, so it will not match any other release. That is deliberate.
+				This command used to check only that the signer was somewhere under our GitHub
+				organisation, which would have accepted a signature minted by any workflow in
+				any repository we own, run from any branch. Checking the whole identity is the
+				difference between &ldquo;someone we know signed something&rdquo; and
+				&ldquo;this release was built by this workflow from this tag&rdquo;.
+			</p>
 			<p>
 				Both files are on the release beside the list itself. The signature is keyless —
 				there is no long-lived private key anywhere, because the certificate is minted
@@ -370,6 +390,26 @@ export const verify = {
 				still stand on their own — this step tells you the <em>list</em> came from our
 				workflow, not just that your file matches it.
 			</p>
+			`
+					: `
+			<h2>5. The checksum list is not signed yet</h2>
+			<p>
+				A hash file proves nothing about itself: anyone who could swap a binary on a
+				page could usually swap the list beside it. The answer to that is a signature
+				over the list, and the release workflow now produces one — but it started
+				doing so after the current release was published, so there is nothing to
+				check on the build you can download today. Rather than print a command that
+				cannot succeed, this step says so.
+			</p>
+			<p>
+				<strong>Do not read a missing signature file as tampering.</strong> If you went
+				looking for <code>SHA256SUMS.txt.sig</code> because an older version of this
+				page told you to, that is our mistake and not a sign that anything is wrong
+				with the download. The build provenance in step 4 covers the same ground for
+				now: it names the workflow, the repository and the commit the bytes came from.
+			</p>
+			`
+			}
 
 			<h2>6. On Windows, check the publisher</h2>
 			<pre><code>Get-AuthenticodeSignature .\\&lt;file&gt;.exe | Format-List Status, SignerCertificate</code></pre>
@@ -385,17 +425,18 @@ export const verify = {
 				<dt>A download from the release page, today</dt>
 				<dd>
 					<strong><code>Status</code> will read <code>NotSigned</code>.</strong> These
-					builds carry no code-signing certificate yet, so Windows will also warn on
-					first run. That is expected and it is stated here rather than left for you
-					to discover — but it does mean this step cannot tell you anything for now,
-					and steps 3 and 4 are doing all the work. When signing exists, the signer
-					will be ${s.publisher} and anything else is not ours.
+					builds carry no code-signing certificate, and none is planned, so Windows
+					will also warn on first run. That is expected and it is stated here rather
+					than left for you to discover — but it does mean this step cannot tell you
+					anything about our direct downloads, and steps 3 and 4 are doing all the
+					work. The Store build is the one that carries a signature, and there the
+					signer is Microsoft.
 				</dd>
 			</dl>
 			<p>
 				A build signed by a name you do not recognise is the one result that should stop
-				you outright. "Unsigned" is a gap in what we have published so far; "signed by
-				someone else" means the file is not from us at all.
+				you outright. "Unsigned" is what our direct downloads are and will stay;
+				"signed by someone else" means the file is not from us at all.
 			</p>
 
 			<h2>Going further: build it yourself</h2>
@@ -429,8 +470,13 @@ export const security = {
 	updated: '2026-08-25',
 	navTitle: 'Security',
 	title: 'Security model: how your Steam secrets are stored',
-	description:
-		'How Steam secrets are stored: scrypt, AES-256-GCM, an isolated renderer, and no network beyond Steam and an optional update check.',
+	description: (s) =>
+		// The old wording stopped at "no network beyond Steam and an optional update
+		// check", which was written before the in-app browser existed and quietly
+		// became the site's largest understatement: that window loads whatever the
+		// user navigates to. A description is the one sentence a search result
+		// shows, so the exception is named in it rather than left to the body.
+		browserFeatureCopy(s).description,
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
@@ -540,9 +586,13 @@ export const security = {
 					each with a validated shape. There is no general-purpose bridge.
 				</li>
 				<li>
-					<strong>No remote content.</strong> A strict content security policy with no
-					remote origins, and navigation locked to the application's own files. There
-					is nothing for an injected script to fetch and nowhere for it to send.
+					<strong>No remote content in the interface.</strong> A strict content
+					security policy with no remote origins, and navigation locked to the
+					application's own files. There is nothing for an injected script to fetch
+					and nowhere for it to send.
+				</li>
+				<li>
+					<strong>${browserFeatureCopy(s).security}</strong>
 				</li>
 				<li>
 					<strong>Developer tools are disabled in release builds</strong>, together with
@@ -550,12 +600,18 @@ export const security = {
 					your codes" is an attack that works on real people.
 				</li>
 				<li>
-					<strong>${s.runtimeDependencies} runtime dependencies.</strong> Every package
-					that ships is a package someone could compromise, so there are as close to
-					none as the job allows. The number is counted from
-					<code>package.json</code> when this page is built rather than written into
-					the sentence, because a dependency claim that has to be remembered is one
-					that eventually goes stale.
+					<strong>${s.runtimeDependencies} direct dependencies, ${s.shippedPackages}
+					packages in total.</strong> Every package that ships is a package someone
+					could compromise, so there are as close to none as the job allows — but the
+					number worth trusting is the second one, because a dependency's own
+					dependencies ship too. This page used to give only the first, which is a
+					count of names typed into <code>package.json</code> rather than of packages
+					in the installer. Both are counted when the page is built, the first from
+					<code>package.json</code> and the second from
+					<code>package-lock.json</code>, because a claim that has to be remembered is
+					one that eventually goes stale. The complete list, with versions, is
+					published as an SBOM beside every release, and the Electron runtime is
+					shipped alongside them.
 				</li>
 			</ul>
 

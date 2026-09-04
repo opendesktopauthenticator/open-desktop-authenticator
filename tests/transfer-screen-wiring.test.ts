@@ -86,7 +86,18 @@ describe('an interrupted transfer is recoverable after unlocking', () => {
 	});
 
 	it('tells the user not to close the window while secrets are unsaved', () => {
-		expect(SCREEN).toContain('Do not close this window until it is saved.');
+		expect(SCREEN).toContain('Do not close this window or quit the app until it is saved.');
+	});
+
+	it('distinguishes recoverable local state from a memory-only replacement', () => {
+		const persist = SCREEN.slice(
+			SCREEN.indexOf("if (awaiting === 'persist' && !done)"),
+			SCREEN.indexOf('\tif (done) {')
+		);
+		expect(persist).toContain("const durableRecovery = recovery?.state === 'replacement';");
+		expect(flat(persist)).toMatch(
+			/durableRecovery \? \([\s\S]*exact replacement is available from this vault or its encrypted safety record[\s\S]*\) : \([\s\S]*only usable copy is[\s\S]*held in memory; a restart will lose it/
+		);
 	});
 
 	it('decides what to show from the main process, not from an error message', () => {
@@ -103,7 +114,13 @@ describe('an interrupted transfer is recoverable after unlocking', () => {
 		// each other" — the loose version passed with the navigation deleted, because
 		// it paired the `onStatus` prop with the unrelated `onMove` handler ten lines
 		// below it.
-		expect(APP).toMatch(/if \(!cancelled && transfer\.awaiting\) \{\s*setView\('move'\);/);
+		const recoveryDelivery = APP.slice(
+			APP.indexOf('const attention: DeferredRecovery'),
+			APP.indexOf('\n\t\t\t})', APP.indexOf('const attention: DeferredRecovery'))
+		);
+		expect(recoveryDelivery).toContain("destination: enrollmentNeedsAttention ? 'enroll' : 'move'");
+		expect(recoveryDelivery).toContain('deliverRecoveryAttention(');
+		expect(recoveryDelivery).toContain('setView(attention.destination);');
 	});
 
 	it('passes the status channel down to the screen', () => {
@@ -128,6 +145,9 @@ describe('a refused code releases the screen', () => {
 			SCREEN.indexOf('const retrySave')
 		);
 		expect(submit).toContain('statusRef.current()');
+		expect(submit).toContain('setStatusProblem(status.problem)');
+		expect(submit).toContain('setRecovery(status.recovery)');
+		expect(submit).toContain('setAwaiting(status.awaiting)');
 		expect(submit).toContain('setCommitted(false)');
 	});
 
@@ -147,6 +167,60 @@ describe('a refused code releases the screen', () => {
 			SCREEN.indexOf('const retrySave')
 		);
 		expect(submit).not.toMatch(/catch\s*\{\s*setCommitted\(false\)/);
+	});
+});
+
+describe('an unreadable safety-record retry refreshes the mounted screen', () => {
+	it('re-reads authoritative status even when retryPersist rejects', () => {
+		const retry = SCREEN.slice(
+			SCREEN.indexOf('const retrySave'),
+			SCREEN.indexOf('const resolveRecovery')
+		);
+		const failed = retry.slice(retry.indexOf('catch (err)'));
+		expect(failed).toContain('await statusRef.current()');
+		expect(failed).toContain('setRecovery(status.recovery)');
+		expect(failed).toContain('setAwaiting(status.awaiting)');
+	});
+});
+
+describe('recovery asks for the vault passphrase only when an old row will change', () => {
+	it('keeps the harmless no-row and not-replaced paths usable without a passphrase', () => {
+		const cleanup = SCREEN.slice(
+			SCREEN.indexOf("if (awaiting === 'cleanup' && !done)"),
+			SCREEN.indexOf("if (awaiting === 'unreadablePersist' && !done)")
+		);
+		const unanswered = SCREEN.slice(
+			SCREEN.indexOf("if (awaiting === 'unanswered' && !done)"),
+			SCREEN.indexOf("if (awaiting === 'persist' && !done)")
+		);
+		expect(cleanup).not.toContain('Vault passphrase');
+		const choice = unanswered.indexOf("onClick={() => void resolveRecovery('notReplaced')}");
+		expect(choice).toBeGreaterThan(-1);
+		const button = unanswered.slice(unanswered.lastIndexOf('<button', choice), choice);
+		expect(button).toContain('disabled={recoveryBusy}');
+		expect(button).not.toContain('resolutionPassphrase');
+	});
+
+	it('shows and enforces the passphrase control from the authoritative status flag', () => {
+		const recoveryScreens = SCREEN.slice(
+			SCREEN.indexOf("if (awaiting === 'unreadable' && !done)"),
+			SCREEN.indexOf('\n\tif (done) {')
+		);
+		// Three recovery branches render the proof field. The fourth reference in
+		// this region belongs to the persist button's empty-proof gate below.
+		expect(recoveryScreens.match(/recovery\?\.requiresPassphrase \? \(/g) ?? []).toHaveLength(3);
+		expect(recoveryScreens).toContain('recovery.requiresPassphrase === true');
+		expect(recoveryScreens).toContain('resolutionPassphrase.length === 0');
+		expect(SCREEN).toContain('onRetryPersist(resolutionPassphrase || undefined)');
+	});
+
+	it('re-reads authoritative status after both a successful and a rejected resolution', () => {
+		const resolve = SCREEN.slice(
+			SCREEN.indexOf('const resolveRecovery'),
+			SCREEN.indexOf('if (statusProblem !== undefined)')
+		);
+		expect(resolve.match(/await statusRef\.current\(\)/g) ?? []).toHaveLength(2);
+		expect(resolve).not.toContain("setRecovery({ ...recovery, state: 'unreadable' })");
 	});
 });
 
@@ -209,7 +283,31 @@ describe('no filesystem path crosses IPC', () => {
 	const MAIN = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8');
 
 	it('does not let a failed export throw the destination path', () => {
-		expect(ENROLL).toMatch(/catch \{[\s\S]{0,200}could not be written to that location/);
+		/*
+		 * Asserted on what is thrown rather than on the shape of the `catch`.
+		 *
+		 * The refusal moved into a helper when the write and the rename were split
+		 * apart — so a pattern anchored on `catch {` was checking punctuation, not
+		 * the rule. The rule is that the message names the *file the user asked
+		 * for* and never the path the OS dialog chose, and that is what these two
+		 * lines say.
+		 */
+		expect(ENROLL).toMatch(/`\$\{suggested\} could not be written to that location\.`/);
+		expect(ENROLL, 'a full path can reach the renderer in an error').not.toMatch(
+			/throw new Error\(`\$\{(destination|temp)\}/
+		);
+	});
+
+	/*
+	 * The one exception, and it is not a path: a lock is reported as a lock.
+	 * Wrapping it in "could not be written to that location" would send somebody
+	 * to check their drive over a vault that timed out while they watched.
+	 */
+	it('reports a lock during the write as a lock', () => {
+		const write = ENROLL.slice(ENROLL.indexOf('const temp = `${destination}'));
+		// Thrown from outside the write's own catch, so it can never be dressed up
+		// as a disk problem and send somebody to check their drive.
+		expect(write).toMatch(/if \(!vault\.isUnlocked\(\)\) \{[\s\S]{0,200}new VaultLockedError\(\)/);
 	});
 
 	it('does not let a failed recovery read throw the chosen path', () => {
@@ -244,9 +342,22 @@ describe('a lock always drops the transfer session', () => {
 		expect(drop).toBeLessThan(refusal);
 	});
 
-	it('has exactly one place that drops them', () => {
-		// Two mechanisms for one rule is how the halves drift apart.
-		expect(TRANSFER.match(/this\.dropCredentials\(\);/g) ?? []).toHaveLength(1);
+	it('uses one credential-erasure mechanism at both lifecycle boundaries', () => {
+		// A lock and a completed Steam replacement are separate lifecycle boundaries,
+		// but both must go through the same erasure primitive. Direct token writes in
+		// either caller would let their behavior drift apart again.
+		expect(TRANSFER.match(/private dropCredentials\(\): void/g) ?? []).toHaveLength(1);
+		expect(TRANSFER.match(/pending\.refreshToken = undefined;/g) ?? []).toHaveLength(1);
+		expect(TRANSFER).not.toContain('pending.accessToken');
+		expect(TRANSFER.match(/this\.dropCredentials\(\);/g) ?? []).toHaveLength(2);
+		const response = TRANSFER.slice(
+			TRANSFER.indexOf('if (result.success !== true && result.replacementToken === undefined)'),
+			TRANSFER.indexOf('const held: HeldReplacement', TRANSFER.indexOf('validateReplacement('))
+		);
+		expect(response.indexOf('this.dropCredentials();')).toBeGreaterThan(-1);
+		expect(response.indexOf('this.dropCredentials();')).toBeLessThan(
+			response.indexOf('validateReplacement(')
+		);
 	});
 
 	it('refuses to reach Steam without a session rather than discovering undefined', () => {
@@ -267,7 +378,7 @@ describe('a transfer that cannot be completed says so', () => {
 	/** Just this branch, bounded by the one that follows it. */
 	const deadEndView = (): string => {
 		const start = SCREEN.indexOf("if (awaiting === 'unreadable' && !done)");
-		const next = SCREEN.indexOf("if (awaiting === 'unanswered' && !done)", start);
+		const next = SCREEN.indexOf("if (awaiting === 'cleanup' && !done)", start);
 		expect(start).toBeGreaterThan(-1);
 		expect(next).toBeGreaterThan(start);
 		return SCREEN.slice(start, next);
@@ -285,19 +396,32 @@ describe('a transfer that cannot be completed says so', () => {
 		expect(deadEndView()).not.toContain('retrySave');
 	});
 
-	it('names Steam Support rather than implying a way back here', () => {
-		expect(flat(deadEndView())).toContain('Steam Support is the route back into the account');
+	it('distinguishes retained ciphertext from a reply for which no secrets survived', () => {
+		const view = flat(deadEndView());
+		expect(view).toContain('recovery?.retained');
+		expect(view).toContain('The exact reply is retained in an encrypted safety record.');
+		expect(view).toContain('No usable replacement secrets could be retained here.');
+		expect(view).not.toContain('nothing here holds it');
 	});
 
 	it('leaves a way off the screen', () => {
-		// `cancel` is what discharges a terminal transfer. Guarding it the way the
-		// unsaved-secrets case is guarded would trap the user on a screen whose only
-		// button calls it.
-		expect(deadEndView()).toContain('onCancel()');
+		// Closing the screen must not discharge the durable record. The user can leave
+		// safely and return after resolving the account with Steam Support.
+		expect(deadEndView()).toContain('onClick={closeRecovery}');
+		expect(deadEndView()).toContain('disabled={recoveryBusy}');
 	});
 
 	it('keeps the storage retry, which is the one that can still work', () => {
-		expect(SCREEN).toContain("{busy ? 'Working…' : 'Save it now'}");
+		expect(SCREEN).toContain("{recoveryBusy ? 'Working…' : 'Finish recovery'}");
+	});
+
+	it('does not promise the safety record survived an ambiguous post-delete flush', () => {
+		expect(SCREEN).not.toContain(
+			'The encrypted recovery record keeps these secrets across a restart.'
+		);
+		expect(SCREEN).toContain(
+			'The exact replacement is available from this vault or its encrypted safety record.'
+		);
 	});
 });
 
@@ -377,7 +501,7 @@ describe('every outstanding state reaches its own screen', () => {
 		// Counted by splitting on a literal rather than by a constructed regex: the
 		// escaping in a built pattern is one more thing to get wrong, and this only
 		// needs to count an exact string.
-		for (const state of ['unreadable', 'unanswered', 'persist']) {
+		for (const state of ['unreadable', 'unreadablePersist', 'unanswered', 'cleanup', 'persist']) {
 			const needle = `if (awaiting === '${state}'`;
 			expect(SCREEN.split(needle).length - 1, state).toBe(1);
 		}
@@ -386,10 +510,21 @@ describe('every outstanding state reaches its own screen', () => {
 	it('never promises held secrets on a screen where none are held', () => {
 		const dead = SCREEN.slice(
 			at("if (awaiting === 'unreadable' && !done)"),
-			at("if (awaiting === 'unanswered' && !done)")
+			at("if (awaiting === 'cleanup' && !done)")
 		);
 		expect(dead).not.toContain('Do not close this window until it is saved');
 		expect(dead).not.toContain('retrySave');
+	});
+
+	it('does not describe a diagnostic safety-record retry as usable vault storage', () => {
+		const start = at("if (awaiting === 'unreadablePersist' && !done)");
+		const end = at("if (awaiting === 'unanswered' && !done)");
+		const safety = SCREEN.slice(start, end);
+		expect(safety).toContain('Save safety record now');
+		expect(safety).toContain('will not add a usable');
+		expect(safety).toContain('Steam Support is still required');
+		expect(safety).not.toContain('The new authenticator was read successfully');
+		expect(safety).not.toContain('only usable copy');
 	});
 });
 
@@ -424,5 +559,59 @@ describe('a recovery file is not decrypted after the vault locks', () => {
 		const decrypt = recover.indexOf('readRecoveryFile(');
 		expect(check).toBeGreaterThan(pick);
 		expect(check).toBeLessThan(decrypt);
+	});
+});
+
+/*
+ * **A checkbox that led nowhere.**
+ *
+ * The completion screen shows the recovery code Steam will never issue again
+ * and asks the user to confirm they wrote it down, above a Done button that
+ * only closed the screen. The account stayed `pendingRevocationBackup` and the
+ * home screen went on warning that the code had never been backed up — about a
+ * code the user had just been shown and had just confirmed keeping. The only
+ * way to clear it was a second ceremony re-revealing the same code behind the
+ * passphrase, which teaches people the warning means nothing.
+ */
+describe('the recovery-code acknowledgement on the completion screen', () => {
+	it('is recorded, not only used to enable the button', () => {
+		expect(SCREEN).toMatch(/onAcknowledgeBackup\(done\.steamId64\)/);
+	});
+
+	it('still requires the box to be ticked first', () => {
+		expect(SCREEN).toMatch(/disabled=\{!savedCode/);
+	});
+
+	/*
+	 * **This assertion used to require the failure to be silent.**
+	 *
+	 * It read `.finally(onClose)` and called that deliberate: the account is
+	 * stored, the standalone ceremony can clear the warning later, so closing
+	 * regardless seemed kinder than trapping somebody on the screen. It is not.
+	 * A vault lock, a storage error or an IPC failure meant the user ticked the
+	 * box, pressed Done, and the home screen went on saying the recovery code
+	 * had never been backed up — with nothing anywhere explaining why. That is
+	 * the "you asked for something and it did not happen" shape the rest of this
+	 * application is written against, and the test was holding it in place.
+	 *
+	 * The code is still on screen at that moment, which is the one point where
+	 * retrying costs nothing at all.
+	 */
+	it('closes only when the acknowledgement was actually recorded', () => {
+		expect(SCREEN).not.toMatch(/\.finally\(onClose\)/);
+		expect(SCREEN).toMatch(/onAcknowledgeBackup\(done\.steamId64\)\s*\.then\(/);
+		expect(SCREEN).toMatch(/setAcknowledgeError\(messageOf\(err\)\)/);
+	});
+
+	it('says what went wrong, and offers a way out that does not pretend', () => {
+		expect(SCREEN).toMatch(/acknowledgeError !== undefined/);
+		expect(flat(SCREEN)).toMatch(/<DynamicError> \{acknowledgeError\}/);
+		// Somebody whose vault locked mid-press cannot record anything from here,
+		// and holding them on this screen would be its own trap.
+		expect(SCREEN).toMatch(/Close without recording it/);
+	});
+
+	it('is wired to the same channel the standalone ceremony uses', () => {
+		expect(APP).toMatch(/onAcknowledgeBackup=\{\(steamId64\) => api\.confirmRevocationBackup/);
 	});
 });

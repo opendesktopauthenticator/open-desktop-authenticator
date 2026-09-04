@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { MoveAuthenticator } from '../src/renderer/screens/MoveAuthenticator';
+import {
+	MoveAuthenticator,
+	transferRecoveryAfterReplaced
+} from '../src/renderer/screens/MoveAuthenticator';
 
 /*
  * The screen that offers to move an authenticator off the Steam mobile app.
@@ -43,10 +46,12 @@ const props = {
 			revocationCode: 'R12345',
 			timeOffsetSeconds: 0
 		}),
+	onAcknowledgeBackup: () => Promise.resolve({ ok: true as const }),
 	onClose: (): void => {}
 };
 
-const markup = (): string => renderToStaticMarkup(<MoveAuthenticator {...props} />);
+const markup = (): string =>
+	renderToStaticMarkup(<MoveAuthenticator requireProxies={false} {...props} />);
 
 describe('what the screen tells the user before anything happens', () => {
 	it('tells them not to remove the authenticator from the phone first', () => {
@@ -82,5 +87,24 @@ describe('what it never does', () => {
 	it('renders no value into the password or code inputs', () => {
 		const html = markup();
 		expect(html).not.toMatch(/type="password"[^>]*value="[^"]+"/);
+	});
+});
+
+describe('recovery after a proven obsolete row was removed', () => {
+	it('does not carry the spent passphrase requirement onto the no-row screen', () => {
+		expect(
+			transferRecoveryAfterReplaced({
+				attemptId: 'attempt-1',
+				state: 'unanswered',
+				at: '2026-09-03T00:00:00.000Z',
+				retained: false,
+				requiresPassphrase: true
+			})
+		).toEqual({
+			attemptId: 'attempt-1',
+			state: 'unreadable',
+			at: '2026-09-03T00:00:00.000Z',
+			retained: false
+		});
 	});
 });

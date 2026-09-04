@@ -1222,6 +1222,61 @@ input::placeholder {
 	cursor: pointer;
 }
 
+/*
+ * A group of mutually exclusive choices, each with its own explanation.
+ *
+ * Shaped from `.checkbox` on purpose: a radio row here is the same thing — a
+ * sentence with a control in front of it — and the two sitting in one form
+ * would read as different kinds of question if they were styled apart.
+ *
+ * The `fieldset` carries no border of its own; the grouping is done by the
+ * legend and the indent, because a box inside a form that is already a box
+ * reads as a nested dialog.
+ */
+.radios {
+	border: none;
+	margin: 14px 0;
+	padding: 0 0 0 4px;
+}
+
+.radios legend {
+	padding: 0;
+	margin-bottom: 6px;
+	font-size: 0.78rem;
+	font-weight: 600;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--muted);
+}
+
+.radio {
+	display: flex;
+	align-items: flex-start;
+	gap: 11px;
+	margin: 10px 0;
+	font-size: 0.925rem;
+	font-weight: 400;
+	letter-spacing: 0;
+	text-transform: none;
+	color: var(--text);
+	cursor: pointer;
+}
+
+.radio input {
+	width: 17px;
+	height: 17px;
+	margin: 2px 0 0;
+	accent-color: var(--emerald);
+	flex: none;
+	cursor: pointer;
+}
+
+/* The example line under each option, and the note under the group. */
+.radio p,
+.radios > .hint {
+	margin: 0.25rem 0 0;
+}
+
 /* Import rows: a checkbox and its explanation, not a form field. */
 .accounts .checkbox {
 	margin-top: 0;

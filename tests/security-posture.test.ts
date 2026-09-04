@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
 	cspFor,
@@ -79,9 +79,26 @@ describe('S6 — IPC answers only our own renderer', () => {
 	});
 
 	it('fails closed when no trusted sender has been configured', () => {
-		// A handler answering before setTrustedSender runs would be answering an
-		// unknown caller; the default must deny.
-		expect(router).toMatch(/isTrustedSender[^=]*=\s*\(\)\s*=>\s*false/);
+		/*
+		 * A handler answering before `setTrustedSender` runs would be answering an
+		 * unknown caller; the default must deny.
+		 *
+		 * **The previous pattern could not match the declaration it was written
+		 * for.** `[^=]*` cannot cross the `=` inside the type annotation
+		 * `(frameUrl: string) => boolean`, so it skipped past line 31 entirely and
+		 * matched `isTrustedSender = () => false;` inside `__resetRouterForTests`
+		 * — certifying a test helper. Changing the real default to `() => true`
+		 * left it green while the IPC boundary answered any WebContents in the
+		 * process.
+		 *
+		 * Anchored to the `let` declaration, so only the shipped default can
+		 * satisfy it.
+		 */
+		expect(
+			router,
+			'the IPC router does not deny by default, so a handler registered before ' +
+				'setTrustedSender runs answers an unknown caller'
+		).toMatch(/let isTrustedSender\b[\s\S]{0,120}?=\s*\(\)\s*=>\s*false;/);
 	});
 
 	it('derives "us" from the same predicate as the navigation lock', () => {
@@ -97,16 +114,84 @@ describe('S6 — IPC answers only our own renderer', () => {
 		expect(SECURE_WEB_PREFERENCES.sandbox).toBe(true);
 	});
 
-	it('is the only webPreferences used to create a window', () => {
-		const main = read('src/main/index.ts');
-		// Any window must spread the shared constant. A literal `webPreferences: {`
-		// followed by its own options would be a second, unreviewed posture.
-		expect(main).toContain('...SECURE_WEB_PREFERENCES');
-		expect(main).not.toMatch(/nodeIntegration:\s*true/);
-		expect(main).not.toMatch(/contextIsolation:\s*false/);
-		expect(main).not.toMatch(/sandbox:\s*false/);
+	/**
+	 * **This is named for a whole-application property and used to read one
+	 * file.**
+	 *
+	 * It checked `src/main/index.ts`, found the spread it was looking for, and
+	 * passed — while `src/main/browser/electron-host.ts` declared a second
+	 * posture of its own with four of the constant's eleven fields, leaving
+	 * `devTools` and `spellcheck` at Electron's defaults on every Steam tab. The
+	 * test could not have caught that, because it never looked.
+	 *
+	 * So it now enumerates every `webPreferences` in the main process. A file
+	 * that grows one later is covered without anybody remembering to add it here,
+	 * which is the only version of this test worth having.
+	 */
+	it('is the only webPreferences used to create a window, anywhere in main', () => {
+		// `webPreferences:` with the colon — an object property, which is a window
+		// being constructed. A bare mention is prose: `security.ts` discusses the
+		// constant in a comment and constructs nothing.
+		const files = mainSources().filter((file) => /webPreferences:\s*\{/.test(read(file)));
+
+		// If this ever finds nothing, the walk is broken rather than the posture
+		// perfect.
+		expect(
+			files.length,
+			'no webPreferences found at all — this test is not looking'
+		).toBeGreaterThan(0);
+
+		for (const file of files) {
+			const source = read(file);
+			expect(
+				source,
+				`${file} declares webPreferences without spreading a reviewed posture`
+			).toMatch(/\.\.\.(SECURE_WEB_PREFERENCES|HARDENED)/);
+			expect(source, `${file} relaxes nodeIntegration`).not.toMatch(/nodeIntegration:\s*true/);
+			expect(source, `${file} relaxes contextIsolation`).not.toMatch(/contextIsolation:\s*false/);
+			expect(source, `${file} relaxes sandbox`).not.toMatch(/sandbox:\s*false/);
+			expect(source, `${file} relaxes webSecurity`).not.toMatch(/webSecurity:\s*false/);
+		}
+	});
+
+	/*
+	 * And the indirection has to bottom out. `HARDENED` is allowed above because
+	 * it is composed from the canonical constant; a future second-hand posture
+	 * that is not would satisfy the spread check while meaning nothing.
+	 */
+	it('lets no posture object stand on its own', () => {
+		for (const file of mainSources()) {
+			const source = read(file);
+			if (!/const HARDENED\s*=/.test(source)) {
+				continue;
+			}
+			expect(source, `${file} defines HARDENED without composing the canonical posture`).toMatch(
+				/const HARDENED = \{\s*\.\.\.SECURE_WEB_PREFERENCES/
+			);
+		}
 	});
 });
+
+/**
+ * Every `.ts`/`.tsx` under `src/main`, so a file added later is covered without
+ * anybody remembering to list it.
+ */
+function mainSources(): string[] {
+	const root = join(__dirname, '..', 'src', 'main');
+	const out: string[] = [];
+	const walk = (dir: string): void => {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			const full = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				walk(full);
+			} else if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) {
+				out.push(relative(join(__dirname, '..'), full).split('\\').join('/'));
+			}
+		}
+	};
+	walk(root);
+	return out;
+}
 
 describe('S5 / §9.3 — renderer has no network of its own', () => {
 	it('forbids the renderer from opening any connection in production', () => {

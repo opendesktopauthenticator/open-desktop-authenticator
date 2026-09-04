@@ -1,4 +1,5 @@
 import { releaseGaps, reviewAsk } from '../markup.mjs';
+import { publicationSummary } from '../publication.mjs';
 
 /** Download status, migration, documentation hub, FAQ, support and 404. */
 
@@ -15,8 +16,7 @@ export const download = {
 			<div class="callout" data-download>
 				<h2>Two places, and nowhere else</h2>
 				<p>
-					${s.name} 1.0 is published in the Microsoft Store and on this project's
-					GitHub releases page. <strong>Those are the only two places a genuine build
+					${publicationSummary(s)} <strong>Those are the only two places a genuine build
 					comes from.</strong> Not a mirror, not a lookalike domain, not a sponsored
 					search result, and not this page — every button here is a link somewhere
 					else, never a file we serve.
@@ -26,7 +26,7 @@ export const download = {
 
 				<div class="download-primary download-windows">
 					<p>
-						<a class="button" href="${s.store.url}" rel="noopener">Get it from the Microsoft Store</a>
+						<a class="button" href="${s.store.url}" rel="noopener" data-got-it="the Store build">Get it from the Microsoft Store</a>
 					</p>
 					<p class="download-why">
 						Microsoft re-signs every package it distributes, so Windows never warns,
@@ -37,7 +37,7 @@ export const download = {
 
 				<div class="download-primary download-linux">
 					<p>
-						<a class="button" href="${s.repo}/releases/latest" rel="noopener">Download for Linux</a>
+						<a class="button" href="${s.repo}/releases/tag/v${s.publication.github.latestVersion}" rel="noopener" data-got-it="the Linux build">Download ${s.publication.github.latestVersion} for Linux</a>
 					</p>
 					<p class="download-why">
 						An AppImage and a <code>.deb</code>, published on the releases page.
@@ -51,15 +51,17 @@ export const download = {
 					<summary>Can't use the Store, or want to check the bytes yourself?</summary>
 					<p>
 						The same builds are on
-						<a href="${s.repo}/releases/latest" rel="noopener">the GitHub releases page</a>,
-						including the portable build, which has no Store equivalent — it writes
-						nothing outside its own folder and runs from a USB stick. Take this route
+						<a href="${s.repo}/releases/tag/v${s.publication.github.latestVersion}" rel="noopener" data-got-it="a build from the release page">the GitHub ${s.publication.github.latestVersion} release page</a>,
+						including the portable build, which has no Store equivalent — its vault,
+						settings and recovery data stay beside the executable, so it can run from
+						a USB stick. The single-file launcher extracts Electron and Chromium runtime
+						files to Windows Temp while it runs and normally removes them on exit. Take this route
 						if the Store is missing from your Windows image, if the machine is locked
 						down, or if you would rather verify a download than be told it is fine.
 					</p>
 					<p>
-						<strong>These carry no code-signing certificate yet, so Windows warns on
-						first run.</strong> That warning is about a missing certificate, not about
+						<strong>These carry no code-signing certificate, and none is planned, so
+						Windows warns on first run.</strong> That warning is about a missing certificate, not about
 						the file being wrong — <a href="/verify">the verification steps</a> are
 						how you tell those two apart instead of guessing.
 					</p>
@@ -130,6 +132,48 @@ export const download = {
 				<li>The application itself: codes, confirmations, enrollment, import and export, encrypted vault, recovery files.</li>
 				<li>The security posture described on the <a href="/security">security page</a>.</li>
 				<li>An automated test suite that runs on every change.</li>
+				${
+					/*
+					 * **The checksum-list signature is listed here, under the flag, rather
+					 * than as a fourth entry in "What is still missing" below.**
+					 *
+					 * It used to live down there in both directions: one `<li>` whose signed
+					 * branch read "The checksum list <em>is</em> signed. Every release carries
+					 * SHA256SUMS.txt.sig ...", sitting under a heading that says "What is
+					 * still missing" and a lead-in promising the reader is being told what has
+					 * not been done. A finished thing announced as an outstanding one is the
+					 * same class of error the release flags exist to prevent, only aimed at
+					 * the reader's comprehension instead of at the facts — and nothing catches
+					 * it, because `CLAIMS` in site/verify.mjs skips the entry while the flag is
+					 * true and `STALE_ABSENCE` only ever hunts for absence phrasings.
+					 *
+					 * An earlier draft bridged the position instead, ending the signed branch
+					 * with "The two things still missing are below." That parses, but it makes
+					 * the heading a lie the next sentence then apologises for, and it only
+					 * reads correctly for as long as this item happens to sit above the
+					 * remaining ones. The neighbouring reproducible-builds entry already
+					 * survives the build only because "cannot yet" lands inside a
+					 * 200-character qualifier window, so a second position-dependent sentence
+					 * in the same list is a second thing that breaks silently when somebody
+					 * reorders it. Moving the item leaves both headings literally true
+					 * whichever way the flag points, which is the reading a careful editor
+					 * arrives at without having to reconcile anything.
+					 *
+					 * The wording changes with the move as well: entries in this list are
+					 * plain noun phrases and the ones below lead with a bold claim, so the
+					 * sentence is rewritten to the grammar of the list it now belongs to
+					 * rather than carried over intact from the one it left.
+					 */
+					s.release.signed
+						? `<li>
+					A signature over the checksum list: every release carries
+					<code>SHA256SUMS.txt.sig</code> and the certificate that goes with it, so
+					you can check that the list itself came from our workflow rather than only
+					that your download matches the list.
+					<a href="/verify">Step 5 walks through it.</a>
+				</li>`
+						: ''
+				}
 				<li>
 					End-to-end testing against live Steam accounts — import from SDA,
 					enrollment, codes, confirmations, backup and recovery — with the defects it
@@ -143,26 +187,38 @@ export const download = {
 				<li>
 					<strong>A code-signing certificate for the direct downloads.</strong> The
 					Store build is signed by Microsoft; the <code>.exe</code> and Linux builds on
-					GitHub are not, so Windows warns on first run. Until that changes, the
-					checksums and the provenance attestation are how you check them.
+					GitHub are not, so Windows warns on first run. The checksums and the
+					provenance attestation are how you check them.
 					<br />
-					We are applying to the
-					<a href="https://signpath.org/" rel="noopener">SignPath Foundation</a>, which
-					provides free code-signing certificates to open-source projects, and intend
-					to sign the direct downloads through
-					<a href="https://about.signpath.io/" rel="noopener">SignPath.io</a> once that
-					is granted. <strong>It has not been granted yet</strong>, so nothing you can
-					download today is signed by us — when that changes, this paragraph and the
-					release notes change with it. See
+					<strong>No certificate is planned.</strong> We applied to the SignPath
+					Foundation and were declined — their free-certificate programme asks for
+					public visibility a project this young does not have. Buying one would not
+					change what you see today either: since March 2024 no certificate, Extended
+					Validation included, clears the Windows warning on its own. So nothing you
+					download directly is signed by us, and we would rather say that than imply
+					it is coming. See
 					<a href="/code-signing-policy">our code signing policy</a>.
 				</li>
-				<li>
-					<strong>The checksum list <em>is</em> signed.</strong> Every release carries
-					<code>SHA256SUMS.txt.sig</code> and a certificate, so you can check the list
-					came from our workflow rather than only that your file matches it.
-					<a href="/verify">Step 5 walks through it.</a> The two things still missing
-					are below.
-				</li>
+				${
+					/*
+					 * Absent from this list entirely once the flag is true, because what it
+					 * describes is then finished and is stated up under "What is finished" —
+					 * the note there explains why it moved rather than being bridged in place.
+					 *
+					 * The conditional wraps the whole `<li>` instead of sitting inside one, so
+					 * the signed rendering has three bullets rather than three bullets and an
+					 * empty one.
+					 */
+					s.release.signed
+						? ''
+						: `<li>
+					<strong>The checksum list is not signed yet.</strong> The release workflow
+					signs it now, but it started doing so after the current release was
+					published — so there is no <code>SHA256SUMS.txt.sig</code> to fetch for the
+					build you can download today. <a href="/verify">Step 5 says so plainly</a>
+					rather than printing a command that cannot succeed.
+				</li>`
+				}
 				<li>
 					<strong>Reproducible builds.</strong> You cannot yet rebuild the tag and
 					compare bytes with ours. The provenance attestation is what stands in for it.
@@ -200,6 +256,48 @@ export const download = {
 			</p>
 
 ${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
+
+			<!--
+				Revealed once a download has actually started, which is the only moment
+				on this page where the reader has received the thing the review would be
+				about. Hidden to begin with and hidden again for anybody who says no,
+				because an ask that ignores an answer is not an ask.
+			-->
+			<!--
+				Shown when a download route is clicked, before the browser follows it.
+				Never a gate: the link the reader asked for is the first control in the
+				block and works whether or not they do anything else here, and if this
+				script does not run the link is an ordinary link.
+
+				It asks them to come back afterwards rather than to review now. The rule
+				this site holds itself to is in markup.mjs: a review from somebody who
+				has not used the thing is worth nothing to the reader it is meant to
+				reassure. They are one click from a download, so they have not used it.
+			-->
+			<aside class="ask ask-prompt" data-review-prompt hidden
+			       role="dialog" aria-modal="true" aria-labelledby="review-prompt-title">
+				<div class="ask-body">
+					<h2 id="review-prompt-title">One thing before you go</h2>
+					<p>
+						Your download is one click away and this does not hold it up. When you have
+						actually used it — today, next week, whenever — come back and say how it
+						went. The next person has no way to tell this project apart from the sites
+						that steal inventories, and a review on a platform we do not own is
+						something they can check without taking our word for it.
+					</p>
+					<p class="hint">
+						Nothing is offered in return and nothing is filtered. If it turns out not to
+						work for you, that is the review worth leaving most.
+					</p>
+					<div class="ask-actions">
+						<a class="button" href="#" data-review-continue rel="noopener">Continue to the download →</a>
+						<a class="button button-quiet" href="${s.reviews.write}" rel="noopener nofollow">Write a review →</a>
+						<button type="button" class="button button-quiet" data-review-dismiss>
+							Do not ask again
+						</button>
+					</div>
+				</div>
+			</aside>
 		</article>`
 };
 
@@ -393,9 +491,12 @@ export const uninstall = {
 				</dd>
 				<dt>Windows portable</dt>
 				<dd>
-					A portable build has no installer and touches no registry key. Delete the
+					A portable build has no installer. Delete the
 					<code>.exe</code> and the <code>open-desktop-authenticator</code> folder
-					beside it, which is where a portable build keeps everything.
+					beside it, which is where it keeps the vault, settings, recovery records and
+					other normal application data. While it runs, the single-file launcher also
+					extracts Electron and Chromium runtime files to Windows Temp; it normally
+					removes that runtime-only stage on exit.
 				</dd>
 				<dt>Linux AppImage</dt>
 				<dd>Delete the <code>.AppImage</code> file. Nothing else was installed.</dd>
@@ -409,8 +510,12 @@ export const uninstall = {
 
 			<h2>2. What is left, and where</h2>
 			<p>
-				Everything the application stored lives in one directory. Nothing is written
-				anywhere else, and nothing was ever sent anywhere.
+				This project operates no server that stores a copy of your vault or account
+				data. The application's persistent data lives in the directory below.
+				Requested authenticator and confirmation operations send the necessary
+				requests to Steam, and the optional update check contacts GitHub when it is
+				enabled. <a href="/privacy">The privacy page names those destinations and
+				what they receive.</a>
 			</p>
 			<dl class="facts">
 				<dt>Windows, installed</dt>
@@ -645,13 +750,16 @@ export const faq = {
 	title: 'FAQ: Steam Guard codes, maFiles and security',
 	description:
 		'Is it free, does it work with SDA maFiles, can it take my items, and what happens if I lose my passphrase. Answers about Open Desktop Authenticator.',
-	structuredData: () => ({
+	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'FAQPage',
 		mainEntity: FAQ_ITEMS.map((item) => ({
 			'@type': 'Question',
 			name: item.q,
-			acceptedAnswer: { '@type': 'Answer', text: item.plain }
+			acceptedAnswer: {
+				'@type': 'Answer',
+				text: typeof item.plain === 'function' ? item.plain(s) : item.plain
+			}
 		}))
 	}),
 	body: (s) => `
@@ -712,8 +820,8 @@ const FAQ_ITEMS = [
 	},
 	{
 		q: 'How do I know this is not itself a scam?',
-		plain:
-			'Do not take our word for it. The source is public, the publisher is a registered company, and 1.0 is out — so the honest answer includes what is still not finished.',
+		plain: (s) =>
+			`Do not take our word for it. The source is public, the publisher is a registered company, and ${s.publication.github.latestVersion ?? s.publication.store.latestVersion} is publicly available — so the honest answer includes what is still not finished.`,
 		/*
 		 * **Derived, because this paragraph made a promise it was breaking.**
 		 *
@@ -855,8 +963,10 @@ export const support = {
 					<p class="hint">
 						Files upload as soon as you choose them, so we can check the type and size
 						before you finish writing. <strong>Remove</strong> deletes our copy, not
-						just the thumbnail. Anything you never attach to a report is deleted
-						within two hours. <a href="/privacy">What we keep, and for how long</a>.
+						just the thumbnail. Anything you never attach to a report becomes eligible
+						for deletion after two hours and is normally removed within a few hours.
+						A failed removal is retried until it succeeds.
+						<a href="/privacy">What we keep, and for how long</a>.
 					</p>
 					<ul class="attachments" data-list></ul>
 				</div>

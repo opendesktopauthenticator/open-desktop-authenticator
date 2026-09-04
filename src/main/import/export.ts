@@ -75,6 +75,23 @@ export function toMaFile(account: Account): string {
 		}
 	};
 
+	/*
+	 * **The proxy is deliberately not exported either, and that is a loss.**
+	 *
+	 * Our own importer reads `Session.proxy`, so writing it would round-trip —
+	 * and it would round-trip the credentials with it. A routed account's URL is
+	 * routinely `user:pass@host`, and this file is plaintext by construction: the
+	 * same reasoning that keeps the refresh token out applies to a proxy password
+	 * verbatim.
+	 *
+	 * The defect this replaced was not the omission, it was the silence. An
+	 * account exported and re-imported came back unrouted, with nothing said, so
+	 * a vault without `Require proxies` would poll it over the machine's own
+	 * address — the one outcome the routing feature exists to prevent. The export
+	 * button now says routing is not included, which makes it a decision the user
+	 * makes rather than one that happens to them.
+	 */
+
 	// **The refresh token is deliberately not exported.**
 	//
 	// It is a live credential: anyone holding the file could reach Steam as this

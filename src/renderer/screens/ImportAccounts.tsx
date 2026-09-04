@@ -6,6 +6,7 @@ import type {
 	ImportSelection
 } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * Importing existing SDA maFiles (§12 F2).
@@ -216,7 +217,7 @@ export function ImportAccounts({
 				well — it holds the settings needed to decrypt them, and they cannot be read without it.
 			</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError>{error}</DynamicError>}
 
 			{outcomes && <ImportResults outcomes={outcomes} />}
 
@@ -252,6 +253,7 @@ export function ImportAccounts({
 										onToggle={() => toggle(candidate.stagingId)}
 										adoptProxy={adopted.has(candidate.stagingId)}
 										onToggleProxy={() => toggleProxy(candidate.stagingId)}
+										busy={busy}
 									/>
 								))}
 							</ul>
@@ -437,20 +439,22 @@ function CandidateRow({
 	checked,
 	onToggle,
 	adoptProxy,
-	onToggleProxy
+	onToggleProxy,
+	busy
 }: {
 	candidate: ImportCandidate;
 	checked: boolean;
 	onToggle: () => void;
 	adoptProxy: boolean;
 	onToggleProxy: () => void;
+	busy: boolean;
 }): React.JSX.Element {
 	const blocked = !candidate.importable || candidate.duplicate === 'selection';
 
 	return (
 		<li>
 			<label className="checkbox">
-				<input type="checkbox" checked={checked} onChange={onToggle} disabled={blocked} />
+				<input type="checkbox" checked={checked} onChange={onToggle} disabled={blocked || busy} />
 				<span>
 					<strong>{candidate.accountName}</strong>{' '}
 					<span className="muted">{candidate.steamId64 ?? 'no SteamID'}</span>
@@ -479,16 +483,28 @@ function CandidateRow({
 			    being imported at all. Off unless asked for: a proxy inside a maFile is
 			    frequently one the user stopped paying for years ago, and routing fails
 			    closed — so adopting a dead one silently means the account cannot reach
-			    Steam at all, with nothing on screen to connect the two. */}
+			    Steam at all, with nothing on screen to connect the two.
+
+			    The address itself is deliberately not here. A proxy URL usually embeds
+			    a username and password, so `ImportCandidate` carries `hasProxy` and
+			    never the URL — this screen genuinely cannot show what is about to be
+			    adopted. Which is why importing now names it in a dialog the main
+			    process draws, and why this hint says so: ticking the box is a request
+			    to be asked, not the last word. */}
 			{candidate.hasProxy && checked && !blocked && (
 				<label className="checkbox nested">
-					<input type="checkbox" checked={adoptProxy} onChange={onToggleProxy} />
+					<input type="checkbox" checked={adoptProxy} onChange={onToggleProxy} disabled={busy} />
 					<span>
 						Also route this account through the proxy saved in the file
 						<p className="hint">
 							Leave this off unless you know the proxy still works. If it does not, this account
 							will not connect to Steam at all — it will not fall back to your own connection. You
 							can add or change routing later.
+						</p>
+						<p className="hint">
+							The address is inside the file and is not shown here, because it usually contains a
+							password. Importing will show you the address it is about to use and ask you to
+							approve it — say no there if you do not recognise it, and nothing is imported.
 						</p>
 					</span>
 				</label>
@@ -523,6 +539,11 @@ function ImportResults({ outcomes }: { outcomes: ImportOutcome[] }): React.JSX.E
 							<strong>{outcome.accountName}</strong>
 							<span className="muted"> {outcome.result}</span>
 							{outcome.reason && <p className="hint">{outcome.reason}</p>}
+							{outcome.warning && (
+								<p className="hint bad" role="alert">
+									{outcome.warning}
+								</p>
+							)}
 						</div>
 					</li>
 				))}

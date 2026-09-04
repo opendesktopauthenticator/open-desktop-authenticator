@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { NotifyDetail } from '../src/shared/vault-schema';
+import type { ConfirmationSummary } from '../src/shared/ipc';
+import { ConfirmationsError } from '../src/main/confirmations/service';
 import { AutoConfirmEngine } from '../src/main/confirmations/auto';
 import type { AutoConfirmOutcome, ConfirmationsService } from '../src/main/confirmations/service';
 import type { VaultService } from '../src/main/vault/service';
@@ -19,18 +22,69 @@ const NOW = Date.parse('2026-08-10T12:00:00Z');
 /** Longer than the largest backoff, so each tick in a loop is always due. */
 const BACKOFF_ENOUGH = 20 * 60_000;
 
-function account(overrides: Partial<{ marketListings: boolean; trades: boolean }> = {}): {
-	steamId64: string;
-	autoConfirm: { marketListings: boolean; trades: boolean; pollIntervalSeconds: number };
-} {
+function account(
+	overrides: Partial<{
+		marketListings: boolean;
+		trades: boolean;
+		pollIntervalSeconds: number;
+		notify: { enabled: boolean; detail: NotifyDetail };
+	}> = {},
+	identity: Partial<{ steamId64: string; accountName: string; proxyUrl: string }> = {}
+): VaultAccountLike {
 	return {
 		steamId64: '76561198000000001',
+		accountName: 'trader',
+		...identity,
 		autoConfirm: {
 			marketListings: false,
 			trades: false,
 			pollIntervalSeconds: 15,
+			notify: { enabled: false, detail: 'full' },
 			...overrides
 		}
+	};
+}
+
+/**
+ * The projection the scheduler actually reads, derived from the same accounts
+ * the fake's `read` returns.
+ *
+ * Written as a derivation rather than a second literal on purpose. The engine
+ * stopped calling `read()` on its hot path because that deep-clones every
+ * secret in the vault once a second; a fake that answered the two independently
+ * could drift, and then these tests would be asserting against a vault no user
+ * has.
+ */
+function scheduleOf(accounts: readonly VaultAccountLike[] = []): {
+	steamId64: string;
+	accountName: string;
+	marketListings: boolean;
+	trades: boolean;
+	pollIntervalSeconds: number;
+	notify: { enabled: boolean; detail: NotifyDetail };
+	hasProxy: boolean;
+}[] {
+	return accounts.map((account) => ({
+		steamId64: account.steamId64,
+		accountName: account.accountName,
+		marketListings: account.autoConfirm.marketListings,
+		trades: account.autoConfirm.trades,
+		pollIntervalSeconds: account.autoConfirm.pollIntervalSeconds,
+		notify: { ...account.autoConfirm.notify },
+		hasProxy: account.proxyUrl !== undefined && account.proxyUrl !== ''
+	}));
+}
+
+/** Only the fields these fakes actually populate. */
+interface VaultAccountLike {
+	steamId64: string;
+	accountName: string;
+	proxyUrl?: string;
+	autoConfirm: {
+		marketListings: boolean;
+		trades: boolean;
+		pollIntervalSeconds: number;
+		notify: { enabled: boolean; detail: NotifyDetail };
 	};
 }
 
@@ -59,7 +113,8 @@ function harness(options: {
 
 	const vault = {
 		isUnlocked: () => options.unlocked ?? true,
-		read: () => ({ accounts: options.accounts ?? [] })
+		read: () => ({ accounts: options.accounts ?? [] }),
+		autoConfirmSchedule: () => scheduleOf(options.accounts)
 	} as unknown as VaultService;
 
 	const confirmations = { runAutoConfirm } as unknown as ConfirmationsService;
@@ -127,6 +182,87 @@ describe('what it refuses to do', () => {
 		// rather than resuming a schedule from a session that has ended.
 		await engine.tick();
 		expect(runAutoConfirm).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe('wall-clock corrections', () => {
+	it.each(['automatic confirmation', 'notification-only'] as const)(
+		'keeps the %s schedule on elapsed time when the wall clock moves backward',
+		async (mode) => {
+			let wall = 10_000_000;
+			let elapsed = 0;
+			let polls = 0;
+			const accounts = [
+				mode === 'automatic confirmation'
+					? account({ trades: true })
+					: account({ notify: { enabled: true, detail: 'full' } })
+			];
+			const vault = {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService;
+			const confirmations = {
+				runAutoConfirm: () => {
+					polls += 1;
+					return Promise.resolve({ approved: [], held: [], unreadable: 0 });
+				},
+				list: () => {
+					polls += 1;
+					return Promise.resolve({ confirmations: [], unreadable: 0 });
+				}
+			} as unknown as ConfirmationsService;
+			const engine = new AutoConfirmEngine({
+				vault,
+				confirmations,
+				now: () => wall,
+				monotonic: () => elapsed
+			});
+
+			await engine.tick();
+			expect(polls).toBe(1);
+
+			wall -= 60 * 60_000;
+			elapsed = 20_000;
+			await engine.tick();
+			expect(polls).toBe(2);
+		}
+	);
+
+	it('serves a failure backoff by elapsed time after a backward wall-clock correction', async () => {
+		let wall = 10_000_000;
+		let elapsed = 0;
+		let polls = 0;
+		const accounts = [account({ trades: true })];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const confirmations = {
+			runAutoConfirm: () => {
+				polls += 1;
+				return Promise.reject(new Error('offline'));
+			}
+		} as unknown as ConfirmationsService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations,
+			now: () => wall,
+			monotonic: () => elapsed
+		});
+
+		await engine.tick();
+		expect(polls).toBe(1);
+
+		wall -= 60 * 60_000;
+		elapsed = 29_999;
+		await engine.tick();
+		expect(polls).toBe(1);
+
+		elapsed = 30_001;
+		await engine.tick();
+		expect(polls).toBe(2);
 	});
 });
 
@@ -422,20 +558,21 @@ describe('the scheduler chain', () => {
 	/** A harness that records every timer and whether it was ever cleared. */
 	function chainHarness(): {
 		engine: AutoConfirmEngine;
-		timers: { id: number; cleared: boolean; fire: () => void }[];
+		timers: { id: number; cleared: boolean; fired: boolean; fire: () => void }[];
 		release: () => void;
 	} {
 		let release: (() => void) | undefined;
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		const timers: { id: number; cleared: boolean; fire: () => void }[] = [];
+		const timers: { id: number; cleared: boolean; fired: boolean; fire: () => void }[] = [];
 		let nextId = 0;
 
 		const engine = new AutoConfirmEngine({
 			vault: {
 				isUnlocked: () => true,
-				read: () => ({ accounts: [account({ trades: true })] })
+				read: () => ({ accounts: [account({ trades: true })] }),
+				autoConfirmSchedule: () => scheduleOf([account({ trades: true })])
 			} as unknown as VaultService,
 			confirmations: {
 				runAutoConfirm: async (): Promise<AutoConfirmOutcome> => {
@@ -445,7 +582,19 @@ describe('the scheduler chain', () => {
 			} as unknown as ConfirmationsService,
 			now: () => NOW,
 			setTimer: (callback: () => void) => {
-				const entry = { id: nextId++, cleared: false, fire: callback };
+				const entry = {
+					id: nextId++,
+					cleared: false,
+					// **A one-shot timer that has fired is no longer armed**, and
+					// `clearTimeout` on it is a no-op. Tracked separately because the
+					// question this harness exists to ask — "is anything still going to
+					// fire that `stop` cannot reach" — is about armed timers only.
+					fired: false,
+					fire: (): void => {
+						entry.fired = true;
+						callback();
+					}
+				};
 				timers.push(entry);
 				return entry as unknown as NodeJS.Timeout;
 			},
@@ -476,7 +625,10 @@ describe('the scheduler chain', () => {
 
 		engine.stop();
 
-		expect(timers.filter((timer) => !timer.cleared)).toHaveLength(0);
+		expect(
+			timers.filter((timer) => !timer.cleared && !timer.fired),
+			'a timer is still armed that stop() did not reach — a forked chain'
+		).toHaveLength(0);
 	});
 
 	it('does not run a sweep for a chain that has been disowned', async () => {
@@ -560,6 +712,58 @@ describe('stopping while a sweep is in the air', () => {
 		expect(harness.dueTimes()).toHaveLength(0);
 	});
 
+	/**
+	 * **A toast raised after the vault closed is what `stop()` exists to
+	 * prevent**, and nothing was asserting it — the mutation that fired
+	 * `onPending` on the disowned generation left the whole suite green.
+	 *
+	 * The outcome is still reported, because Steam really did act. The
+	 * notification is not, because the person is gone and the toast would name a
+	 * trade partner and an item on a screen they have just walked away from.
+	 */
+	it('raises no notification for a sweep the lock disowned', async () => {
+		let settle: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			settle = resolve;
+		});
+		const accounts = [account({ trades: true, notify: { enabled: true, detail: 'full' } })];
+		const pending: string[] = [];
+		const outcomes: string[] = [];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: async () => {
+					await gate;
+					return {
+						approved: [],
+						held: [{ confirmation: { id: '1' } as unknown as ConfirmationSummary, reason: 'held' }],
+						unreadable: 0
+					} as unknown as AutoConfirmOutcome;
+				}
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onOutcome: (steamId64) => outcomes.push(steamId64),
+			onPending: (steamId64) => pending.push(steamId64),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		const sweep = engine.tick();
+		await inFlight();
+		engine.stop();
+		settle?.();
+		await sweep;
+
+		expect(pending, 'a toast was raised after the vault locked').toEqual([]);
+		// The approval still happened, so the log still hears about it.
+		expect(outcomes).toHaveLength(1);
+	});
+
 	it('still reports an outcome that really happened', async () => {
 		// Being disowned by a lock does not make the approval imaginary. Steam acted
 		// on it, so the activity log has to say so.
@@ -596,7 +800,8 @@ describe('the clock is checked before a pass signs anything', () => {
 		const engine = new AutoConfirmEngine({
 			vault: {
 				isUnlocked: () => true,
-				read: () => ({ accounts: [account({ trades: true })] })
+				read: () => ({ accounts: [account({ trades: true })] }),
+				autoConfirmSchedule: () => scheduleOf([account({ trades: true })])
 			} as unknown as VaultService,
 			confirmations: {
 				runAutoConfirm: () => {
@@ -636,7 +841,8 @@ describe('the clock is checked before a pass signs anything', () => {
 		const engine = new AutoConfirmEngine({
 			vault: {
 				isUnlocked: () => true,
-				read: () => ({ accounts: [account({ trades: true })] })
+				read: () => ({ accounts: [account({ trades: true })] }),
+				autoConfirmSchedule: () => scheduleOf([account({ trades: true })])
 			} as unknown as VaultService,
 			confirmations: { runAutoConfirm } as unknown as ConfirmationsService,
 			ensureClock: () => clockDone,
@@ -668,37 +874,74 @@ describe('one slow account does not block the others', () => {
 			releaseA = resolve;
 		});
 		const ran: string[] = [];
+		const both: VaultAccountLike[] = [
+			{
+				steamId64: '76561198000000001',
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: true,
+					trades: false,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
+			},
+			{
+				steamId64: '76561198000000002',
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: true,
+					trades: false,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
+			}
+		];
 		const vault = {
 			isUnlocked: () => true,
-			read: () => ({
-				accounts: [
-					{
-						steamId64: '76561198000000001',
-						autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
-					},
-					{
-						steamId64: '76561198000000002',
-						autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
-					}
-				]
-			})
+			read: () => ({ accounts: both }),
+			autoConfirmSchedule: () => scheduleOf(both)
 		} as unknown as VaultService;
+		// Armed only for the sweep under test: the two seeding ticks below have to
+		// complete, and gating the first account would hang them.
+		let gated = false;
 		const confirmations = {
 			runAutoConfirm: async (steamId64: string) => {
 				ran.push(steamId64);
-				if (steamId64 === '76561198000000001') {
+				if (gated && steamId64 === '76561198000000001') {
 					await gateA;
 				}
 				return { approved: [], held: [], unreadable: 0 };
 			}
 		} as unknown as ConfirmationsService;
 
-		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => 0 });
+		/*
+		 * **Two accounts have to be due in the SAME sweep for this to mean
+		 * anything**, and after the stampede fix they are not on the first one:
+		 * accounts are given staggered slots before any of them polls. So the
+		 * clock is advanced until both come round together, which is the state
+		 * this property is actually about — a sweep that holds two accounts must
+		 * not serialise them behind each other's network call.
+		 */
+		let at = 0;
+		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => at });
+
+		// Beat 0 seeds both and polls the first; beat 1 polls the second.
+		await engine.tick();
+		at = 1000;
+		await engine.tick();
+		expect(ran, 'both accounts should have had a first poll by now').toHaveLength(2);
+
+		// Far enough ahead that both intervals have elapsed.
+		ran.length = 0;
+		gated = true;
+		at = 60_000;
 		const sweep = engine.tick();
 
 		// Both must have been *started* while A is still gated.
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		expect(ran).toContain('76561198000000002');
+		expect(ran, 'the sweep serialised two accounts behind one another').toContain(
+			'76561198000000002'
+		);
 
 		releaseA?.();
 		await sweep;
@@ -718,13 +961,13 @@ describe('scheduling two accounts on the same interval', () => {
 	it('separates them onto different beats after the first sweep', async () => {
 		let at = 0;
 		const beats: number[] = [];
-		const accounts = ['76561198000000001', '76561198000000002'].map((steamId64) => ({
-			steamId64,
-			autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 15 }
-		}));
+		const accounts = ['76561198000000001', '76561198000000002'].map((steamId64) =>
+			account({ marketListings: true }, { steamId64 })
+		);
 		const vault = {
 			isUnlocked: () => true,
-			read: () => ({ accounts })
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
 		} as unknown as VaultService;
 		let ranThisBeat = 0;
 		const confirmations = {
@@ -742,10 +985,195 @@ describe('scheduling two accounts on the same interval', () => {
 			if (ranThisBeat > 0) beats.push(ranThisBeat);
 		}
 
-		// The first sweep is necessarily joint — nothing is scheduled yet.
-		expect(beats[0]).toBe(2);
-		expect(beats.slice(1).every((n) => n === 1)).toBe(true);
+		// **No joint beat at all, including the first — and that is the change.**
+		//
+		// This used to read "the first sweep is necessarily joint, nothing is
+		// scheduled yet", and asserted `beats[0]` was 2. That premise was the
+		// defect: an account with no state counted as due, so every unlock sent
+		// every enabled account to Steam on one beat, over as many proxies as the
+		// vault has. The stagger existed but only ever moved the *next* poll.
+		//
+		// Accounts are now given a slot before any of them polls, so there is no
+		// sweep in which two share a beat.
+		expect(
+			beats.every((n) => n === 1),
+			'two accounts shared a beat'
+		).toBe(true);
 		expect(beats.length).toBeGreaterThan(4);
+	});
+
+	/**
+	 * **And they stay separated when a poll takes longer than a beat.**
+	 *
+	 * The test above never exercised that, because its fake returns instantly —
+	 * so the spacing it measured held only while every round trip fitted inside
+	 * one second. It does not: a proxy round trip is seconds, and the timeout is
+	 * thirty.
+	 *
+	 * A single `running` flag used to make the heartbeat serial, so no beat
+	 * happened while a sweep was in flight. Every slot that elapsed during a slow
+	 * poll therefore passed unobserved, and the next sweep found all of them due
+	 * at once and started them in one microtask — twelve accounts polling in
+	 * lockstep over twelve proxies, which is the correlation the stagger and
+	 * THREAT_MODEL both say is prevented. Measured before the fix at a 2.5s round
+	 * trip: three accounts collapsed to two simultaneous starts on the first
+	 * sweep after unlock.
+	 */
+	it('keeps them separated when a poll outlasts a beat', async () => {
+		let at = 0;
+		/** When each poll was started, by account. */
+		const startedAt: { steamId64: string; at: number }[] = [];
+		const accounts = ['76561198000000001', '76561198000000002', '76561198000000003'].map(
+			(steamId64) => account({ marketListings: true }, { steamId64 })
+		);
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+
+		// The first account's poll never returns during the window under test —
+		// the dead-proxy case, and the one the serial heartbeat turned into a
+		// suppressed second and third account.
+		let releaseFirst: (() => void) | undefined;
+		const confirmations = {
+			runAutoConfirm: async (steamId64: string): Promise<AutoConfirmOutcome> => {
+				startedAt.push({ steamId64, at });
+				if (steamId64 === accounts[0]?.steamId64) {
+					await new Promise<void>((resolve) => {
+						releaseFirst = resolve;
+					});
+				}
+				return { approved: [], held: [], unreadable: 0 };
+			}
+		} as unknown as ConfirmationsService;
+
+		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => at });
+
+		// Not awaited: this sweep parks on the first account and, before the fix,
+		// took the whole heartbeat down with it.
+		const stuck = engine.tick();
+		await Promise.resolve();
+
+		for (let second = 1; second <= 4; second += 1) {
+			at = second * 1000;
+			await engine.tick();
+		}
+
+		releaseFirst?.();
+		await stuck;
+
+		expect(
+			startedAt.map((start) => start.steamId64),
+			'an account whose slot elapsed during the slow poll was never reached'
+		).toHaveLength(3);
+		expect(
+			new Set(startedAt.map((start) => start.at)).size,
+			`two accounts started at the same instant: ${JSON.stringify(startedAt)}`
+		).toBe(3);
+	});
+
+	/*
+	 * And the same slow poll is not started again on every beat while it runs.
+	 * Without a per-account claim, an account behind a slow proxy reads as due on
+	 * every beat — its `nextDueAt` is not rewritten until the poll returns — so
+	 * removing the serial flag would have replaced one dead proxy stalling
+	 * everything with one dead proxy being hammered once a second.
+	 */
+	it('does not re-poll an account whose request is still in the air', async () => {
+		let at = 0;
+		let started = 0;
+		const accounts = [account({ marketListings: true })];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+
+		let release: (() => void) | undefined;
+		const confirmations = {
+			runAutoConfirm: async (): Promise<AutoConfirmOutcome> => {
+				started += 1;
+				await new Promise<void>((resolve) => {
+					release = resolve;
+				});
+				return { approved: [], held: [], unreadable: 0 };
+			}
+		} as unknown as ConfirmationsService;
+
+		const engine = new AutoConfirmEngine({ vault, confirmations, now: () => at });
+		const stuck = engine.tick();
+		await Promise.resolve();
+
+		for (let second = 1; second <= 20; second += 1) {
+			at = second * 1000;
+			await engine.tick();
+		}
+
+		expect(started, 'the account in flight was polled again on later beats').toBe(1);
+		release?.();
+		await stuck;
+	});
+
+	/**
+	 * **The heartbeat itself, not `tick` driven by hand.**
+	 *
+	 * The two tests above call `tick` directly, so they see the re-entrance rule
+	 * and nothing else. The other half of the serialisation lived in `schedule`,
+	 * which armed the next beat from the sweep's own `finally` — so a sweep that
+	 * never settled never armed one, and one dead proxy stopped the clock for
+	 * every account until its thirty-second timeout expired.
+	 *
+	 * Driven through the injected timer because that is the only place the defect
+	 * is visible: with the fix reverted, these assertions are the only thing in
+	 * the suite that goes red.
+	 */
+	it('arms the next beat while a sweep is still in the air', async () => {
+		const armed: (() => void)[] = [];
+		const accounts = [account({ marketListings: true })];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+
+		let release: (() => void) | undefined;
+		const confirmations = {
+			runAutoConfirm: async (): Promise<AutoConfirmOutcome> => {
+				await new Promise<void>((resolve) => {
+					release = resolve;
+				});
+				return { approved: [], held: [], unreadable: 0 };
+			}
+		} as unknown as ConfirmationsService;
+
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations,
+			now: () => NOW,
+			setTimer: (callback: () => void) => {
+				armed.push(callback);
+				return { unref: () => undefined } as unknown as NodeJS.Timeout;
+			},
+			clearTimer: () => undefined
+		});
+
+		engine.start();
+		expect(armed, 'start() armed no beat at all').toHaveLength(1);
+
+		// The first beat fires and its sweep parks on a poll that does not return.
+		armed[0]?.();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+
+		expect(
+			armed,
+			'no further beat was armed while a sweep was in flight, so one slow account stops the clock for all of them'
+		).toHaveLength(2);
+
+		release?.();
+		engine.stop();
 	});
 });
 
@@ -762,18 +1190,24 @@ describe('after auto-confirm halts', () => {
 	it('stops reading the vault on every beat', async () => {
 		let at = 0;
 		let reads = 0;
+		const enabled: VaultAccountLike[] = [
+			{
+				steamId64: '76561198000000001',
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: false,
+					trades: true,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
+			}
+		];
 		const vault = {
 			isUnlocked: () => true,
-			read: () => {
+			read: () => ({ accounts: enabled }),
+			autoConfirmSchedule: () => {
 				reads += 1;
-				return {
-					accounts: [
-						{
-							steamId64: '76561198000000001',
-							autoConfirm: { marketListings: false, trades: true, pollIntervalSeconds: 15 }
-						}
-					]
-				};
+				return scheduleOf(enabled);
 			}
 		} as unknown as VaultService;
 		const confirmations = {
@@ -801,5 +1235,1395 @@ describe('after auto-confirm halts', () => {
 			await engine.tick();
 		}
 		expect(reads).toBe(atHalt);
+	});
+});
+
+/*
+ * **The default vault, which is the one almost everybody has.**
+ *
+ * The halted case above was fixed and tested; this one was neither. With
+ * auto-confirm switched off everywhere, no account is ever scheduled, so
+ * `earliestDueAt` never leaves 0, so the cheap early-out never fires — and
+ * every single beat, for the whole life of an unlocked session, went to the
+ * vault. That read used to be `read()`, which deep-clones every shared secret,
+ * identity secret and revocation code the user owns; §11 already admits those
+ * strings survive until collection, and this made an acknowledged limit
+ * measurably worse once a second in exchange for nothing.
+ *
+ * It still asks the vault every beat — that is what keeps a switch flipped in
+ * settings taking effect within a second — but what it asks for now holds no
+ * secrets.
+ */
+describe('a vault with auto-confirm switched off everywhere', () => {
+	it('never deep-clones the vault to discover there is nothing to do', async () => {
+		let clones = 0;
+		let projections = 0;
+		const idle: VaultAccountLike[] = [
+			{
+				steamId64: '76561198000000001',
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: false,
+					trades: false,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
+			},
+			{
+				steamId64: '76561198000000002',
+				accountName: 'trader',
+				autoConfirm: {
+					marketListings: false,
+					trades: false,
+					pollIntervalSeconds: 15,
+					notify: { enabled: false, detail: 'full' }
+				}
+			}
+		];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => {
+				clones += 1;
+				return { accounts: idle };
+			},
+			autoConfirmSchedule: () => {
+				projections += 1;
+				return scheduleOf(idle);
+			}
+		} as unknown as VaultService;
+
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: () => Promise.reject(new Error('nothing should be polled'))
+			} as unknown as ConfirmationsService,
+			now: () => 0,
+			onFailure: () => undefined
+		});
+
+		for (let i = 0; i < 30; i += 1) {
+			await engine.tick();
+		}
+
+		expect(clones, 'the whole secret-bearing vault was cloned on a beat').toBe(0);
+		// The projection is still consulted, so switching auto-confirm on takes
+		// effect on the next beat rather than on the next unlock.
+		expect(projections).toBeGreaterThan(0);
+	});
+
+	it('carries the same fields the scheduler used to read off the vault', () => {
+		expect(
+			scheduleOf([
+				{
+					steamId64: '76561198000000001',
+					accountName: 'trader',
+					autoConfirm: {
+						marketListings: true,
+						trades: false,
+						pollIntervalSeconds: 45,
+						notify: { enabled: false, detail: 'full' }
+					}
+				}
+			])
+		).toEqual([
+			{
+				steamId64: '76561198000000001',
+				accountName: 'trader',
+				marketListings: true,
+				trades: false,
+				pollIntervalSeconds: 45,
+				notify: { enabled: false, detail: 'full' },
+				hasProxy: false
+			}
+		]);
+	});
+});
+
+/**
+ * **Watching without approving.**
+ *
+ * An account may have notifications on and both auto-confirm switches off. It
+ * is polled, and everything it finds is reported to a person; nothing is ever
+ * approved on its behalf. The dangerous mistake here is routing such an account
+ * through `runAutoConfirm`, which approves nothing with both switches off and
+ * returns an empty outcome — a feature that polls forever and tells nobody
+ * anything. So these assert on `list` being called and `runAutoConfirm` not.
+ */
+describe('notify-only accounts', () => {
+	function notifyHarness(options: {
+		accounts?: VaultAccountLike[];
+		requireProxies?: boolean;
+		list?: (steamId64: string) => Promise<{
+			confirmations: ConfirmationSummary[];
+			unreadable: number;
+		}>;
+		run?: (steamId64: string) => Promise<AutoConfirmOutcome>;
+	}) {
+		let clock = NOW;
+		const pending: {
+			steamId64: string;
+			accountName: string;
+			awaiting: ConfirmationSummary[];
+			unreadable: number;
+			detail: NotifyDetail;
+		}[] = [];
+		const signIns: { steamId64: string; accountName: string }[] = [];
+		const failures: {
+			steamId64: string;
+			reason: string;
+			halted: boolean;
+			context?: { accountName: string; mode: string };
+		}[] = [];
+
+		const runAutoConfirm = vi.fn(
+			options.run ??
+				((): Promise<AutoConfirmOutcome> =>
+					Promise.resolve({ approved: [], held: [], unreadable: 0 }))
+		);
+		const list = vi.fn(
+			options.list ??
+				((): Promise<{ confirmations: ConfirmationSummary[]; unreadable: number }> =>
+					Promise.resolve({ confirmations: [], unreadable: 0 }))
+		);
+
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts: options.accounts ?? [] }),
+			autoConfirmSchedule: () => scheduleOf(options.accounts)
+		} as unknown as VaultService;
+
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: { runAutoConfirm, list } as unknown as ConfirmationsService,
+			now: () => clock,
+			requireProxies: () => options.requireProxies ?? false,
+			onPending: (steamId64, accountName, awaiting, unreadable, detail) =>
+				pending.push({ steamId64, accountName, awaiting, unreadable, detail }),
+			onSignInNeeded: (steamId64, accountName) => signIns.push({ steamId64, accountName }),
+			onFailure: (steamId64, reason, halted, context) =>
+				failures.push({ steamId64, reason, halted, context }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		return {
+			engine,
+			runAutoConfirm,
+			list,
+			pending,
+			signIns,
+			failures,
+			advance: (ms: number) => {
+				clock += ms;
+			}
+		};
+	}
+
+	const watching = account({ notify: { enabled: true, detail: 'full' } });
+
+	it('is polled with both auto-confirm switches off', async () => {
+		const h = notifyHarness({ accounts: [watching] });
+		await h.engine.tick();
+		expect(h.list).toHaveBeenCalledWith('76561198000000001');
+	});
+
+	it('never goes through runAutoConfirm', async () => {
+		const h = notifyHarness({ accounts: [watching] });
+		await h.engine.tick();
+		expect(
+			h.runAutoConfirm,
+			'a watching account was sent down the approve path, which never lists, so never notifies'
+		).not.toHaveBeenCalled();
+	});
+
+	it('reports what it found', async () => {
+		const h = notifyHarness({
+			accounts: [watching],
+			list: () =>
+				Promise.resolve({
+					confirmations: [{ id: '1' } as unknown as ConfirmationSummary],
+					unreadable: 2
+				})
+		});
+		await h.engine.tick();
+		expect(h.pending).toHaveLength(1);
+		expect(h.pending[0]?.accountName).toBe('trader');
+		expect(h.pending[0]?.awaiting).toHaveLength(1);
+		expect(h.pending[0]?.unreadable).toBe(2);
+		expect(h.pending[0]?.detail).toBe('full');
+	});
+
+	it('is not polled when neither notifications nor auto-confirm are on', async () => {
+		const h = notifyHarness({ accounts: [account()] });
+		await h.engine.tick();
+		expect(h.list).not.toHaveBeenCalled();
+		expect(h.runAutoConfirm).not.toHaveBeenCalled();
+	});
+
+	/*
+	 * One poll serves both. An account with an auto type on takes the confirm
+	 * arm even when it also wants toasts, and what `runAutoConfirm` held back is
+	 * what a person still has to look at.
+	 */
+	it('polls once when both are on, and reports what was held', async () => {
+		const both = account({ trades: true, notify: { enabled: true, detail: 'type' } });
+		const h = notifyHarness({
+			accounts: [both],
+			run: () =>
+				Promise.resolve({
+					approved: [],
+					held: [{ confirmation: { id: '9' } as unknown as ConfirmationSummary, reason: 'nope' }],
+					unreadable: 0
+				} as unknown as AutoConfirmOutcome)
+		});
+		await h.engine.tick();
+		expect(h.runAutoConfirm).toHaveBeenCalledTimes(1);
+		expect(h.list).not.toHaveBeenCalled();
+		expect(h.pending[0]?.awaiting).toHaveLength(1);
+		expect(h.pending[0]?.detail).toBe('type');
+	});
+
+	it('does not report pending for an account that only auto-confirms', async () => {
+		const h = notifyHarness({ accounts: [account({ trades: true })] });
+		await h.engine.tick();
+		expect(h.runAutoConfirm).toHaveBeenCalledTimes(1);
+		expect(h.pending).toHaveLength(0);
+	});
+});
+
+/**
+ * **`Require proxies` refuses at construction, so polling anyway is wasted.**
+ *
+ * `transports.forAccount` throws before any request is made. Ten of those in a
+ * row reach the halt — an account hidden by a policy refusal rather than a
+ * fault, until something unrelated changes.
+ */
+describe('Require proxies', () => {
+	function h(requireProxies: boolean, proxyUrl?: string) {
+		const accounts = [account({ trades: true }, proxyUrl === undefined ? {} : { proxyUrl })];
+		const runAutoConfirm = vi.fn(() => Promise.resolve({ approved: [], held: [], unreadable: 0 }));
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: { runAutoConfirm } as unknown as ConfirmationsService,
+			now: () => NOW,
+			requireProxies: () => requireProxies,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return { engine, runAutoConfirm };
+	}
+
+	it('skips an account with no proxy when the rule is on', async () => {
+		const { engine, runAutoConfirm } = h(true);
+		await engine.tick();
+		expect(runAutoConfirm).not.toHaveBeenCalled();
+	});
+
+	it('polls it when the rule is off', async () => {
+		const { engine, runAutoConfirm } = h(false);
+		await engine.tick();
+		expect(runAutoConfirm).toHaveBeenCalled();
+	});
+
+	it('polls an account that has a proxy', async () => {
+		const { engine, runAutoConfirm } = h(true, 'http://proxy.example:8080');
+		await engine.tick();
+		expect(runAutoConfirm).toHaveBeenCalled();
+	});
+
+	it('treats an empty proxy string as no proxy', async () => {
+		const { engine, runAutoConfirm } = h(true, '');
+		await engine.tick();
+		expect(runAutoConfirm).not.toHaveBeenCalled();
+	});
+
+	it('reconsiders a previously excluded account as soon as strict routing is turned off', async () => {
+		let required = true;
+		const accounts = [
+			account({ trades: true }, { proxyUrl: 'http://proxy.example:8080' }),
+			account({ trades: true }, { steamId64: '76561198000000002', accountName: 'unproxied trader' })
+		];
+		const runAutoConfirm = vi.fn(() => Promise.resolve({ approved: [], held: [], unreadable: 0 }));
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: { runAutoConfirm } as unknown as ConfirmationsService,
+			now: () => NOW,
+			requireProxies: () => required,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		await engine.tick();
+		expect(runAutoConfirm).toHaveBeenCalledWith('76561198000000001');
+		expect(runAutoConfirm).not.toHaveBeenCalledWith('76561198000000002');
+
+		required = false;
+		engine.policyChanged();
+		await engine.tick();
+		expect(runAutoConfirm).toHaveBeenCalledWith('76561198000000002');
+	});
+});
+
+/**
+ * **An expired session is not a fault that backing off fixes.**
+ *
+ * Counting it toward the ten-strike halt spends ten intervals arriving at a
+ * message phrased "failures in a row" — for the one condition only the user can
+ * clear, and which the activity log's `failed` kind is not urgent enough to
+ * surface. So it is caught ahead of the failure counter.
+ *
+ * **On both arms, and that is the whole point of these tests.** An earlier
+ * draft caught it inside the notify branch only. Every account with an auto
+ * type on takes the confirm branch, so the accounts that actually have this
+ * problem were exactly the ones the fix would have missed.
+ */
+describe('a session that needs signing in again', () => {
+	function h(mode: 'confirm' | 'notify') {
+		const accounts = [
+			mode === 'confirm'
+				? account({ trades: true })
+				: account({ notify: { enabled: true, detail: 'full' } })
+		];
+		const expired = new ConfirmationsError('the saved session expired. Sign in again.', true);
+		const reject = (): Promise<never> => Promise.reject(expired);
+		const signIns: { steamId64: string; accountName: string }[] = [];
+		const failures: { reason: string; halted: boolean }[] = [];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		let clock = NOW;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: reject,
+				list: reject
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onSignInNeeded: (steamId64, accountName) => signIns.push({ steamId64, accountName }),
+			onFailure: (_id, reason, halted) => failures.push({ reason, halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return {
+			engine,
+			signIns,
+			failures,
+			advance: (ms: number) => {
+				clock += ms;
+			}
+		};
+	}
+
+	it('is reported, not counted, on the confirm arm', async () => {
+		const { engine, signIns, failures } = h('confirm');
+		await engine.tick();
+		expect(signIns, 'a confirm-mode account with an expired session said nothing').toEqual([
+			{ steamId64: '76561198000000001', accountName: 'trader' }
+		]);
+		expect(failures, 'an expired session was counted toward the halt').toEqual([]);
+	});
+
+	it('is reported, not counted, on the notify arm', async () => {
+		const { engine, signIns, failures } = h('notify');
+		await engine.tick();
+		expect(signIns).toHaveLength(1);
+		expect(failures).toEqual([]);
+	});
+
+	/*
+	 * The clock has to move: a sign-in failure reschedules at the ordinary
+	 * interval, so without advancing it every tick after the first early-outs on
+	 * `nextDueAt` and the account is polled exactly once — which would make this
+	 * pass while proving nothing.
+	 */
+	it('never halts, however many times it happens', async () => {
+		const { engine, signIns, failures, advance } = h('confirm');
+		for (let i = 0; i < 12; i += 1) {
+			await engine.tick();
+			advance(20 * 60_000);
+		}
+		expect(failures, 'twelve expired-session polls reached the halt').toEqual([]);
+		expect(signIns, 'the account stopped being polled').toHaveLength(12);
+	});
+
+	/*
+	 * The distinction that matters: an ordinary error is still a failure, still
+	 * backs off, and still halts at ten. Catching sign-in ahead of the counter
+	 * must not have swallowed the counter.
+	 */
+	it('still counts an ordinary failure', async () => {
+		const accounts = [account({ trades: true })];
+		const failures: { halted: boolean }[] = [];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		let clock = NOW;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: () => Promise.reject(new Error('steam said no'))
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, _reason, halted) => failures.push({ halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		for (let i = 0; i < 10; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		expect(failures).toHaveLength(10);
+		expect(failures[9]?.halted, 'ten ordinary failures no longer halt').toBe(true);
+	});
+});
+
+/**
+ * **The halt sentence, and who it is about.**
+ *
+ * An account that was only ever watching never had automatic confirmation to
+ * stop, so telling its owner that automatic confirmation has stopped describes
+ * a feature they never switched on.
+ */
+describe('what a halt says', () => {
+	async function haltWith(mode: 'confirm' | 'notify') {
+		const accounts = [
+			mode === 'confirm'
+				? account({ trades: true })
+				: account({ notify: { enabled: true, detail: 'full' } })
+		];
+		const reject = (): Promise<never> => Promise.reject(new Error('steam said no'));
+		const failures: {
+			reason: string;
+			halted: boolean;
+			context?: { accountName: string; mode: string };
+		}[] = [];
+		let clock = NOW;
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: reject,
+				list: reject
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, reason, halted, context) => failures.push({ reason, halted, context }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		for (let i = 0; i < 10; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		return failures[failures.length - 1];
+	}
+
+	it('says automatic confirmation stopped, for an account that was confirming', async () => {
+		const last = await haltWith('confirm');
+		expect(last?.halted).toBe(true);
+		expect(last?.reason).toContain('Automatic confirmation stopped');
+	});
+
+	it('says checking stopped, for an account that was only watching', async () => {
+		const last = await haltWith('notify');
+		expect(last?.halted).toBe(true);
+		expect(
+			last?.reason,
+			'a watching account was told automatic confirmation stopped, which it never had'
+		).not.toContain('Automatic confirmation');
+		expect(last?.reason).toContain('Checking stopped');
+	});
+
+	/*
+	 * Both sentences contain "stopped", so the flag is the only thing that can
+	 * distinguish a halt — which is why the activity log stopped inferring it
+	 * from the wording.
+	 */
+	it('carries the halt as a flag, not something to read out of the sentence', async () => {
+		const confirm = await haltWith('confirm');
+		const notify = await haltWith('notify');
+		expect(confirm?.reason).toContain('stopped');
+		expect(notify?.reason).toContain('stopped');
+		expect(confirm?.halted).toBe(true);
+		expect(notify?.halted).toBe(true);
+	});
+
+	it('carries the account name and mode, which a toast needs', async () => {
+		expect(await haltWith('confirm').then((f) => f?.context)).toEqual({
+			accountName: 'trader',
+			mode: 'confirm'
+		});
+		expect(await haltWith('notify').then((f) => f?.context)).toEqual({
+			accountName: 'trader',
+			mode: 'notify'
+		});
+	});
+});
+
+/**
+ * **A listener that throws is not Steam saying no.**
+ *
+ * Four of the six listeners run inside `runOne`'s `try`, so a notification that
+ * threw landed in the catch — where nothing can tell it from Steam refusing.
+ * The successful pass was overwritten with a backoff, logged as `failed` with
+ * the listener's own message, and on an hourly account the next poll was pulled
+ * from an hour to thirty seconds: the rule that a failure never speeds anything
+ * up, inverted by the reporting of a success. The two that run inside the catch
+ * were worse — a throw there escaped the sweep as an unhandled rejection.
+ */
+describe('a notification listener that throws', () => {
+	function h(which: 'onOutcome' | 'onPending' | 'onFailure' | 'onSignInNeeded', fail = false) {
+		const accounts = [account({ trades: true, notify: { enabled: true, detail: 'full' } })];
+		const boom = (): never => {
+			throw new Error('the toast host exploded');
+		};
+		const failures: { halted: boolean }[] = [];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: {
+				runAutoConfirm: fail
+					? () => Promise.reject(new Error('steam said no'))
+					: () => Promise.resolve({ approved: [], held: [], unreadable: 0 })
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onOutcome: which === 'onOutcome' ? boom : () => undefined,
+			onPending: which === 'onPending' ? boom : () => undefined,
+			onSignInNeeded: which === 'onSignInNeeded' ? boom : () => undefined,
+			onFailure:
+				which === 'onFailure'
+					? boom
+					: (_id, _reason, halted) => {
+							failures.push({ halted });
+						},
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return { engine, failures };
+	}
+
+	it('does not turn a successful pass into a failure', async () => {
+		const { engine, failures } = h('onOutcome');
+		await engine.tick();
+		expect(failures, 'a throwing listener was recorded as Steam refusing').toEqual([]);
+	});
+
+	it('does not turn a successful poll into a failure from onPending either', async () => {
+		const { engine, failures } = h('onPending');
+		await engine.tick();
+		expect(failures).toEqual([]);
+	});
+
+	/*
+	 * The listeners inside the catch never reached a failure counter — they
+	 * escaped `runOne` entirely, rejecting the sweep with nothing anywhere in the
+	 * application handling it.
+	 */
+	it('does not reject the sweep from inside the failure path', async () => {
+		const { engine } = h('onFailure', true);
+		await expect(engine.tick()).resolves.toBeUndefined();
+	});
+
+	it('does not reject the sweep from the sign-in path', async () => {
+		const accounts = [account({ notify: { enabled: true, detail: 'full' } })];
+		const expired = new ConfirmationsError('the saved session expired.', true);
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				list: () => Promise.reject(expired)
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onSignInNeeded: () => {
+				throw new Error('the toast host exploded');
+			},
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		await expect(engine.tick()).resolves.toBeUndefined();
+	});
+
+	/*
+	 * And the guard must not swallow the thing it is standing next to.
+	 */
+	it('still records a real Steam failure', async () => {
+		const { engine, failures } = h('onOutcome', true);
+		await engine.tick();
+		expect(failures, 'guarding the listeners swallowed a real failure').toHaveLength(1);
+	});
+});
+
+/**
+ * **A route that changed under a request is not a failure.**
+ *
+ * Saving a proxy aborts whatever was in the air, and that abort reaches the
+ * engine as an ordinary error. Without a per-account epoch the user's own save
+ * was scored against them: a `failed` entry, a backoff of up to fifteen
+ * minutes, and a strike toward the halt.
+ */
+describe('an account whose route changes mid-poll', () => {
+	function parkedAccount() {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const accounts = [account({ trades: true })];
+		const failures: string[] = [];
+		const outcomes: string[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: async () => {
+					await gate;
+					throw new Error("this account's routing changed while the request was in the air.");
+				}
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onFailure: (_id, reason) => failures.push(reason),
+			onOutcome: (id) => outcomes.push(id),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return { engine, failures, outcomes, release: () => release?.() };
+	}
+
+	it('is not counted against the account', async () => {
+		const h = parkedAccount();
+		const sweep = h.engine.tick();
+		// Let the sweep reach the parked request before the route changes.
+		for (let i = 0; i < 5; i += 1) {
+			await Promise.resolve();
+		}
+
+		h.engine.forgetAccount('76561198000000001');
+		h.release();
+		await sweep;
+
+		expect(h.failures, "the user's own proxy save was logged as a Steam failure").toEqual([]);
+	});
+
+	/*
+	 * Replacing a dead proxy is the obvious remedy for the routing errors that
+	 * caused a halt. Nothing cleared it before: only a settings save, a lock, or
+	 * a restart did.
+	 */
+	it('clears a halt, so a replaced proxy can be tried again', async () => {
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		const failures: { halted: boolean }[] = [];
+		let calls = 0;
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () => {
+					calls += 1;
+					return Promise.reject(new Error('routing refused'));
+				}
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, _reason, halted) => failures.push({ halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		for (let i = 0; i < 10; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		expect(failures[9]?.halted, 'the account should be halted by now').toBe(true);
+
+		const before = calls;
+		await engine.tick();
+		expect(calls, 'a halted account was polled anyway').toBe(before);
+
+		engine.forgetAccount('76561198000000001');
+		clock += 20 * 60_000;
+		await engine.tick();
+		await engine.tick();
+		expect(calls, 'replacing the proxy did not lift the halt').toBeGreaterThan(before);
+	});
+});
+
+/**
+ * **A poll carries the settings it started with, and they can be replaced
+ * underneath it.**
+ *
+ * `runOne` reads `notify` and the disclosure detail before its request and uses
+ * them after. Clearing only the schedule on a settings change left the request
+ * in flight holding what the user had just replaced — so switching
+ * notifications off, or `full` down to `count`, still produced one last `full`
+ * toast naming the trade partner and the headline. Precisely the toast somebody
+ * switched the feature off to stop.
+ */
+describe('notification settings changed while a poll was in the air', () => {
+	function parked() {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const accounts = [account({ notify: { enabled: true, detail: 'full' } })];
+		const pending: { detail: string }[] = [];
+		const outcomes: string[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				list: async () => {
+					await gate;
+					return { confirmations: [{ id: '1' } as unknown as ConfirmationSummary], unreadable: 0 };
+				}
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onPending: (_id, _name, _awaiting, _unreadable, detail) => pending.push({ detail }),
+			onOutcome: (id) => outcomes.push(id),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return { engine, pending, outcomes, release: () => release?.() };
+	}
+
+	it('raises no toast under the policy the user just replaced', async () => {
+		const h = parked();
+		const sweep = h.engine.tick();
+		for (let i = 0; i < 5; i += 1) {
+			await Promise.resolve();
+		}
+
+		// The user switches notifications off, or down to `count`.
+		h.engine.reset('76561198000000001');
+		h.release();
+		await sweep;
+
+		expect(h.pending, 'a toast was composed from settings the user had already replaced').toEqual(
+			[]
+		);
+	});
+
+	/*
+	 * A confirm-mode poll that actually approved something still reports it.
+	 * Approving a trade is a fact about the world whatever the settings now say,
+	 * and the activity log is the only record of it.
+	 */
+	it('still reports an outcome it really achieved', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const accounts = [account({ trades: true })];
+		const outcomes: string[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: async () => {
+					await gate;
+					return { approved: [], held: [], unreadable: 0 };
+				}
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onOutcome: (id) => outcomes.push(id),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		const sweep = engine.tick();
+		for (let i = 0; i < 5; i += 1) {
+			await Promise.resolve();
+		}
+		engine.reset('76561198000000001');
+		release?.();
+		await sweep;
+
+		expect(outcomes, 'a real approval went unrecorded').toHaveLength(1);
+	});
+});
+
+/**
+ * **An invalidation a sibling could undo.**
+ *
+ * `forgetAccount` and `reset` set `earliestDueAt = 0` so the next beat re-reads
+ * the vault. Any *other* account's poll finishing later in the same sweep then
+ * calls `rememberEarliest`, which recomputes that cache from the state map —
+ * and the forgotten account is no longer in it, so the invalidation is quietly
+ * reversed by an account it has nothing to do with.
+ *
+ * With one account it is harmless: the map goes empty and the recompute yields
+ * 0 anyway, which is exactly why every earlier test of these two methods
+ * missed it. With two it is not, and the worst shape is a halted sibling: its
+ * entry holds `Infinity`, so the recompute pins the cache there and the beat's
+ * early-out stops the engine reading the vault at all — for every account.
+ */
+describe('a schedule invalidated while another account is mid-poll', () => {
+	function twoAccounts(runFor: (steamId64: string) => Promise<never> | Promise<unknown>) {
+		const accounts = [
+			account({ trades: true }, { steamId64: '76561198000000001' }),
+			account({ trades: true }, { steamId64: '76561198000000002' })
+		];
+		let clock = NOW;
+		let reads = 0;
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => {
+				reads += 1;
+				return scheduleOf(accounts);
+			}
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: { runAutoConfirm: runFor } as unknown as ConfirmationsService,
+			now: () => clock,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+		return {
+			engine,
+			reads: () => reads,
+			/** The vault stops offering it, which is what a removal actually is. */
+			removeAccount: (steamId64: string) => {
+				const at = accounts.findIndex((entry) => entry.steamId64 === steamId64);
+				accounts.splice(at, 1);
+			},
+			advance: (ms: number) => {
+				clock += ms;
+			}
+		};
+	}
+
+	it('still re-reads the vault when a halted sibling holds infinity', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let park = false;
+		// **The SIBLING is the one parked.** The forgotten account's own poll is
+		// disowned by its epoch and returns before writing anything, so it cannot
+		// be what undoes the invalidation. It is the other account — whose epoch
+		// is untouched, and which therefore completes normally and recomputes the
+		// cache from a map the forgotten account has just left.
+		const h = twoAccounts(async (steamId64) => {
+			if (steamId64 === '76561198000000002') {
+				if (park) {
+					await gate;
+				}
+				throw new Error('steam said no');
+			}
+			return { approved: [], held: [], unreadable: 0 };
+		});
+
+		/*
+		 * **Ten iterations, not nine — because the first one does not poll ...002.**
+		 *
+		 * It seeds that account at offset 1000 instead, so nine iterations produced
+		 * only eight failures and the parked sweep was the ninth: one short of
+		 * `HALT_AFTER_FAILURES`. The test still discriminated, but on a finite maxed
+		 * backoff rather than on the `Infinity` this whole mechanism is written for,
+		 * so the scenario in its own title had no coverage. Instrumented before the
+		 * change: `{ nextDueAt: <finite>, backoffMs: 900000, failures: 9 }`, `halted`
+		 * never true, `onFailure` never called with `halted === true`.
+		 */
+		for (let i = 0; i < 10; i += 1) {
+			await h.engine.tick();
+			h.advance(20 * 60_000);
+		}
+
+		park = true;
+		const sweep = h.engine.tick();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+
+		// The user repairs the OTHER account's proxy while that poll is in flight.
+		h.engine.forgetAccount('76561198000000001');
+
+		// The sibling's tenth failure halts it, writing `Infinity` and recomputing.
+		release?.();
+		await sweep;
+
+		/*
+		 * **Asserted, not assumed.** The `Infinity` is the whole premise: without it
+		 * this passes on a maxed finite backoff and says nothing about the case in
+		 * its title.
+		 */
+		const state = (
+			h.engine as unknown as {
+				state: Map<string, { nextDueAt: number; halted?: boolean }>;
+			}
+		).state;
+		expect(
+			state.get('76561198000000002'),
+			'the sibling never actually halted, so nothing pinned the cache'
+		).toMatchObject({ nextDueAt: Number.POSITIVE_INFINITY, halted: true });
+
+		const before = h.reads();
+		await h.engine.tick();
+
+		expect(
+			h.reads(),
+			'a halted sibling pinned the cache at infinity and the engine went silent'
+		).toBeGreaterThan(before);
+	});
+
+	/**
+	 * **And the opposite pin: a halt written while the flag was up.**
+	 *
+	 * `rememberEarliest` returns 0 while `scheduleDirty` is set, and the halt path
+	 * calls it immediately after writing `Infinity`. So a halt that landed while a
+	 * sibling's `forgetAccount` had the flag up left `earliestDueAt` at 0 for the
+	 * life of the process: `tick` cleared the flag, but nothing recomputed —
+	 * a halted account is skipped by `dueAccounts` without seeding, so no later
+	 * `rememberEarliest` ever ran. Every one-second beat then re-read the vault to
+	 * rediscover there was nothing to do, silently undoing the property the test
+	 * above pins.
+	 */
+	it('stops re-reading once the halt is the only thing left', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let park = false;
+		const h = twoAccounts(async (steamId64) => {
+			if (steamId64 === '76561198000000002') {
+				if (park) {
+					await gate;
+				}
+				throw new Error('steam said no');
+			}
+			return { approved: [], held: [], unreadable: 0 };
+		});
+
+		for (let i = 0; i < 10; i += 1) {
+			await h.engine.tick();
+			h.advance(20 * 60_000);
+		}
+
+		park = true;
+		const sweep = h.engine.tick();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		/*
+		 * The other account is **removed**, not merely re-routed, so that after
+		 * this the halted one is genuinely all that is left. A re-routed sibling
+		 * comes straight back from the vault on the next beat and schedules itself
+		 * normally, which pins the cache at a sane finite value and hides the
+		 * defect entirely — verified: with `forgetAccount` alone this test passes
+		 * whether or not the recompute is there.
+		 */
+		h.removeAccount('76561198000000001');
+		h.engine.forgetAccount('76561198000000001');
+		release?.();
+		await sweep;
+
+		// One beat to rebuild the schedule from the vault, which now offers only
+		// the halted account.
+		await h.engine.tick();
+
+		const before = h.reads();
+		for (let beat = 0; beat < 5; beat += 1) {
+			h.advance(1000);
+			await h.engine.tick();
+		}
+
+		expect(
+			h.reads() - before,
+			'idle beats went on reading the vault, so the halt left the cache pinned at zero'
+		).toBe(0);
+	});
+
+	it('still re-reads the vault when a sibling reschedules normally', async () => {
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let park = false;
+		const h = twoAccounts(async (steamId64) => {
+			if (steamId64 === '76561198000000002' && park) {
+				await gate;
+			}
+			return { approved: [], held: [], unreadable: 0 };
+		});
+
+		// Both accounts get their slots and their first polls.
+		await h.engine.tick();
+		h.advance(1000);
+		await h.engine.tick();
+		h.advance(20 * 60_000);
+
+		// The sibling's poll is in flight when the user saves settings for the
+		// other account. Its healthy `nextDueAt` must not overwrite the
+		// invalidation `reset` just made.
+		park = true;
+		const sweep = h.engine.tick();
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+		h.engine.reset('76561198000000001');
+		release?.();
+		await sweep;
+
+		const before = h.reads();
+		await h.engine.tick();
+
+		expect(h.reads(), 'a sibling rescheduling undid the invalidation').toBeGreaterThan(before);
+	});
+});
+
+/**
+ * **A sign-in failure must not launder the failure count.**
+ *
+ * The branch correctly declines to *count* an expired session — backing off
+ * cannot fix one. It also used to write a fresh state record, which discarded
+ * whatever had already accumulated. An account alternating 403s with ordinary
+ * errors, which is what a flaky proxy in front of Steam looks like, therefore
+ * reset its tally every other poll: it never reached the halt and never built
+ * up backoff, failing forever at a fifteen-second cadence while the user
+ * believes it is working.
+ */
+describe('a session expiry among ordinary failures', () => {
+	it('does not reset the tally that leads to a halt', async () => {
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		let call = 0;
+		const failures: { halted: boolean }[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				// Every other poll is an expiry, the rest are ordinary failures.
+				runAutoConfirm: () => {
+					call += 1;
+					return call % 2 === 0
+						? Promise.reject(new ConfirmationsError('the saved session expired.', true))
+						: Promise.reject(new Error('steam said no'));
+				}
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, _reason, halted) => failures.push({ halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		for (let i = 0; i < 40; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+
+		expect(
+			failures.some((entry) => entry.halted),
+			'an account alternating expiries with real failures never halted'
+		).toBe(true);
+	});
+
+	/**
+	 * **And the accumulated backoff, which the test above cannot see.**
+	 *
+	 * It advances the clock twenty minutes a tick, so backoff never decides
+	 * whether a poll is due and deleting the `backoffMs` carry leaves it green —
+	 * verified. Yet the carry is half of what the branch comment claims: without
+	 * it every expiry erases the accumulated delay, so the next ordinary failure
+	 * restarts at `BACKOFF_START_MS` instead of doubling toward the maximum. An
+	 * account behind a flaky proxy alternating 403s with ordinary errors then
+	 * keeps hammering Steam at thirty-second intervals *during a rate limit* —
+	 * the "turned a failure into a speed-up" the comment says this prevents.
+	 */
+	it('does not reset the accumulated backoff either', async () => {
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		/** What the next poll should be: an ordinary failure, or an expiry. */
+		const script: ('fail' | 'expired')[] = ['fail', 'fail', 'expired', 'fail'];
+		let call = 0;
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () => {
+					const step = script[call];
+					call += 1;
+					return step === 'expired'
+						? Promise.reject(new ConfirmationsError('the saved session expired.', true))
+						: Promise.reject(new Error('steam said no'));
+				}
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		const backoff = (): number | undefined =>
+			(engine as unknown as { state: Map<string, { backoffMs?: number }> }).state.get(
+				'76561198000000001'
+			)?.backoffMs;
+
+		for (const step of script) {
+			await engine.tick();
+			// Past any backoff this could have written, so the schedule never
+			// decides the outcome — only the carry does.
+			clock += 20 * 60_000;
+			void step;
+		}
+
+		expect(call, 'the script did not run to the end').toBe(script.length);
+		expect(
+			backoff(),
+			'the expiry erased the accumulated backoff, so the next failure restarted at thirty seconds'
+		).toBe(120_000);
+	});
+
+	/*
+	 * And a genuine success still clears it, which is the whole point of the
+	 * counter being resettable at all.
+	 */
+	it('is still cleared by a poll that works', async () => {
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		let fail = true;
+		const failures: { halted: boolean }[] = [];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () =>
+					fail
+						? Promise.reject(new Error('steam said no'))
+						: Promise.resolve({ approved: [], held: [], unreadable: 0 })
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onFailure: (_id, _reason, halted) => failures.push({ halted }),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		for (let i = 0; i < 9; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		fail = false;
+		await engine.tick();
+		clock += 20 * 60_000;
+
+		fail = true;
+		for (let i = 0; i < 5; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+
+		expect(
+			failures.some((entry) => entry.halted),
+			'a success did not clear the count that had built up before it'
+		).toBe(false);
+	});
+});
+
+/**
+ * **The only recurring event a halted account has left.**
+ *
+ * `halted()` is called once — `nextDueAt` goes to infinity, so there is no
+ * second poll — which is why a halt toast the OS refused was lost outright.
+ * The notifier can retry it, but only if something tells it the account is
+ * still halted, and the beat that skips it is the only candidate.
+ */
+describe('an account the scheduler is skipping because it halted', () => {
+	it('is reported on the beat, so a lost halt notice can be retried', async () => {
+		const stillHalted: string[] = [];
+		const accounts = [account({ trades: true })];
+		let clock = NOW;
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () => Promise.reject(new Error('steam said no'))
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onStillHalted: (steamId64) => stillHalted.push(steamId64),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		// Ten failures reach the halt. The first tick seeds rather than polls.
+		for (let i = 0; i < 11; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+		expect(stillHalted, 'the account never halted, so this tests nothing').not.toHaveLength(0);
+
+		const before = stillHalted.length;
+		await engine.tick();
+		expect(
+			stillHalted.length,
+			'a halted account is skipped in silence, so a halt notice the OS refused can never be ' +
+				'retried — there is no other recurring event for that account'
+		).toBeGreaterThan(before);
+	});
+
+	/* And an account that is merely backing off is not reported as halted. */
+	it('is not reported for an account that is only backing off', async () => {
+		const stillHalted: string[] = [];
+		const accounts = [account({ trades: true })];
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () => Promise.reject(new Error('steam said no'))
+			} as unknown as ConfirmationsService,
+			now: () => NOW,
+			onStillHalted: (steamId64) => stillHalted.push(steamId64),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		// Seed, then one failure. Far short of the ten that halt.
+		await engine.tick();
+		await engine.tick();
+
+		expect(stillHalted, 'a backing-off account was reported as halted').toEqual([]);
+	});
+});
+
+/**
+ * **A settings save puts the account back to work, halt and all.**
+ *
+ * `reset` deleted the schedule but left the id in `halted`, and `tick` walks
+ * that set on every beat and calls `onStillHalted` — the retry path for a halt
+ * notice the OS refused. So after saving auto-confirm settings the engine went
+ * on asserting "stopped after 10 consecutive failures" about an account it was
+ * polling successfully, once a beat, for as long as the app stayed open.
+ * `forgetAccount` clears both; only `reset` did not.
+ */
+describe('an account whose settings are saved after it halted', () => {
+	async function haltedEngine() {
+		const accounts = [account({ trades: true })];
+		const stillHalted: string[] = [];
+		let clock = NOW;
+		let failing = true;
+		const engine = new AutoConfirmEngine({
+			vault: {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService,
+			confirmations: {
+				runAutoConfirm: () =>
+					failing
+						? Promise.reject(new Error('steam said no'))
+						: Promise.resolve({ approved: [], held: [], unreadable: 0 })
+			} as unknown as ConfirmationsService,
+			now: () => clock,
+			onStillHalted: (steamId64) => stillHalted.push(steamId64),
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		// Ten consecutive failures is what halts it.
+		for (let i = 0; i < 10; i += 1) {
+			await engine.tick();
+			clock += 20 * 60_000;
+		}
+
+		return {
+			engine,
+			stillHalted,
+			recover: () => {
+				failing = false;
+			},
+			beat: async () => {
+				clock += 20 * 60_000;
+				await engine.tick();
+			}
+		};
+	}
+
+	it('stops insisting the account is halted', async () => {
+		const h = await haltedEngine();
+		// One beat past the halt, so the retry path has actually fired once and the
+		// assertion below is measuring a change rather than a silence.
+		await h.beat();
+		expect(
+			h.stillHalted.length,
+			'the halted account never reached the retry path, so this asserts nothing'
+		).toBeGreaterThan(0);
+
+		h.recover();
+		h.engine.reset('76561198000000001');
+		const before = h.stillHalted.length;
+
+		await h.beat();
+		await h.beat();
+		await h.beat();
+
+		expect(
+			h.stillHalted.length - before,
+			'the engine kept re-firing "automatic confirmation stopped" for an account it is now ' +
+				'polling successfully, once on every beat'
+		).toBe(0);
+	});
+
+	/*
+	 * And `forgetAccount`, which always cleared it, still does — so this change
+	 * did not move the behaviour from one method to neither.
+	 */
+	it('still stops insisting after forgetAccount', async () => {
+		const h = await haltedEngine();
+		h.recover();
+		h.engine.forgetAccount('76561198000000001');
+		const before = h.stillHalted.length;
+
+		await h.beat();
+		await h.beat();
+
+		expect(h.stillHalted.length - before).toBe(0);
 	});
 });

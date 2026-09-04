@@ -27,6 +27,40 @@ export const escape = (s) =>
  * is asking about, which is the only position where it is a request rather than
  * an interruption.
  */
+/**
+ * Trustpilot's Review Collector, as markup.
+ *
+ * **It is a call to action, not a form.** Trustpilot's own catalogue describes
+ * the Review Collector as a button-style widget, and inspecting the rendered
+ * frame confirms it: no field, no submit, one outbound link into Trustpilot's
+ * evaluation flow. The writing still happens on their site. That is not a fault
+ * — a review nobody can tie to a real Trustpilot account is worth nothing to
+ * the reader it is meant to reassure — but it is worth stating plainly, because
+ * this was first added under the description "collect reviews without leaving
+ * the page", which it does not do.
+ *
+ * What it does buy is Trustpilot's own tracked collection surface rather than a
+ * hand-rolled link, and everything about it is public: the identifiers appear
+ * in the source of every site that embeds one. The anchor inside it is not
+ * decoration — it is what a reader sees when the script is blocked, which on a
+ * privacy-minded audience is a real fraction of them.
+ */
+export function reviewCollector(s) {
+	const w = s.reviews.widget;
+	return `<div
+						class="trustpilot-widget"
+						data-locale="${escape(w.locale)}"
+						data-template-id="${escape(w.templateId)}"
+						data-businessunit-id="${escape(w.businessUnitId)}"
+						data-style-height="52px"
+						data-style-width="250px"
+						data-theme="dark"
+						data-token="${escape(w.token)}"
+					>
+						<a href="${escape(s.reviews.profile)}" target="_blank" rel="noopener nofollow">Trustpilot</a>
+					</div>`;
+}
+
 export function reviewAsk(s, { got }) {
 	return `			<aside class="ask">
 				<div class="ask-body">
@@ -43,6 +77,7 @@ export function reviewAsk(s, { got }) {
 						not help, that is worth writing too.
 					</p>
 				</div>
+				<div class="ask-collector">${reviewCollector(s)}</div>
 				<div class="ask-actions">
 					<a class="button" href="${s.reviews.write}" rel="noopener nofollow">Write a review →</a>
 					<a class="button button-quiet" href="${s.reviews.profile}" rel="noopener nofollow">Read the reviews</a>
@@ -77,9 +112,10 @@ const RELEASE_GAPS = [
 	},
 	{
 		open: (r) => !r.codeSigned,
-		clause: 'the direct downloads carry no code-signing certificate',
-		noun: 'a code-signing certificate for the direct downloads',
-		sentence: 'The direct downloads carry no code-signing certificate, so Windows warns on them.'
+		clause: 'the direct downloads carry no code-signing certificate, and none is planned',
+		noun: 'a code-signing certificate for the direct downloads (not planned)',
+		sentence:
+			'The direct downloads carry no code-signing certificate and none is planned, so Windows warns on them.'
 	},
 	{
 		open: (r) => !r.reproducible,

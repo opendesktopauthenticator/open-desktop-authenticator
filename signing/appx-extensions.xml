@@ -1,0 +1,21 @@
+<!--
+  This fragment is inserted inside the Application's single <Extensions>
+  element by electron-builder. Electron itself implements and registers the COM
+  class at runtime; the package manifest tells Windows which executable to start
+  and binds that class to notification activation.
+
+  electron-builder does not expand macros inside a custom extension fragment,
+  so the executable is intentionally pinned here and guarded against
+  `productName` by tests.
+-->
+<com:Extension Category="windows.comServer">
+  <com:ComServer>
+    <com:ExeServer Executable="app\Open Desktop Authenticator.exe">
+      <com:Class Id="FB72EFDC-FEA0-44CD-9DD5-FFCFBEDBF734" />
+    </com:ExeServer>
+  </com:ComServer>
+</com:Extension>
+<desktop:Extension Category="windows.toastNotificationActivation">
+  <desktop:ToastNotificationActivation
+    ToastActivatorCLSID="FB72EFDC-FEA0-44CD-9DD5-FFCFBEDBF734" />
+</desktop:Extension>

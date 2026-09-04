@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { APERTURE, coverage, DESIGN, rgbaOf, shieldSvgPath } from '../src/shared/logo';
@@ -40,6 +40,16 @@ describe('the committed icons', () => {
 		// geometry change someone forgot to re-run — shows up here as a byte
 		// mismatch naming the file.
 		const scratch = join(root, 'node_modules', '.icon-verify');
+		/*
+		 * **Emptied first, or a deleted output cannot be noticed.**
+		 *
+		 * The generator writes files; it does not remove ones it no longer makes.
+		 * So a previous run's leftovers sat in here and were compared as though
+		 * this run had produced them — meaning dropping an `emit` entirely still
+		 * passed, which is the exact drift this test exists to catch. Found by
+		 * deleting one on purpose and watching nothing happen.
+		 */
+		rmSync(scratch, { recursive: true, force: true });
 		execFileSync(process.execPath, [join(root, 'tools', 'make-icons.mjs')], {
 			cwd: root,
 			env: { ...process.env, ICON_OUTPUT_DIR: scratch },

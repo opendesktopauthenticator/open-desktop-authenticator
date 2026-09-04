@@ -66,8 +66,21 @@ export class ClipboardCourier {
 
 	/** Put `text` on the clipboard and schedule its removal. */
 	copy(text: string, clearAfterMs: number): void {
-		this.cancel();
+		/*
+		 * **The write first, and the cancellation only once it has succeeded.**
+		 *
+		 * This cancelled the previous code's clearing timer before attempting the
+		 * write. If the write then failed — and Electron's clipboard can, when
+		 * another process holds it open — the *previous* Guard code was left sitting
+		 * on the clipboard with nothing scheduled to remove it, for the rest of the
+		 * session. A code this app put there and then abandoned is precisely what
+		 * the timer exists to prevent.
+		 *
+		 * In this order a failed write changes nothing: the old code is still
+		 * `written`, its timer still runs, and it is still wiped on schedule.
+		 */
 		this.clipboard.writeText(text);
+		this.cancel();
 		this.written = text;
 
 		const handle = this.setTimer(() => {

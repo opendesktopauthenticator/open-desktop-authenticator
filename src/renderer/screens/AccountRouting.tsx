@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { AccountSummary } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * Per-account network routing (§10.1).
@@ -37,10 +38,20 @@ export function AccountRouting({
 		}
 		setBusy(true);
 		setError(undefined);
-		onSave(proxyUrl)
+		// Start from a promise turn so a bridge which throws before returning its
+		// promise is still one settled attempt, with the same visible error and
+		// credential cleanup as an asynchronous refusal.
+		void Promise.resolve()
+			.then(() => onSave(proxyUrl))
 			.then(() => onClose())
 			.catch((err: unknown) => setError(messageOf(err)))
-			.finally(() => setBusy(false));
+			.finally(() => {
+				// This input is frozen for the complete attempt. Whether the user was
+				// saving a replacement or removing the route, no proxy credential needs
+				// to remain in renderer state once that action has settled.
+				setAddress('');
+				setBusy(false);
+			});
 	};
 
 	return (
@@ -79,17 +90,20 @@ export function AccountRouting({
 				<p className="hint bad">{account.routingProblem}</p>
 			)}
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError id="routing-error">{error}</DynamicError>}
 
 			<form
 				onSubmit={(event) => {
 					event.preventDefault();
-					save(address.trim());
+					const submittedAddress = address.trim();
+					save(submittedAddress);
 				}}
 			>
 				<label htmlFor="proxy-address">Proxy address</label>
 				<input
 					id="proxy-address"
+					aria-invalid={error !== undefined}
+					aria-describedby={error === undefined ? undefined : 'routing-error'}
 					type="password"
 					value={address}
 					onChange={(event) => setAddress(event.target.value)}

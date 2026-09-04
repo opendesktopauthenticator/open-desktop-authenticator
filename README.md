@@ -12,7 +12,7 @@ Built and maintained by **MASTERPANEL LLC** · [opendesktopauthenticator.com](ht
 > else** — anything else claiming to be a build of this is not ours.
 >
 > The Store package is signed, because Microsoft re-signs what it distributes.
-> The direct downloads are not signed yet, so Windows warns on first run; verify
+> The direct downloads are not signed and none is planned, so Windows warns on first run; verify
 > them against `SHA256SUMS.txt` and the build provenance attestation.
 >
 > It has been **exercised end to end against live Steam accounts** by the
@@ -72,6 +72,7 @@ rather check the bytes than be told they are fine.
 - Steam Guard codes
 - Trade and market confirmations: view, accept, deny
 - Optional auto-confirm, per account, per type, off by default
+- Optional desktop notifications when a confirmation needs you, per account, off by default
 - Optional per-account network routing
 - Runs entirely on your machine
 

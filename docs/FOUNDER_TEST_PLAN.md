@@ -375,6 +375,68 @@ Then repeat T17's broken-proxy setup and press **Trade** on that account.
 **Pass:** no window opens at all, and the row says the browser could not be
 routed. **Fails if** a window opens anyway, however it looks.
 
+### T31a · The three routing buttons, and what each one shows Steam
+
+A routed account offers **Trade (proxied)**, **Steam only** and **Direct**. T31
+covered the first. These two are the ones a person will actually reach for when
+a proxied page will not load, so what they show Steam is worth seeing once with
+your own eyes.
+
+1. On a routed account, press **Steam only**. Visit a page that reports your
+   address.
+2. In the same window, open one of the trade sites the mode lets out — the list
+   is in `DIRECT_CONTENT_DOMAINS` in `src/main/net/egress.ts`.
+
+**Pass:** Steam sees the **proxy's** address, and the trade site sees your
+machine's. **Fails if** Steam sees yours — that is the whole promise of the mode
+and the one thing it must never get wrong.
+
+> [!NOTE]
+> Anything the mode does not recognise goes through the proxy, not around it.
+> So an unfamiliar site loading slowly here is the design working, not a fault.
+
+3. Press **Direct** on the same account and check the address again.
+
+**Pass:** it is the address this machine normally browses from. **If you are
+behind a company or system proxy it will be that proxy's address, not your
+own** — the button says so, and that is correct: Direct removes the _account's_
+proxy, not your machine's network settings.
+
+### T31b · `Require proxies`
+
+Settings → **Require proxies**. Off by default; this is the vault-wide rule for
+people who want the choice gone.
+
+1. Turn it on. Look at a routed account's row.
+
+**Pass:** only **Trade (proxied)** remains — Steam only and Direct are gone.
+
+2. Look at an account with **no** proxy and press its button.
+
+**Pass:** it refuses, and the message names both ways out (give the account a
+proxy, or turn the setting off). **Fails if** a window opens.
+
+3. Try **Add authenticator** and **Move authenticator** with the proxy field
+   empty.
+
+**Pass:** the field says _required_, and the submit button will not go.
+
+4. With the setting on, open a routed browser, then turn the setting **off and
+   on again**.
+
+**Pass:** the window stays open — it is compliant. Now open a **Direct** window
+first (setting off), then turn the setting on.
+
+**Pass:** that window closes on its own. **Fails if** it stays open: a window
+making unrouted requests under a rule that forbids them is exactly what the
+setting exists to stop.
+
+5. With the setting on, check Settings again.
+
+**Pass:** update checks have stopped — the switch says so. The update check goes
+to GitHub, not to Steam, so no account's proxy applies to it, and this setting
+says that request should not be made unrouted.
+
 ### T32 · The browser ends when the vault locks
 
 1. Open a browser for an account and leave it on a signed-in Steam page.
@@ -511,6 +573,59 @@ Enable it, lock the vault, send a trade, wait.
 
 **Pass:** nothing is approved until you unlock.
 
+### T34 · Notifications
+
+**Nothing here approves anything.** This is the one poll setting that is safe to
+try on an account you care about — which is also why the interesting failures
+are about what a toast _says_ rather than what it does.
+
+1. On one account, switch **notifications** on and leave both auto-confirm
+   switches **off**. Leave the detail on its default, `Everything`.
+   — With market auto-confirm on, the listing in step 2 is approved and there is
+   correctly no toast, so the test would appear to fail while working.
+2. Set the interval to 60 seconds, so you are not waiting on a 15-second poll
+   while watching for one toast.
+3. Make a market listing from another device.
+
+**Pass:** within about a minute, exactly **one** notification, titled with that
+account's name, naming the listing. The account row reads
+`notifying, approving nothing` — not `auto-confirm: off`.
+
+4. Wait through two more polls without touching anything.
+
+**Pass:** no repeat. The same pending confirmation is announced once, not every
+minute. **Fails if** it repeats — that is the version of this feature people
+switch off.
+
+5. Click the notification.
+
+**Pass:** the window comes to the front, on that account's confirmations. Try it
+again with the window closed to the tray, and again with a different screen
+already open (routing, or the auto-confirm settings) — all three should land in
+the same place.
+
+6. **Lock the vault.** Make another listing. Wait.
+
+**Pass:** no notification at all while locked. Unlock, and the first poll after
+it stays silent too — it establishes what is already there rather than
+announcing a backlog.
+
+7. **Now lock Windows** (Win+L) with the vault still **unlocked**, and make
+   another listing.
+
+**Pass — and read this before filing it as a bug:** the notification **does**
+still arrive, and on the lock screen it **does** name the trade and the item.
+That is the intended behaviour and the disclosure beside the switch says so; see
+`THREAT_MODEL.md` §3.2 for why a degrade was considered and rejected. If you
+would rather it did not, the fix is `Count only` or `Type only`, which is what
+those options are for — switch to `Type only` and repeat this step to confirm
+the item name is gone.
+
+8. Switch notifications **off** and make one more listing.
+
+**Pass:** silence. **Fails if** anything still arrives, which would mean the
+switch does not reach the poller.
+
 ### T23 · Remove an account
 
 **Read this before doing it.** Removing an account from the vault does not remove
@@ -577,6 +692,6 @@ that closed are the ones a reader would otherwise assume are still open.
 - **Run a Linux build.** Neither the AppImage nor the `.deb` has been launched by
   a human. This is the largest untested surface in the project.
 - A Windows code-signing certificate (Q2) — the direct downloads stay unsigned
-  until SignPath, and the Store package is signed by Microsoft instead.
+  (no certificate is planned), and the Store package is signed by Microsoft instead.
 - Sign-off on the IPC channel table (§24.3).
 - The scrypt work factor benchmarked on your slowest target machine (Q6).

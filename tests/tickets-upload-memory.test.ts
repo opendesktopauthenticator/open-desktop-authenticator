@@ -1,0 +1,515 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { once } from 'node:events';
+import type { ClientRequest } from 'node:http';
+import { request as httpRequest } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+
+/**
+ * What an upload costs this process while it is arriving.
+ *
+ * The upload reader used to push every chunk onto an array and then hand
+ * `Buffer.concat` the lot, so the whole body existed in memory twice. Eight
+ * concurrent twenty-megabyte uploads — nginx permits eight connections per
+ * address on this path, and no credential is needed to open one — took RSS from
+ * 76.1 MiB to 399.7 MiB against the unit's `MemoryMax=256M`. systemd kills the
+ * service, and the whole support surface goes down: filing a report, reading
+ * your own report, the admin queue. A denial of service costing eight HTTP
+ * requests and no account.
+ *
+ * **That property had no guard in the repository at all.** The fix was verified
+ * once by hand, with a script in a scratch directory that no longer exists, and
+ * the defect was afterwards put back in full — chunk array, `Buffer.concat`, the
+ * whole body resident, the external contract and the temp-file cleanup left
+ * intact so nothing else could notice — and the entire ticket suite passed and
+ * exited zero. Nothing in it could see the defect, because every other ticket
+ * test drives `handle` with a fake `Readable` and a fake response: no socket, no
+ * kernel buffers, no concurrency, and nothing looking at what the process holds.
+ * A fix nobody can regress against is a fix with a shelf life.
+ *
+ * So this file is the one that does the expensive thing. It starts the real
+ * server on a real loopback port, opens eight connections at once, and watches
+ * what the process is holding while the bodies arrive. Three escapes are covered,
+ * each one already proven to slip past everything else in the suite:
+ *
+ *  1. buffering the body instead of streaming it to disk — the headline defect;
+ *  2. destroying the request on the oversize path, which turns the 413 that
+ *     exists to explain the refusal into a socket hang up;
+ *  3. deleting the `write()`/`drain` backpressure check, which moves the same
+ *     unbounded buffer inside the write stream, where no reading of the source
+ *     text can find it.
+ *
+ * The first and third are caught by measurement, the second by what the client
+ * actually receives — deliberately not by where `request.destroy()` sits in the
+ * file. The guard that used to cover it read the source between the last
+ * `request.pause();` and `request.oversized = true;`, so moving the destroy one
+ * line later, after the mark instead of before it — exactly what a careless "we
+ * should also close the socket while we are here" edit looks like — left the
+ * whole suite green while every oversized upload got ECONNRESET.
+ *
+ * **Proven, not assumed.** Each of the three was reapplied to `receiveUpload`
+ * and the ticket suite re-run. Every time, this file was the only thing that
+ * went red: 181 of the other 182 tests passed under each mutant, and the run
+ * exited 1 solely because of the assertions below.
+ */
+
+let service: typeof import('../tickets/server.mjs', { with: { 'resolution-mode': 'import' } });
+let files: string;
+let port = 0;
+
+beforeAll(async () => {
+	files = mkdtempSync(join(tmpdir(), 'oda-upload-mem-'));
+	process.env.TICKETS_DB = ':memory:';
+	// The module binds a fixed port on import. Suppress that, then bind port 0
+	// ourselves below: a hard-coded port makes the file fail when the real
+	// service — or a parallel vitest worker — already holds it.
+	process.env.TICKETS_NO_LISTEN = '1';
+	process.env.TICKETS_FILES = files;
+	service = await import('../tickets/server.mjs');
+	service.server.listen(0, '127.0.0.1');
+	await once(service.server, 'listening');
+	const bound = service.server.address();
+	if (bound === null || typeof bound === 'string') {
+		throw new Error('the ticket server did not bind a loopback port');
+	}
+	port = bound.port;
+});
+
+afterAll(async () => {
+	service?.server?.close?.();
+	await once(service.server, 'close').catch(() => undefined);
+	rmSync(files, { recursive: true, force: true });
+});
+
+const ORIGIN = 'https://opendesktopauthenticator.com';
+
+/**
+ * The unit of body, sent over and over.
+ *
+ * Deliberately two buffers reused by every connection rather than one payload
+ * per connection. The measurement below is of this whole process, so a client
+ * that allocated twenty megabytes per upload would be charged for the very
+ * thing it is trying to prove the server no longer does. `write` neither copies
+ * nor mutates what it is handed, so eight sockets sharing one buffer cost one
+ * buffer, and both of these are allocated before the baseline is taken.
+ *
+ * Four megabytes rather than something polite, because the size of the slice is
+ * what decides how far ahead of the disk the socket can get. Measured with the
+ * backpressure check deleted, holding everything else fixed: one-megabyte slices
+ * reached 68 MiB of growth and four-megabyte slices 164 MiB, while the correct
+ * code read the same either way. A tidy little client hides that defect
+ * completely, so this one is not tidy.
+ */
+const SLICE = 4 * 1024 * 1024;
+
+/** The first slice, carrying a PNG signature so `sniff` recognises the body. */
+const MAGIC_SLICE = (() => {
+	const slice = Buffer.alloc(SLICE, 0x41);
+	Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(slice, 0);
+	return slice;
+})();
+
+/**
+ * The first slice of an **accepted** body: an MP4 `ftyp` box at offset 4.
+ *
+ * The PNG above is deliberately refused — twenty megabytes is far over the six
+ * megabyte image cap — so it exercises the reader and returns before
+ * `storeUpload` ever runs. That left the whole accept path unmeasured, and the
+ * accept path is where a plausible one-line addition lives: a dedupe hash
+ * (`createHash('sha256').update(readFileSync(path))`) is the obvious way to
+ * implement "do not store the same screenshot twice", and it reads the finished
+ * file back into memory. Proven against this suite before this slice existed:
+ * eight accepted uploads went from 35.8 MiB of growth to 141.9 MiB with every
+ * test still green.
+ *
+ * Video's cap is twenty megabytes, so a body under it is stored rather than
+ * refused and the 200 path is measured too.
+ */
+const VIDEO_MAGIC_SLICE = (() => {
+	const slice = Buffer.alloc(SLICE, 0x41);
+	// `\x00\x00\x00\x18ftypisom` — a realistic ISO base media header, but only the four
+	// bytes at offset 4 decide anything: `tickets/server.mjs` sniffs mp4 with `at4: [0x66, 0x74,
+	// 0x79, 0x70]`, so the box size in front and the `isom` brand behind are both ignored. Proved
+	// by mutation: `ftypisom` -> `ftypisoZ` leaves this suite green, `ftyp` -> `ftyq` turns the
+	// accepted-upload test red with 415 instead of 200.
+	//
+	// The four leading bytes are escapes rather than the bytes themselves, and must stay that
+	// way. Typed literally they put a NUL at byte 6595 of this file, inside the 8000 bytes git
+	// sniffs before deciding a file is binary, so `git diff` showed `Binary files a/... and
+	// b/... differ` and nothing else: no reviewable diff, no `git grep`, no blame, on a test
+	// whose whole job is to hold a denial-of-service fix in place. `grep` refused the file too.
+	// 'binary' is latin1, one byte per code unit, so the buffer these escapes build is the same
+	// twelve bytes to the byte.
+	Buffer.from('\x00\x00\x00\x18ftypisom', 'binary').copy(slice, 0);
+	return slice;
+})();
+
+/** Every slice after the first. Content is irrelevant past the sniff window. */
+const FILLER = Buffer.alloc(SLICE, 0x42);
+
+let nth = 0;
+/**
+ * A distinct client address per request.
+ *
+ * `/support/attach` allows twelve uploads per address in ten minutes, and every
+ * loopback connection is 127.0.0.1. Without this the later tests in the file
+ * would be answered 429 by the rate limiter and would assert nothing about
+ * memory or about the oversize path — passing for a reason that has nothing to
+ * do with what they are named after.
+ */
+const someAddress = (): string => {
+	nth += 1;
+	return `10.70.${(nth >> 8) & 255}.${nth & 255}`;
+};
+
+interface Answer {
+	status: number;
+	body: string;
+}
+
+/**
+ * POST a body of `total` bytes and return what came back.
+ *
+ * **The error handling is the point of this helper.** A refusal closes the
+ * connection while the client is still writing, so the write side always ends
+ * in EPIPE or ECONNRESET on a correct refusal — that is not the failure. The
+ * failure is receiving no response at all. So a socket error is only fatal
+ * before response headers arrive; after them, whatever was received is the
+ * answer. Rejecting on any error would have made the correct behaviour and the
+ * torn-down-socket behaviour indistinguishable, which is precisely the
+ * distinction this file exists to draw.
+ */
+function post(
+	path: string,
+	total: number,
+	headers: Record<string, string> = {},
+	/** Send a body the server will store rather than refuse. See VIDEO_MAGIC_SLICE. */
+	accepted = false
+): Promise<Answer> {
+	return new Promise<Answer>((resolve, reject) => {
+		let answered = false;
+		let status = 0;
+		let body = '';
+		const req = httpRequest(
+			{
+				host: '127.0.0.1',
+				port,
+				path,
+				method: 'POST',
+				headers: {
+					origin: ORIGIN,
+					'x-real-ip': someAddress(),
+					'content-type': 'application/octet-stream',
+					'content-length': String(total),
+					...headers
+				}
+			},
+			(res) => {
+				answered = true;
+				status = res.statusCode ?? 0;
+				res.setEncoding('utf8');
+				res.on('data', (chunk: string) => {
+					body += chunk;
+				});
+				res.on('end', () => resolve({ status, body }));
+				// A refused upload is answered and the connection is closed under us
+				// mid-body; the status line is still the answer we came for.
+				res.on('aborted', () => resolve({ status, body }));
+			}
+		);
+		req.on('error', (error) => {
+			if (answered) {
+				resolve({ status, body });
+			} else {
+				reject(error);
+			}
+		});
+		void feed(req, total, accepted);
+	});
+}
+
+/**
+ * Write `total` bytes as fast as the socket will take them.
+ *
+ * No artificial gap between slices, on purpose. A client that pauses lets the
+ * disk catch up and hides a missing backpressure check entirely — with the
+ * `write()`/`drain` block deleted, a *slow* client still looks fine and a fast
+ * one drives the write stream's internal queue to hundreds of megabytes. The
+ * attacker is not going to be polite about it, so neither is this.
+ */
+async function feed(req: ClientRequest, total: number, accepted = false): Promise<void> {
+	try {
+		let sent = 0;
+		while (sent < total) {
+			const source = sent === 0 ? (accepted ? VIDEO_MAGIC_SLICE : MAGIC_SLICE) : FILLER;
+			const take = Math.min(source.length, total - sent);
+			const piece = take === source.length ? source : source.subarray(0, take);
+			sent += take;
+			if (!req.write(piece)) {
+				await once(req, 'drain');
+			}
+		}
+		req.end();
+	} catch {
+		// The server closed on us because it refused the body. Expected on every
+		// oversize path; the response side of `post` decides what that meant.
+	}
+}
+
+interface Reading {
+	/** Resident set size. What `MemoryMax` counts and what the OOM killer reads. */
+	rss: number;
+	/** Bytes held in `ArrayBuffer`s, which is what a request body is made of. */
+	buffers: number;
+}
+
+const reading = (): Reading => {
+	const usage = process.memoryUsage();
+	return { rss: usage.rss, buffers: usage.arrayBuffers };
+};
+
+/**
+ * Sample memory until stopped, and report the highest reading of each measure.
+ *
+ * **Two measures rather than one, and the second is not decoration.** RSS is the
+ * number that matters — it is what `MemoryMax` counts and what gets the process
+ * killed — but it is a high-water mark that the allocator never gives back, so
+ * once anything in this process has been that large, a later burst can hold just
+ * as much while RSS barely moves. Test files share a worker process, so a heavy
+ * file running before this one could hand a genuinely broken reader a quiet RSS
+ * and a green result.
+ *
+ * `arrayBuffers` has no such blind spot: V8 counts the bytes, not the pages, and
+ * the count falls the instant a buffer is freed. A body kept in memory — in a
+ * chunk array or in a write stream's queue — is `ArrayBuffer` bytes either way,
+ * so it is counted here whatever the allocator did with the pages underneath.
+ */
+function watchMemory(): { stop: () => Reading } {
+	const peak = reading();
+	const sample = (): void => {
+		const now = reading();
+		if (now.rss > peak.rss) {
+			peak.rss = now.rss;
+		}
+		if (now.buffers > peak.buffers) {
+			peak.buffers = now.buffers;
+		}
+	};
+	const timer = setInterval(sample, 10);
+	return {
+		stop: () => {
+			clearInterval(timer);
+			sample();
+			return peak;
+		}
+	};
+}
+
+const mib = (bytes: number): string => `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+
+/**
+ * The attack exactly as it is available: eight connections, each the largest
+ * body accepted. That is what nginx permits per address on this path, so it
+ * needs no more than one machine and no account. A hundred and sixty megabytes
+ * moves across loopback in about two hundred milliseconds here, which is cheap
+ * enough that the guard can afford to be the real shape rather than a scaled
+ * model of it.
+ */
+const CONCURRENT = 8;
+const UPLOAD_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Growth allowed across all eight uploads together, on either measure.
+ *
+ * Not a tight bound on what streaming costs, and not meant to be. Most of what a
+ * correct run shows is socket read buffers the collector has not got to yet —
+ * short-lived, real while they last, and their quantity is a fact about when V8
+ * decided to run rather than about this code. Pinning that number would make the
+ * file fail on a machine with a different heap budget instead of on a defect.
+ *
+ * What it bounds is *retention*, and the readings it sits between are far apart.
+ * Measured in a vitest worker on the development machine, growth over the eight
+ * uploads:
+ *
+ *   streaming to disk, as the code stands    67 MiB   (53.5-69.2 across runs)
+ *   backpressure check deleted              162 MiB   (125.8-162.2 across runs)
+ *   body buffered and concatenated          322 MiB   (322.0-322.2 across runs)
+ *
+ * **The middle row moves, and an earlier version of this comment said it did
+ * not.** It claimed only the first row varied and that the other two "came back
+ * identical to a tenth of a megabyte", on the strength of two isolated readings
+ * of 162.0 and 162.1. Eleven runs give 125.8 to 162.2 — a 36 MiB spread, with
+ * the low end reached inside the full suite, where the disk keeps up better.
+ * That matters to whoever reads this next: the no-drain row is the one reading
+ * in the table to distrust, and at its minimum it clears the bound by 31 per
+ * cent rather than the 69 the two quoted figures implied.
+ *
+ * The bottom row genuinely is stable, and it is the original defect — whose
+ * real-world figure was RSS from 76.1 to 399.7 MiB against a 256M `MemoryMax`.
+ *
+ * Ninety-six megabytes sits between them: 39 per cent clear of the widest
+ * correct reading (69.2) and 24 per cent under the *lowest* defect reading
+ * (125.8). If this ever fails by a few megabytes rather than by a factor,
+ * suspect the collector before suspecting the reader — and check `arrayBuffers`
+ * in the message, which is the measure that does not lie about it.
+ */
+const GROWTH_LIMIT = 96 * 1024 * 1024;
+
+/** Under the twenty-megabyte video cap, so the body is stored rather than refused. */
+const ACCEPTED_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Tighter than the refusal bound, because nothing legitimate holds an accepted
+ * body either — measured at 35.8 MiB of growth as the code stands, against
+ * 141.9 MiB with a dedupe hash added to `storeUpload`. Set between them, nearer
+ * the floor than the ceiling.
+ */
+const ACCEPTED_GROWTH_LIMIT = 80 * 1024 * 1024;
+
+describe('what concurrent uploads cost this process', () => {
+	it('streams several maximum-size uploads to disk instead of holding them in memory', async () => {
+		// A small upload first, so the write-stream machinery, the buffer pools
+		// and the JIT are all paid for before the baseline is taken. Without it
+		// the first-run cost of the module itself is charged to the measurement.
+		const warm = await post('/support/attach', 64 * 1024);
+		expect(warm.status, 'the warm-up upload never reached the attach route').toBe(200);
+
+		const baseline = reading();
+		const probe = watchMemory();
+		const answers = await Promise.all(
+			Array.from({ length: CONCURRENT }, () => post('/support/attach', UPLOAD_BYTES))
+		);
+		const peak = probe.stop();
+		const grew = { rss: peak.rss - baseline.rss, buffers: peak.buffers - baseline.buffers };
+
+		// Twenty megabytes sniffs as a PNG and is far over the six-megabyte image
+		// cap, so each is refused *after* the whole body has been received and
+		// its temporary file is deleted — the reader is exercised end to end and
+		// nothing is left on disk. The assertion is here because a 429 or a 403
+		// would mean the bodies were never read at all and the measurement below
+		// would be of nothing, passing for the worst possible reason.
+		for (const answer of answers) {
+			expect(
+				answer.status,
+				'the uploads did not reach the reader, so nothing about memory was measured'
+			).toBe(415);
+		}
+
+		const held =
+			`${CONCURRENT} concurrent uploads of ${mib(UPLOAD_BYTES)} grew RSS by ` +
+			`${mib(grew.rss)} and ArrayBuffer bytes by ${mib(grew.buffers)}, past the ` +
+			`${mib(GROWTH_LIMIT)} bound. The reader is holding the bodies instead of ` +
+			'streaming them to disk — either buffered into an array and concatenated at the ' +
+			'end, or piling up inside the write stream because the write()/drain check is ' +
+			'gone. Eight requests shaped exactly like these, from one address and no account, ' +
+			'is how this process gets killed by its 256M MemoryMax and takes every support ' +
+			'page down with it.';
+		expect(grew.buffers, held).toBeLessThan(GROWTH_LIMIT);
+		expect(grew.rss, held).toBeLessThan(GROWTH_LIMIT);
+	}, 120_000);
+
+	/**
+	 * **And the path a real upload actually takes.**
+	 *
+	 * Every body above is refused at the image cap, so it exercises the reader
+	 * and returns before `storeUpload` runs. That left the accept path — the one
+	 * ordinary users are on — measured by nothing, and it is where the plausible
+	 * regression lives: reading the finished file back to hash it is the obvious
+	 * implementation of "do not store the same screenshot twice", and
+	 * `readFileSync` is already imported in that module.
+	 *
+	 * Proven against this file before this test existed: two lines in
+	 * `storeUpload` took eight accepted uploads from 35.8 MiB of growth to 141.9
+	 * MiB with all 103 test files green.
+	 *
+	 * A tighter bound than the refusal case, because the accepted bodies are
+	 * smaller and nothing legitimate holds them: measured at 35.8 MiB for the
+	 * code as it stands.
+	 */
+	it('streams accepted uploads to disk too, not just the ones it refuses', async () => {
+		const warm = await post('/support/attach', 64 * 1024, {}, true);
+		expect(warm.status, 'the warm-up upload never reached the attach route').toBe(200);
+
+		const baseline = reading();
+		const probe = watchMemory();
+		const answers = await Promise.all(
+			Array.from({ length: CONCURRENT }, () => post('/support/attach', ACCEPTED_BYTES, {}, true))
+		);
+		const peak = probe.stop();
+		const grew = { rss: peak.rss - baseline.rss, buffers: peak.buffers - baseline.buffers };
+
+		// The whole point: these must be *stored*. A 415 would mean the sniff
+		// stopped recognising the body and this measured the refusal path again —
+		// passing for exactly the reason the test was written to stop.
+		for (const answer of answers) {
+			expect(
+				answer.status,
+				'the uploads were refused, so the accept path went unmeasured once more'
+			).toBe(200);
+		}
+
+		const held =
+			`${CONCURRENT} accepted uploads of ${mib(ACCEPTED_BYTES)} grew RSS by ` +
+			`${mib(grew.rss)} and ArrayBuffer bytes by ${mib(grew.buffers)}, past the ` +
+			`${mib(ACCEPTED_GROWTH_LIMIT)} bound. Something on the success path is reading the ` +
+			'stored file back into memory — a dedupe hash, a thumbnail, a virus scan. Eight ' +
+			'ordinary uploads is not a lot, and this process has a 256M MemoryMax.';
+		expect(grew.buffers, held).toBeLessThan(ACCEPTED_GROWTH_LIMIT);
+		expect(grew.rss, held).toBeLessThan(ACCEPTED_GROWTH_LIMIT);
+	}, 120_000);
+});
+
+describe('refusing an oversized body over a real socket', () => {
+	/*
+	 * One byte over what the reader accepts. `/support/attach` caps at the video
+	 * limit plus a kilobyte, so this is the smallest body that trips it.
+	 */
+	const OVER_UPLOAD = 20 * 1024 * 1024 + 2048;
+
+	it('answers an oversized upload with 413 rather than a socket hang up', async () => {
+		const answer = await post('/support/attach', OVER_UPLOAD).catch((error: Error) => error);
+
+		// Named separately from the status check because the two failures read
+		// completely differently to whoever hits them: a 500 is a bug in the
+		// refusal, a hang up is the refusal never arriving.
+		expect(
+			answer instanceof Error ? `${answer.name}: ${answer.message}` : 'a response arrived',
+			'the oversized upload was answered by tearing down the socket, so the client sees a ' +
+				'hang up instead of the 413 whose entire job is to say why the file was refused'
+		).toBe('a response arrived');
+		const received = answer as Answer;
+		expect(
+			received.status,
+			'an oversized upload has to be told it was oversized, not handed some other status'
+		).toBe(413);
+		expect(
+			received.body,
+			'the 413 body has to name the size as the reason, or the uploader has nothing to act on'
+		).toMatch(/larger than we accept/i);
+	}, 120_000);
+
+	it('answers an oversized form post with 413 rather than a socket hang up', async () => {
+		// The other body reader, on a sixteen-kilobyte cap, so this costs nothing.
+		// Both readers have the same oversize path and both have been broken the
+		// same way; guarding only the upload one leaves half the property uncovered.
+		const answer = await post('/support/submit', 64 * 1024, {
+			'content-type': 'application/x-www-form-urlencoded'
+		}).catch((error: Error) => error);
+
+		expect(
+			answer instanceof Error ? `${answer.name}: ${answer.message}` : 'a response arrived',
+			'the oversized form post was answered by tearing down the socket, so the sender sees a ' +
+				'hang up instead of being told the submission was too large'
+		).toBe('a response arrived');
+		const received = answer as Answer;
+		expect(
+			received.status,
+			'an oversized submission has to be told it was oversized, not left to guess'
+		).toBe(413);
+		expect(
+			received.body,
+			'the 413 page has to say the submission was too large, or it explains nothing'
+		).toMatch(/too large/i);
+	}, 60_000);
+});

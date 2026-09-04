@@ -14,6 +14,8 @@
  * neither applies, the page says nothing.
  */
 
+import { reviewAsk } from '../markup.mjs';
+
 /** Valve's own pages. Every number on these pages comes from one of them. */
 const VALVE = {
 	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31',
@@ -379,12 +381,14 @@ export const moveToPc = {
 			<div class="callout">
 				<p>
 					<strong>${
-						s.release.published ? 'Yes — the transfer is built into the application.' : 'Not yet.'
+						s.features.transfer.anyPublic
+							? 'Yes — the transfer is built into the published application.'
+							: 'Not yet.'
 					}</strong>
 					${
-						s.release.published
+						s.features.transfer.anyPublic
 							? 'It uses the flow described above and never substitutes remove-and-add.'
-							: `${s.name} implements this flow, and it has been run successfully against a real account — but there is no public release yet, so there is nothing for you to download. <a href="/download">The download page tracks exactly where that stands.</a>`
+							: `${s.name} implements this flow in the upcoming ${s.version} source, and it has been run successfully against a real account — but the currently published GitHub ${s.publication.github.latestVersion ?? 'build'} and Microsoft Store ${s.publication.store.latestVersion ?? 'build'} builds do not contain it. <a href="/download">The download page tracks exactly where that stands.</a>`
 					}
 				</p>
 				<p>
@@ -409,5 +413,7 @@ export const moveToPc = {
 					<span>What the new one does, and why the old one stops working.</span></a>
 				</li>
 			</ul>
+
+${reviewAsk(s, { got: 'Did this get your authenticator onto your PC?' })}
 		</article>`
 };

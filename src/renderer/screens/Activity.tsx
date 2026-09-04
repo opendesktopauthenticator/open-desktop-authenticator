@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AccountSummary, ActivityList } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * What automatic confirmation did while nobody was watching.
@@ -167,7 +168,10 @@ export function Activity({
 			// An entry that failed to parse has no type, so it cannot be ruled out as
 			// the account-recovery confirmation. It belongs with the things a person
 			// has to look at, not in the ordinary list below.
-			entry.kind === 'unreadable'
+			entry.kind === 'unreadable' ||
+			// Nothing this application does will fix an expired session, so it is
+			// exactly the case that has to reach a person rather than scroll past.
+			entry.kind === 'signInRequired'
 	);
 	const rest = entries.filter((candidate) => !urgent.includes(candidate));
 
@@ -185,7 +189,7 @@ export function Activity({
 				away&rdquo;, not &ldquo;what did I trade last month&rdquo;. Nothing here is written to disk.
 			</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError>{error}</DynamicError>}
 
 			{urgent.map(({ steamId64, entry }, index) => (
 				<div className="ceremony" key={`${index}-${entry.at}`}>
@@ -217,6 +221,21 @@ export function Activity({
 								<strong>Open the account and check by hand.</strong> Nothing here can tell what the
 								skipped {entry.count === 1 ? 'confirmation was' : 'confirmations were'}, which is
 								why it is being shown to you rather than passed over.
+							</p>
+						</>
+					) : entry.kind === 'signInRequired' ? (
+						<>
+							<h2>Sign in again to keep checking this account</h2>
+							<p>
+								{nameOf(steamId64)} · {formatTime(entry.at)}
+							</p>
+							<p>
+								The saved Steam session for this account has expired. Nothing here can renew it, so
+								this account is not being checked until you sign in again.
+							</p>
+							<p>
+								Open the account and sign in. Until then, confirmations may be waiting without
+								anything telling you about them.
 							</p>
 						</>
 					) : (
@@ -255,9 +274,23 @@ export function Activity({
 			) : entries.length === 0 ? (
 				<div className="empty">
 					<h2>Nothing yet</h2>
+					{/*
+						**It said "it never will", and that was wrong twice over.**
+
+						This log is not only about approving. An account with notifications
+						on and both auto types off is polled just as hard, and the failure
+						and halt paths write entries for it — "Checking stopped for this
+						account" among them. So a user who switched on notifications only
+						was told the screen would stay empty for ever, about the one screen
+						that would tell them their account had stopped being checked.
+
+						What is true of the default is that nothing is switched on, and
+						nothing switched on means nothing polled. That is worth saying; the
+						promise about the future is not.
+					*/}
 					<p>
-						Automatic confirmation has not done anything. If you have not switched it on for an
-						account, it never will — that is the default.
+						Nothing has been checked or approved yet. This screen fills in once an account has
+						automatic confirmation or notifications switched on — both are off by default.
 					</p>
 				</div>
 			) : (
@@ -299,9 +332,22 @@ function describe(entry: ActivityList['entries'][number]['entry']): string {
 			return entry.count === 1
 				? 'One confirmation could not be read and was skipped'
 				: `${entry.count} confirmations could not be read and were skipped`;
-		default:
+		case 'signInRequired':
+			return 'Sign in again — the saved Steam session expired';
+		case 'halted':
 			return entry.reason;
+		default:
+			// **Exhaustive on purpose.** The `default` here used to return
+			// `entry.reason`, which quietly assumed every kind it had not been told
+			// about carries one. `signInRequired` does not, so adding it printed
+			// `undefined` on screen. Now a new kind is a compile error instead.
+			return assertNever(entry);
 	}
+}
+
+/** A kind nobody handled. Unreachable, and a type error if it becomes reachable. */
+function assertNever(entry: never): string {
+	return String((entry as { kind?: string }).kind ?? 'unknown');
 }
 
 /** Local time, seconds included: "when exactly" is the question being asked. */

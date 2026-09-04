@@ -52,12 +52,13 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, timingSafeEqual, scryptSync } from 'node:crypto';
 import {
 	createReadStream,
+	createWriteStream,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	renameSync,
 	rmSync,
-	statSync,
-	writeFileSync
+	statSync
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -297,21 +298,100 @@ const fileFor = (id) => {
 	return join(FILES_DIR, id);
 };
 
+/**
+ * The name an upload wears while it is still arriving.
+ *
+ * It lives in the attachment directory rather than a temporary one so that the
+ * finished file can be claimed with a `rename`, which is atomic only within a
+ * filesystem — across one, Node copies, and a copy of a twenty-megabyte upload
+ * is the memory and the time this whole shape exists to avoid. It also keeps
+ * every byte this service holds under the one directory the systemd unit makes
+ * writable.
+ *
+ * The prefix is deliberately not a 32-character hex id, so `sweepOrphans` walks
+ * straight past an upload that is still being written instead of deleting it out
+ * from under the socket that is filling it.
+ */
+const INCOMING_PREFIX = 'incoming-';
+const incomingPath = () => join(FILES_DIR, `${INCOMING_PREFIX}${randomBytes(16).toString('hex')}`);
+
+/**
+ * How long a part-written upload may sit before a sweep takes it.
+ *
+ * Every failure path below removes its own temp file, so the only way one
+ * survives is the one case no `catch` can reach: the process not being there to
+ * run the cleanup. A kill, an OOM, a power cut. Without this, streaming to disk
+ * would have traded a memory leak for a disk leak, which is a worse deal — the
+ * memory came back on restart and these bytes never would, and nothing else
+ * counts them, since the size accounting reads rows and a part-written upload
+ * has none.
+ *
+ * An hour, because nginx gives a body sixty seconds to arrive: anything
+ * untouched for an hour is not an upload in progress under any timing.
+ */
+const INCOMING_LIFETIME_MS = 60 * 60 * 1000;
+
 /** Drop uploads nobody ever attached to a report, from disk and from the table. */
+/**
+ * Send a file, and survive it going away underneath us.
+ *
+ * **`pipe` does not forward errors, and there was no listener.** The size is
+ * read with `statSync` and the stream is opened afterwards — a gap the
+ * retention sweep, a failed disk, or an operator with `rm` can all land in. The
+ * resulting `error` event fires on a stream nobody is listening to, outside the
+ * request's promise, which in Node is an uncaught exception: **one attachment
+ * view could stop the entire ticket service**, for every other reporter at
+ * once.
+ *
+ * Headers are already sent by the time this can happen, so there is no status
+ * left to change. Ending the response is the whole of what is still available,
+ * and it is enough: the client sees a truncated body rather than a dead server.
+ */
+function stream(source, response) {
+	source.on('error', () => {
+		// `destroy` rather than `end`: a half-sent body should read as broken to
+		// the client, not as complete.
+		response.destroy();
+	});
+	// If the client goes away mid-send, stop reading the file for them.
+	response.on('close', () => source.destroy());
+	return source.pipe(response);
+}
+
 function sweepUnclaimed() {
 	const cutoff = new Date(Date.now() - UNCLAIMED_LIFETIME_MS).toISOString();
 	const stale = db
 		.prepare('SELECT id FROM attachments WHERE ticket_id IS NULL AND created_at < ?')
 		.all(cutoff);
+	/*
+	 * **A row is only dropped once its bytes are actually gone.**
+	 *
+	 * `rmSync(..., { force: true })` already swallows ENOENT, which is the only
+	 * case this `catch` was written for. Everything else it caught was a real
+	 * failure — EACCES, EBUSY, an I/O fault — and the row was deleted anyway.
+	 *
+	 * The file then stops existing as far as this service is concerned: the
+	 * orphan sweep keeps retrying the delete, but `storedBytes()` counts rows, so
+	 * those bytes drop out of the two-gigabyte budget while still sitting on the
+	 * disk. Enough persistent failures and real usage passes the cap the limit
+	 * exists to enforce, silently, with the accounting insisting everything is
+	 * fine. The same shape as the withdraw endpoint's bug, one sweep along.
+	 */
+	const removed = [];
 	for (const row of stale) {
 		try {
 			rmSync(fileFor(row.id), { force: true });
+			removed.push(row.id);
 		} catch {
-			// A file already gone is the state we wanted; the row still goes.
+			// Left in place *and* left counted, so the next sweep tries again and the
+			// budget keeps seeing it in the meantime.
 		}
 	}
-	if (stale.length) {
-		db.prepare('DELETE FROM attachments WHERE ticket_id IS NULL AND created_at < ?').run(cutoff);
+	if (removed.length) {
+		const drop = db.prepare('DELETE FROM attachments WHERE id = ?');
+		for (const id of removed) {
+			drop.run(id);
+		}
 	}
 	sweepOrphans();
 	sweepClosed();
@@ -333,19 +413,45 @@ function sweepClosed() {
 	if (!done.length) {
 		return 0;
 	}
+	/*
+	 * **A report is only deleted once its pictures actually are.**
+	 *
+	 * A failed `rmSync` used to be shrugged off — "swept again by sweepOrphans
+	 * once the row is gone" — and the ticket was deleted anyway. The cascade then
+	 * took the attachment rows with it, and `storedBytes()` counts rows, so the
+	 * bytes vanished from the two-gigabyte budget while still sitting on the
+	 * disk. Worse for the reporter: the text of their report was deleted while
+	 * part of its private evidence stayed.
+	 *
+	 * `sweepOrphans` does keep retrying, so this usually resolves itself. A
+	 * persistent EACCES does not, and nothing would ever have counted it again.
+	 * Holding the ticket back costs a retry an hour later and keeps the
+	 * accounting honest in the meantime.
+	 */
 	const files = db.prepare('SELECT id FROM attachments WHERE ticket_id = ?');
+	const cleared = [];
 	for (const ticket of done) {
+		let complete = true;
 		for (const file of files.all(ticket.id)) {
 			try {
 				rmSync(fileFor(file.id), { force: true });
 			} catch {
-				// Swept again by sweepOrphans once the row is gone.
+				complete = false;
 			}
 		}
+		if (complete) {
+			cleared.push(ticket.id);
+		}
 	}
-	return db
-		.prepare("DELETE FROM tickets WHERE status IN ('resolved', 'declined') AND updated_at < ?")
-		.run(cutoff).changes;
+	if (!cleared.length) {
+		return 0;
+	}
+	const drop = db.prepare('DELETE FROM tickets WHERE id = ?');
+	let changes = 0;
+	for (const id of cleared) {
+		changes += drop.run(id).changes;
+	}
+	return changes;
 }
 
 /**
@@ -378,6 +484,24 @@ function sweepOrphans() {
 			.map((r) => r.id)
 	);
 	for (const name of onDisk) {
+		if (name.startsWith(INCOMING_PREFIX)) {
+			/*
+			 * A part-written upload. One that is still arriving is seconds old and
+			 * must survive this loop, so age is the only safe test — and an hour is
+			 * far past the sixty seconds nginx allows a body. What is left is the
+			 * residue of a crash: bytes with no row, which nothing else on this box
+			 * will ever look at again.
+			 */
+			try {
+				const path = join(FILES_DIR, name);
+				if (Date.now() - statSync(path).mtimeMs > INCOMING_LIFETIME_MS) {
+					rmSync(path, { force: true });
+				}
+			} catch {
+				// Best effort: retried next sweep, same as the orphans below.
+			}
+			continue;
+		}
 		if (!isAttachmentId(name) || known.has(name)) {
 			continue;
 		}
@@ -390,16 +514,85 @@ function sweepOrphans() {
 }
 
 /**
- * Read a request body of unknown length, refusing early rather than late.
+ * How much of an upload is held in memory while the rest goes to disk.
  *
- * The cap is enforced as chunks arrive, so an oversized upload is dropped after
- * one chunk over the line instead of after the sender has finished sending it.
+ * `sniff` refuses anything shorter than sixteen bytes and never looks past
+ * offset eleven, so sixty-four is already generous. The number that matters is
+ * the one it replaces: eight concurrent uploads now hold half a kilobyte between
+ * them where they used to hold three hundred and twenty megabytes.
  */
-function readBody(request, limit) {
+const SNIFF_BYTES = 64;
+
+/**
+ * Receive an upload onto disk, keeping only its first bytes in memory.
+ *
+ * **This used to assemble the whole body in memory and then duplicate it.**
+ * Every chunk was pushed onto an array and `Buffer.concat` allocated a second
+ * copy of the lot at the end. Eight uploads are permitted at once — nginx allows
+ * eight connections per address on this path — and each may be twenty megabytes,
+ * so a stranger with eight sockets and no credentials could ask this process for
+ * three hundred and twenty megabytes of memory. Measured, not guessed: eight
+ * successful uploads took RSS from 75 MiB to 398 MiB, against the unit's
+ * `MemoryMax=256M`. systemd kills it, and the whole support service — filing a
+ * report, reading your own report, the admin queue — goes down and comes back
+ * empty-handed. A denial of service costing eight HTTP requests and no account.
+ *
+ * So the bytes go where bytes belong. What stays in memory is the first
+ * `SNIFF_BYTES` of the body, which is everything `sniff` reads, plus a running
+ * count. The file is written under a name that is not an attachment id, so until
+ * `storeUpload` renames it into place it is findable by nothing and served by
+ * nothing.
+ *
+ * **The caller owns that file the moment this resolves** and must remove it on
+ * every path that does not claim it. Otherwise this has traded a memory leak for
+ * a disk leak, which is the worse of the two: memory came back on restart and
+ * these bytes never would.
+ */
+function receiveUpload(request, limit) {
+	mkdirSync(FILES_DIR, { recursive: true });
+	const path = incomingPath();
+	// 0o600 from the instant the file exists rather than tightened afterwards:
+	// these are other people's screenshots, some of them showing more than was
+	// intended, and a file created readable is readable for as long as that gap
+	// lasts. `wx` so a name we just minted can never truncate something already
+	// there.
+	const file = createWriteStream(path, { flags: 'wx', mode: 0o600 });
 	return new Promise((resolve, reject) => {
 		let size = 0;
-		const chunks = [];
+		let head = Buffer.alloc(0);
+		let ended = false;
+		let settled = false;
+
+		/** Give up, and take the part-written file with us. */
+		const discard = (error) => {
+			if (settled) {
+				return;
+			}
+			settled = true;
+			const unlink = () => {
+				try {
+					rmSync(path, { force: true });
+				} catch {
+					// Left for the hourly sweep, which takes these by age.
+				}
+				reject(error);
+			};
+			// Windows will not unlink a file that still has an open handle, so the
+			// stream has to go first and the delete has to wait for it. `closed`
+			// covers the case where it already went, where `destroy` emits no further
+			// `close` to wait on and the delete would never run.
+			if (file.closed) {
+				unlink();
+			} else {
+				file.once('close', unlink);
+				file.destroy();
+			}
+		};
+
 		request.on('data', (chunk) => {
+			if (settled) {
+				return;
+			}
 			size += chunk.length;
 			if (size > limit) {
 				// **Paused, not destroyed.** Destroying the request tears down the
@@ -414,18 +607,66 @@ function readBody(request, limit) {
 				// sending.
 				request.pause();
 				// Marked so the connection closes whatever status the caller settles
-				// on. Only the 413 path closed it, and several callers catch this
-				// rejection, substitute an empty form and answer 400 or 403 instead —
-				// leaving a paused request with body bytes outstanding on a keep-alive
-				// socket, which the next request on it would be parsed out of.
+				// on, and so the caller can tell "too big" apart from "our disk said
+				// no" — answering 413 to a failed write tells somebody their file was
+				// too large when it was not.
 				request.oversized = true;
-				reject(new Error('too large'));
+				discard(new Error('too large'));
 				return;
 			}
-			chunks.push(chunk);
+			if (head.length < SNIFF_BYTES) {
+				head = Buffer.concat([head, chunk.subarray(0, SNIFF_BYTES - head.length)]);
+			}
+			// **Backpressure, honoured.** Without this the socket is read faster than
+			// the disk accepts and the queue inside the write stream becomes the same
+			// unbounded buffer this function exists to remove — the defect back in a
+			// different object.
+			if (!file.write(chunk)) {
+				request.pause();
+				file.once('drain', () => {
+					if (!settled) {
+						request.resume();
+					}
+				});
+			}
 		});
-		request.on('end', () => resolve(Buffer.concat(chunks)));
-		request.on('error', reject);
+
+		/*
+		 * A client that goes away mid-upload leaves its bytes behind unless
+		 * somebody notices, and nothing else ever looks at them: there is no row,
+		 * so the unclaimed sweep and the size accounting are both blind to them.
+		 *
+		 * Both listeners are here on purpose, and measurement is why. Cutting a
+		 * real socket off mid-body raises `error` *and* `close` on Node 25, so
+		 * either one alone catches the abort — removing just one leaves the guard
+		 * green, and removing both leaks the file. `close` without `end` is the
+		 * more general statement of "this stopped early" and the only signal a
+		 * plain `Readable` gives when it is destroyed without an error, which is
+		 * exactly the shape the tests drive.
+		 */
+		request.on('error', discard);
+		request.on('close', () => {
+			if (!ended) {
+				discard(new Error('the upload stopped early'));
+			}
+		});
+		// A full disk, a revoked permission, an I/O fault. Same answer: no file.
+		file.on('error', discard);
+
+		request.on('end', () => {
+			ended = true;
+			// `close`, not `finish`: the descriptor has to be shut before the caller
+			// renames the file, because Windows refuses to rename one that is still
+			// open — and the tests run there.
+			file.once('close', () => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				resolve({ path, bytes: size, head });
+			});
+			file.end();
+		});
 	});
 }
 
@@ -452,21 +693,42 @@ function storedBytes() {
 	return Number(db.prepare('SELECT COALESCE(SUM(bytes), 0) AS n FROM attachments').get().n);
 }
 
-/** Store an uploaded body, or say why not. Returns { error } or { attachment }. */
-function storeUpload(buffer) {
-	const media = sniff(buffer);
+/**
+ * Claim a received upload, or say why not. Returns { error } or { attachment }.
+ *
+ * Takes what `receiveUpload` produced — a file already on disk, its length, and
+ * the first bytes of it — rather than the body itself, because the body no
+ * longer exists as one object anywhere. Every refusal below deletes that file
+ * before answering: it is nobody's attachment, nothing else knows its name, and
+ * a refusal that left it there would fill the disk with the uploads we declined
+ * rather than the ones we accepted.
+ */
+function storeUpload(received) {
+	const { path, bytes, head } = received;
+	/** Drop the part we were handed. Used on every path that does not claim it. */
+	const drop = () => {
+		try {
+			rmSync(path, { force: true });
+		} catch {
+			// The hourly sweep takes anything left behind, by age.
+		}
+	};
+	const media = sniff(head);
 	if (!media) {
+		drop();
 		return {
 			error:
 				'That file is not a kind we accept. Screenshots as PNG, JPEG, GIF or WebP; video as MP4 or WebM.'
 		};
 	}
-	if (buffer.length > SIZE[media.kind]) {
+	if (bytes > SIZE[media.kind]) {
+		drop();
 		return {
 			error: `That ${media.kind} is over the ${SIZE[media.kind] / (1024 * 1024)} MB limit for ${media.kind}s.`
 		};
 	}
-	if (storedBytes() + buffer.length > TOTAL_STORAGE_LIMIT) {
+	if (storedBytes() + bytes > TOTAL_STORAGE_LIMIT) {
+		drop();
 		return {
 			error:
 				'We are temporarily out of room for attachments. Please send the report without one — the text is the part that matters, and we will ask for a picture if we need it.',
@@ -474,14 +736,46 @@ function storeUpload(buffer) {
 		};
 	}
 	const id = randomBytes(16).toString('hex');
-	mkdirSync(FILES_DIR, { recursive: true });
-	// 0o600: readable by the service account and nothing else. These are other
-	// people's screenshots and some of them will contain more than intended.
-	writeFileSync(fileFor(id), buffer, { mode: 0o600 });
-	db.prepare(
-		'INSERT INTO attachments (id, ticket_id, media_type, bytes, created_at) VALUES (?, NULL, ?, ?, ?)'
-	).run(id, media.type, buffer.length, now());
-	return { attachment: { id, type: media.type, kind: media.kind, bytes: buffer.length } };
+	/*
+	 * **The rename is the moment the upload becomes an attachment.**
+	 *
+	 * One filesystem operation, inside one directory, so there is no instant at
+	 * which `fileFor(id)` names a half-written file. A reader either finds the
+	 * whole thing or finds nothing — which matters because the id is handed to
+	 * the browser the moment this returns, and a copy-then-truncate would have a
+	 * window where it is served short.
+	 */
+	try {
+		renameSync(path, fileFor(id));
+	} catch (err) {
+		drop();
+		throw err;
+	}
+	/*
+	 * **The row is what makes the file findable, so a failed insert must take the
+	 * file with it.**
+	 *
+	 * Bytes were written first and tracked second, with nothing in between. An
+	 * insert that threw — a locked database, a full disk, a constraint — left the
+	 * upload on disk with no row: invisible to the unclaimed sweep, which reads
+	 * rows, and uncounted by the size accounting, which also reads rows. So the
+	 * caller was told nothing was saved while somebody's screenshot sat in the
+	 * attachment directory permanently, outside the two-gigabyte budget that
+	 * exists to bound exactly this.
+	 */
+	try {
+		db.prepare(
+			'INSERT INTO attachments (id, ticket_id, media_type, bytes, created_at) VALUES (?, NULL, ?, ?, ?)'
+		).run(id, media.type, bytes, now());
+	} catch (err) {
+		try {
+			rmSync(fileFor(id), { force: true });
+		} catch {
+			// Nothing further to try. The throw below is still the right answer.
+		}
+		throw err;
+	}
+	return { attachment: { id, type: media.type, kind: media.kind, bytes } };
 }
 
 /**
@@ -1592,16 +1886,35 @@ async function handle(request, response, url) {
 			.prepare('SELECT id FROM attachments WHERE id = ? AND ticket_id IS NULL')
 			.get(withdraw[1]);
 		if (row) {
+			/*
+			 * **A failed unlink is not "already gone".**
+			 *
+			 * `rmSync(..., { force: true })` already swallows ENOENT, which is the
+			 * case this catch was written for. Everything it caught on top of that
+			 * was a real failure — EACCES, EBUSY, an I/O fault — and the row was
+			 * deleted anyway. That is the worst available outcome: the file stays on
+			 * disk, the only record of it is gone, so the unclaimed sweep can never
+			 * find it either, and the caller is told 204. Somebody who pulled a
+			 * screenshot back because their account name was in the corner of it was
+			 * told it had been removed, and it had become permanent instead.
+			 *
+			 * The row now outlives a failed delete, so the sweep retries it, and the
+			 * caller is told the truth.
+			 */
 			try {
 				rmSync(fileFor(row.id), { force: true });
 			} catch {
-				// Already gone is the state we wanted; the row still goes.
+				return send(response, 500, JSON.stringify({ error: 'That file could not be removed.' }), {
+					'content-type': 'application/json'
+				});
 			}
 			db.prepare('DELETE FROM attachments WHERE id = ? AND ticket_id IS NULL').run(row.id);
 		}
 		// 204 either way: whether it was already gone or never existed, the caller's
 		// desired state is "not stored", and distinguishing the two would tell an
-		// unauthenticated caller which ids are real.
+		// unauthenticated caller which ids are real. A row that *is* here and could
+		// not be removed is the one case that answers differently, above — that is
+		// not a probe answering, it is our own failure being reported.
 		return send(response, 204, '');
 	}
 
@@ -1620,12 +1933,25 @@ async function handle(request, response, url) {
 		}
 		sweepUnclaimed();
 
-		// One byte over the largest thing we accept is enough to reject on.
-		const body = await readBody(request, SIZE.video + 1024).catch(() => undefined);
-		if (!body) {
-			return json(413, { error: 'That file is larger than we accept.' });
+		// One byte over the largest thing we accept is enough to reject on. The
+		// body streams to disk as it arrives; only its first bytes are held.
+		const received = await receiveUpload(request, SIZE.video + 1024).catch(() => undefined);
+		if (!received) {
+			/*
+			 * Every rejection used to be answered "larger than we accept", because
+			 * the only one that could happen was the cap. Streaming adds real ones —
+			 * a full disk, a client that hung up halfway — and telling somebody their
+			 * file was too big when it was not sends them off to compress a
+			 * screenshot that was never the problem. `oversized` is set by the reader
+			 * on the one path where the size really is the reason.
+			 */
+			return request.oversized
+				? json(413, { error: 'That file is larger than we accept.' })
+				: json(500, { error: 'That upload could not be saved. Please try it again.' });
 		}
-		const result = storeUpload(body);
+		// `storeUpload` owns the received file from here, including deleting it on
+		// every path that refuses it.
+		const result = storeUpload(received);
 		if (result.error) {
 			return json(415, { error: result.error });
 		}
@@ -1778,11 +2104,11 @@ async function handle(request, response, url) {
 					'content-range': `bytes ${from}-${to}/${size}`,
 					'content-length': to - from + 1
 				});
-				return createReadStream(filePath, { start: from, end: to }).pipe(response);
+				return stream(createReadStream(filePath, { start: from, end: to }), response);
 			}
 
 			response.writeHead(200, { ...common, 'content-length': size });
-			return createReadStream(filePath).pipe(response);
+			return stream(createReadStream(filePath), response);
 		}
 
 		/* ---- the reporter adds to their own report ---- */
@@ -2291,12 +2617,15 @@ async function handleAdmin(request, response, url) {
 
 refreshBootstrap();
 
+/** Requests whose handler has not settled, including a body still streaming to disk. */
+const activeRequests = new Set();
+
 const server = createServer((request, response) => {
 	// The origin is fixed rather than taken from the Host header: this process is
 	// only ever reached through nginx for one hostname, and parsing an
 	// attacker-supplied Host into routing decisions is how host-header bugs start.
 	const url = new URL(request.url ?? '/', 'https://opendesktopauthenticator.com');
-	Promise.resolve()
+	const work = Promise.resolve()
 		.then(() => handle(request, response, url))
 		.then((done) => (done === undefined ? handleAdmin(request, response, url) : done))
 		.then((done) => {
@@ -2323,7 +2652,74 @@ const server = createServer((request, response) => {
 				);
 			}
 		});
+	activeRequests.add(work);
+	// Use both arms instead of a bare `finally`: `finally` creates another
+	// rejecting promise when a future error escapes the handler, and leaving that
+	// promise unobserved would turn one request failure into an unhandled rejection.
+	void work.then(
+		() => activeRequests.delete(work),
+		() => activeRequests.delete(work)
+	);
 });
+
+const SHUTDOWN_DEADLINE_MS = 65_000;
+let shutdownInFlight;
+let databaseClosed = false;
+
+/**
+ * Stop taking work, drain what was already accepted, then close durable state.
+ *
+ * `systemctl stop` is the consistency barrier used by the backup script. Node's
+ * default SIGTERM action killed the process in the middle of `receiveUpload`,
+ * bypassing its close/error cleanup and leaving `incoming-*` beside a database
+ * snapshot that could never name it. The manifest quite correctly refused that
+ * archive — and then every later backup met the same abandoned file.
+ *
+ * `server.close()` preserves active requests. The deadline handles a client
+ * that deliberately never finishes a body: destroy its connection, wait for
+ * the request promise (and therefore temp-file cleanup) to settle, and only then
+ * let the process end. systemd's stop deadline is longer than this one, so its
+ * unconditional kill is never the first cleanup mechanism.
+ */
+function shutdownTicketServer({ forceAfterMs = SHUTDOWN_DEADLINE_MS } = {}) {
+	if (shutdownInFlight) return shutdownInFlight;
+
+	shutdownInFlight = new Promise((resolve, reject) => {
+		const force = setTimeout(
+			() => {
+				server.closeAllConnections();
+			},
+			Math.max(1, forceAfterMs)
+		);
+
+		server.close((closeError) => {
+			clearTimeout(force);
+			void Promise.allSettled([...activeRequests]).then((settled) => {
+				const requestFailure = settled.find((answer) => answer.status === 'rejected');
+				try {
+					if (!databaseClosed) {
+						db.close();
+						databaseClosed = true;
+					}
+				} catch (error) {
+					reject(error);
+					return;
+				}
+				if (closeError && closeError.code !== 'ERR_SERVER_NOT_RUNNING') {
+					reject(closeError);
+					return;
+				}
+				if (requestFailure) {
+					reject(requestFailure.reason);
+					return;
+				}
+				resolve();
+			});
+		});
+	});
+
+	return shutdownInFlight;
+}
 
 // Loopback only. nginx is the only thing that may reach this.
 if (process.env.TICKETS_NO_LISTEN !== '1') {
@@ -2352,6 +2748,15 @@ if (process.env.TICKETS_NO_LISTEN !== '1') {
 	};
 	sweepAll();
 	setInterval(sweepAll, 60 * 60 * 1000).unref();
+
+	const stop = (signal) => {
+		void shutdownTicketServer().catch((error) => {
+			process.stderr.write(`${signal} shutdown failed: ${error?.message}\n`);
+			process.exitCode = 1;
+		});
+	};
+	process.once('SIGTERM', () => stop('SIGTERM'));
+	process.once('SIGINT', () => stop('SIGINT'));
 }
 
-export { handleAdmin, server, loginPage };
+export { handleAdmin, server, loginPage, shutdownTicketServer };

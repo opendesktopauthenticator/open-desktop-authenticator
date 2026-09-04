@@ -1,4 +1,6 @@
 import { beforeAll, describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 /**
  * The sentences that describe what this project has not done yet.
@@ -58,12 +60,60 @@ const NOTHING: Release = {
 // reached by any body this file renders.
 const site = (release: Release) => ({
 	release,
+	version: '1.0.0',
+	name: 'Open Desktop Authenticator',
+	publication: {
+		sourceVersion: '1.0.0',
+		github: { current: true, latestVersion: '1.0.0' },
+		store: { current: true, latestVersion: '1.0.0' }
+	},
+	features: {
+		browser: {
+			introducedVersion: '1.0.0',
+			inSource: true,
+			github: true,
+			store: true,
+			anyPublic: true,
+			bothPublic: true
+		},
+		transfer: {
+			introducedVersion: '1.0.0',
+			inSource: true,
+			github: true,
+			store: true,
+			anyPublic: true,
+			bothPublic: true
+		}
+	},
 	origin: 'https://example.test',
-	// `reviewAsk` reads these; the rest of SITE is not reached by any body here.
-	reviews: { profile: 'https://example.test/p', write: 'https://example.test/w' }
+	/*
+	 * `reviewAsk` reads these; the rest of SITE is not reached by any body here.
+	 * The widget block is read too — the ask embeds Trustpilot's collector — and
+	 * it is spelled out rather than defaulted, so a body that starts reading a
+	 * new field fails here instead of rendering an empty attribute into the
+	 * published page.
+	 */
+	reviews: {
+		profile: 'https://example.test/p',
+		write: 'https://example.test/w',
+		widget: {
+			script: 'https://widget.example.test/bootstrap.js',
+			origin: 'https://widget.example.test',
+			locale: 'en-US',
+			templateId: 'template',
+			businessUnitId: 'unit',
+			token: 'token'
+		}
+	}
 });
-const gaps = (release: Release, form?: 'clause' | 'noun') =>
-	markup.releaseGaps(site(release), form);
+/**
+ * The three phrasings, spelled out because the seam tests below need to ask for
+ * the one their page renders in. A page checked against the wrong form is a
+ * check against words that page can never print.
+ */
+type GapForm = 'clause' | 'noun' | 'sentence';
+
+const gaps = (release: Release, form?: GapForm) => markup.releaseGaps(site(release), form);
 
 /** The rendered paragraph, with tags and runs of whitespace flattened away. */
 const words = (html: string) =>
@@ -143,41 +193,145 @@ describe('the grammar around the list', () => {
 /**
  * The seam. Each of these renders the real page body against a made-up release
  * object, which is the only way to catch a page that quietly stops deriving.
+ *
+ * **Every page words the same gap differently, so the tripwire has to be worded
+ * per page.** The homepage takes the clause form, /alternatives the noun form,
+ * the FAQ the standalone sentence. The rows below once used the clause-form
+ * pattern `/signs the checksum list/` for all three — and /alternatives says
+ * "signing that checksum list", which that pattern does not match in either
+ * flag state. So its row asserted the absence of words the page cannot print:
+ * green with the signature, green without it, and green through a version of
+ * the page with the four noun phrases typed out as a literal, printing "Three
+ * things are not yet done:" above four items, one of them still calling the
+ * checksum list unsigned. That is precisely the regression this file exists to
+ * catch, and the assertion meant to catch it could not fail.
+ *
+ * The control that should have caught the mismatch was `/checksum list/i`,
+ * which both phrasings contain — a substring shared by the wording under test
+ * and the wording the page actually uses proves only that the page mentions the
+ * subject. So each row now carries its own page's spelling of the stale claim,
+ * and asserts it is *present* while it is true before asserting it is gone.
  */
+type SigningGapRow = [name: string, slug: string, form: GapForm, stale: RegExp, done: string];
+
+const SIGNING_GAP_PAGES: SigningGapRow[] = [
+	[
+		'the homepage',
+		'index',
+		'clause',
+		/nothing signs the checksum list/i,
+		'Everything this page once listed as outstanding is done.'
+	],
+	[
+		'the alternatives page',
+		'alternatives',
+		'noun',
+		/signing that checksum list/i,
+		'Nothing on that list is still outstanding'
+	],
+	[
+		'the FAQ',
+		'faq',
+		'sentence',
+		/nothing signs the checksum list, so take it/i,
+		'Everything this answer used to list as unfinished is now done.'
+	]
+];
+
 describe('the pages that carry the sentence', () => {
-	it.each([
-		['the homepage', (s: unknown) => pageBySlug('index').body(s)],
-		['the alternatives page', (s: unknown) => pageBySlug('alternatives').body(s)],
-		['the FAQ', (s: unknown) => pageBySlug('faq').body(s)]
-	])('%s never claims the checksum list is unsigned once it is', (_name, render) => {
-		const signed = words(render(site({ ...NOTHING, signed: true })));
-		expect(signed).not.toMatch(/signs the checksum list/i);
-		expect(signed, 'the sentence disappeared entirely').toMatch(/code-signing certificate/i);
+	/** The page body as flattened text, rendered against a release we made up. */
+	const bodyOf = (slug: string, release: Release) => words(pageBySlug(slug).body(site(release)));
 
-		// And still says it while it is true, or the check above proves nothing.
-		expect(words(render(site(NOTHING)))).toMatch(/checksum list/i);
-	});
+	it.each(SIGNING_GAP_PAGES)(
+		'%s never claims the checksum list is unsigned once it is',
+		(_name, slug, _form, stale) => {
+			// First, that the page says it at all, in these words. Without this the
+			// check below is asserting the absence of a phrasing the page never had,
+			// which is how the /alternatives row spent its life passing.
+			expect(
+				bodyOf(slug, NOTHING),
+				'this page no longer words the signing gap the way this row watches for, so the check below cannot fail and is proving nothing'
+			).toMatch(stale);
 
-	it.each([
-		['the homepage', (s: unknown) => pageBySlug('index').body(s)],
-		['the alternatives page', (s: unknown) => pageBySlug('alternatives').body(s)],
-		['the FAQ', (s: unknown) => pageBySlug('faq').body(s)]
-	])('%s says something sensible when there is nothing left to admit', (_name, render) => {
-		const done = {
-			published: true,
-			checksums: true,
-			signed: true,
-			codeSigned: true,
-			reproducible: true,
-			audited: true
-		};
-		const text = words(render(site(done)));
-		// No dangling "is written down rather than left for you to find: ." and no
-		// empty count — the two ways a derived sentence fails at zero.
-		expect(text).not.toMatch(/:\s*\./);
-		expect(text).not.toMatch(/not yet done:\s*—/);
-		expect(text).not.toMatch(/\bthings are not yet done: \./);
-	});
+			const signed = bodyOf(slug, { ...NOTHING, signed: true });
+			expect(
+				signed,
+				'the page goes on telling the reader nothing signs the checksum list after the flag says something does'
+			).not.toMatch(stale);
+			expect(signed, 'the sentence disappeared entirely').toMatch(/code-signing certificate/i);
+		}
+	);
+
+	/*
+	 * **That the prose is derived, rather than merely correct today.**
+	 *
+	 * The row above watches one gap in one page's wording, and a page could pass
+	 * it with the other three typed out by hand — which is what going stale looks
+	 * like on the way in. So render the same page either side of a single flag and
+	 * ask what moved: every phrasing `releaseGaps` still returns has to be there,
+	 * every phrasing it stopped returning has to be gone, and the paragraph has to
+	 * have changed at all. Compared against the helper rather than against a copy
+	 * of its strings on purpose — the claim being pinned is that the page is still
+	 * calling it, so the helper is the right side of the comparison.
+	 */
+	it.each(SIGNING_GAP_PAGES)(
+		'%s lists exactly the gaps the flags leave open, and changes when one closes',
+		(_name, slug, form) => {
+			const openBefore = gaps(NOTHING, form);
+			const openAfter = gaps({ ...NOTHING, signed: true }, form);
+			const closed = openBefore.filter((gap) => !openAfter.includes(gap));
+			expect(
+				closed,
+				'signing the checksum list stopped closing exactly one gap, so this test is no longer asking anything'
+			).toHaveLength(1);
+
+			const before = bodyOf(slug, NOTHING);
+			const after = bodyOf(slug, { ...NOTHING, signed: true });
+			expect(
+				after,
+				'the page reads identically either side of the flag, so it is not deriving anything'
+			).not.toBe(before);
+
+			for (const gap of openBefore) {
+				expect(before, `the page is not listing a gap that is open: ${gap}`).toContain(gap);
+			}
+			for (const gap of openAfter) {
+				expect(after, `the page dropped a gap that is still open: ${gap}`).toContain(gap);
+			}
+			for (const gap of closed) {
+				expect(after, `the page goes on listing a gap the flags have closed: ${gap}`).not.toContain(
+					gap
+				);
+			}
+		}
+	);
+
+	it.each(SIGNING_GAP_PAGES)(
+		'%s says something sensible when there is nothing left to admit',
+		(_name, slug, form, _stale, done) => {
+			const text = bodyOf(slug, {
+				published: true,
+				checksums: true,
+				signed: true,
+				codeSigned: true,
+				reproducible: true,
+				audited: true
+			});
+			// No dangling "is written down rather than left for you to find: ." and no
+			// empty count — the two ways a derived sentence fails at zero.
+			expect(text).not.toMatch(/:\s*\./);
+			expect(text).not.toMatch(/not yet done:\s*—/);
+			expect(text).not.toMatch(/\bthings are not yet done: \./);
+			// The three patterns above are the homepage's and /alternatives' ways of
+			// failing at zero; the FAQ has neither a count word nor a colon, so none
+			// of them can fail for it and its row needs a claim of its own. What every
+			// page owes the reader here is the sentence saying so, and no gap list.
+			expect(text, 'the page went quiet instead of saying the list is now empty').toContain(done);
+			for (const gap of gaps(NOTHING, form)) {
+				expect(text, `nothing is outstanding, and the page still lists: ${gap}`).not.toContain(gap);
+			}
+		}
+	);
 
 	/*
 	 * **The fourth page, found by an outside audit after this file existed.**
@@ -244,5 +398,97 @@ describe('the pages that carry the sentence', () => {
 		expect(at({ ...NOTHING, signed: true, audited: true, reproducible: true })).toMatch(
 			/One thing is not yet done/
 		);
+	});
+});
+
+/**
+ * **The page must not print a command that cannot succeed.**
+ *
+ * `signed` was `true` from the day the signing step was written, which was
+ * three days after the only published release was tagged. So /verify told every
+ * visitor to fetch `SHA256SUMS.txt.sig` and `SHA256SUMS.txt.pem` and run
+ * `cosign verify-blob` against them, and neither file is on that release.
+ *
+ * The command failing is the smaller half. A missing signature file is exactly
+ * what tampering looks like, so the page taught people to distrust a release
+ * that is fine — the opposite of what a verification page is for.
+ *
+ * The flag describes the release somebody can download, not what the workflow
+ * does. These pin both directions so it cannot drift back.
+ */
+describe('the verify page and the signature that may not exist yet', () => {
+	const verifyBody = (release: Release): string => pageBySlug('verify').body(site(release));
+
+	it('prints no cosign command while nothing published is signed', () => {
+		expect(
+			verifyBody({ ...NOTHING, signed: false }),
+			'the page asked for a signature file the release does not have'
+		).not.toContain('cosign verify-blob');
+	});
+
+	/*
+	 * It may still *name* the file — the unsigned copy does, to tell somebody who
+	 * went looking for it that its absence is our mistake. What it must not do is
+	 * hand them flags to fetch it with.
+	 */
+	it('gives no instruction to fetch a signature file', () => {
+		const body = verifyBody({ ...NOTHING, signed: false });
+		expect(body).not.toContain('--signature');
+		expect(body).not.toContain('--certificate');
+		expect(body).not.toContain('SHA256SUMS.txt.pem');
+	});
+
+	/*
+	 * And it must say why, rather than going quiet — somebody who followed the
+	 * old page went looking for a file that is not there, and needs to be told
+	 * that is our mistake rather than evidence.
+	 */
+	it('says the list is not signed yet, instead of omitting the step', () => {
+		const body = verifyBody({ ...NOTHING, signed: false });
+		expect(body).toContain('not signed yet');
+		expect(body).toMatch(/not read a missing signature file as tampering/i);
+	});
+
+	/**
+	 * **A canary on the live value, because no local test can check the world.**
+	 *
+	 * Every other case here parameterises `signed`, which is right for the
+	 * rendering rules and useless for this one: flipping the real flag in
+	 * `site/build.mjs` left all of them green while /verify published a command
+	 * that could not succeed. The flag is a claim about which files are on a
+	 * release page, and nothing in this repository can see a release page.
+	 *
+	 * So the guard is deliberateness. Flipping it means editing this test, in the
+	 * same change, having actually looked at the release and seen
+	 * `SHA256SUMS.txt.sig` and `SHA256SUMS.txt.pem` listed on it.
+	 * `docs/RELEASE_CHECKLIST.md` carries that step.
+	 */
+	it('is a deliberate claim: no published release is signed yet', () => {
+		// Read rather than imported: `build.mjs` writes the site when it runs, and
+		// a test must not. The claim being pinned is what is checked in.
+		const source = readFileSync(join(__dirname, '..', 'site', 'build.mjs'), 'utf8');
+		expect(
+			source,
+			'flip this only in the change that publishes a signed release, and update this test with it'
+		).toContain('signed: false,');
+		expect(source).not.toContain('signed: true,');
+	});
+
+	it('prints the command once a signed release exists', () => {
+		const body = verifyBody({ ...NOTHING, signed: true });
+		expect(body).toContain('cosign verify-blob');
+		expect(body).toContain('SHA256SUMS.txt.sig');
+	});
+
+	/*
+	 * The identity has to name the tag, not just the organisation — the earlier
+	 * published command accepted a signature from any workflow in any repository
+	 * the org owns, run from any branch.
+	 */
+	it('binds the published identity to repository, workflow and tag', () => {
+		const body = verifyBody({ ...NOTHING, signed: true });
+		expect(body).toContain('--certificate-identity ');
+		expect(body).not.toContain('--certificate-identity-regexp');
+		expect(body).toContain('/.github/workflows/release.yml@refs/tags/');
 	});
 });

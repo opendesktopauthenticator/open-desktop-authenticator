@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { RecoverResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * Restoring an account from its recovery file (§12 F2).
@@ -74,7 +75,7 @@ export function RecoverAccount({
 				revocation code down, this is how you get it back.
 			</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError id="recover-account-error">{error}</DynamicError>}
 
 			{result?.state === 'restored' && (
 				<div className="ceremony">
@@ -103,6 +104,8 @@ export function RecoverAccount({
 				<label htmlFor="recover-passphrase">Vault passphrase</label>
 				<input
 					id="recover-passphrase"
+					aria-invalid={error !== undefined}
+					aria-describedby={error === undefined ? undefined : 'recover-account-error'}
 					type="password"
 					value={passphrase}
 					onChange={(event) => setPassphrase(event.target.value)}

@@ -650,15 +650,37 @@ figure.diagram figcaption {
 	transform: translateY(-1px);
 	box-shadow: 0 14px 30px -16px rgba(66, 242, 154, 0.75);
 }
-.button-quiet {
+/*
+ * **The quiet modifier, at a specificity that can actually reach a `<button>`.**
+ *
+ * `.button-quiet` is 0,1,0 and `button.button` further down is 0,1,1, so on a
+ * real `<button>` the modifier lost and the control rendered as a full primary
+ * call to action — same mint gradient, same lift on hover. The download page's
+ * "Do not ask again" is the one control on the site that uses this combination,
+ * and it sat next to "Continue to the Store build" with identical weight: two
+ * primary buttons, one of which permanently turns something off.
+ *
+ * Found by rendering the page, not by reading it. The class was present in the
+ * markup and spelled correctly, so nothing about the source looked wrong.
+ *
+ * The hover state has to be neutralised as well as the background: `button.button:hover`
+ * brightens, lifts and casts a mint shadow, and a quiet control that does all
+ * three on hover is not quiet.
+ */
+.button-quiet,
+button.button.button-quiet {
 	background: transparent;
 	border: 1px solid var(--line-strong);
 	color: var(--text);
 }
-.button-quiet:hover {
+.button-quiet:hover,
+button.button.button-quiet:hover {
 	border-color: var(--mint);
 	color: var(--mint);
+	background: transparent;
 	box-shadow: none;
+	filter: none;
+	transform: none;
 }
 
 /* --------------------------------------------------------------- projects -- */
@@ -977,6 +999,85 @@ main.has-hero {
 	flex-wrap: wrap;
 	gap: 12px;
 	align-items: center;
+}
+
+/*
+ * **Sized to the button inside it, not to the column.**
+ *
+ * Trustpilot's Review Collector is a fixed white button, and it ignores
+ * `data-theme="dark"` — the theme reaches the frame and the template does not
+ * use it. Given the full width of the card it therefore drew a white slab
+ * across a dark page with a small button adrift in the middle.
+ *
+ * Nothing here can style across the frame boundary, so the fix is to stop
+ * giving it room to be a slab: the frame is the width of the control it holds,
+ * clipped to the same radius as the buttons beside it, so it reads as
+ * Trustpilot's own button rather than as a hole in the page.
+ *
+ * `min-height` holds the space before the frame loads, so the line below it
+ * does not jump while the reader is looking at it.
+ *
+ * One of these, on the review section. The download prompt used to carry a
+ * second copy directly below it, so the foot of the page showed two identical
+ * white boxes; the prompt asks with an ordinary button now.
+ */
+.ask-collector {
+	margin: 10px 0 6px;
+	width: 250px;
+	border-radius: var(--radius);
+	overflow: hidden;
+	line-height: 0;
+}
+.ask-collector .trustpilot-widget {
+	min-height: 52px;
+}
+
+/*
+ * **The prompt is a dialog, because of where the reader is standing.**
+ *
+ * It is the last element in the article and the download buttons are near the
+ * top. Measured on the built page at a 1920x889 viewport: pressing "Get it from
+ * the Microsoft Store" at y=463 scrolled the reader 3,798px to a card at the
+ * very bottom, immediately below the review section it duplicated, and left the
+ * button they had just pressed 3,335px above the fold. An ask that teleports
+ * somebody to the far end of the page reads as the page breaking, not as a
+ * question.
+ *
+ * So it opens where they already are — whichever button they pressed, wherever
+ * they had scrolled to — and the page behind it does not move at all.
+ *
+ * Only while it is open. `hidden` keeps it out of the flow entirely, and if the
+ * stylesheet never arrives it is an ordinary block at the end of the article
+ * with a working link in it, which is the same failure mode the script has.
+ *
+ * `safe center` rather than plain centring: a short window would otherwise
+ * centre a tall card by pushing its top out of reach, and the heading is the
+ * part that explains why the thing appeared.
+ */
+.ask-prompt {
+	border-color: var(--line-strong);
+	margin-top: 28px;
+}
+.ask-prompt:not([hidden]) {
+	position: fixed;
+	inset: 0;
+	z-index: 60;
+	display: grid;
+	place-items: safe center;
+	margin: 0;
+	padding: 24px;
+	border: 0;
+	border-radius: 0;
+	background: rgba(3, 6, 9, 0.72);
+	overflow-y: auto;
+}
+.ask-prompt:not([hidden]) .ask-body {
+	width: min(560px, 100%);
+	padding: 26px 28px;
+	border: 1px solid var(--line-strong);
+	border-radius: var(--radius);
+	background: var(--panel);
+	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
 }
 
 /* ------------------------------------------------------------------ give -- */

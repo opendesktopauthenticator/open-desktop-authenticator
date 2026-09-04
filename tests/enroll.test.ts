@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { EnrollmentError, finalizeEnrollment, startEnrollment } from '../src/main/steam/enroll';
+import {
+	EnrollmentError,
+	EnrollmentSecretsError,
+	finalizeEnrollment,
+	removeAuthenticator,
+	startEnrollment
+} from '../src/main/steam/enroll';
 import { toMaFile, maFileName } from '../src/main/import/export';
 import { parseMaFile } from '../src/main/import/mafile';
 import type { SteamRequest, SteamResponse } from '../src/main/confirmations/client';
-import type { Account } from '../src/shared/vault-schema';
+import { EgressError } from '../src/main/net/egress';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * Attaching a new authenticator (§12 F3).
@@ -74,6 +81,188 @@ describe('starting enrollment', () => {
 		expect(started.deviceId).toMatch(/^android:/);
 	});
 
+	it('preserves the optional secret_1 field for maFile fidelity', async () => {
+		const secret1 = Buffer.alloc(20, 9).toString('base64');
+		const { transport } = transportReturning([
+			{ response: { ...okAdd.response, secret_1: secret1 } }
+		]);
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.toMatchObject({ secret1 });
+	});
+
+	it('preserves a complete one-time bundle even when status contradicts it', async () => {
+		const contradictory = { response: { ...okAdd.response, status: 29 } };
+		const { transport } = transportReturning([contradictory]);
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.toMatchObject({
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345'
+		});
+	});
+
+	it.each([
+		['malformed login secret', 'not base64!', IDENTITY],
+		['short login secret', 'YQ==', IDENTITY],
+		['malformed confirmation secret', SHARED, 'not base64!'],
+		['short confirmation secret', SHARED, 'YQ==']
+	])('retains but refuses a complete-looking bundle with a %s', async (_case, shared, identity) => {
+		const reply = {
+			response: {
+				...okAdd.response,
+				shared_secret: shared,
+				identity_secret: identity
+			}
+		};
+		const { transport } = transportReturning([reply]);
+
+		const thrown = await startEnrollment(transport, {
+			steamId64: STEAM_ID,
+			accessToken: ACCESS,
+			unixSeconds: NOW_SECONDS
+		}).then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		expect(thrown).toBeInstanceOf(EnrollmentSecretsError);
+		expect(thrown).toMatchObject({
+			committed: true,
+			started: {
+				sharedSecret: shared,
+				identitySecret: identity,
+				revocationCode: 'R12345'
+			}
+		});
+	});
+
+	it.each([
+		['missing', undefined],
+		['a string', '1'],
+		['null', null]
+	])('keeps a complete usable bundle when status is %s', async (_case, status) => {
+		const response: Record<string, unknown> = { ...okAdd.response, status };
+		if (status === undefined) delete response.status;
+		const { transport } = transportReturning([{ response }]);
+
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.toMatchObject({
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345'
+		});
+	});
+
+	it('ignores malformed optional metadata without discarding usable secrets', async () => {
+		const { transport } = transportReturning([
+			{
+				response: {
+					...okAdd.response,
+					serial_number: 123,
+					account_name: null,
+					token_gid: {},
+					uri: false,
+					phone_number_hint: []
+				}
+			}
+		]);
+
+		const started = await startEnrollment(transport, {
+			steamId64: STEAM_ID,
+			accessToken: ACCESS,
+			unixSeconds: NOW_SECONDS
+		});
+
+		expect(started).toMatchObject({
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345'
+		});
+		expect(started).not.toHaveProperty('serialNumber');
+		expect(started).not.toHaveProperty('accountName');
+		expect(started).not.toHaveProperty('tokenGid');
+		expect(started).not.toHaveProperty('uri');
+		expect(started).not.toHaveProperty('phoneNumberHint');
+	});
+
+	it('omits an oversized phone hint before the one-time bundle is sealed', async () => {
+		const { transport } = transportReturning([
+			{ response: { ...okAdd.response, phone_number_hint: '1'.repeat(65) } }
+		]);
+
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.not.toHaveProperty('phoneNumberHint');
+	});
+
+	it('keeps usable authenticator keys when Steam omits the optional revocation code', async () => {
+		const response = { ...okAdd.response } as Record<string, unknown>;
+		delete response.revocation_code;
+		const { transport } = transportReturning([{ response }]);
+
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.toMatchObject({ sharedSecret: SHARED, identitySecret: IDENTITY });
+	});
+
+	it('drops oversized optional metadata before it can exceed the recovery journal', async () => {
+		const { transport } = transportReturning([
+			{
+				response: {
+					...okAdd.response,
+					account_name: 'a'.repeat(65),
+					serial_number: '1'.repeat(129),
+					token_gid: 'g'.repeat(129),
+					uri: 'u'.repeat(8 * 1024 + 1)
+				}
+			}
+		]);
+
+		const started = await startEnrollment(transport, {
+			steamId64: STEAM_ID,
+			accessToken: ACCESS,
+			unixSeconds: NOW_SECONDS
+		});
+		expect(started).not.toHaveProperty('accountName');
+		expect(started).not.toHaveProperty('serialNumber');
+		expect(started).not.toHaveProperty('tokenGid');
+		expect(started).not.toHaveProperty('uri');
+	});
+
+	it('treats partial secret material with a refusal as indeterminate', async () => {
+		const { transport } = transportReturning([{ response: { status: 29, shared_secret: SHARED } }]);
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).rejects.toMatchObject({ committed: true, certain: false });
+	});
+
 	it('asks Steam to use the phone already on the account', async () => {
 		// This app never manages phone numbers, and no library in the ecosystem
 		// does either (F-10). `sms_phone_id: 1` is how you say "the one you have".
@@ -111,7 +300,7 @@ describe('starting enrollment', () => {
 	 * would leave the user retrying against an account that is already locked.
 	 */
 	it('says plainly when Steam accepted but withheld the secrets', async () => {
-		for (const missing of ['shared_secret', 'identity_secret', 'revocation_code']) {
+		for (const missing of ['shared_secret', 'identity_secret']) {
 			const partial = { response: { ...okAdd.response } };
 			delete (partial.response as Record<string, unknown>)[missing];
 
@@ -238,9 +427,16 @@ describe('finalising enrollment', () => {
 	it('warns that state is uncertain when the reply is unreadable', async () => {
 		// The authenticator may or may not be active. Saying either would be a
 		// guess about an account the user cannot afford guesses on.
+		//
+		// Asserted as `committed` rather than on a phrase: this used to match
+		// "may or may not", which pinned one sentence and said nothing about
+		// whether the caller was allowed to retry on top of it.
 		const { transport } = transportReturning(['not json']);
 
-		await expect(finalizeEnrollment(transport, options)).rejects.toThrow(/may or may not/);
+		await expect(finalizeEnrollment(transport, options)).rejects.toMatchObject({
+			committed: true,
+			permanent: true
+		});
 	});
 });
 
@@ -258,7 +454,7 @@ describe('exporting a maFile', () => {
 		refreshToken: 'a-live-credential',
 		status: 'active',
 		addedAt: '2026-08-01T00:00:00.000Z',
-		autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		autoConfirm: newAutoConfirm()
 	};
 
 	it('does not demote a freshly activated account to "never activated"', () => {
@@ -422,5 +618,204 @@ describe('an account with no phone number', () => {
 		await expect(
 			finalizeEnrollment(transport, { ...base, validateSmsCode: false })
 		).rejects.toThrow(/email/);
+	});
+});
+
+/**
+ * **Every call in this file changes the account before anything can go wrong
+ * with the answer.**
+ *
+ * `AddAuthenticator`, `FinalizeAddAuthenticator` and `RemoveAuthenticator` all
+ * send their request and then read a reply. A timeout, a torn connection, a
+ * refused proxy, an HTTP error page or an unparseable body all arrive *after*
+ * the bytes have gone, and every one of them means the same thing: Steam may
+ * have done it.
+ *
+ * Two ways that was wrong. `startEnrollment` reported an unreadable reply with
+ * the words "Nothing was changed", which is a claim about Steam's state that
+ * nothing here can make — the account may now carry an authenticator whose
+ * secrets were in the reply that never arrived. And a **timeout reached none of
+ * these messages at all**: `await transport(...)` rejected with a network error
+ * straight past them, so the case where the outcome is least knowable produced
+ * the least guidance and an offer to try again.
+ *
+ * `permanent: true` on all of them is the point rather than a side effect.
+ * Retrying is exactly what must not happen until somebody has looked at the
+ * account.
+ */
+describe('a request that was sent and never answered', () => {
+	/** A transport that fails the way a timeout does: after the request has gone. */
+	function transportFailing(sent: SteamRequest[] = []) {
+		return {
+			sent,
+			transport: (request: SteamRequest): Promise<SteamResponse> => {
+				sent.push(request);
+				return Promise.reject(new Error('ETIMEDOUT: the connection timed out'));
+			}
+		};
+	}
+
+	const START = { steamId64: STEAM_ID, accessToken: ACCESS, unixSeconds: NOW_SECONDS };
+	const FINALIZE = {
+		steamId64: STEAM_ID,
+		accessToken: ACCESS,
+		sharedSecret: SHARED,
+		activationCode: '55555',
+		unixSeconds: NOW_SECONDS
+	};
+	const REMOVE = { steamId64: STEAM_ID, accessToken: ACCESS, revocationCode: 'R12345' };
+
+	it.each([
+		[
+			'adding an authenticator',
+			(t: (request: SteamRequest) => Promise<SteamResponse>) => startEnrollment(t, START),
+			/add an authenticator and did not answer/
+		],
+		[
+			'activating one',
+			(t: (request: SteamRequest) => Promise<SteamResponse>) => finalizeEnrollment(t, FINALIZE),
+			/activate the authenticator and did not answer/
+		],
+		[
+			'removing one',
+			(t: (request: SteamRequest) => Promise<SteamResponse>) => removeAuthenticator(t, REMOVE),
+			/remove the authenticator and did not answer/
+		]
+	])('reports %s as uncertain rather than failed', async (_what, call, expected) => {
+		const { transport, sent } = transportFailing();
+
+		const thrown = await call(transport).then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		expect(sent, 'the request never went, so there is nothing uncertain about it').toHaveLength(1);
+		expect(thrown).toMatchObject({ committed: true, permanent: true });
+		expect(
+			(thrown as Error).message,
+			'the timeout surfaced as a raw network error, with nothing telling the user the account ' +
+				'may already have changed'
+		).toMatch(expected);
+	});
+
+	it.each([
+		[
+			'adding an authenticator',
+			(t: (r: SteamRequest) => Promise<SteamResponse>) => startEnrollment(t, START)
+		],
+		[
+			'activating one',
+			(t: (r: SteamRequest) => Promise<SteamResponse>) => finalizeEnrollment(t, FINALIZE)
+		],
+		[
+			'removing one',
+			(t: (r: SteamRequest) => Promise<SteamResponse>) => removeAuthenticator(t, REMOVE)
+		]
+	])('never claims nothing happened after %s', async (_what, call) => {
+		/*
+		 * The last two are valid JSON of the wrong shape, which is a different
+		 * branch: the first three fail at `JSON.parse` and never reach the schema
+		 * check. Without them this test passed while that branch still said
+		 * "Nothing was changed".
+		 */
+		for (const body of ['not json', '<html>502 Bad Gateway</html>', '', '{}', '{"response":{}}']) {
+			const { transport } = transportReturning([body]);
+			const thrown = (await call(transport).then(
+				() => undefined,
+				(err: unknown) => err
+			)) as Error & { committed?: boolean };
+
+			expect(
+				thrown.message,
+				`"${body}" was reported as though the account were untouched, and the request had ` +
+					'already been sent'
+			).not.toMatch(/nothing was changed/i);
+			expect(thrown.committed, 'the caller was left free to retry on top of it').toBe(true);
+		}
+	});
+});
+
+/**
+ * **A refusal in which nothing was sent must not be reported as one that may
+ * have happened.**
+ *
+ * The uncertainty wrapper was applied to every rejection, on the reasoning that
+ * a transport rejects after the bytes have gone. Most of this transport's
+ * refusals are the opposite: the routing check that finds Chromium would connect
+ * directly, an account closed while a transport was held, a scheme that cannot
+ * be carried. Nothing leaves the machine.
+ *
+ * Those were being reported as "Steam was asked to add an authenticator and did
+ * not answer ... if an authenticator was attached, its secrets were in the reply
+ * that never arrived ... removing it there, or contacting Steam Support, is the
+ * way out". For a proxy the user could fix in ten seconds. And the real cause
+ * was appended, then truncated before the sentence naming it.
+ *
+ * `EgressError` now says whether the request went. Anything that cannot say is
+ * treated as sent, because that is the assumption which cannot lose an
+ * authenticator.
+ */
+describe('a refusal that happened before the request was sent', () => {
+	const START = { steamId64: STEAM_ID, accessToken: ACCESS, unixSeconds: NOW_SECONDS };
+
+	function transportRefusing(error: Error) {
+		let reached = 0;
+		return {
+			reached: () => reached,
+			transport: (): Promise<SteamResponse> => {
+				reached += 1;
+				return Promise.reject(error);
+			}
+		};
+	}
+
+	it.each([
+		[
+			'the routing check refuses a direct connection',
+			new EgressError(
+				'this account is set to route through http://***:***@proxy.example:8080, but this ' +
+					'connection would be made directly instead. Refusing to connect.',
+				false
+			)
+		],
+		[
+			'the account was closed while the transport was held',
+			new EgressError('this account was closed before the request was sent', false)
+		]
+	])('is passed through unchanged when %s', async (_what, error) => {
+		const { transport } = transportRefusing(error);
+
+		const thrown = (await startEnrollment(transport, START).then(
+			() => undefined,
+			(err: unknown) => err
+		)) as Error & { committed?: boolean };
+
+		expect(
+			thrown.message,
+			'a refusal in which no byte left the machine was reported as one where Steam may have ' +
+				'attached an authenticator'
+		).toBe(error.message);
+		expect(thrown, 'and it was marked as committed').not.toHaveProperty('committed', true);
+	});
+
+	/*
+	 * And the property the wrapper exists for survives: an error that cannot say
+	 * whether the request went is still treated as though it did.
+	 */
+	it('still reports an ordinary network failure as uncertain', async () => {
+		const { transport } = transportRefusing(new Error('ETIMEDOUT: the connection timed out'));
+
+		await expect(startEnrollment(transport, START)).rejects.toMatchObject({
+			committed: true,
+			permanent: true
+		});
+	});
+
+	it('reports a failure that says the request went as uncertain', async () => {
+		const { transport } = transportRefusing(
+			new EgressError('the connection to Steam failed (ERR_CONNECTION_RESET)', true)
+		);
+
+		await expect(startEnrollment(transport, START)).rejects.toMatchObject({ committed: true });
 	});
 });

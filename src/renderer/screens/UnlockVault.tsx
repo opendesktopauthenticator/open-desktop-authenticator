@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Logo } from '../Logo';
 import { branding } from '../../shared/branding';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 import { BackupRestore } from './BackupRestore';
 
 /**
@@ -66,6 +67,8 @@ export function UnlockVault({
 				<label htmlFor="passphrase">Passphrase</label>
 				<input
 					id="passphrase"
+					aria-invalid={error !== undefined}
+					aria-describedby={error === undefined ? undefined : 'unlock-error'}
 					type="password"
 					autoComplete="current-password"
 					spellCheck={false}
@@ -75,7 +78,7 @@ export function UnlockVault({
 					disabled={busy}
 				/>
 
-				{error && <p className="error">{error}</p>}
+				{error && <DynamicError id="unlock-error">{error}</DynamicError>}
 
 				<div className="controls">
 					<button type="submit" disabled={!passphrase || busy}>

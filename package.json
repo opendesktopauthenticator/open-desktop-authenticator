@@ -1,8 +1,8 @@
 {
   "name": "open-desktop-authenticator",
-  "version": "1.0.0",
+  "version": "1.5.0",
   "private": true,
-  "description": "Open Desktop Authenticator \u2014 an open-source desktop authenticator for Steam, by MASTERPANEL LLC. A maintained successor to SDA.",
+  "description": "Open Desktop Authenticator — an open-source desktop authenticator for Steam, by MASTERPANEL LLC. A maintained successor to SDA.",
   "license": "MIT",
   "author": {
     "name": "MASTERPANEL LLC",
@@ -14,7 +14,7 @@
   },
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "npm run typecheck && electron-vite build",
+    "build": "npm run typecheck && npm run notices && electron-vite build",
     "package": "npm run build && electron-builder --config electron-builder.config.mjs --publish never",
     "package:store": "npm run build && electron-builder --config electron-builder.config.mjs --win appx --publish never",
     "start": "electron-vite preview",
@@ -22,16 +22,22 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run",
+    "test": "npm run test:core && npm run test:integration",
+    "test:core": "vitest run --exclude tests/infra-runtime.test.ts --exclude tests/cloudflare-firewall.test.ts --exclude tests/site-deploy.test.ts",
+    "test:integration": "vitest run tests/infra-runtime.test.ts tests/cloudflare-firewall.test.ts tests/site-deploy.test.ts --maxWorkers=1",
     "test:watch": "vitest",
     "benchmark:kdf": "node scripts/benchmark-kdf.mjs",
     "icons": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON tools/make-icons.mjs",
-    "smoke:browser": "electron-vite build && electron tools/smoke-browser-chrome.mjs && esbuild tools/smoke-browser-window.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/smoke/browser-window.js --log-level=error && electron out/smoke/browser-window.js"
+    "smoke:browser": "electron-vite build && esbuild tools/smoke-system-login.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/smoke/system-login.js --log-level=error && node tools/run-electron-harness.mjs out/smoke/system-login.js && node tools/run-electron-harness.mjs tools/smoke-browser-chrome.mjs && esbuild tools/smoke-browser-window.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/smoke/browser-window.js --log-level=error && node tools/run-electron-harness.mjs out/smoke/browser-window.js",
+    "stress:browser": "electron-vite build && esbuild tools/stress-browser.mjs --bundle --platform=node --format=cjs --external:electron --outfile=out/stress/browser.js --log-level=error && node tools/run-electron-harness.mjs out/stress/browser.js",
+    "notices": "node scripts/generate-notices.mjs"
   },
   "dependencies": {
+    "https-proxy-agent": "7.0.6",
     "protobufjs": "7.6.5",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "socks-proxy-agent": "7.0.0",
     "steam-session": "^1.9.4",
     "zod": "4.4.3"
   },

@@ -10,6 +10,10 @@ import { registerUpdateHandlers } from '../src/main/update/ipc';
 import { registerEnrollmentHandlers } from '../src/main/steam/enrollment-ipc';
 import { registerTransferHandlers } from '../src/main/steam/transfer-ipc';
 import { registerBrowserHandlers } from '../src/main/browser/ipc';
+import {
+	registerToastClickHandlers,
+	ToastClickRouter
+} from '../src/main/confirmations/toast-click';
 import type { AccountBrowsers } from '../src/main/browser/window';
 import type { TransferService } from '../src/main/steam/transfer';
 import type { EnrollmentService } from '../src/main/steam/enrollment';
@@ -86,8 +90,12 @@ function registerEverything(): void {
 		account: () => undefined,
 		mintToken: () => Promise.resolve(''),
 		isUnlocked: () => false,
+		requireProxies: () => false,
 		touch: () => undefined
 	});
+	registerToastClickHandlers(
+		new ToastClickRouter({ reveal: () => undefined, push: () => undefined })
+	);
 }
 
 beforeEach(() => {
@@ -133,6 +141,9 @@ describe('IPC registration', () => {
 			// Declared beside `accountSetProxy`, so it sorts ahead of the rest by
 			// declaration order rather than by anything meaningful.
 			CHANNELS.accountOpenBrowser,
+			// Answered by the enrollment handlers, which this case deliberately does
+			// not register.
+			CHANNELS.accountResolveOperation,
 			CHANNELS.activityList,
 			CHANNELS.activityAcknowledge,
 			CHANNELS.confirmationsList,
@@ -144,14 +155,19 @@ describe('IPC registration', () => {
 			CHANNELS.transferComplete,
 			CHANNELS.transferRetryPersist,
 			CHANNELS.transferStatus,
+			CHANNELS.transferResolve,
 			CHANNELS.transferCancel,
 			CHANNELS.enrollBegin,
 			CHANNELS.enrollEmailCode,
 			CHANNELS.enrollActivate,
+			CHANNELS.enrollStatus,
+			CHANNELS.enrollRetryPersist,
+			CHANNELS.enrollResolve,
 			CHANNELS.enrollCancel,
 			CHANNELS.accountExport,
 			CHANNELS.accountDeactivate,
-			CHANNELS.accountRecover
+			CHANNELS.accountRecover,
+			CHANNELS.takePendingConfirmations
 		]);
 	});
 

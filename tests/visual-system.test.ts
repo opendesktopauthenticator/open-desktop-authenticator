@@ -76,8 +76,33 @@ describe('the code glyphs', () => {
 		// An earlier version flipped each glyph in through `rotateX(-75deg)`, which
 		// left the code showing one or two readable characters for about half a
 		// second on every rotation. Five characters, legibly, is the entire job.
-		const land = css.slice(css.indexOf('@keyframes land'));
-		expect(land.slice(0, land.indexOf('}') + 2)).not.toMatch(/rotate/);
+		/*
+		 * **The whole block, not its first step.** `indexOf('}')` finds the brace
+		 * closing the inner `from { ... }` step, so the slice ended there and every
+		 * later step went unchecked — adding `50% { ... rotateX(-75deg); }` brought
+		 * the flip straight back with the test still green.
+		 */
+		const at = css.indexOf('@keyframes land');
+		expect(at, 'the land keyframes are gone; this test needs rewriting').toBeGreaterThan(-1);
+		const open = css.indexOf('{', at);
+		let depth = 0;
+		let close = -1;
+		for (let i = open; i < css.length; i += 1) {
+			if (css[i] === '{') depth += 1;
+			else if (css[i] === '}') {
+				depth -= 1;
+				if (depth === 0) {
+					close = i;
+					break;
+				}
+			}
+		}
+		expect(close, 'the land keyframes are not a balanced block').toBeGreaterThan(open);
+		expect(
+			css.slice(open, close),
+			'a step in @keyframes land rotates the glyph, so the code shows one or two readable ' +
+				'characters for part of every rotation'
+		).not.toMatch(/rotate/);
 	});
 });
 
@@ -166,7 +191,9 @@ describe('the gate screens', () => {
 	it('still has two labelled fields on the create screen', () => {
 		// Guards the premise of the test above rather than the styling: if this
 		// screen ever became single-field, the scoping would stop mattering and
-		// somebody should notice deliberately rather than by breaking it.
-		expect(create.match(/<label htmlFor=/g) ?? []).toHaveLength(2);
+		// somebody should notice deliberately rather than by breaking it. The
+		// separate existing-vault adoption control is outside this creation form.
+		const createForm = create.slice(create.indexOf('<form'), create.indexOf('</form>'));
+		expect(createForm.match(/<label htmlFor=/g) ?? []).toHaveLength(2);
 	});
 });

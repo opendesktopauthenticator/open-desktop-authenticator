@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { VaultSettingsView } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * The two timings a user can change (§10.3).
@@ -108,7 +109,7 @@ export function Settings({
 				</button>
 			</header>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError>{error}</DynamicError>}
 
 			{settings === undefined ? (
 				error === undefined ? (
@@ -155,6 +156,26 @@ export function Settings({
 					<p className="hint">
 						Seconds, between 5 and 300. Only ever clears the code we put there — anything you copied
 						since is left alone.
+					</p>
+
+					<h2>Routing</h2>
+					<label className="checkbox">
+						<input
+							type="checkbox"
+							checked={settings.requireProxies}
+							disabled={busy}
+							onChange={(event) => change({ requireProxies: event.target.checked })}
+						/>
+						Require proxies
+					</label>
+					{/* What it costs, next to the switch, because both consequences are
+					    things the user will otherwise meet as unexplained failures: a
+					    Trade button that refuses, and update checks that stop. */}
+					<p className="hint">
+						With this on, the browser refuses to open without a proxy — the Direct button goes away,
+						and an account that has no proxy cannot open one at all. Update checks stop too: they go
+						to GitHub rather than to Steam, so no account’s proxy applies to them, and this setting
+						says that request should not be made unrouted.
 					</p>
 
 					<h2>Update checks</h2>
@@ -231,17 +252,23 @@ export function PassphraseChange({
 		onBusy?.(true);
 		setError(undefined);
 		setDone(false);
-		onChange(current, next)
+		// Enter the callback from a promise turn as well: the real bridge returns a
+		// promise, but a broken bridge can still throw before returning one. That is
+		// a rejected attempt too, and must reach the same error and cleanup paths.
+		Promise.resolve()
+			.then(() => onChange(current, next))
 			.then(() => {
 				setDone(true);
-				// Passphrases have no business sitting in component state after the
-				// change. The success line is what remains.
-				setCurrent('');
-				setNext('');
-				setConfirm('');
 			})
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => {
+				// These fields are frozen for the whole attempt, so they still hold
+				// exactly the submitted values. Drop every copy however the request
+				// settles; a rejected current passphrase is still a credential and a
+				// rejected replacement should not remain in the DOM either.
+				setCurrent('');
+				setNext('');
+				setConfirm('');
 				setBusy(false);
 				onBusy?.(false);
 			});
@@ -258,6 +285,8 @@ export function PassphraseChange({
 			<label htmlFor="passphrase-current">Current passphrase</label>
 			<input
 				id="passphrase-current"
+				aria-invalid={error !== undefined}
+				aria-describedby={error === undefined ? undefined : 'passphrase-change-error'}
 				type="password"
 				disabled={busy}
 				autoComplete="current-password"
@@ -268,6 +297,8 @@ export function PassphraseChange({
 			<label htmlFor="passphrase-next">New passphrase</label>
 			<input
 				id="passphrase-next"
+				aria-invalid={error !== undefined}
+				aria-describedby={error === undefined ? undefined : 'passphrase-change-error'}
 				type="password"
 				disabled={busy}
 				autoComplete="new-password"
@@ -278,6 +309,8 @@ export function PassphraseChange({
 			<label htmlFor="passphrase-confirm">New passphrase, again</label>
 			<input
 				id="passphrase-confirm"
+				aria-invalid={error !== undefined}
+				aria-describedby={error === undefined ? undefined : 'passphrase-change-error'}
 				type="password"
 				disabled={busy}
 				autoComplete="new-password"
@@ -285,7 +318,7 @@ export function PassphraseChange({
 				onChange={(event) => setConfirm(event.target.value)}
 			/>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError id="passphrase-change-error">{error}</DynamicError>}
 
 			<div className="controls">
 				<button type="submit" disabled={busy || !current || !next || !confirm}>
@@ -359,6 +392,15 @@ export function UpdateCheckSetting({
 					Asks GitHub once every few hours whether a newer release exists. It sends nothing about
 					you or your accounts — it is the same question any visitor to the releases page asks.
 					GitHub will see your IP address and that this application is running.
+				</p>
+				{/* Said plainly, because somebody who has set a proxy on every account
+				    would otherwise reasonably assume this went through one. It does
+				    not, and there is nowhere it could: proxies here belong to
+				    accounts, and this request belongs to none of them. */}
+				<p className="hint">
+					It goes out from this computer&rsquo;s own address. Account proxies are exactly that — per
+					account — and this request is not made on behalf of any account, so none of them applies
+					to it. Switch this off if that matters to you.
 				</p>
 				<p className="hint">
 					It never downloads or installs anything. When there is a new version you get a link, and

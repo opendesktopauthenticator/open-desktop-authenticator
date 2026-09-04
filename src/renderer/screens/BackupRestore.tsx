@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * Loading the vault's `.bak` deliberately (§12 F1).
@@ -73,7 +74,7 @@ export function BackupRestore({
 			    was about to load one. */}
 			<p className="hint">{introduction}</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError id="restore-backup-error">{error}</DynamicError>}
 
 			<form
 				onSubmit={(event) => {
@@ -97,6 +98,8 @@ export function BackupRestore({
 				<label htmlFor="restore-passphrase">Passphrase for the backup</label>
 				<input
 					id="restore-passphrase"
+					aria-invalid={error !== undefined}
+					aria-describedby={error === undefined ? undefined : 'restore-backup-error'}
 					type="password"
 					value={passphrase}
 					onChange={(event) => setPassphrase(event.target.value)}
@@ -135,6 +138,17 @@ export function BackupRestore({
 						onClick={() => {
 							setOpen(false);
 							setError(undefined);
+							/*
+							 * **And the passphrase, which Cancel did not clear.**
+							 *
+							 * This component stays mounted on the Create and Unlock screens
+							 * — closing the form only hides it — so the controlled value
+							 * survived, and reopening the form presented the previous
+							 * secret already typed in. Both success and failure clear it
+							 * above; abandoning is the third way out and was the one that
+							 * kept it.
+							 */
+							setPassphrase('');
 						}}
 						disabled={busy || siblingBusy}
 					>

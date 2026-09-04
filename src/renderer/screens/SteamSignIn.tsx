@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { SignInResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * Signing in to Steam, once (§12 F3).
@@ -19,6 +20,7 @@ export function SteamSignIn({
 	accountName,
 	reason,
 	onSignIn,
+	onSignedIn,
 	onCancel
 }: {
 	accountName: string;
@@ -33,6 +35,8 @@ export function SteamSignIn({
 	 * form withdraws instead of inviting another password.
 	 */
 	onSignIn: (password: string) => Promise<SignInResult>;
+	/** Runs only after Steam has accepted and saved the sign-in. */
+	onSignedIn?: () => void;
 	onCancel: () => void;
 }): React.JSX.Element {
 	const [password, setPassword] = useState('');
@@ -54,6 +58,7 @@ export function SteamSignIn({
 				// lifetime of the screen — whatever the outcome was.
 				setPassword('');
 				if (result.ok) {
+					onSignedIn?.();
 					return;
 				}
 				if (result.retryable) {
@@ -98,7 +103,7 @@ export function SteamSignIn({
 				)}
 			</div>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError id="steam-sign-in-error">{error}</DynamicError>}
 
 			{/* The form withdraws entirely. Steam has said something a password
 			    cannot answer — the sign-in must be approved on the device holding the
@@ -109,7 +114,7 @@ export function SteamSignIn({
 			    alike. */}
 			{hopeless !== undefined ? (
 				<>
-					<p className="error">{hopeless}</p>
+					<DynamicError>{hopeless}</DynamicError>
 					<p className="hint">
 						Another password attempt will not change this. Deal with it on Steam&rsquo;s side, then
 						come back.
@@ -125,8 +130,11 @@ export function SteamSignIn({
 					<label htmlFor="steam-password">Steam password for {accountName}</label>
 					<input
 						id="steam-password"
+						aria-invalid={error !== undefined}
+						aria-describedby={error === undefined ? undefined : 'steam-sign-in-error'}
 						type="password"
 						value={password}
+						disabled={busy}
 						onChange={(event) => setPassword(event.target.value)}
 						autoComplete="off"
 						spellCheck={false}

@@ -1,6 +1,12 @@
 import { generateGuardCode } from '../codes/totp';
 import { redactCredentials, steamSessionProxy } from '../net/egress';
+import { ProxyConnectionError } from '../net/bounded-https-proxy-agent';
 import { jwtAudience, jwtExpiry } from '../steam-jwt';
+import type { ApiRequest, ApiResponse, ITransport } from 'steam-session';
+import {
+	SYSTEM_PROXY_AUTH_REQUIRED,
+	type SystemLoginTransportFactory
+} from './system-login-transport';
 
 /**
  * Signing in with a password, once (§12 F3).
@@ -22,9 +28,9 @@ import { jwtAudience, jwtExpiry } from '../steam-jwt';
  * `steam-session` is DoctorMcKay's, it is the flow every other Steam tool uses,
  * and it carries **zero** advisories of its own (the eleven in the spike all
  * arrive through `steamcommunity` → `request`, which is why that one is still
- * not shipped). It also removes a class of bug we had already hit once: it
- * authenticates to proxies itself, over Node's HTTP stack, rather than through
- * an Electron mechanism we had to wire by hand.
+ * not shipped). Explicit account proxies stay on its proven Node agent path.
+ * Accounts without one receive the application's system-aware Electron
+ * transport, because a plain Node agent cannot follow Windows/PAC settings.
  *
  * ## What is still ours, and why
  *
@@ -152,12 +158,129 @@ export interface LoginSessionLike {
 export type LoginSessionFactory = (proxyUrl: string | undefined) => LoginSessionLike;
 
 /**
- * Build a real `LoginSession`, routed through the account's proxy if it has one.
+ * The private dependency hook used to retain `steam-session`'s own transport.
+ *
+ * For an explicit account proxy, this is the exact transport the dependency
+ * constructed around the selected agent. For the machine route, it is the
+ * application-owned Electron transport supplied through the library's public
+ * `ITransport` option. The same fence wraps either one, so route selection does
+ * not weaken cancellation.
+ *
+ * This is the one private shape on which the fence depends. It is checked at
+ * runtime before a credential is accepted; dependency drift therefore refuses
+ * the sign-in instead of silently returning to unfenced requests.
+ */
+interface FencableLoginSession extends LoginSessionLike {
+	_handler?: {
+		_transport?: unknown;
+	};
+}
+
+const LOGIN_CANCELLED = 'The Steam sign-in was cancelled before another request could be sent.';
+
+function cancellationError(): SteamLoginError {
+	return new SteamLoginError(LOGIN_CANCELLED, false);
+}
+
+/**
+ * A synchronous ownership fence around the library's already-configured
+ * transport.
+ *
+ * It cannot recall the one request already on the wire. It does stop a late
+ * answer from advancing the login state, and it refuses every request the
+ * library tries to begin afterwards. Both checks matter: the original defect
+ * was an RSA-key request resolving after cancellation and immediately starting
+ * a password-bearing BeginAuthSession request.
+ */
+class CancellationFencedTransport implements ITransport {
+	private cancelled = false;
+
+	constructor(readonly delegate: ITransport) {}
+
+	cancel(): void {
+		this.cancelled = true;
+		// AuthenticationClient delays transport cleanup for two seconds. A vault
+		// lock or policy change cannot wait for that timer: the system transport
+		// owns a live Electron request and close() is its synchronous abort seam.
+		this.delegate.close();
+	}
+
+	async sendRequest(request: ApiRequest): Promise<ApiResponse> {
+		if (this.cancelled) {
+			throw cancellationError();
+		}
+		const response = await this.delegate.sendRequest(request);
+		if (this.cancelled) {
+			throw cancellationError();
+		}
+		return response;
+	}
+
+	close(): void {
+		// Cleanup is still the dependency's job. In particular, a future transport
+		// may own a socket even though today's MobileApp WebAPI transport does not.
+		this.delegate.close();
+	}
+}
+
+/** Install the cancellation fence before the session can start a request. */
+export function fenceLoginCancellation(session: LoginSessionLike): LoginSessionLike {
+	const candidate = session as FencableLoginSession;
+	const handler = candidate._handler;
+	const transport = handler?._transport;
+	if (
+		handler === undefined ||
+		transport === undefined ||
+		typeof (transport as Partial<ITransport>).sendRequest !== 'function' ||
+		typeof (transport as Partial<ITransport>).close !== 'function'
+	) {
+		try {
+			session.cancelLoginAttempt();
+		} catch {
+			// No request has started. Refusal below is the fail-closed outcome.
+		}
+		throw new SteamLoginError(
+			'The installed Steam sign-in library cannot be cancelled safely. Refusing to sign in; update the app before trying again.'
+		);
+	}
+
+	const fence = new CancellationFencedTransport(transport as ITransport);
+	try {
+		handler._transport = fence;
+		if (handler._transport !== fence) {
+			throw new Error('the Steam transport hook is not writable');
+		}
+	} catch {
+		try {
+			session.cancelLoginAttempt();
+		} catch {
+			// No request has started. Refusal below is the fail-closed outcome.
+		}
+		throw new SteamLoginError(
+			'The installed Steam sign-in library cannot be cancelled safely. Refusing to sign in; update the app before trying again.'
+		);
+	}
+
+	const cancel = session.cancelLoginAttempt.bind(session);
+	session.cancelLoginAttempt = (): void => {
+		// First, synchronously. The dependency's own cleanup is delayed and cannot
+		// be the boundary that decides whether another request is allowed to start.
+		fence.cancel();
+		cancel();
+	};
+	return session;
+}
+
+/**
+ * Build a real `LoginSession`: explicit account proxy, or injected system route.
  *
  * Imported lazily so that requiring this module does not drag protobuf parsing
  * and a websocket stack into every test that only wants the error mapping.
  */
-export const createLoginSession: LoginSessionFactory = (proxyUrl) => {
+export function createLoginSession(
+	proxyUrl: string | undefined,
+	systemTransport?: SystemLoginTransportFactory
+): LoginSessionLike {
 	/* eslint-disable @typescript-eslint/no-require-imports -- lazy by design, see above */
 	const { LoginSession, EAuthTokenPlatformType } =
 		require('steam-session') as typeof import('steam-session');
@@ -167,14 +290,24 @@ export const createLoginSession: LoginSessionFactory = (proxyUrl) => {
 	// account configured to route must never sign in over the machine's own
 	// address — that is the one request that ties the account to the user.
 	const routed = proxyUrl !== undefined && proxyUrl !== '';
-	const options = routed ? steamSessionProxy(proxyUrl) : {};
+	let options;
+	if (routed) {
+		options = steamSessionProxy(proxyUrl);
+	} else {
+		if (systemTransport === undefined) {
+			throw new SteamLoginError(
+				"the machine's system proxy route is unavailable. Refusing to sign in rather than using a direct Node connection."
+			);
+		}
+		options = { transport: systemTransport() };
+	}
 
 	// Checked rather than assumed, because `steam-session` **silently ignores an
 	// option key it does not recognise** and connects direct. There is no
 	// equivalent of Chromium's `resolveProxy` to ask afterwards, so this is the
 	// only moment the mistake is catchable — and its failure mode is the account
 	// signing in from the user's real address with nothing on screen to say so.
-	if (routed && !('httpProxy' in options) && !('socksProxy' in options)) {
+	if (routed && !('agent' in options) && !('socksProxy' in options)) {
 		throw new SteamLoginError(
 			'this account is set to route through a proxy, but the routing could not be applied to ' +
 				'the sign-in. Refusing to continue rather than signing in from this machine’s own address.'
@@ -186,22 +319,63 @@ export const createLoginSession: LoginSessionFactory = (proxyUrl) => {
 	// library rather than being told to accept it. If a future version needs a
 	// cast here, that is the signal the shim has drifted from `steam-session` —
 	// which is exactly the drift that broke proxy authentication once already.
-	return new LoginSession(EAuthTokenPlatformType.MobileApp, options);
-};
+	return fenceLoginCancellation(new LoginSession(EAuthTokenPlatformType.MobileApp, options));
+}
+
+/** Bind application-owned system routing once, then inject the resulting seam. */
+export function createSystemAwareLoginSessionFactory(
+	systemTransport: SystemLoginTransportFactory
+): LoginSessionFactory {
+	return (proxyUrl) => createLoginSession(proxyUrl, systemTransport);
+}
 
 /**
  * Exchange a password for a MobileApp refresh token.
  *
  * @throws SteamLoginError — `permanent: false` only when retrying could help.
  */
+/**
+ * Why a sign-in was stopped when the proxy policy forbade it.
+ *
+ * Exported so the two callers that cancel for this reason say the same thing —
+ * a password path is a bad place for two sentences describing one cause.
+ */
+/**
+ * Why a sign-in was stopped when the vault locked under it.
+ *
+ * Shared for the same reason as `PROXY_POLICY_STOPPED`: enrolment cancels its
+ * session directly rather than through the callback below, so without a name
+ * to reach for it reported "Steam refused the sign-in" — blaming Steam for a
+ * lock this application performed.
+ */
+export const VAULT_LOCKED_DURING_SIGN_IN = 'The vault locked before Steam finished signing in.';
+
+export const PROXY_POLICY_STOPPED =
+	'This vault is set to require proxies, so the sign-in was stopped. Give the account a ' +
+	'proxy, or turn off "Require proxies" in Settings.';
+
 export async function signIn(
 	request: SignInRequest,
 	proxyUrl: string | undefined,
 	factory: LoginSessionFactory = createLoginSession,
-	now: () => number = () => Date.now()
+	now: () => number = () => Date.now(),
+	/**
+	 * Handed a way to abandon this attempt while it is still running.
+	 *
+	 * **Every failure path already cancels; nothing outside could.** A sign-in
+	 * takes as long as Steam takes, up to the ninety-second timeout, and the
+	 * vault can lock in the middle of it — by the idle timer, by the lid, by the
+	 * user. `ConfirmationsService.forget` bumps its generation so the token that
+	 * eventually arrives is refused, which is the important half; but the
+	 * authentication polling kept running against Steam over the account's proxy,
+	 * and the closure holding the user's password stayed alive with it, for up to
+	 * a minute and a half after the user had said "stop".
+	 *
+	 * Refusing the result is not the same as stopping the work. This is the
+	 * other half.
+	 */
+	onAttempt?: (cancel: (reason?: string) => void) => void
 ): Promise<SignInResult> {
-	const session = factory(proxyUrl);
-
 	/*
 	 * Derived from the secret when this app holds it, typed by the user when it
 	 * does not.
@@ -224,14 +398,23 @@ export async function signIn(
 		);
 	}
 
+	/*
+	 * The factory owns a system-session lease when there is no explicit proxy.
+	 * Keep every throwing input precondition above this line: a refusal before a
+	 * LoginSession exists has nothing it can cancel, so acquiring first leaves the
+	 * shared Electron owner permanently believing an attempt is still alive.
+	 */
+	const session = factory(proxyUrl);
+
 	return new Promise<SignInResult>((resolve, reject) => {
 		let settled = false;
+		let timer: NodeJS.Timeout | undefined;
 		const finish = (run: () => void): void => {
 			if (settled) {
 				return;
 			}
 			settled = true;
-			clearTimeout(timer);
+			if (timer !== undefined) clearTimeout(timer);
 			run();
 		};
 
@@ -253,49 +436,83 @@ export async function signIn(
 				reject(error);
 			});
 
-		const timer = setTimeout(
-			() =>
-				fail(new SteamLoginError('Steam did not finish the sign-in in time. Try again.', false)),
-			SIGN_IN_TIMEOUT_MS
-		);
-		timer.unref?.();
+		/*
+		 * Handed out before the attempt starts, so a lock arriving between the
+		 * first packet and the last always finds something to cancel — and after
+		 * `timer` exists, because `fail` clears it.
+		 *
+		 * Routed through `fail` rather than calling the library directly:
+		 * cancelling without settling would leave the caller awaiting a promise
+		 * nothing will ever resolve.
+		 */
+		/*
+		 * **The caller says why, because there is now more than one why.**
+		 *
+		 * This read "The vault locked before Steam finished signing in" and was
+		 * the only sentence a cancellation could produce. `Require proxies` now
+		 * cancels unrouted sign-ins through the same callback, and told the user
+		 * their vault had locked — which had not happened, and sends them to
+		 * unlock a vault that is already open. The default is still the lock,
+		 * because that is still the common case.
+		 */
+		try {
+			timer = setTimeout(
+				() =>
+					fail(new SteamLoginError('Steam did not finish the sign-in in time. Try again.', false)),
+				SIGN_IN_TIMEOUT_MS
+			);
+			timer.unref?.();
 
-		session.on('timeout', () =>
-			fail(new SteamLoginError('Steam did not finish the sign-in in time. Try again.', false))
-		);
+			onAttempt?.((reason) =>
+				fail(new SteamLoginError(reason ?? VAULT_LOCKED_DURING_SIGN_IN, false))
+			);
+			// A registration callback is allowed to cancel immediately. The fence
+			// would stop the network request, but not starting it at all also avoids
+			// handing a password to a session whose answer is already unwanted.
+			if (settled) return;
 
-		session.on('error', (err) =>
-			// Retryable: an `error` here is a transport or Steam-side failure, not a
-			// rejected credential — those arrive as a refused start.
-			fail(new SteamLoginError(describeLibraryError(err), false))
-		);
+			session.on('timeout', () =>
+				fail(new SteamLoginError('Steam did not finish the sign-in in time. Try again.', false))
+			);
 
-		session.on('authenticated', () =>
-			finish(() => {
-				try {
-					resolve(collectTokens(session, now));
-				} catch (err) {
-					// `collectTokens` throws only `SteamLoginError`. Normalised anyway so
-					// the rejection is an Error whatever future edits do to it.
-					reject(err instanceof Error ? err : new SteamLoginError(String(err)));
-				}
-			})
-		);
+			session.on('error', (err) =>
+				// Retryable: an `error` here is a transport or Steam-side failure, not a
+				// rejected credential — those arrive as a refused start.
+				fail(new SteamLoginError(describeLibraryError(err), false))
+			);
 
-		session
-			.startWithCredentials({
-				accountName: request.accountName,
-				password: request.password,
-				persistence: PERSISTENT,
-				steamGuardCode
-			})
-			.then((started) => {
-				if (started.actionRequired) {
-					fail(refusalFor(started.validActions ?? []));
-				}
-				// Otherwise `authenticated` is coming; nothing to do but wait.
-			})
-			.catch((err: unknown) => fail(new SteamLoginError(describeLibraryError(err), false)));
+			session.on('authenticated', () =>
+				finish(() => {
+					try {
+						resolve(collectTokens(session, now));
+					} catch (err) {
+						// `collectTokens` throws only `SteamLoginError`. Normalised anyway so
+						// the rejection is an Error whatever future edits do to it.
+						reject(err instanceof Error ? err : new SteamLoginError(String(err)));
+					}
+				})
+			);
+
+			session
+				.startWithCredentials({
+					accountName: request.accountName,
+					password: request.password,
+					persistence: PERSISTENT,
+					steamGuardCode
+				})
+				.then((started) => {
+					if (started.actionRequired) {
+						fail(refusalFor(started.validActions ?? []));
+					}
+					// Otherwise `authenticated` is coming; nothing to do but wait.
+				})
+				.catch((err: unknown) => fail(new SteamLoginError(describeLibraryError(err), false)));
+		} catch (err) {
+			// Dependency drift or a throwing registration callback is still a failed
+			// attempt. Cancel it through the same one-settlement boundary immediately;
+			// otherwise its system-session lease survives until process exit.
+			fail(new SteamLoginError(describeLibraryError(err), false));
+		}
 	});
 }
 
@@ -382,6 +599,15 @@ function refusalFor(actions: { type: number }[]): SteamLoginError {
  */
 function describeLibraryError(err: unknown): string {
 	const message = err instanceof Error ? err.message : String(err);
+	/*
+	 * A proxy controls its CONNECT reason phrase. Classify that transport
+	 * boundary before looking for Steam result names: a 407 phrase such as
+	 * "InvalidPassword" describes the proxy's answer, not Steam's verdict on the
+	 * account password. `describeProxyLoginError` retains only local wording and
+	 * the numeric status.
+	 */
+	const proxy = describeProxyLoginError(err);
+	if (proxy !== undefined) return proxy;
 
 	if (/InvalidPassword|InvalidCredentials/i.test(message)) {
 		return 'Steam did not accept that username and password.';
@@ -393,4 +619,45 @@ function describeLibraryError(err: unknown): string {
 	// said — and what it says routinely includes the URL it failed on, proxy
 	// credentials and all.
 	return `Steam refused the sign-in: ${redactCredentials(message)}`;
+}
+
+/** A failure produced before the proxy has opened a route to Steam. */
+export function describeProxyLoginError(err: unknown): string | undefined {
+	const message = err instanceof Error ? err.message : String(err);
+	if (message === SYSTEM_PROXY_AUTH_REQUIRED) return message;
+	if (
+		/Proxy connection timed out/i.test(message) ||
+		/A "socket" was not created for HTTP request before \d+ms/i.test(message)
+	) {
+		return 'The proxy did not finish opening a connection to Steam in time. Try again.';
+	}
+
+	const proxyConnect = /\bProxy CONNECT (\d{3})(?: ([^\r\n]*))?/i.exec(message);
+	if (proxyConnect !== null) {
+		/*
+		 * The status text is supplied by the proxy, not by Node or this app. A
+		 * proxy has already received its configured credentials and can echo them
+		 * in that phrase; including it here put the password straight into the
+		 * renderer-visible error while bypassing `redactCredentials`. The numeric
+		 * status is enough to distinguish the actionable 407 case and contains no
+		 * remote-controlled prose.
+		 */
+		const status = `CONNECT ${proxyConnect[1]}`;
+		return proxyConnect[1] === '407'
+			? `The proxy requires a username and password, or did not accept the ones configured (${status}).`
+			: `The proxy refused to open a connection to Steam (${status}).`;
+	}
+	if (
+		/Proxy CONNECT (?:failed|response headers exceeded)/i.test(message) ||
+		/Proxy connection ended before receiving CONNECT response/i.test(message) ||
+		/Invalid (?:response from proxy CONNECT request|header in proxy CONNECT response)/i.test(
+			message
+		)
+	) {
+		return 'The proxy closed the connection or sent an invalid response while opening a route to Steam.';
+	}
+	if (err instanceof ProxyConnectionError || /SOCKS proxy handshake failed:/i.test(message)) {
+		return 'The SOCKS proxy rejected or could not finish opening a connection to Steam.';
+	}
+	return undefined;
 }

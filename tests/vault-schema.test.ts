@@ -4,6 +4,7 @@ import {
 	AUTO_CONFIRM_DEFAULTS,
 	emptyVault,
 	MIN_PASSPHRASE_LENGTH,
+	newAutoConfirm,
 	passphraseProblem,
 	steamId64Schema,
 	vaultContentsSchema,
@@ -210,5 +211,193 @@ describe('one Steam identity, one stored account', () => {
 			// account to deduplicate — "not valid" alone is a lockout.
 			expect(JSON.stringify(result.error.issues)).toContain('76561198000000001');
 		}
+	});
+});
+
+/**
+ * **Confirmation notifications, and what has to survive a round trip.**
+ *
+ * The defaults here are a security decision, not a preference: notifications
+ * are off until somebody switches them on for one account, and the disclosure
+ * about what `full` prints sits beside that switch. A default that drifted to
+ * `enabled: true` would put trade partners and item names on a lock screen
+ * nobody had agreed to.
+ */
+describe('notification settings', () => {
+	it('defaults to off, and to full detail', () => {
+		const parsed = accountSchema.parse(account);
+		expect(parsed.autoConfirm.notify.enabled, 'notifications defaulted to on').toBe(false);
+		expect(parsed.autoConfirm.notify.detail).toBe('full');
+	});
+
+	it('accepts an account written before the field existed', () => {
+		const parsed = accountSchema.parse({
+			...account,
+			autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 30 }
+		});
+		expect(parsed.autoConfirm.notify).toEqual({ enabled: false, detail: 'full' });
+		// The fields that were there are not disturbed by the one that was not.
+		expect(parsed.autoConfirm.pollIntervalSeconds).toBe(30);
+		expect(parsed.autoConfirm.marketListings).toBe(true);
+	});
+
+	/*
+	 * Not covered by the two tests above, and mutation testing is how that came
+	 * out: an account with no `autoConfirm` at all takes the *outer* default,
+	 * and one with `autoConfirm` but no `notify` takes `notify`'s object
+	 * default. Neither ever consults `detail`'s own default, so changing it to
+	 * `'type'` left the suite green. This is the shape that reaches it — a
+	 * partial `notify`, which is what a newer build writing only `enabled`
+	 * would leave behind.
+	 */
+	it('fills in full when notify exists without a detail', () => {
+		const parsed = accountSchema.parse({
+			...account,
+			autoConfirm: { ...AUTO_CONFIRM_DEFAULTS, notify: { enabled: true } }
+		});
+		expect(parsed.autoConfirm.notify.detail).toBe('full');
+		expect(parsed.autoConfirm.notify.enabled).toBe(true);
+	});
+
+	it('refuses a detail outside the enum', () => {
+		expect(() =>
+			accountSchema.parse({
+				...account,
+				autoConfirm: { ...AUTO_CONFIRM_DEFAULTS, notify: { enabled: true, detail: 'everything' } }
+			})
+		).toThrow();
+	});
+
+	it('accepts exactly the floor', () => {
+		// Without this, raising `min(10)` to `min(30)` refuses every interval the
+		// UI offers between the two and the suite stays green.
+		const parsed = accountSchema.parse({
+			...account,
+			autoConfirm: { ...AUTO_CONFIRM_DEFAULTS, pollIntervalSeconds: 10 }
+		});
+		expect(parsed.autoConfirm.pollIntervalSeconds).toBe(10);
+	});
+
+	it('still enforces the ten-second interval floor', () => {
+		expect(() =>
+			accountSchema.parse({
+				...account,
+				autoConfirm: { ...AUTO_CONFIRM_DEFAULTS, pollIntervalSeconds: 9 }
+			})
+		).toThrow();
+	});
+
+	/*
+	 * The outer `autoConfirmSchema` has a `.passthrough()`, which protects a
+	 * sibling key called `notify` — it does not protect keys *inside* it. An
+	 * earlier draft of this test pointed at the outer object, where it passed
+	 * without testing the thing that can actually be lost.
+	 */
+	it('keeps an unknown key from inside notify', () => {
+		const parsed = accountSchema.parse({
+			...account,
+			autoConfirm: {
+				...AUTO_CONFIRM_DEFAULTS,
+				notify: { enabled: false, detail: 'full', sound: 'chime' }
+			}
+		}) as unknown as { autoConfirm: { notify: Record<string, unknown> } };
+		expect(parsed.autoConfirm.notify.sound, 'a newer build lost a setting inside notify').toBe(
+			'chime'
+		);
+	});
+});
+
+/**
+ * **Two accounts added in one session must not share one `notify` object.**
+ *
+ * `AUTO_CONFIRM_DEFAULTS` used to be flat, so every call site spread it and
+ * that was safe. `notify` made it nested, and a shallow spread copies the
+ * reference — while `vault/ipc.ts` mutates `account.autoConfirm` in place. The
+ * two together mean switching notifications on for one account switches them
+ * on for every account added beside it, and the vault is written that way.
+ */
+describe('newAutoConfirm', () => {
+	it('gives each account its own notify object', () => {
+		const first = newAutoConfirm();
+		const second = newAutoConfirm();
+		first.notify.enabled = true;
+		expect(second.notify.enabled, 'two accounts shared one notify object').toBe(false);
+	});
+
+	it('does not write through to the shared defaults', () => {
+		newAutoConfirm().notify.enabled = true;
+		expect(AUTO_CONFIRM_DEFAULTS.notify.enabled, 'the defaults themselves were mutated').toBe(
+			false
+		);
+	});
+
+	it('matches the schema defaults', () => {
+		expect(newAutoConfirm()).toEqual(accountSchema.parse(account).autoConfirm);
+	});
+});
+
+/**
+ * **Nothing may hand out the module constant itself.**
+ *
+ * These are reference assertions, deliberately, and the reason is that the
+ * value-equality version of them passed while the bug was live. zod resolves a
+ * `.default()` with a *shallow* clone: the outer `autoConfirm` came back fresh
+ * and the nested `notify` was the exported constant. Two accounts parsed
+ * without an `autoConfirm` — a legacy vault, a hand-edited one, a recovery file
+ * — therefore shared one `notify` with each other and with the defaults, so a
+ * single in-place write flipped notifications on for all of them *and* for
+ * every account created afterwards, for the life of the process.
+ *
+ * That is precisely the "off by default quietly becomes on" failure the
+ * docblock above `AUTO_CONFIRM_DEFAULTS` names, so `toEqual` is not a strong
+ * enough assertion to be worth writing here.
+ */
+describe('the defaults are never handed out by reference', () => {
+	const other = { ...account, steamId64: '76561198000000002' };
+
+	it('gives two defaulted accounts separate notify objects', () => {
+		const a = accountSchema.parse(account);
+		const b = accountSchema.parse(other);
+		expect(a.autoConfirm.notify, 'two accounts share one notify').not.toBe(b.autoConfirm.notify);
+	});
+
+	it('never returns the exported constant itself', () => {
+		const parsed = accountSchema.parse(account);
+		expect(parsed.autoConfirm).not.toBe(AUTO_CONFIRM_DEFAULTS);
+		expect(parsed.autoConfirm.notify, 'a parse handed back the module constant').not.toBe(
+			AUTO_CONFIRM_DEFAULTS.notify
+		);
+	});
+
+	it('does not let one account written to reach another, or the next parse', () => {
+		const a = accountSchema.parse(account);
+		a.autoConfirm.notify.enabled = true;
+		expect(accountSchema.parse(other).autoConfirm.notify.enabled).toBe(false);
+		expect(AUTO_CONFIRM_DEFAULTS.notify.enabled, 'the defaults were rewritten').toBe(false);
+	});
+
+	/*
+	 * The backstop, in case a future default is added by value again. Freezing
+	 * turns a silent process-wide corruption into a thrown error at the write.
+	 */
+	it('freezes the constant, nested object included', () => {
+		expect(Object.isFrozen(AUTO_CONFIRM_DEFAULTS)).toBe(true);
+		expect(Object.isFrozen(AUTO_CONFIRM_DEFAULTS.notify), 'the nested object is writable').toBe(
+			true
+		);
+	});
+
+	it('gives the partial-notify path a fresh object too', () => {
+		// This one takes `notify`'s own default rather than `autoConfirm`'s.
+		const a = accountSchema.parse({
+			...account,
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+		const b = accountSchema.parse({
+			...other,
+			autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+		});
+		expect(a.autoConfirm.notify).not.toBe(b.autoConfirm.notify);
+		expect(a.autoConfirm.notify).not.toBe(AUTO_CONFIRM_DEFAULTS.notify);
 	});
 });

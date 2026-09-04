@@ -57,17 +57,34 @@ describe('the rotation window', () => {
 });
 
 describe('per-account busy flags', () => {
-	it('clear only their own account', () => {
+	/*
+	 * **This test used to pin the bug in place.**
+	 *
+	 * It asserted the exact text of a `finally` that cleared only its own
+	 * account — which was correct, and was the *finishing* half. The starting
+	 * half wrote a single account name, so beginning a second copy re-enabled the
+	 * first row's button while its request was still in flight. Two accounts
+	 * never appeared in the assertion, so it could not have noticed.
+	 *
+	 * The behaviour now lives in `vault-home-busy.test.tsx`, which runs the
+	 * updaters with two accounts instead of reading them. What is left here is
+	 * the one thing source text is good for: that the state is a set, so a
+	 * regression to a single name is visible.
+	 */
+	it('are a set, not one account at a time', () => {
 		const home = readFileSync(join(__dirname, '../src/renderer/screens/VaultHome.tsx'), 'utf8');
-		// An unconditional `setCopying(undefined)` in a `finally` re-enabled every
-		// account's button, including one whose own copy was still in flight.
-		expect(home).toMatch(
-			/setCopying\(\(prev\) => \(prev === account\.steamId64 \? undefined : prev\)\)/
+		const app = readFileSync(join(__dirname, '../src/renderer/App.tsx'), 'utf8');
+		expect(home).toMatch(/const \[copying, setCopying\] = useState<ReadonlySet<string>>/);
+		expect(app).toMatch(
+			/const \[exportingAccountIds, setExportingAccountIds\] = useState<ReadonlySet<string>>/
 		);
-		expect(home).toMatch(
-			/setExporting\(\(prev\) => \(prev === account\.steamId64 \? undefined : prev\)\)/
-		);
-		expect(home).not.toMatch(/setCopying\(undefined\)\)/);
+		expect(app).toMatch(/const exportingAccounts = useRef\(new Set<string>\(\)\)/);
+		expect(home).toMatch(/exporting\?: ReadonlySet<string>/);
+		// The single-name shape, in either direction.
+		expect(home).not.toMatch(/setCopying\(account\.steamId64\)/);
+		expect(app).not.toMatch(/setExportingAccountIds\(account\.steamId64\)/);
+		expect(home).not.toMatch(/copying === account\.steamId64/);
+		expect(home).not.toMatch(/exporting === account\.steamId64/);
 	});
 });
 
@@ -152,10 +169,31 @@ describe('the create screen and an in-flight restore', () => {
 describe('the portable build', () => {
 	it('does not write the Windows identity keys', () => {
 		const main = readFileSync(join(__dirname, '../src/main/index.ts'), 'utf8');
-		// "No installer, no writes outside its own directory" is the whole point
-		// of that target; this writes two values under HKCU, one of them a path
-		// pointing back at the copy the user was only trying out.
-		expect(main).toMatch(/if \(portableDir === undefined\) \{\s*void registerWindowsIdentity\(/);
+		/*
+		 * The portable target keeps application data beside the executable and does
+		 * not install itself; this writes two values under HKCU, one of them a path
+		 * pointing back at the copy the user was only trying out. Windows Temp
+		 * runtime extraction is unrelated to this persistent identity record.
+		 *
+		 * **Asserted as the property, not as the line.** This pinned the guard's
+		 * exact source — `if (portableDir === undefined) {` — and so failed the day
+		 * a second, narrower condition was added beside it, while the thing it
+		 * exists to protect was still true. That is this repository's own recurring
+		 * mistake: a guard that reads the text rather than the rule. What matters is
+		 * that the call is behind a condition, and that the condition still asks
+		 * about portable.
+		 */
+		const guard = main.match(/if \(([^)]*)\)\s*\{\s*void registerWindowsIdentity\(/);
+		expect(
+			guard,
+			'registerWindowsIdentity is no longer directly behind an `if`, so this test can no ' +
+				'longer see what guards it — read the call site and rewrite this assertion'
+		).not.toBeNull();
+		expect(
+			guard?.[1],
+			'the portable build now writes the Windows identity keys: two values under HKCU, one ' +
+				'of them a path pointing back at a copy the user was only trying out'
+		).toContain('portableDir === undefined');
 	});
 });
 
@@ -248,28 +286,122 @@ describe('the update-check toggle', () => {
 describe('per-account status on the account list', () => {
 	it('is only written by the newest attempt', () => {
 		const source = readFileSync(join(__dirname, '../src/renderer/screens/VaultHome.tsx'), 'utf8');
-		// One status slot for the whole list: the first copy after an unlock waits
-		// on the Steam clock sync, and another row's button stays live meanwhile,
-		// so an older failure could overwrite a newer success.
-		expect(source).toMatch(/const attempt = useRef\(0\);/);
-		expect(source.match(/const mine = \(attempt\.current \+= 1\);/g) ?? []).toHaveLength(2);
+		const app = readFileSync(join(__dirname, '../src/renderer/App.tsx'), 'utf8');
+		/*
+		 * **One counter per status slot, and there are three slots.**
+		 *
+		 * The first copy after an unlock waits on the Steam clock sync, and another
+		 * row's button stays live meanwhile, so an older failure could overwrite a
+		 * newer success — hence the counters at all.
+		 *
+		 * This test used to assert the opposite of what it should: that copy and
+		 * export *shared* one, with a comment explaining that the browser's was
+		 * separate because it writes a separate slot. Copy and export write
+		 * separate slots too. Sharing meant starting an export silenced a copy that
+		 * then succeeded, leaving a live Steam Guard code on the clipboard with a
+		 * running timer and nothing on screen saying so — and the reverse silenced
+		 * a save that had already written a file holding the keys to an account.
+		 * The test did not miss that; it wrote it down as intended.
+		 */
+		expect(source).toMatch(/const copyAttempt = useRef\(0\);/);
+		expect(app).toMatch(/const exportAttempt = useRef\(new Map<string, number>\(\)\);/);
+
+		// One writer for copy and one for the browser — whose three buttons share
+		// a helper rather than repeating the claim. Export is now owned by App so a
+		// navigation cannot unmount its attempt or its eventual result.
+		expect(source.match(/const mine = \(copyAttempt\.current \+= 1\);/g) ?? []).toHaveLength(1);
+		// Export's counter is a map too, for the same reason the browser's is: its
+		// result carries the warning that a plaintext copy is still on disk, and a
+		// second account's export used to discard it as stale.
+		expect(
+			app.match(
+				/const mine = \(exportAttempt\.current\.get\(account\.steamId64\) \?\? 0\) \+ 1;/g
+			) ?? []
+		).toHaveLength(1);
+		expect(app).toMatch(
+			/const current = \(\): boolean => exportAttempt\.current\.get\(account\.steamId64\) === mine;/
+		);
+		expect(app).not.toMatch(/exportAttempt\.current \+= 1/);
+		/*
+		 * The browser's counter is a **map**, not a number. A single number made
+		 * account B's press "newer" than account A's, so A's failure was discarded
+		 * as stale — with A's browser unopened and nothing on screen saying why.
+		 * `browserError` is rendered on the row it belongs to, so the two never
+		 * competed for anything in the first place.
+		 */
+		expect(source).toMatch(/const browserAttempt = useRef\(new Map<string, number>\(\)\)/);
+		expect(source).not.toMatch(/browserAttempt\.current \+= 1/);
+		/*
+		 * **One claim, shared by all three buttons.**
+		 *
+		 * This asserted a claim per button while there were two, which is the
+		 * weaker property: it counted copies rather than requiring that every
+		 * button have one. A third button added without its own claim would have
+		 * satisfied a count of two and opened without ever claiming — its failure
+		 * then discarded as stale, or worse, shown on top of a different route's.
+		 * A single helper cannot be forgotten by a button that calls it.
+		 */
+		expect(source.match(/const newest = claimBrowser\(account\.steamId64\);/g) ?? []).toHaveLength(
+			1
+		);
+		expect(source).toMatch(
+			/const openBrowserAs = \(account: AccountSummary, route: BrowserRoute\)/
+		);
+		// Every button goes through it, and none of them calls `onOpenBrowser`
+		// directly — which is what would skip the claim.
+		expect(source.match(/openBrowserAs\(account, /g) ?? []).toHaveLength(3);
+		expect(source.match(/[^s]onOpenBrowser\(account, /g) ?? []).toHaveLength(1);
 
 		/*
-		 * The browser counts separately, and that is deliberate rather than an
-		 * oversight this test should have caught.
+		 * **And each button sends the route its own label promises.**
 		 *
-		 * `attempt` is shared by copy and export because they share one status
-		 * slot. The browser has its own slot, so sharing the counter would make
-		 * opening a browser silence an export result that is still on screen and
-		 * still true.
+		 * Counting the calls was the whole check here, and counting is exactly
+		 * what a wrong route survives: three buttons, three calls, two of them
+		 * routing the same way. The Steam-only button would have opened a fully
+		 * proxied window — the mode the user pressed it to get away from — while
+		 * every other test in the suite stayed green. So the label, the tooltip
+		 * and the route are asserted as one string rather than three facts that
+		 * happen to be true separately.
 		 */
-		expect(source).toMatch(/const browserAttempt = useRef\(0\);/);
-		expect(source.match(/const mine = \(browserAttempt\.current \+= 1\);/g) ?? []).toHaveLength(2);
+		expect(source).toMatch(
+			/onClick=\{\(\) => openBrowserAs\(account, 'steam-only'\)\}\s*>\s*Steam only\s*</
+		);
+		expect(source).toMatch(
+			/onClick=\{\(\) => openBrowserAs\(account, 'direct'\)\}\s*>\s*Direct\s*</
+		);
+		// The first button is the only one that reads the account: an unrouted
+		// account has no proxy to send anything through.
+		expect(source).toMatch(/openBrowserAs\(account, account\.hasProxy \? 'proxy' : 'direct'\)/);
 
-		// Every asynchronous writer to a shared slot, guarded: two for copy, two
-		// for export, and one each for the proxied and the direct browser button —
-		// neither has a success message to write, only a failure.
-		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(6);
+		/*
+		 * And the failure itself is per account. One object served the whole list,
+		 * so two accounts failing meant the second overwrote the first — the
+		 * message is rendered on its own row, so they were never competing.
+		 */
+		expect(source).toMatch(
+			/const \[browserError, setBrowserError\] = useState<ReadonlyMap<string, string>>/
+		);
+		expect(source).not.toMatch(/browserError\?\.steamId64 === account\.steamId64/);
+
+		/*
+		 * Export results are app-owned and append-only until their own Dismiss is
+		 * pressed. This both keeps the plaintext warning per attempt and lets it
+		 * survive the account list being unmounted by any navigation.
+		 */
+		expect(app).toMatch(
+			/const \[exportNotices, updateExportNotices\] = useReducer\(exportNoticeReducer, \[\]\)/
+		);
+		expect(app).toMatch(/return \[\.\.\.state, action\.notice\];/);
+		expect(source).not.toMatch(/setExported|setExportError/);
+
+		// No counter is read by anything but the attempt that owns it: a bare
+		// `attempt` would be the shared one coming back.
+		expect(source).not.toMatch(/[^a-zA-Z]attempt\.current/);
+
+		// Every asynchronous row-local writer is guarded: two for copy and one for
+		// the browser. Export's resolve/reject pair is behavior-tested through its
+		// shared `current()` gate in export-navigation-survival.test.tsx.
+		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(3);
 	});
 });
 
@@ -322,5 +454,249 @@ describe('promise chains in the renderer', () => {
 		const ups = (source.match(/listing\.current \+= 1;/g) ?? []).length;
 		const downs = (source.match(/listing\.current -= 1;/g) ?? []).length;
 		expect(downs).toBe(ups);
+	});
+});
+
+/**
+ * **The switch for `Require proxies`, on the screen that owns it.**
+ *
+ * The setting existed in the vault schema, with a docblock describing what it
+ * would do, and no screen offered it and no code read it. A user could not turn
+ * it on, and a vault that already had it on was not obeyed.
+ */
+describe('the Require proxies control', () => {
+	const source = readFileSync(join(__dirname, '../src/renderer/screens/Settings.tsx'), 'utf8');
+
+	it('is on the settings form', () => {
+		expect(source).toMatch(/Require proxies/);
+		expect(source).toMatch(/checked=\{settings\.requireProxies\}/);
+	});
+
+	it('saves through the same path as every other setting', () => {
+		// `change({ requireProxies })` rather than a write of its own: the form
+		// posts the whole view, and a field that saved by another route would be
+		// dropped by the next save of any other field.
+		expect(source).toMatch(/change\(\{ requireProxies: event\.target\.checked \}\)/);
+	});
+
+	/*
+	 * Both consequences, next to the switch. Each one is otherwise met as an
+	 * unexplained failure — a Trade button that refuses, and update checks that
+	 * silently stop.
+	 */
+	it('says what it costs', () => {
+		expect(source).toMatch(/Direct button goes\s+away/);
+		expect(source).toMatch(/Update checks stop/i);
+	});
+});
+
+/**
+ * **Cancelling the restore form left the passphrase in it.**
+ *
+ * `BackupRestore` stays mounted on the Create and Unlock screens — closing the
+ * form only hides it — so the controlled value survived, and reopening
+ * presented the previous secret already typed in. Success and failure both
+ * clear it; abandoning was the third way out and was the one that did not.
+ */
+describe('the backup restore form', () => {
+	const source = readFileSync(join(__dirname, '../src/renderer/screens/BackupRestore.tsx'), 'utf8');
+
+	it('clears the passphrase when the form is cancelled', () => {
+		// The handler attached to the button labelled Cancel: everything from the
+		// last `onClick` before that label up to the label itself.
+		// `lastIndexOf`: the handler's own comment mentions Cancel, and it sits
+		// before the label, so the first match cuts the region in half.
+		const label = source.lastIndexOf('Cancel');
+		const cancel = source.slice(source.lastIndexOf('onClick', label), label);
+		expect(cancel, 'Cancel closed the form and kept the secret').toMatch(/setPassphrase\(''\)/);
+	});
+
+	/*
+	 * All three exits, so a fourth added later is measured against a rule rather
+	 * than against whichever two happened to be right.
+	 */
+	it('clears it on every way out of the form', () => {
+		expect(source.match(/setPassphrase\(''\)/g) ?? []).toHaveLength(3);
+	});
+});
+
+/**
+ * **A form that says "optional" for a field the main process requires.**
+ *
+ * Under `Require proxies` an enrolment or a transfer with an empty proxy is
+ * refused before any credential is sent — correctly. Both screens still called
+ * the field optional and offered a submit, so the user was invited into an
+ * action that could only fail.
+ *
+ * Asserted on the source rather than the markup: an unfilled form disables its
+ * submit anyway — the account name and password are empty too — so the rendered
+ * attribute is the same either way and cannot tell the two apart. What
+ * distinguishes them is the condition, and that is what regresses. The label
+ * itself is checked by rendering, in `browser-button.test.tsx`.
+ */
+describe('the enrolment and transfer forms under Require proxies', () => {
+	it('gates the enrolment submit on the proxy field', () => {
+		const source = readFileSync(
+			join(__dirname, '../src/renderer/screens/AddAuthenticator.tsx'),
+			'utf8'
+		);
+		expect(source).toMatch(/requireProxies && proxyUrl\.trim\(\) === ''/);
+		expect(source).toMatch(/through a proxy \(required\)/);
+	});
+
+	it('gates the transfer submit the same way', () => {
+		const source = readFileSync(
+			join(__dirname, '../src/renderer/screens/MoveAuthenticator.tsx'),
+			'utf8'
+		);
+		expect(source).toMatch(/requireProxies && proxyUrl\.trim\(\) === ''/);
+		expect(source, 'the transfer form still calls a required field optional').toMatch(
+			/through a proxy \(required\)/
+		);
+	});
+});
+
+/**
+ * **The update check has to restart when the settings that stop it change.**
+ *
+ * The effect depended on the unlocked state alone, so the two switches that
+ * stop a check could not start one again: turning update checks back on, or
+ * turning `Require proxies` off, left the app waiting for the next unlock to
+ * discover there was a release.
+ */
+describe('when the app asks about updates', () => {
+	const app = readFileSync(join(__dirname, '../src/renderer/App.tsx'), 'utf8');
+
+	it('re-asks on every save, through a revision rather than the values', () => {
+		expect(app).toMatch(/\}, \[api, status\?\.unlocked, settingsRevision\]\);/);
+	});
+
+	/**
+	 * **And deliberately not on the values themselves.**
+	 *
+	 * Watching `status.requireProxies` and `status.updateCheck` looked equivalent
+	 * and is not. Turn `Require proxies` on and straight off again between two
+	 * status polls and both come back to what they already were: React sees no
+	 * dependency change, no newer check starts, and the answer from the check the
+	 * first save aborted is still the newest anybody claimed — so the staleness
+	 * guard lets it through and the screen shows "could not check".
+	 *
+	 * A counter cannot return to a value it has already had.
+	 */
+	it('does not depend on the settings values, which can return to themselves', () => {
+		const deps = app.slice(app.indexOf('}, [api, status?.unlocked'), app.indexOf('if (fatal'));
+		expect(deps, 'a quick on-then-off would look like no change at all').not.toMatch(
+			/status\?\.(requireProxies|updateCheck)/
+		);
+	});
+
+	it('bumps the revision only after a save that succeeded', () => {
+		// From the handler's opening brace, not from the save call — a bump added
+		// *above* the call would otherwise sit outside the slice and be invisible
+		// to the ordering check below.
+		const at = app.indexOf('onSave={async (settings) => {');
+		const saved = app.slice(at, at + 2400);
+
+		// After the awaited `updateSettings`, so a throw never reaches it — a
+		// failed save must not supersede the check that is running.
+		expect(saved).toMatch(/setSettingsRevision\(\(revision\) => revision \+ 1\)/);
+		expect(saved.indexOf('api.updateSettings(')).toBeLessThan(
+			saved.indexOf('setSettingsRevision(')
+		);
+		// Once. A second bump anywhere in the handler is a save counted twice, or
+		// counted before it succeeded.
+		expect(saved.match(/setSettingsRevision\(/g) ?? []).toHaveLength(1);
+	});
+
+	it('still carries both settings on the status, for the rest of the screen', () => {
+		// The account list hides Direct and Steam-only on `requireProxies`; that
+		// still needs the value, it just no longer drives the update effect.
+		const shared = readFileSync(join(__dirname, '../src/shared/ipc.ts'), 'utf8');
+		const status = shared.slice(
+			shared.indexOf('export const vaultStatusResponse'),
+			shared.indexOf('export const accountSummary')
+		);
+		expect(status).toMatch(/requireProxies: z\.boolean\(\)/);
+		expect(status).toMatch(/updateCheck: z\.boolean\(\)/);
+	});
+});
+
+/**
+ * **A proxy field holding only spaces is not a proxy.**
+ *
+ * Enrolment sends `proxyUrl.trim() || undefined`. The transfer screen sent the
+ * raw value, so a field the user had effectively left blank reached `new URL()`
+ * in the main process and failed with `Invalid URL` — a transfer refused for
+ * something that looked empty on screen. Fails closed rather than leaking, and
+ * is still a defect: the screen already treats the trimmed value as the real
+ * one everywhere else it looks at it.
+ */
+describe('the proxy field on the two credential forms', () => {
+	it.each([['AddAuthenticator.tsx'], ['MoveAuthenticator.tsx']])(
+		'%s submits the trimmed value, or nothing',
+		(screen) => {
+			const source = readFileSync(join(__dirname, `../src/renderer/screens/${screen}`), 'utf8');
+			expect(source).toMatch(/proxyUrl\.trim\(\) \|\| undefined/);
+		}
+	);
+
+	it('neither submits the raw value', () => {
+		for (const screen of ['AddAuthenticator.tsx', 'MoveAuthenticator.tsx']) {
+			const source = readFileSync(join(__dirname, `../src/renderer/screens/${screen}`), 'utf8');
+			// The bare identifier as an argument, which is what the transfer did.
+			expect(source, `${screen} passes the untrimmed field`).not.toMatch(/,\s*proxyUrl\s*\)/);
+		}
+	});
+});
+
+/**
+ * **Saving reads the status back, rather than waiting for the poll.**
+ *
+ * The update effect watches `status.requireProxies` and `status.updateCheck`,
+ * and the status is polled once a second. A quick on-then-off of `Require
+ * proxies` between two ticks therefore changed both fields back to what they
+ * already were: the effect never re-ran, and the check the first save aborted
+ * was never retried. The setting had been turned off and on again with no
+ * visible consequence at all.
+ */
+describe('saving settings and the status the screen watches', () => {
+	const app = readFileSync(join(__dirname, '../src/renderer/App.tsx'), 'utf8');
+	// Forward from the call rather than back from a later name: `onClose={() =>
+	// setView(` appears on an earlier screen too, so an `indexOf` for it ends
+	// the slice before it starts.
+	const saveAt = app.indexOf('const result = await api.updateSettings(');
+	const save = app.slice(saveAt, saveAt + 1600);
+
+	/*
+	 * The predicate in `update-banner-race.test.tsx` decides correctly given two
+	 * different numbers. This is what makes them different: reading the counter
+	 * instead of claiming it gives every check the same one, and the predicate
+	 * then says every answer is current — the race, restored, with the guard
+	 * still in place and still agreeing with itself.
+	 */
+	it('claims a sequence number for each check rather than reading one', () => {
+		expect(app).toMatch(/const mine = \(updateSeq\.current \+= 1\);/);
+		expect(app).toMatch(/updateAnswerIsCurrent\(updateSeq\.current, mine,/);
+	});
+
+	it('refreshes the status straight after a successful save', () => {
+		expect(save, 'the screen waits up to a poll to notice its own save').toMatch(
+			/refresh\(\{ includeCodes: false \}\)/
+		);
+	});
+
+	/*
+	 * After the write, or it reads the values being replaced.
+	 */
+	it('refreshes after the save, not before', () => {
+		expect(save.indexOf('api.updateSettings(')).toBeLessThan(save.indexOf('refresh({'));
+	});
+
+	/*
+	 * Without the codes: they are the slow part — `listCodes` waits on the Steam
+	 * clock sync — and nothing about a settings save changes them.
+	 */
+	it('does not drag the Steam clock sync into a settings save', () => {
+		expect(save).not.toMatch(/refresh\(\)/);
 	});
 });

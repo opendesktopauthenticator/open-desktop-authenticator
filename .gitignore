@@ -29,6 +29,11 @@ vault.json.*
 dist/
 out/
 release/
+# Release-candidate staging built before a tag. Same reason as `release/`,
+# and it was missed: 356 MB of build output sat untracked next to it, so a
+# `git add .` would have put it in this repository's permanent history.
+release-rc/
+/release-rc/
 *.tsbuildinfo
 
 # Dependencies
@@ -64,3 +69,20 @@ tickets/*.db-wal
 tickets/*.db-shm
 tickets/*.db-journal
 tickets/attachments/
+
+# Scratch: generated PDFs and other working files. Never part of a release.
+tmp/
+
+# SBOM documents and the self-test fixtures the release workflow writes beside
+# them. Generated per run and never reviewed as source; committing one would
+# make a stale inventory look like an authoritative one.
+*.spdx.json
+
+# The tree those documents describe, and the scanner configuration that decides
+# what is catalogued in it, both written by
+# .github/scripts/assemble-shipping-tree.mjs. Anyone can now run that script
+# locally — `sbom.yml` runs it on every pull request and reproducing a failure
+# by hand is the point — so its output has to be ignorable rather than a
+# surprise in `git status`.
+sbom-root/
+sbom-syft.yaml

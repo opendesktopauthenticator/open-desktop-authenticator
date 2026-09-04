@@ -5,7 +5,13 @@ import type {
 	ConfirmationSummary,
 	SignInResult
 } from '../../shared/ipc';
+import {
+	notificationRefreshMayStart,
+	runAcceptedNotificationRefresh
+} from '../../shared/notification-click';
+import { actOnConfirmationBatches } from '../../shared/confirmation-batches';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 import { SteamSignIn } from './SteamSignIn';
 
 /**
@@ -65,12 +71,21 @@ export function Confirmations({
 	onList,
 	onAct,
 	onSignIn,
+	notificationRefreshToken,
+	onNotificationRefresh,
+	onBusyChange,
 	onClose
 }: {
 	account: AccountSummary;
 	onList: () => Promise<ConfirmationsList>;
 	onAct: (action: 'allow' | 'cancel', ids: string[]) => Promise<unknown>;
 	onSignIn: (password: string) => Promise<SignInResult>;
+	/** A newer toast for the account already on screen requires a fresh list. */
+	notificationRefreshToken?: number;
+	/** Called after the accepted post-click list succeeds or renders its failure. */
+	onNotificationRefresh?: (token: number) => void;
+	/** Parent navigation must not bypass an approve, deny, sign-in, or list. */
+	onBusyChange?: (busy: boolean) => void;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [confirmations, setConfirmations] = useState<ConfirmationSummary[] | undefined>();
@@ -132,6 +147,27 @@ export function Confirmations({
 	useEffect(() => {
 		listRef.current = onList;
 	}, [onList]);
+	const notificationRefreshDoneRef = useRef(onNotificationRefresh);
+	useEffect(() => {
+		notificationRefreshDoneRef.current = onNotificationRefresh;
+	}, [onNotificationRefresh]);
+
+	/*
+	 * Keep the parent barrier exact even before React has painted the next busy
+	 * value. Native notification events and promise settlements are independent
+	 * event sources; reporting at the operation boundary closes that small gap.
+	 */
+	const setWorking = useCallback(
+		(value: boolean): void => {
+			setBusy(value);
+			onBusyChange?.(value);
+		},
+		[onBusyChange]
+	);
+	useEffect(() => {
+		onBusyChange?.(busy);
+		return () => onBusyChange?.(false);
+	}, [busy, onBusyChange]);
 
 	/**
 	 * Fetch the list. **Does not touch `busy`**, and that separation is the point.
@@ -175,15 +211,15 @@ export function Confirmations({
 			return;
 		}
 		listing.current += 1;
-		setBusy(true);
+		setWorking(true);
 		setError(undefined);
 		load()
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => {
 				listing.current -= 1;
-				setBusy(false);
+				setWorking(false);
 			});
-	}, [busy, load]);
+	}, [busy, load, setWorking]);
 
 	// Fetch once per account. The screen already says "Asking Steam…" while
 	// `confirmations` is undefined, so no busy flag is set synchronously here.
@@ -220,28 +256,82 @@ export function Confirmations({
 			.finally(() => {
 				listing.current -= 1;
 				if (!cancelled) {
-					setBusy(false);
+					setWorking(false);
 				}
 			});
 		return () => {
 			cancelled = true;
 		};
-	}, [steamId64]);
+	}, [setWorking, steamId64]);
+
+	/**
+	 * A notification for the account already on screen is a request to re-list,
+	 * not a request to navigate to the same stale component. Queue it behind any
+	 * irreversible action already running and try each token at most once. Once
+	 * accepted, success or a failure rendered here settles that exact click: Back
+	 * must not turn a failed refresh into a second navigation request.
+	 */
+	const attemptedNotificationRefresh = useRef<number | undefined>(undefined);
+	useEffect(() => {
+		const token = notificationRefreshToken;
+		if (
+			!notificationRefreshMayStart(
+				token,
+				attemptedNotificationRefresh.current,
+				busy,
+				listing.current
+			)
+		) {
+			return;
+		}
+		// The predicate above proves this, but keep the refinement local rather
+		// than making the shared helper's return type part of this component.
+		if (token === undefined) return;
+		attemptedNotificationRefresh.current = token;
+		listing.current += 1;
+		void Promise.resolve()
+			.then(() => {
+				setWorking(true);
+				setError(undefined);
+				return runAcceptedNotificationRefresh(
+					token,
+					load,
+					(err) => setError(messageOf(err)),
+					(settledToken) => notificationRefreshDoneRef.current?.(settledToken)
+				);
+			})
+			.finally(() => {
+				listing.current -= 1;
+				setWorking(false);
+			});
+	}, [busy, load, notificationRefreshToken, setWorking]);
 
 	const act = (action: 'allow' | 'cancel', ids: string[]): void => {
 		if (busy) {
 			return;
 		}
-		setBusy(true);
+		setWorking(true);
 		setError(undefined);
 		// One `finally`, covering both the action and the reload after it. The
 		// previous shape cleared the flag in the failure branch and relied on
 		// `refresh` to clear it in the success branch, which put the only path out
 		// of "Working…" inside a function that could decline to run.
-		onAct(action, ids)
+		actOnConfirmationBatches(onAct, action, ids)
 			.then(() => load())
-			.catch((err: unknown) => setError(messageOf(err)))
-			.finally(() => setBusy(false));
+			.catch(async (err: unknown) => {
+				const actionError = messageOf(err);
+				try {
+					// A later batch can fail after earlier batches committed. Reload before
+					// reporting so those completed actions do not remain selectable.
+					await load();
+					setError(actionError);
+				} catch (refreshError) {
+					setError(
+						`${actionError} The confirmation list also could not be refreshed: ${messageOf(refreshError)}`
+					);
+				}
+			})
+			.finally(() => setWorking(false));
 	};
 
 	const critical = confirmations?.filter((entry) => entry.securityCritical) ?? [];
@@ -281,7 +371,7 @@ export function Confirmations({
 
 			{error && (
 				<>
-					<p className="error">{error}</p>
+					<DynamicError>{error}</DynamicError>
 					{/* A failed load must offer the way out of itself. The header Refresh
 					    does the same job, but it reads as a routine control rather than
 					    the answer to the red text directly above it — and a screen whose
@@ -299,12 +389,20 @@ export function Confirmations({
 					accountName={account.accountName}
 					{...(signInReason === '' ? {} : { reason: signInReason })}
 					onSignIn={async (password) => {
-						const result = await onSignIn(password);
+						setWorking(true);
+						let result: SignInResult;
+						try {
+							result = await onSignIn(password);
+						} catch (error) {
+							setWorking(false);
+							throw error;
+						}
 						// **Only on success.** A failure is now returned rather than
 						// thrown, so advancing unconditionally would clear the form and
 						// reload as though the sign-in had worked — the outcome reported
 						// back to `SteamSignIn`, which shows it, would never be seen.
 						if (!result.ok) {
+							setWorking(false);
 							return result;
 						}
 						// Straight into the list the user came here for, rather than
@@ -326,13 +424,12 @@ export function Confirmations({
 						// `catch` a failed reload is an unhandled rejection that the user
 						// never sees, on a screen they have just successfully signed into.
 						listing.current += 1;
-						setBusy(true);
 						setError(undefined);
 						void load()
 							.catch((err: unknown) => setError(messageOf(err)))
 							.finally(() => {
 								listing.current -= 1;
-								setBusy(false);
+								setWorking(false);
 							});
 						return result;
 					}}

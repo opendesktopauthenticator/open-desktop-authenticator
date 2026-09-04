@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { newAutoConfirm } from '../src/shared/vault-schema';
 import {
 	applyProxyChange,
 	markRevocationBackedUp,
@@ -6,6 +7,7 @@ import {
 	RevocationCeremony,
 	toSummary
 } from '../src/main/vault/ipc';
+import { authenticatorFingerprint } from '../src/main/steam/authenticator-secrets';
 import { accountSummary, CHANNELS, IPC_CONTRACT } from '../src/shared/ipc';
 
 /**
@@ -26,7 +28,7 @@ const account = {
 	proxyUrl: 'socks5h://user:PROXY-PASSWORD@host:1080',
 	status: 'active',
 	addedAt: '2026-08-08T00:00:00.000Z',
-	autoConfirm: { marketListings: true, trades: false, pollIntervalSeconds: 20 }
+	autoConfirm: { ...newAutoConfirm(), marketListings: true, pollIntervalSeconds: 20 }
 };
 
 /** Every string reachable in a value. */
@@ -81,8 +83,47 @@ describe('account summaries carry no secrets', () => {
 		expect(summary.autoConfirm).toEqual({
 			marketListings: true,
 			trades: false,
-			pollIntervalSeconds: 20
+			pollIntervalSeconds: 20,
+			notify: { enabled: false, detail: 'full' }
 		});
+	});
+
+	/*
+	 * **The other half of the round trip.** The screen renders its controls from
+	 * this summary, so a value the vault holds and this drops is a control that
+	 * silently shows the default — and saving from that screen then writes the
+	 * default back over what the user had chosen.
+	 *
+	 * Asserted on a non-default value, because projecting a hard-coded default
+	 * would pass against a fixture that used the default.
+	 */
+	it('carries the notification settings the vault actually holds', () => {
+		const summary = toSummary({
+			...account,
+			autoConfirm: {
+				...account.autoConfirm,
+				notify: { enabled: true, detail: 'count' }
+			}
+		});
+		expect(summary.autoConfirm.notify, 'the screen would render a stale control').toEqual({
+			enabled: true,
+			detail: 'count'
+		});
+	});
+
+	/*
+	 * A fresh object, like everything else that crosses. Handing out a reference
+	 * into vault contents is how a screen ends up able to write to the vault by
+	 * assigning to what it was shown.
+	 */
+	it('does not hand out a reference into the vault', () => {
+		const source = {
+			...account,
+			autoConfirm: { ...account.autoConfirm, notify: { enabled: true, detail: 'count' as const } }
+		};
+		const summary = toSummary(source);
+		summary.autoConfirm.notify.enabled = false;
+		expect(source.autoConfirm.notify.enabled, 'the renderer wrote into the vault').toBe(true);
 	});
 
 	it('produces something the response schema accepts', () => {
@@ -93,6 +134,86 @@ describe('account summaries carry no secrets', () => {
 
 	it('keeps the SteamID a string', () => {
 		expect(typeof toSummary(account).steamId64).toBe('string');
+	});
+
+	it('marks a stale vault record with an opaque exact-record token without exposing its fingerprint', () => {
+		const oldFingerprint = authenticatorFingerprint({ sharedSecret: 'OLDER-SECRET-VALUE' });
+		const summary = toSummary({
+			...account,
+			unresolvedOperation: {
+				kind: 'activate' as const,
+				guidance: 'old record',
+				fingerprint: oldFingerprint,
+				at: '2026-01-01T00:00:00.000Z'
+			}
+		});
+
+		expect(summary.unresolvedOperation).toMatchObject({ stale: true });
+		expect(summary.unresolvedOperation?.staleToken).toMatch(/^[a-f0-9]{64}$/);
+		expect(JSON.stringify(summary)).not.toContain(oldFingerprint);
+	});
+
+	it('gives an applicable record an opaque token without exposing its internal identity', () => {
+		const currentFingerprint = authenticatorFingerprint(account);
+		const operationId = '11111111-1111-4111-8111-111111111111';
+		const summary = toSummary({
+			...account,
+			unresolvedOperation: {
+				kind: 'activate' as const,
+				guidance: 'check Steam',
+				fingerprint: currentFingerprint,
+				operationId,
+				at: '2026-01-01T00:00:00.000Z'
+			}
+		});
+
+		expect(summary.unresolvedOperation?.operationToken).toMatch(/^[a-f0-9]{64}$/);
+		expect(summary.unresolvedOperation?.staleToken).toBeUndefined();
+		expect(JSON.stringify(summary)).not.toContain(currentFingerprint);
+		expect(JSON.stringify(summary)).not.toContain(operationId);
+		expect(accountSummary.safeParse(summary).success).toBe(true);
+	});
+
+	it.each([
+		'',
+		'a'.repeat(15),
+		'a'.repeat(17),
+		'ABCDEF0123456789',
+		'gggggggggggggggg',
+		'fingerprint-for-an-older-authenticator'
+	])(
+		'fails an unverifiable fingerprint closed without making it discardable (%j)',
+		(fingerprint) => {
+			const summary = toSummary({
+				...account,
+				unresolvedOperation: {
+					kind: 'activate' as const,
+					guidance: 'unverifiable record',
+					fingerprint,
+					at: '2026-01-01T00:00:00.000Z'
+				}
+			});
+
+			expect(summary.unresolvedOperation).toMatchObject({ unidentified: true });
+			expect(summary.unresolvedOperation?.stale).toBeUndefined();
+			expect(summary.unresolvedOperation?.staleToken).toBeUndefined();
+			expect(accountSummary.safeParse(summary).success).toBe(true);
+		}
+	);
+
+	it('fails a legacy record closed without presenting it as discardable', () => {
+		const summary = toSummary({
+			...account,
+			unresolvedOperation: {
+				kind: 'deactivate' as const,
+				guidance: 'legacy record',
+				at: '2026-01-01T00:00:00.000Z'
+			}
+		});
+
+		expect(summary.unresolvedOperation).toMatchObject({ unidentified: true });
+		expect(summary.unresolvedOperation?.stale).toBeUndefined();
+		expect(summary.unresolvedOperation?.staleToken).toBeUndefined();
 	});
 });
 
@@ -356,8 +477,12 @@ describe('the settings contract', () => {
 
 	it('accepts values inside the schema bounds', () => {
 		expect(
-			request.safeParse({ autoLockMinutes: 30, clipboardClearSeconds: 45, updateCheck: true })
-				.success
+			request.safeParse({
+				requireProxies: false,
+				autoLockMinutes: 30,
+				clipboardClearSeconds: 45,
+				updateCheck: true
+			}).success
 		).toBe(true);
 	});
 
@@ -367,8 +492,12 @@ describe('the settings contract', () => {
 		// the outcome the setting exists to make unnecessary.
 		for (const autoLockMinutes of [0, -5, 241, 1.5, Number.NaN]) {
 			expect(
-				request.safeParse({ autoLockMinutes, clipboardClearSeconds: 30, updateCheck: true })
-					.success,
+				request.safeParse({
+					requireProxies: false,
+					autoLockMinutes,
+					clipboardClearSeconds: 30,
+					updateCheck: true
+				}).success,
 				`${autoLockMinutes}`
 			).toBe(false);
 		}
@@ -377,8 +506,12 @@ describe('the settings contract', () => {
 	it('refuses a clipboard delay outside 5–300', () => {
 		for (const clipboardClearSeconds of [0, 4, 301, -1]) {
 			expect(
-				request.safeParse({ autoLockMinutes: 10, clipboardClearSeconds, updateCheck: true })
-					.success,
+				request.safeParse({
+					requireProxies: false,
+					autoLockMinutes: 10,
+					clipboardClearSeconds,
+					updateCheck: true
+				}).success,
 				`${clipboardClearSeconds}`
 			).toBe(false);
 		}
@@ -389,6 +522,7 @@ describe('the settings contract', () => {
 		// writable here. Strict mode is what stops it arriving anyway.
 		expect(
 			request.safeParse({
+				requireProxies: false,
 				autoLockMinutes: 10,
 				clipboardClearSeconds: 30,
 				updateCheck: true,
@@ -402,6 +536,7 @@ describe('the settings contract', () => {
 		// schema must not reach the renderer just because someone added it there —
 		// `convenienceUnlock` is the standing example, and it stays out.
 		const parsed = response.parse({
+			requireProxies: true,
 			autoLockMinutes: 10,
 			clipboardClearSeconds: 30,
 			updateCheck: true,
@@ -410,6 +545,7 @@ describe('the settings contract', () => {
 		});
 
 		expect(Object.keys(parsed)).toEqual([
+			'requireProxies',
 			'autoLockMinutes',
 			'clipboardClearSeconds',
 			'updateCheck'

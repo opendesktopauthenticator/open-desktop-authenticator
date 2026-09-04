@@ -68,7 +68,7 @@ beforeEach(async () => {
 	clock = NOW;
 	vault = new VaultService({ file: join(dir, 'vault.json'), now: () => clock });
 	await vault.create(PASS);
-	imports = new ImportService(vault, { now: () => clock });
+	imports = new ImportService(vault, { now: () => clock, monotonicNow: () => clock });
 });
 
 afterEach(() => {

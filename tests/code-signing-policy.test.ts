@@ -1,21 +1,27 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * The strings SignPath Foundation requires, asserted literally.
+ * **The page no longer claims a sponsor, and must not start again.**
  *
- * https://signpath.org/terms.html sets conditions that are quoted text rather
- * than a topic: the term "Code signing policy" must appear on the home page and
- * the download/release pages, and the attribution must read exactly
+ * This file used to pin the strings the SignPath Foundation requires — chiefly
+ * the attribution "Free code signing provided by SignPath.io, certificate by
+ * SignPath Foundation", which their terms quote verbatim and which a paraphrase
+ * would fail. The application was declined, so that sentence now names a sponsor
+ * who is not sponsoring this project, and every claim that a certificate was
+ * coming names a plan that does not exist.
  *
- *   Free code signing provided by SignPath.io, certificate by SignPath Foundation
+ * So the assertions are inverted. What is pinned now is that no page claims a
+ * certificate, a sponsor or an application in progress, and that the pages still
+ * say plainly that the direct downloads are unsigned. The page itself stays: who
+ * approves a release, and how a stranger verifies one, never depended on the
+ * certificate.
  *
- * A paraphrase is a failed condition, not a stylistic variation — and every
- * other sentence on this site is written to be improved by whoever edits it
- * next, which is precisely the habit that would quietly break this one. So the
- * exact wording is pinned here, where an edit that "reads better" fails the
- * build instead of the application.
+ * The absence checks are deliberately about the *claim*, not the word. The
+ * policy page still names SignPath once, in the paragraph explaining that the
+ * application was declined — recording what happened is the opposite of
+ * claiming it.
  */
 
 const root = join(__dirname, '..');
@@ -25,13 +31,18 @@ const POLICY = read('site', 'pages', 'code-signing.mjs');
 const HOME = read('site', 'pages', 'home.mjs');
 const DOWNLOAD = read('site', 'pages', 'guides.mjs');
 const INDEX = read('site', 'pages', 'index.mjs');
+const BUILD = read('site', 'build.mjs');
 
-/** SignPath's required sentence, character for character. */
+/** The sentence their terms require of a sponsored project. */
 const ATTRIBUTION = 'Free code signing provided by SignPath.io, certificate by SignPath Foundation';
 
-describe('the code signing policy SignPath Foundation requires', () => {
-	it('carries their attribution sentence exactly', () => {
-		expect(POLICY).toContain(ATTRIBUTION);
+describe('the code signing policy page', () => {
+	it('no longer carries a sponsor attribution', () => {
+		expect(
+			POLICY,
+			'the page names SignPath as the sponsor of a certificate this project does not have, ' +
+				'which is a false claim on the one page whose subject is who you can trust'
+		).not.toContain(ATTRIBUTION);
 	});
 
 	it('is a real page in the site, not an orphan file', () => {
@@ -40,52 +51,108 @@ describe('the code signing policy SignPath Foundation requires', () => {
 	});
 
 	/*
-	 * "on your project's home page and download/release pages (section header or
-	 * link to a dedicated page)" — so the literal term has to be present in both
-	 * places, not merely a link with different wording.
+	 * The page survives the sponsor. Both surfaces still link to it, because "who
+	 * approved this release" is a question a reader has whether or not a signature
+	 * exists — and a dangling route would be worse than the claim it replaced.
 	 */
 	it.each([
 		['the home page', () => HOME],
 		['the download page', () => DOWNLOAD]
-	])('uses the term "Code signing policy" on %s', (_where, source) => {
-		expect(source()).toMatch(/code signing policy/i);
+	])('is still reachable from %s', (_where, source) => {
 		expect(source()).toContain('/code-signing-policy');
 	});
 
-	it('names both required roles', () => {
+	it('still names both accountable roles', () => {
 		expect(POLICY).toMatch(/Committers and reviewers/);
 		expect(POLICY).toMatch(/Approvers/);
 	});
 
-	it('states the multi-factor requirement', () => {
+	it('still states the multi-factor requirement', () => {
 		expect(POLICY).toMatch(/multi-factor authentication/i);
 	});
 
-	/*
-	 * Their terms accept either a link to a privacy policy or the specific
-	 * "will not transfer any information" sentence. This page does both, because
-	 * the sentence is true of the application and the link covers the website,
-	 * which collects things the application does not.
-	 */
-	it('covers privacy by link and by statement', () => {
+	it('still covers privacy by link and by statement', () => {
 		expect(POLICY).toContain('/privacy');
 		expect(POLICY).toMatch(/will not transfer any information to other networked systems/);
 	});
+});
+
+/**
+ * **Nothing anywhere may say a certificate is coming.**
+ *
+ * The download page said "We are applying to the SignPath Foundation… once that
+ * is granted" for as long as that was true, and it stopped being true the moment
+ * the application was declined. The same sentence promised it would change when
+ * the situation did; this is what holds it to that.
+ *
+ * **Every page, not a hand-picked few.** The first version of this listed four
+ * constants and passed while five other surfaces still said "yet" — the download
+ * page contradicted itself a hundred lines apart, `/verify` named a future
+ * signer, and the release-notes template published on every GitHub release said
+ * the same. A guard that only looks where you remembered to look is how that
+ * happened, so this reads the whole directory.
+ */
+describe('what the project says about signing', () => {
+	const SURFACES: [string, string][] = [
+		...readdirSync(join(root, 'site', 'pages'))
+			.filter((name) => name.endsWith('.mjs'))
+			.map((name): [string, string] => [`site/pages/${name}`, read('site', 'pages', name)]),
+		['site/markup.mjs', read('site', 'markup.mjs')],
+		['site/build.mjs', BUILD],
+		['README.md', read('README.md')],
+		['.github/workflows/release.yml', read('.github', 'workflows', 'release.yml')],
+		/*
+		 * **The changelog was the surface nobody remembered.** This list was
+		 * written to stop exactly that — "a guard that only looks where you
+		 * remembered to look" — and then omitted the one document a reader opens
+		 * to find out what a release contains. The 1.0.0 entry said the direct
+		 * downloads "carry no code-signing certificate yet" for a week after the
+		 * application was declined, so the file recording what is true of each
+		 * release was the last place still promising one.
+		 */
+		['CHANGELOG.md', read('CHANGELOG.md')],
+		['docs/RELEASE_CHECKLIST.md', read('docs', 'RELEASE_CHECKLIST.md')]
+	];
+
+	it('has surfaces to check at all', () => {
+		expect(
+			SURFACES.length,
+			'nothing was read, so every assertion below is vacuous'
+		).toBeGreaterThan(8);
+	});
 
 	/*
-	 * The claim must not drift ahead of reality. Until a certificate exists the
-	 * page has to say so.
-	 *
-	 * The flag carrying that meaning is `codeSigned`, not `signed` — this test
-	 * asserted `signed: false` and started failing the moment the checksum list
-	 * gained a sigstore signature and `signed` flipped true. That is the split
-	 * working: one flag used to mean "the list is signed" and "the binaries are
-	 * signed" at once, and a test written against the old name is exactly what
-	 * should break when the two are separated.
+	 * "not signed yet" about the **checksum list** is deliberately not matched:
+	 * that gap is real and still pending. What must not survive is a claim about
+	 * a *code-signing certificate* arriving.
 	 */
-	it('does not claim a certificate it does not have', () => {
-		expect(POLICY).toMatch(/has not been granted yet/);
-		const build = read('site', 'build.mjs');
-		expect(build).toMatch(/codeSigned:\s*false/);
+	const PENDING =
+		/code[- ]signing certificate yet|certificate yet|are applying to|application is in progress|has not been granted|once (that|the certificate) is granted|until the SignPath|when signing exists|blocked on SignPath/i;
+
+	it.each(SURFACES)('%s does not say a certificate is coming', (_where, source) => {
+		const hit = PENDING.exec(source);
+		expect(
+			hit?.[0],
+			'this surface still tells the reader a code-signing certificate is on its way, which it ' +
+				'is not — the SignPath Foundation application was declined and none is planned'
+		).toBeUndefined();
+	});
+
+	/*
+	 * And the honest statement is still there. Removing a false claim by deleting
+	 * the whole subject would leave a reader with no idea whether the file they
+	 * downloaded is signed, which is worse than the claim was.
+	 */
+	it('still tells the reader the direct downloads are unsigned', () => {
+		expect(POLICY).toMatch(/not code-signed|carry a code-signing certificate/i);
+		expect(DOWNLOAD).toMatch(/no code-signing certificate, and none is planned/i);
+	});
+
+	it('says so on the verification page too, where the check comes back NotSigned', () => {
+		expect(read('site', 'pages', 'safety.mjs')).toMatch(/none is planned/i);
+	});
+
+	it('still derives that from the flag rather than prose alone', () => {
+		expect(BUILD).toMatch(/codeSigned:\s*false/);
 	});
 });

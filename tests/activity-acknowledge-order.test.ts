@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -31,10 +32,45 @@ describe('the alert is cleared only once the entries are in hand', () => {
 	});
 
 	it('does not acknowledge when the load failed', () => {
-		// The `.catch` sets an error and nothing else. If this ever grows an
-		// acknowledgement, the alert is being cleared for a screen showing an error.
-		const failure = SOURCE.slice(SOURCE.indexOf('.catch((err: unknown) => {'));
-		expect(failure.slice(0, 300)).not.toContain('seenRef.current()');
+		// Locate the block-bodied failure continuation as syntax, not as a source
+		// window. The old check searched for the impossible zero-argument spelling
+		// `seenRef.current()` and therefore let both real acknowledgement calls
+		// through.
+		const file = ts.createSourceFile(
+			'Activity.tsx',
+			SOURCE,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TSX
+		);
+		const failures: ts.ArrowFunction[] = [];
+		const findFailure = (node: ts.Node): void => {
+			const callback = ts.isCallExpression(node) ? node.arguments[0] : undefined;
+			if (
+				ts.isCallExpression(node) &&
+				ts.isPropertyAccessExpression(node.expression) &&
+				node.expression.name.text === 'catch' &&
+				callback !== undefined &&
+				ts.isArrowFunction(callback) &&
+				ts.isBlock(callback.body)
+			) {
+				failures.push(callback);
+			}
+			ts.forEachChild(node, findFailure);
+		};
+		findFailure(file);
+		expect(failures, 'the initial-load failure callback changed shape').toHaveLength(1);
+
+		const acknowledgements: string[] = [];
+		const findAcknowledgement = (node: ts.Node): void => {
+			if (ts.isCallExpression(node)) {
+				const callee = node.expression.getText(file);
+				if (callee === 'seenRef.current' || callee === 'markSeen') acknowledgements.push(callee);
+			}
+			ts.forEachChild(node, findAcknowledgement);
+		};
+		findAcknowledgement(failures[0]!);
+		expect(acknowledgements).toEqual([]);
 	});
 
 	it('acknowledges at most once', () => {

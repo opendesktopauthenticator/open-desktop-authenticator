@@ -3,7 +3,7 @@ import { CHANNELS, TRADES_ACK } from '../src/shared/ipc';
 import { __resetRouterForTests, setTrustedSender } from '../src/main/ipc/router';
 import { registerVaultHandlers } from '../src/main/vault/ipc';
 import type { VaultService } from '../src/main/vault/service';
-import type { Account } from '../src/shared/vault-schema';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * The gate on automatic trade confirmation (§12 F6).
@@ -42,7 +42,7 @@ function account(trades: boolean): Account {
 		identitySecret: 'ASNFZ4mrze8BI0VniavN7wEjRWc=',
 		status: 'active',
 		addedAt: '2026-08-01T00:00:00.000Z',
-		autoConfirm: { marketListings: false, trades, pollIntervalSeconds: 15 }
+		autoConfirm: { ...newAutoConfirm(), trades }
 	};
 }
 
@@ -89,7 +89,8 @@ describe('switching trades on', () => {
 				steamId64: STEAM_ID,
 				marketListings: false,
 				trades: true,
-				pollIntervalSeconds: 15
+				pollIntervalSeconds: 15,
+				notify: { enabled: false, detail: 'full' }
 			})
 		).rejects.toThrow();
 
@@ -107,6 +108,7 @@ describe('switching trades on', () => {
 				marketListings: false,
 				trades: true,
 				pollIntervalSeconds: 15,
+				notify: { enabled: false, detail: 'full' },
 				tradesAcknowledgement: 'yes please'
 			})
 		).rejects.toThrow();
@@ -122,6 +124,7 @@ describe('switching trades on', () => {
 			marketListings: false,
 			trades: true,
 			pollIntervalSeconds: 15,
+			notify: { enabled: false, detail: 'full' },
 			tradesAcknowledgement: TRADES_ACK
 		});
 
@@ -137,6 +140,7 @@ describe('switching trades on', () => {
 			marketListings: false,
 			trades: true,
 			pollIntervalSeconds: 15,
+			notify: { enabled: false, detail: 'full' },
 			tradesAcknowledgement: '  approve   trades '
 		});
 
@@ -156,7 +160,8 @@ describe('once trades are already on', () => {
 			steamId64: STEAM_ID,
 			marketListings: false,
 			trades: true,
-			pollIntervalSeconds: 20
+			pollIntervalSeconds: 20,
+			notify: { enabled: false, detail: 'full' }
 		});
 
 		expect(accounts[0]?.autoConfirm.pollIntervalSeconds).toBe(20);
@@ -171,7 +176,8 @@ describe('once trades are already on', () => {
 			steamId64: STEAM_ID,
 			marketListings: true,
 			trades: true,
-			pollIntervalSeconds: 15
+			pollIntervalSeconds: 15,
+			notify: { enabled: false, detail: 'full' }
 		});
 
 		expect(accounts[0]?.autoConfirm.marketListings).toBe(true);
@@ -186,7 +192,8 @@ describe('once trades are already on', () => {
 			steamId64: STEAM_ID,
 			marketListings: false,
 			trades: false,
-			pollIntervalSeconds: 15
+			pollIntervalSeconds: 15,
+			notify: { enabled: false, detail: 'full' }
 		});
 
 		expect(accounts[0]?.autoConfirm.trades).toBe(false);
@@ -202,7 +209,8 @@ describe('once trades are already on', () => {
 			steamId64: STEAM_ID,
 			marketListings: false,
 			trades: false,
-			pollIntervalSeconds: 15
+			pollIntervalSeconds: 15,
+			notify: { enabled: false, detail: 'full' }
 		});
 
 		await expect(
@@ -210,7 +218,8 @@ describe('once trades are already on', () => {
 				steamId64: STEAM_ID,
 				marketListings: false,
 				trades: true,
-				pollIntervalSeconds: 15
+				pollIntervalSeconds: 15,
+				notify: { enabled: false, detail: 'full' }
 			})
 		).rejects.toThrow();
 		expect(accounts[0]?.autoConfirm.trades).toBe(false);
@@ -226,9 +235,134 @@ describe('market listings alone', () => {
 			steamId64: STEAM_ID,
 			marketListings: true,
 			trades: false,
-			pollIntervalSeconds: 15
+			pollIntervalSeconds: 15,
+			notify: { enabled: false, detail: 'full' }
 		});
 
 		expect(accounts[0]?.autoConfirm.marketListings).toBe(true);
+	});
+});
+
+/**
+ * **The round trip, which is the whole point of this phase.**
+ *
+ * Mutation testing is how this got written: deleting the two lines that persist
+ * `notify`, and the ones that project it back to the renderer, left the entire
+ * suite green. The contract knew about the field, the screen rendered a control
+ * for it, and nothing in between was tested — which is precisely the failure
+ * the plan warned about when it said an earlier draft "changed the contract and
+ * the screen and nothing in between".
+ */
+describe('notification settings survive a save', () => {
+	it('writes what was sent', async () => {
+		const { vault, accounts } = fakeVault(account(false));
+		registerVaultHandlers(vault);
+
+		await setAutoConfirm({
+			steamId64: STEAM_ID,
+			marketListings: false,
+			trades: false,
+			pollIntervalSeconds: 15,
+			notify: { enabled: true, detail: 'count' }
+		});
+
+		expect(accounts[0]?.autoConfirm.notify, 'the setting was accepted and dropped').toEqual({
+			enabled: true,
+			detail: 'count'
+		});
+	});
+
+	it('writes the detail as well as the switch', async () => {
+		const { vault, accounts } = fakeVault(account(false));
+		registerVaultHandlers(vault);
+
+		await setAutoConfirm({
+			steamId64: STEAM_ID,
+			marketListings: false,
+			trades: false,
+			pollIntervalSeconds: 15,
+			notify: { enabled: true, detail: 'type' }
+		});
+
+		expect(accounts[0]?.autoConfirm.notify.detail, 'the detail was dropped').toBe('type');
+	});
+
+	it('can be switched back off', async () => {
+		const { vault, accounts } = fakeVault(account(false));
+		registerVaultHandlers(vault);
+
+		await setAutoConfirm({
+			steamId64: STEAM_ID,
+			marketListings: false,
+			trades: false,
+			pollIntervalSeconds: 15,
+			notify: { enabled: true, detail: 'full' }
+		});
+		await setAutoConfirm({
+			steamId64: STEAM_ID,
+			marketListings: false,
+			trades: false,
+			pollIntervalSeconds: 15,
+			notify: { enabled: false, detail: 'full' }
+		});
+
+		expect(accounts[0]?.autoConfirm.notify.enabled).toBe(false);
+	});
+
+	/*
+	 * Notifications spend nothing. Trades are the setting that lets items leave
+	 * an account with nobody watching, which is why they demand a typed phrase —
+	 * and inheriting that ceremony here would train people to type it for
+	 * something harmless.
+	 */
+	it('needs no acknowledgement of its own', async () => {
+		const { vault, accounts } = fakeVault(account(false));
+		registerVaultHandlers(vault);
+
+		await expect(
+			setAutoConfirm({
+				steamId64: STEAM_ID,
+				marketListings: false,
+				trades: false,
+				pollIntervalSeconds: 15,
+				notify: { enabled: true, detail: 'full' }
+			})
+		).resolves.toEqual({ ok: true });
+		expect(accounts[0]?.autoConfirm.notify.enabled).toBe(true);
+	});
+
+	/*
+	 * The request is `.strict()`, so an omitted `notify` is a rejected save
+	 * rather than a field left alone. A screen that can silently skip a field is
+	 * a screen that can silently reset it.
+	 */
+	it('is required by the contract, not optional', async () => {
+		const { vault } = fakeVault(account(false));
+		registerVaultHandlers(vault);
+
+		await expect(
+			setAutoConfirm({
+				steamId64: STEAM_ID,
+				marketListings: false,
+				trades: false,
+				pollIntervalSeconds: 15
+			})
+		).rejects.toThrow();
+	});
+
+	it('refuses a detail outside the enum', async () => {
+		const { vault, accounts } = fakeVault(account(false));
+		registerVaultHandlers(vault);
+
+		await expect(
+			setAutoConfirm({
+				steamId64: STEAM_ID,
+				marketListings: false,
+				trades: false,
+				pollIntervalSeconds: 15,
+				notify: { enabled: true, detail: 'everything' }
+			})
+		).rejects.toThrow();
+		expect(accounts[0]?.autoConfirm.notify.enabled).toBe(false);
 	});
 });

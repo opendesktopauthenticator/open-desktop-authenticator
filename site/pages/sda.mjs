@@ -18,6 +18,26 @@ export default {
 		dateModified: '2026-08-14',
 		mainEntityOfPage: `${s.origin}/steam-desktop-authenticator`
 	}),
+	/*
+	 * **The provenance clause in "This project" is load-bearing.**
+	 *
+	 * A pass that pulled a false signature claim out of five sentences rewrote
+	 * three of them to say "published checksums and build provenance" and left
+	 * this one carrying checksums alone — so the card whose whole job is
+	 * convincing an SDA user that this is checkable listed less evidence than the
+	 * release actually ships, while /verify step 4 and /download both send people
+	 * to the attestation it had stopped mentioning. Understating is a smaller
+	 * fault than overclaiming and still the wrong one for this page.
+	 *
+	 * **A JS comment, not an HTML one.** The first version of this note was
+	 * written inside the template and rendered straight into
+	 * site/dist/steam-desktop-authenticator.html — a maintainer's aside shipped to
+	 * every visitor. It also claimed the phrase order "not yet code-signed" made
+	 * the paragraph fail verify.mjs loudly if a flag were flipped back, which is
+	 * backwards: a qualifier inside UNBUILT_CAPABILITY's window makes that check
+	 * pass, not fail. Nothing here is doing that job, and the phrase order is
+	 * ordinary English.
+	 */
 	body: (s) => `
 		<article>
 			<h1>Steam Desktop Authenticator: what it is, and how to use it safely</h1>
@@ -244,9 +264,9 @@ export default {
 					<p>
 						An independent, open-source alternative, written to be checkable: public
 						source, builds produced in public CI, and no self-updating. Published
-						checksums and a signature over them shipped with 1.0, though the binaries
-						are not code-signed yet;
-						reproducible builds are a later goal and are not claimed yet —
+						checksums and a build provenance attestation naming the workflow and
+						the commit that produced the bytes shipped with 1.0. Reproducible
+						builds did not, and the binaries are not yet code-signed —
 						<a href="/download">the download page tracks where each one stands</a>.
 					</p>
 				</section>

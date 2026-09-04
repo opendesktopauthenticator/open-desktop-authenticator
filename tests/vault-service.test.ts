@@ -10,7 +10,8 @@ import {
 	type LockReason
 } from '../src/main/vault/service';
 import { readEnvelope } from '../src/main/vault/storage';
-import type { Account } from '../src/shared/vault-schema';
+import { openBytesWithKey, wipe } from '../src/main/vault/crypto';
+import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
  * Lifecycle rules for the vault session.
@@ -101,7 +102,7 @@ const account: Account = {
 	identitySecret: 'aWRlbnRpdHk=',
 	status: 'active',
 	addedAt: '2026-08-08T00:00:00.000Z',
-	autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 15 }
+	autoConfirm: newAutoConfirm()
 };
 
 describe('creation', () => {
@@ -342,6 +343,42 @@ describe('changing the passphrase', () => {
 		expect(reopened.read().accounts).toHaveLength(1);
 	});
 
+	/**
+	 * **The backup as well, or the retired passphrase still opens everything.**
+	 *
+	 * `writeEnvelope` copies the file it is about to overwrite into `.bak` first,
+	 * which is exactly right for an ordinary save — the backup is the previous
+	 * good state. During a rotation the file being copied is still sealed under
+	 * the **old** key, so the passphrase the user had just retired went on
+	 * opening `vault.json.bak` and handing back every account in it.
+	 *
+	 * Measured before the fix, and this is the reproduction: create a vault, add
+	 * an account, change the passphrase. The new passphrase could not restore the
+	 * backup; the old one could. The Settings screen promises the opposite in as
+	 * many words, which makes it worse than an unfixed hole — it is a hole the
+	 * product tells people is closed.
+	 */
+	it('leaves the backup readable only with the new passphrase', async () => {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+
+		await v.changePassphrase(PASS, 'a brand new long passphrase');
+
+		const withOld = service();
+		await expect(
+			withOld.restoreFromBackup(PASS),
+			'the retired passphrase still opened the backup, and every account in it'
+		).rejects.toThrow();
+
+		const withNew = service();
+		await withNew.restoreFromBackup('a brand new long passphrase');
+		expect(
+			withNew.read().accounts,
+			'the backup is unreadable with either passphrase, so the safety net is gone'
+		).toHaveLength(1);
+	});
+
 	it('rotates the salt', async () => {
 		const v = service();
 		await v.create(PASS);
@@ -430,15 +467,33 @@ describe('adopting a vault file from elsewhere', () => {
 		const origin = new VaultService({ file: source, now });
 		await origin.create(PASS);
 		await origin.mutate((d) => d.accounts.push(account));
+		const workflowKey = Buffer.alloc(32, 77);
+		const wrappedWorkflowKey = origin.sealScopedKey(workflowKey);
 
 		const here = service();
 		expect(here.exists()).toBe(false);
 
-		here.adoptFrom(source);
+		await here.adoptFrom(source, PASS, (candidate, key) => {
+			const opened = openBytesWithKey(wrappedWorkflowKey, key, candidate.kdf);
+			try {
+				expect(opened).toEqual(workflowKey);
+			} finally {
+				wipe(opened);
+			}
+		});
 
 		expect(here.exists()).toBe(true);
 		await here.unlock(PASS);
 		expect(here.read().accounts).toHaveLength(1);
+	});
+
+	it('refuses a wrong passphrase before installing the chosen vault', async () => {
+		const source = join(dir, 'elsewhere', 'vault.json');
+		await new VaultService({ file: source, now }).create(PASS);
+		const here = service();
+
+		await expect(here.adoptFrom(source, 'this is not the vault passphrase')).rejects.toThrow();
+		expect(here.exists()).toBe(false);
 	});
 
 	it('refuses to replace a vault that already exists', async () => {
@@ -455,17 +510,34 @@ describe('adopting a vault file from elsewhere', () => {
 		here.lock('manual');
 		const before = readFileSync(file, 'utf8');
 
-		expect(() => here.adoptFrom(source)).toThrow(/already a vault/);
+		await expect(here.adoptFrom(source, PASS)).rejects.toThrow(/already a vault/);
 		expect(readFileSync(file, 'utf8')).toBe(before);
 	});
 
-	it('refuses a file that is not a vault, without creating one', () => {
+	it('refuses a file that is not a vault, without creating one', async () => {
 		const notAVault = join(dir, 'notes.json');
 		writeFileSync(notAVault, '{"hello":"world"}', 'utf8');
 
 		const here = service();
-		expect(() => here.adoptFrom(notAVault)).toThrow(/not a vault/);
+		await expect(here.adoptFrom(notAVault, PASS)).rejects.toThrow(/not a vault/);
 		expect(here.exists()).toBe(false);
+	});
+
+	it('checks workflow-key compatibility before adopting or writing anything', async () => {
+		const source = join(dir, 'elsewhere', 'vault.json');
+		const origin = new VaultService({ file: source, now });
+		await origin.create(PASS);
+		const here = service();
+		const check = vi.fn(() => {
+			throw new VaultServiceError('that vault belongs to another workflow key');
+		});
+
+		await expect(here.adoptFrom(source, PASS, check)).rejects.toThrow(/another workflow key/i);
+		expect(check).toHaveBeenCalledOnce();
+		expect(
+			here.exists(),
+			'the rejected candidate was installed before compatibility was checked'
+		).toBe(false);
 	});
 });
 
@@ -515,7 +587,7 @@ describe('backup recovery', () => {
 	});
 
 	it('puts the vault back when the restore write fails', async () => {
-		// `setAside` renames the main file away, which makes `writeEnvelope` believe
+		// `setAside` removes the main name after preserving it, which makes `writeEnvelope` believe
 		// there was never one — so its own rollback, which restores from `.bak` only
 		// when a main file existed, does nothing. Left like that a failed restore
 		// leaves no `vault.json` at all: the app reads that as a fresh install and
@@ -559,6 +631,26 @@ describe('backup recovery', () => {
 
 		expect(readFileSync(file, 'utf8')).toBe(before);
 		expect(readdirSync(dir).filter((name) => name.includes('superseded'))).toHaveLength(0);
+	});
+
+	it('checks workflow-key compatibility before moving the current vault during restore', async () => {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+		v.lock();
+		const before = readFileSync(file, 'utf8');
+		const check = vi.fn(() => {
+			throw new VaultServiceError('that backup cannot open the pending workflow key');
+		});
+
+		await expect(service().restoreFromBackup(PASS, check)).rejects.toThrow(/pending workflow key/i);
+		expect(check).toHaveBeenCalledOnce();
+		expect(readFileSync(file, 'utf8')).toBe(before);
+		expect(readdirSync(dir).filter((name) => name.includes('superseded'))).toHaveLength(0);
+
+		const reopened = service();
+		await reopened.unlock(PASS);
+		expect(reopened.read().accounts).toHaveLength(1);
 	});
 
 	it('says so plainly when there is no backup at all', async () => {
@@ -736,13 +828,13 @@ describe('restore while unlocked', () => {
 });
 
 describe('adopting a vault file', () => {
-	it('refuses to read an enormous pick at all', () => {
+	it('refuses to read an enormous pick at all', async () => {
 		const big = join(dir, 'huge.vault');
 		// Sparse-ish: two megabytes of zeros is enough to trip a one-megabyte cap
 		// without slowing the suite.
 		writeFileSync(big, Buffer.alloc(2 * 1024 * 1024));
 		const v = service();
-		expect(() => v.adoptFrom(big)).toThrow(/too large/);
+		await expect(v.adoptFrom(big, PASS)).rejects.toThrow(/too large/);
 	});
 });
 
@@ -916,7 +1008,7 @@ describe('create and adopt while a session is open', () => {
 		await v.create(PASS);
 		rmSync(file);
 
-		expect(() => v.adoptFrom(source)).toThrow(/vault is open/i);
+		await expect(v.adoptFrom(source, 'another long passphrase')).rejects.toThrow(/vault is open/i);
 	});
 });
 
@@ -1036,5 +1128,159 @@ describe('verifyPassphrase against a concurrent rotation', () => {
 		v.lock('idle');
 		release?.();
 		await expect(proof).resolves.toMatch(/refused|locked/i);
+	});
+});
+
+/**
+ * **What the poller is allowed to see, and nothing more.**
+ *
+ * This projection exists because the alternative — `read()` on every beat —
+ * deep-clones every shared secret, identity secret and revocation code in the
+ * vault, once a second, forever, to rediscover that there is nothing to do.
+ * Its whole value is that it carries no secrets, and the way that value gets
+ * lost is somebody adding one field too many while wiring up a feature.
+ *
+ * So the keys are asserted **exactly**, not with `objectContaining`. A partial
+ * match is precisely the assertion that would keep passing on the day this
+ * starts carrying `sharedSecret`.
+ */
+describe('the auto-confirm projection', () => {
+	async function withAccount(overrides: Partial<Account> = {}) {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((draft) => {
+			draft.accounts.push({ ...account, ...overrides });
+		});
+		return v;
+	}
+
+	it('carries exactly these keys, and no secret among them', async () => {
+		const v = await withAccount();
+		const row = v.autoConfirmSchedule()[0];
+		expect(Object.keys(row ?? {}).sort()).toEqual([
+			'accountName',
+			'hasProxy',
+			'marketListings',
+			'notify',
+			'pollIntervalSeconds',
+			'steamId64',
+			'trades'
+		]);
+		expect(Object.keys(row?.notify ?? {}).sort()).toEqual(['detail', 'enabled']);
+	});
+
+	it('carries the account name, for the notification title', async () => {
+		const v = await withAccount();
+		expect(v.autoConfirmSchedule()[0]?.accountName).toBe('trader');
+	});
+
+	it('carries the notify settings', async () => {
+		const v = await withAccount({
+			autoConfirm: { ...newAutoConfirm(), notify: { enabled: true, detail: 'count' } }
+		});
+		expect(v.autoConfirmSchedule()[0]?.notify).toEqual({ enabled: true, detail: 'count' });
+	});
+
+	/*
+	 * A boolean, never the URL. A proxy address carries credentials, and this
+	 * object is rebuilt on every beat of a one-second scheduler.
+	 */
+	it('says whether a proxy exists without saying what it is', async () => {
+		const v = await withAccount({ proxyUrl: 'http://user:secret@proxy.example:8080' });
+		const row = v.autoConfirmSchedule()[0];
+		expect(row?.hasProxy).toBe(true);
+		expect(JSON.stringify(row)).not.toContain('secret');
+		expect(JSON.stringify(row)).not.toContain('proxy.example');
+	});
+
+	it('treats an empty proxy string as no proxy', async () => {
+		// "" and "unset" being the same value is how a control that looks cleared
+		// leaves something behind — and under `Require proxies` the difference
+		// decides whether the account is polled at all.
+		const v = await withAccount({ proxyUrl: '' });
+		expect(v.autoConfirmSchedule()[0]?.hasProxy).toBe(false);
+	});
+
+	it('reports no proxy when none is stored', async () => {
+		const v = await withAccount();
+		expect(v.autoConfirmSchedule()[0]?.hasProxy).toBe(false);
+	});
+
+	/*
+	 * Handing out a live reference into the vault's contents would let a caller
+	 * write to it. Every other field here is a primitive that cannot be.
+	 */
+	it('hands out a notify object the caller cannot write back through', async () => {
+		const v = await withAccount();
+		const row = v.autoConfirmSchedule()[0];
+		if (row) {
+			row.notify.enabled = true;
+		}
+		expect(v.autoConfirmSchedule()[0]?.notify.enabled, 'a caller wrote into the vault').toBe(false);
+	});
+
+	it('refuses while locked', () => {
+		const v = service();
+		expect(() => v.autoConfirmSchedule()).toThrow(VaultLockedError);
+	});
+});
+
+/**
+ * **A lock was announced and an unlock was not.**
+ *
+ * Anything that mirrors the lock state had to find out by asking, and the tray
+ * menu Linux keeps assigned asks on a 250 ms beat - so `Lock now` stayed greyed
+ * for a quarter second after the vault opened. A dead control, in exactly the
+ * emergency it exists for, at the moment somebody is provably at the machine.
+ *
+ * These drive the service rather than the tray: the tray's half is proved next
+ * door, and this is the half that has to fire for that to mean anything.
+ */
+describe('the unlock the vault announces', () => {
+	const PHRASE = 'a passphrase long enough to pass';
+
+	function watched(): { vault: VaultService; count: () => number } {
+		let unlocks = 0;
+		const vault = new VaultService({
+			file,
+			now,
+			onUnlock: () => {
+				unlocks += 1;
+			}
+		});
+		return { vault, count: () => unlocks };
+	}
+
+	it('is announced when a vault is created', async () => {
+		const watcher = watched();
+		await watcher.vault.create(PHRASE);
+
+		expect(
+			watcher.count(),
+			'creating a vault leaves it open, and nothing was told - so the tray menu offered to ' +
+				'lock a vault it believed was already locked'
+		).toBe(1);
+	});
+
+	it('is announced when a vault is unlocked', async () => {
+		const first = service();
+		await first.create(PHRASE);
+		first.lock();
+
+		const watcher = watched();
+		await watcher.vault.unlock(PHRASE);
+
+		expect(watcher.count(), 'the unlock was silent, so only a poll could notice it').toBe(1);
+	});
+
+	it('is not announced by an unlock that failed', async () => {
+		const first = service();
+		await first.create(PHRASE);
+		first.lock();
+
+		const watcher = watched();
+		await expect(watcher.vault.unlock('the wrong passphrase entirely')).rejects.toThrow();
+
+		expect(watcher.count(), 'a refused passphrase was announced as an unlock').toBe(0);
 	});
 });

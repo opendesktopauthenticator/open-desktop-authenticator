@@ -33,9 +33,10 @@ export const privacy = {
 				Short version: <strong>the application</strong> holds your secrets on your own
 				machine, sends them to nobody but Steam, and contains no analytics or telemetry of any
 				kind. <strong>This website</strong> is a separate thing and does collect a
-				little — server logs kept for 14 days, Cloudflare in front of it, and Google
-				Analytics. All of that is listed below, along with what a report holds and how
-				long it lives.
+				little — server logs kept for 14 days, Cloudflare in front of it, Google
+				Analytics, and Trustpilot on the pages that ask you for a review. All of that
+				is listed below, along with what a report holds, how long it lives, and the one
+				thing the download page keeps in your own browser.
 			</p>
 
 			<div class="callout">
@@ -88,7 +89,7 @@ export const privacy = {
 					<tr><th>What</th><th>Kept for</th></tr>
 				</thead>
 				<tbody>
-					<tr><td>An upload you never attached to a report</td><td>2 hours</td></tr>
+					<tr><td>An upload you never attached to a report</td><td>Eligible for deletion after 2 hours; normally removed within a few hours</td></tr>
 					<tr><td>An open report, and anything attached to it</td><td>Until it is closed</td></tr>
 					<tr><td>A resolved or declined report</td><td>90 days after it was closed, then deleted with its attachments</td></tr>
 					<tr><td>Web server request logs</td><td>14 days</td></tr>
@@ -98,7 +99,8 @@ export const privacy = {
 			<p class="hint">
 				Deletion runs on a clock inside the service, hourly, whether or not anybody
 				visits. It used to run only when somebody uploaded a file, which meant a quiet
-				week was a week when nothing expired.
+				week was a week when nothing expired. Failed removals are retried until they
+				succeed.
 			</p>
 
 			<h2>Having something removed sooner</h2>
@@ -153,6 +155,32 @@ export const privacy = {
 					<strong>We listed Google Analytics as the only third-party script until 25
 					August 2026, which was wrong</strong>: this one is added after our build, so
 					it never appeared in the source we were checking.
+				</dd>
+				<dt>Trustpilot, on the pages that ask for a review</dt>
+				<dd>
+					Only the pages that ask you for a review load Trustpilot's script — this page
+					does not, and neither does any page that is not asking. (No number here on
+					purpose: a count typed into a sentence is wrong the first time a page is
+					added, and this one is derived from what each page actually renders.) Where it does load, Trustpilot sees the request
+					the same way any embedded widget's host does: your IP address, your browser,
+					and which of our pages you were on. We send it nothing about you, and we
+					receive nothing back about who clicked; what we can see is the public review
+					count on our own profile, the same number you can.
+					<br />
+					<strong>Added 2 September 2026.</strong> It went onto every page for one
+					commit before this entry existed, including this one — a page that lists
+					everyone we talk to and then ended the list with the sentence below.
+				</dd>
+				<dt>One thing kept in your own browser</dt>
+				<dd>
+					The download page remembers a single flag in your browser's local storage, and
+					nothing else does: <code>oda.review-prompt.dismissed</code>, set if you turn the
+					review prompt down, follow the link to write a review, or carry on to a build
+					from the prompt itself. It exists so the page can ask you about a review once
+					and then stop asking. This site cannot tell whether you actually downloaded or
+					installed anything, and does not try to.
+					It never leaves your machine, nothing on the server reads it, and clearing your
+					site data removes it. It does not expire on its own.
 				</dd>
 				<dt>Nobody else</dt>
 				<dd>

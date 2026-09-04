@@ -22,13 +22,29 @@ const SOURCE = readFileSync(join(__dirname, '..', 'site', 'assets', 'download.js
 
 /** Run the real asset against a faked navigator and report what it stamped. */
 function detect(userAgent: string, userAgentData: { platform: string } | null): string | undefined {
+	/*
+	 * The script does more than stamp a platform now — it also wires the review
+	 * prompt that appears once a download starts — so the fake has to model the
+	 * handful of DOM calls it makes. A stub that answers every selector with one
+	 * object missing half the interface is not "the real asset as a browser would
+	 * run it"; it is a different program that happens to share a file.
+	 */
 	const element = {
 		attributes: {} as Record<string, string>,
+		hidden: true,
 		setAttribute(name: string, value: string) {
 			this.attributes[name] = value;
-		}
+		},
+		querySelector: () => null,
+		appendChild: () => undefined,
+		addEventListener: () => undefined
 	};
-	const document = { querySelector: () => element };
+	const document = {
+		// Only the download root exists here. The review prompt is absent, which is
+		// the shape of every page but /download and the one this test cares about.
+		querySelector: (selector: string) => (selector === '[data-download]' ? element : null),
+		querySelectorAll: () => []
+	};
 	const navigator = {
 		userAgentData,
 		platform: userAgentData ? userAgentData.platform : '',
@@ -38,7 +54,12 @@ function detect(userAgent: string, userAgentData: { platform: string } | null): 
 	// `node:vm` rather than a Function constructor: this is deliberately
 	// executing a script from disk, and saying so plainly is better than
 	// smuggling it past a lint rule that exists for good reason.
-	runInNewContext(SOURCE, { document, navigator });
+	runInNewContext(SOURCE, {
+		document,
+		navigator,
+		// Reached only from the click handler, which nothing here fires.
+		window: { setTimeout: () => 0, localStorage: { getItem: () => null, setItem: () => undefined } }
+	});
 	return element.attributes['data-platform'];
 }
 

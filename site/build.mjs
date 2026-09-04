@@ -34,6 +34,13 @@ import { rootIcons, hashedIcons, manifest } from './icons.mjs';
 import { checkAddresses } from './addresses.mjs';
 import { escape, releaseGaps, reviewAsk, sentenceList } from './markup.mjs';
 import { anchorHeadings, readingMinutes, guideMeta, jumpList } from './guide-kit.mjs';
+import {
+	browserFeatureCopy,
+	featureAvailability,
+	FEATURE_INTRODUCED,
+	publicationState,
+	RELEASE_PUBLICATIONS
+} from './publication.mjs';
 
 // Re-exported so pages may take it from either module without a second import.
 export { reviewAsk };
@@ -54,6 +61,16 @@ if (badAddresses.length) {
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Gridinsoft's ownership token for this domain.
+ *
+ * Named rather than inlined because it appears twice — in the home page's head
+ * and as the name of a file at the site root — and the two have to agree. They
+ * are issued per domain, so this one is `opendesktopauthenticator.com`'s and
+ * nothing else's: the same token on another site verifies neither.
+ */
+const GRIDINSOFT_KEY = 'nxu0pl5j85cxvlp60subwgz6bicyp3qv4zd1j7mr0b2jm3f9d1cunqqwqupqls81';
 const out = join(here, 'dist');
 
 export const SITE = {
@@ -72,17 +89,62 @@ export const SITE = {
 	updated: '2026-08-27',
 
 	/*
-	 * When 1.0 was published, from the GitHub release.
+	 * When each published version went out, from the GitHub releases.
 	 *
 	 * Here because two pages said "Version 1.0 is days old" — true when typed,
 	 * wronger every day after, and nothing to notice. It is the same failure as
 	 * the checksum-signature sentences: a fact about the release, written by
 	 * hand, with no path from the fact to the page. A date does not rot.
+	 *
+	 * **Keyed by version, and that is the whole point.** It was a single date
+	 * described in its own comment as "when 1.0 was published", and `version`
+	 * moved to 1.5.0 underneath it — so `datePublished` went on saying 1.0's
+	 * date beside `softwareVersion: 1.5.0`, in structured data, which is a false
+	 * statement about a release in the form search engines read. A version with
+	 * no entry here has not been published yet, and pages print nothing rather
+	 * than borrowing the last one's date.
 	 */
-	released: '2026-08-25',
-	/** The same date, as a person would read it. */
+	publicationRecords: RELEASE_PUBLICATIONS,
+
+	get publication() {
+		return publicationState(this.version, this.publicationRecords);
+	},
+
+	get features() {
+		return {
+			browser: featureAvailability(this.publication, FEATURE_INTRODUCED.browser),
+			transfer: featureAvailability(this.publication, FEATURE_INTRODUCED.transfer)
+		};
+	},
+
+	/** Compatibility view for the first-release copy below. GitHub owns dates. */
+	get publishedOn() {
+		return Object.fromEntries(
+			Object.entries(this.publicationRecords.github).map(([version, record]) => [
+				version,
+				record.publishedOn
+			])
+		);
+	},
+
+	/**
+	 * The publication date of the version this build is — **undefined until it
+	 * has one**, which is the honest answer for a version that has not shipped.
+	 */
+	get released() {
+		return this.publicationRecords.github[this.version]?.publishedOn;
+	},
+
+	/**
+	 * When the project first shipped, formatted.
+	 *
+	 * A different fact from the one above, and the two were the same value until
+	 * `version` moved. Both prose uses say "Version 1.0 was published on ..." —
+	 * an argument about how young the project is, which is anchored to the first
+	 * release and does not move when a later one goes out.
+	 */
 	get releasedOn() {
-		return formatDate(this.released);
+		return formatDate(Object.values(this.publishedOn).sort()[0]);
 	},
 	/** GA4 measurement ID. Referenced by head() and by the CSP host allowlist. */
 	analyticsId: 'G-G0GE9H5VR7',
@@ -103,7 +165,18 @@ export const SITE = {
 	verifications: [
 		// Requested by Trustpilot support, 2026-08-26, to verify domain ownership
 		// for the review profile.
-		{ service: 'Trustpilot', token: 'r2qnjwvklb' }
+		{ service: 'Trustpilot', token: 'r2qnjwvklb' },
+		/*
+		 * Gridinsoft, 2026-08-30. A `meta` name rather than a comment because that
+		 * is what they read — Trustpilot accepts a comment and Gridinsoft does not,
+		 * so the shape is per service rather than a house style.
+		 *
+		 * They offer a root file as an alternative and this site publishes both:
+		 * `file` puts the same token at `/gridinsoft-<token>.txt`. Either alone
+		 * would verify; together, neither a rewritten head nor a missing file can
+		 * quietly un-verify the domain.
+		 */
+		{ service: 'Gridinsoft', token: GRIDINSOFT_KEY, meta: 'gridinsoft-key', file: true }
 	],
 
 	/*
@@ -118,6 +191,31 @@ export const SITE = {
 	get runtimeDependencies() {
 		const pkg = JSON.parse(readFileSync(join(here, '..', 'package.json'), 'utf8'));
 		return Object.keys(pkg.dependencies ?? {}).length;
+	},
+
+	/**
+	 * How many packages are in the installer once their dependencies are counted.
+	 *
+	 * **The number above is five, and the sentence it sat in was about the whole
+	 * shipping surface.** "Every package that ships is a package someone could
+	 * compromise, so there are as close to none as the job allows" is a claim
+	 * about the supply chain, and five is the count of names typed into
+	 * `dependencies` — not of packages that ship. The closure is 39, plus the
+	 * Electron runtime.
+	 *
+	 * Five is still worth saying; it is a real and unusual number for an
+	 * application of this kind. Saying it *instead* of the closure, on the page
+	 * whose entire argument is that claims should be checkable, was the problem —
+	 * and the SBOM published beside every release lists all of them, so the page
+	 * was understating something a reader could already count.
+	 *
+	 * Read from the lockfile at build time for the reason the direct count is:
+	 * a number that has to be remembered is one that eventually goes stale.
+	 */
+	get shippedPackages() {
+		const lock = JSON.parse(readFileSync(join(here, '..', 'package-lock.json'), 'utf8'));
+		return Object.entries(lock.packages ?? {}).filter(([path, entry]) => path !== '' && !entry.dev)
+			.length;
 	},
 	/*
 	 * What it runs on.
@@ -209,7 +307,32 @@ export const SITE = {
 	 */
 	reviews: {
 		profile: 'https://www.trustpilot.com/review/opendesktopauthenticator.com',
-		write: 'https://www.trustpilot.com/evaluate/opendesktopauthenticator.com'
+		write: 'https://www.trustpilot.com/evaluate/opendesktopauthenticator.com',
+		/*
+		 * **The Review Collector, embedded rather than linked.**
+		 *
+		 * The ask already existed and pointed at Trustpilot by hand. This replaces
+		 * that with Trustpilot's own collection surface, which they track as one.
+		 *
+		 * **It is still a button.** The Review Collector renders a call to action,
+		 * not a form: the writing happens on Trustpilot, as it has to if the review
+		 * is going to be tied to a real account and mean anything to the reader.
+		 * Worth saying because it was first added here under a description that
+		 * claimed otherwise.
+		 *
+		 * These are public identifiers — they appear in the markup of every site
+		 * that embeds one, and the token identifies the widget rather than
+		 * authorising anything. No secret belongs here.
+		 */
+		widget: {
+			script: 'https://widget.trustpilot.com/bootstrap/v5/tp.widget.bootstrap.min.js',
+			origin: 'https://widget.trustpilot.com',
+			locale: 'en-US',
+			/** Review Collector. */
+			templateId: '56278e9abfbbba0bdcd568bc',
+			businessUnitId: '6a8f1c6d93a7a59a46a46270',
+			token: '7f6209c2-e467-4b2f-9dd4-2bd892cb1e0c'
+		}
 	},
 
 	/*
@@ -229,53 +352,84 @@ export const SITE = {
 	 *
 	 * Flip a flag when the thing is genuinely true, and every page follows.
 	 */
-	release: {
-		/** A signed public build exists and can be downloaded. */
-		published: true,
-		/** Artifacts are listed with SHA-256 checksums on the release page. */
-		checksums: true,
-		/*
-		 * **`SHA256SUMS.txt` carries a signature.** True since the release
-		 * workflow began signing it with sigstore `cosign`, keylessly, under the
-		 * workflow's own OIDC identity.
-		 *
-		 * This flag was one word doing three jobs, and splitting it was the
-		 * precondition for flipping any of them. "Signed" can mean the checksum
-		 * list is signed, or the binaries carry a code-signing certificate, or
-		 * that a `.asc` exists for someone reaching for `gpg --verify`. Only the
-		 * first is true, and a single flag would have licensed all three
-		 * phrasings the moment it flipped.
-		 */
-		signed: true,
-		/*
-		 * **The binaries are not code-signed**, and this is the flag that says
-		 * so. The Microsoft Store package carries Microsoft's signature because
-		 * Microsoft re-signs what it distributes; the `.exe`, `.AppImage` and
-		 * `.deb` on the release page carry none, so Windows warns on first run.
-		 * Blocked on the SignPath Foundation certificate — see
-		 * /code-signing-policy, which exists and says the same thing.
-		 */
-		codeSigned: false,
-		/*
-		 * **No `.asc`, and there never was one.** The signature is sigstore, not
-		 * GPG, so `gpg --verify` and `SHA256SUMS.txt.asc` remain instructions to
-		 * nobody — a reader who follows one gets "No such file or directory" and
-		 * has to guess whether that means the download is bad. /verify once
-		 * carried exactly that instruction, which is why the tripwire for it is
-		 * kept rather than deleted now that a different signature exists.
-		 */
-		gpgSignature: false,
-		/** Anyone can rebuild the tag and get the same bytes. Deferred (§P3). */
-		reproducible: false,
-		/*
-		 * **An independent third party has audited this and published the
-		 * result.** Maintainer testing is not that, and neither is passing Store
-		 * certification — certification checks policy compliance, not
-		 * cryptography. The flag exists because two pages asserted the absence
-		 * of an audit in prose, which is a claim that would have gone stale
-		 * silently the day one happened.
-		 */
-		audited: false
+	releaseByVersion: {
+		'1.0.0': {
+			/** A signed public build exists and can be downloaded. */
+			published: true,
+			/** Artifacts are listed with SHA-256 checksums on the release page. */
+			checksums: true,
+			/*
+			 * **Whether a signature is on the release somebody can download right
+			 * now** — not whether the workflow signs.
+			 *
+			 * It was `true` from the day the signing step was written, and that was
+			 * three days after v1.0.0 was tagged. So the only published release has
+			 * no `SHA256SUMS.txt.sig` and no `.pem`, while /verify told every visitor
+			 * to fetch both and run `cosign verify-blob` against them. The command
+			 * cannot succeed. Worse than useless: a missing signature file is what
+			 * tampering looks like, so the page taught people to suspect a release
+			 * that is fine.
+			 *
+			 * **Flip this back to `true` in the same change that publishes a signed
+			 * release, and not before.** The workflow signs correctly today; the
+			 * question this flag answers is whether the bytes on the release page
+			 * carry the result, which is a fact about the release and not about the
+			 * code.
+			 *
+			 * The flag was already split three ways — checksum-list signature,
+			 * binary code-signing, and a `.asc` for `gpg --verify` — because one word
+			 * doing three jobs would have licensed all three phrasings the moment any
+			 * one became true. Being split is what makes it safe to say "checksums,
+			 * yes; signature, not yet" rather than going silent about both.
+			 */
+			signed: false,
+			/*
+			 * **The binaries are not code-signed**, and this is the flag that says
+			 * so. The Microsoft Store package carries Microsoft's signature because
+			 * Microsoft re-signs what it distributes; the `.exe`, `.AppImage` and
+			 * `.deb` on the release page carry none, so Windows warns on first run.
+			 * No certificate is planned: the SignPath Foundation declined, and a paid
+			 * one would not clear the Windows warning on its own anyway. See
+			 * /code-signing-policy, which exists and says the same thing.
+			 */
+			codeSigned: false,
+			/*
+			 * **No `.asc`, and there never was one.** The signature is sigstore, not
+			 * GPG, so `gpg --verify` and `SHA256SUMS.txt.asc` remain instructions to
+			 * nobody — a reader who follows one gets "No such file or directory" and
+			 * has to guess whether that means the download is bad. /verify once
+			 * carried exactly that instruction, which is why the tripwire for it is
+			 * kept rather than deleted now that a different signature exists.
+			 */
+			gpgSignature: false,
+			/** Anyone can rebuild the tag and get the same bytes. Deferred (§P3). */
+			reproducible: false,
+			/*
+			 * **An independent third party has audited this and published the
+			 * result.** Maintainer testing is not that, and neither is passing Store
+			 * certification — certification checks policy compliance, not
+			 * cryptography. The flag exists because two pages asserted the absence
+			 * of an audit in prose, which is a claim that would have gone stale
+			 * silently the day one happened.
+			 */
+			audited: false
+		}
+	},
+
+	/** Security evidence for the exact GitHub build linked by the site. */
+	get release() {
+		const version = this.publication.github.latestVersion;
+		const evidence = version === undefined ? undefined : this.releaseByVersion[version];
+		return {
+			version,
+			published: evidence !== undefined,
+			checksums: evidence?.checksums ?? false,
+			signed: evidence?.signed ?? false,
+			codeSigned: evidence?.codeSigned ?? false,
+			gpgSignature: evidence?.gpgSignature ?? false,
+			reproducible: evidence?.reproducible ?? false,
+			audited: evidence?.audited ?? false
+		};
 	},
 
 	/*
@@ -337,6 +491,9 @@ const NAV = [
 	'donate'
 ];
 
+const descriptionOf = (page) =>
+	typeof page.description === 'function' ? page.description(SITE) : page.description;
+
 /**
  * One page's `<head>`.
  *
@@ -344,8 +501,13 @@ const NAV = [
  * Relative canonicals and missing ones are the two ways a site ends up with the
  * same content indexed under several URLs.
  */
-function head(page) {
+/**
+ * @param page the page being rendered
+ * @param collectsReviews whether its body actually carries a review widget
+ */
+function head(page, collectsReviews) {
 	const url = `${SITE.origin}/${page.slug === 'index' ? '' : page.slug}`;
+	const description = descriptionOf(page);
 	// The brand suffix is the short form. Spelling it out costs 29 characters,
 	// which is most of the room a result has before it is truncated mid-word —
 	// and a title cut off at "Open Desktop Authentica…" has spent that room on
@@ -364,8 +526,14 @@ function head(page) {
 	const verifications =
 		page.slug === 'index'
 			? SITE.verifications
-					.map(
-						(v) => `
+					.map((v) =>
+						// A comment satisfies the services that read one; the rest want a
+						// real tag, and a comment they cannot see is indistinguishable
+						// from having done nothing.
+						v.meta
+							? `
+	<meta name="${escape(v.meta)}" content="${escape(v.token)}">`
+							: `
 	<!-- ${escape(v.service)} verification: ${escape(v.token)} -->`
 					)
 					.join('')
@@ -375,14 +543,14 @@ function head(page) {
 	<meta charset="utf-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">${verifications}
 	<title>${escape(title)}</title>
-	<meta name="description" content="${escape(page.description)}">
+	<meta name="description" content="${escape(description)}">
 	<link rel="canonical" href="${escape(url)}">
 	<meta name="robots" content="${page.noindex ? 'noindex, follow' : 'index, follow, max-image-preview:large, max-snippet:-1'}">
 	<meta name="theme-color" content="#070a0e">
 	<meta property="og:type" content="website">
 	<meta property="og:site_name" content="${escape(SITE.name)}">
 	<meta property="og:title" content="${escape(title)}">
-	<meta property="og:description" content="${escape(page.description)}">
+	<meta property="og:description" content="${escape(description)}">
 	<meta property="og:url" content="${escape(url)}">
 	<meta property="og:image" content="${SITE.origin}${asset('og-512.png')}">
 	<meta property="og:image:width" content="512">
@@ -443,6 +611,25 @@ function head(page) {
 	-->
 	<script async src="https://www.googletagmanager.com/gtag/js?id=${SITE.analyticsId}"></script>
 	<script src="${asset('analytics.js')}" defer></script>
+	<!--
+		Trustpilot's widget loader, which turns the review boxes on this site into
+		something a reader can write in without leaving the page.
+
+		Second third-party script, and the same reasoning as the one above: no
+		integrity attribute, because Trustpilot regenerates the bundle and
+		publishes no stable hash, so pinning one would break every widget on their
+		next deploy. The CSP host allowlist and TLS are what this rests on, and the
+		frame-src directive has to name the same host: the widget renders in an
+		iframe, and without it the box is invisible with nothing in the console to
+		say why.
+
+		Only on the pages that actually carry a widget, and derived from the
+		rendered body rather than from a flag somebody has to remember. It went on
+		all thirty-two first, including /privacy — a page that lists every third
+		party this site talks to and ends that list with "Nobody else", while
+		loading a third party to say it.
+	-->
+	${collectsReviews ? `<script async src="${SITE.reviews.widget.script}"></script>` : ''}
 	${page.structuredData ? `<script type="application/ld+json">${JSON.stringify(datedFor(page))}</script>` : ''}
 	<script type="application/ld+json">${JSON.stringify(breadcrumbs(page))}</script>`.trim();
 }
@@ -580,7 +767,7 @@ function layout(page) {
 	return `<!doctype html>
 <html lang="en">
 <head>
-	${head(page)}
+	${head(page, body.includes('trustpilot-widget'))}
 </head>
 <body>
 	<a class="skip" href="#main">Skip to content</a>
@@ -796,6 +983,17 @@ writeFileSync(join(out, 'site.webmanifest'), manifest(SITE, asset));
  */
 const expires = new Date(`${SITE.updated}T00:00:00Z`);
 expires.setUTCFullYear(expires.getUTCFullYear() + 1);
+/*
+ * The file half of each verification that asks for one.
+ *
+ * Written from the same token the head carries, so the pair cannot drift: a
+ * meta tag and a file naming different keys is the one failure mode of
+ * publishing both, and it verifies nothing while looking like it should.
+ */
+for (const v of SITE.verifications.filter((entry) => entry.file)) {
+	writeFileSync(join(out, `gridinsoft-${v.token}.txt`), v.token);
+}
+
 writeFileSync(
 	join(out, 'security.txt'),
 	`# ${SITE.name} — how to report a security problem.
@@ -930,7 +1128,7 @@ const LLMS_SECTIONS = [
 	const url = (slug) => `${SITE.origin}/${slug === 'index' ? '' : slug}`;
 	const link = (slug) => {
 		const page = indexable.find((p) => p.slug === slug);
-		return `- [${page.title}](${url(slug)}): ${page.description}`;
+		return `- [${page.title}](${url(slug)}): ${descriptionOf(page)}`;
 	};
 
 	writeFileSync(
@@ -951,9 +1149,9 @@ It runs entirely on the user's own machine. There is no account to create, no se
 - **Licence:** MIT. Source: ${SITE.repo}
 - **Publisher:** ${SITE.publisher}, a Steam trading company — which is why it was written.
 - **Platforms:** ${platformSentence()}
-- **Install from:** the Microsoft Store (${SITE.store.url}) or GitHub releases (${SITE.repo}/releases/latest).
+- **Install from:** Microsoft Store ${SITE.publication.store.latestVersion} (${SITE.store.url}) or GitHub ${SITE.publication.github.latestVersion} (${SITE.repo}/releases/tag/v${SITE.publication.github.latestVersion}).
 - **This website hosts no binaries** and never will; every download control links outward.
-- **Runtime dependencies:** ${SITE.runtimeDependencies}.
+- **Dependencies:** ${SITE.runtimeDependencies} direct, ${SITE.shippedPackages} shipped in total, plus the Electron runtime.
 
 ## What it does
 
@@ -966,6 +1164,7 @@ It runs entirely on the user's own machine. There is no account to create, no se
 - Stores the Steam revocation code (Valve calls it the recovery code) and can reveal it again.
 - Optional automatic confirmation, per account and per type, off by default.
 - Optional per-account network routing.
+- ${browserFeatureCopy(SITE).fact}
 
 ## What it deliberately does not do
 
@@ -975,7 +1174,7 @@ Non-goals rather than roadmap items: no trade automation beyond confirmations, n
 
 ## How secrets are protected
 
-Steam secrets are encrypted at rest with scrypt and AES-256-GCM behind the user's passphrase. The interface runs isolated with no Node integration, the vault locks when idle, and the application opens no network connection beyond Steam and an optional update check. ${SITE.origin}/security sets out the model, including what it cannot protect against.
+Steam secrets are encrypted at rest with scrypt and AES-256-GCM behind the user's passphrase. The interface runs isolated with no Node integration, the vault locks when idle, and on its own the application opens no network connection beyond Steam and an optional update check. ${browserFeatureCopy(SITE).security} ${SITE.origin}/security sets out the model, including what it cannot protect against.
 
 ## How to check a download is genuine
 

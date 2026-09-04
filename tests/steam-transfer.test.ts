@@ -25,6 +25,7 @@ function service(options: {
 	signIn?: unknown;
 	held?: string[];
 	now?: () => number;
+	monotonicNow?: () => number;
 }): TransferService {
 	const signIn =
 		options.signIn ??
@@ -36,6 +37,7 @@ function service(options: {
 			}));
 	return new TransferService(vaultHolding(options.held), transports, () => 0, {
 		now: options.now ?? (() => 1_000_000),
+		...(options.monotonicNow === undefined ? {} : { monotonicNow: options.monotonicNow }),
 		signIn: signIn as never
 	});
 }
@@ -125,12 +127,18 @@ describe('what the transfer never exposes', () => {
 
 describe('the pending transfer', () => {
 	it('lapses rather than lingering', async () => {
-		let clock = 1_000_000;
-		const svc = service({ now: () => clock });
+		let wall = 1_000_000;
+		let elapsed = 10_000;
+		const svc = service({ now: () => wall, monotonicNow: () => elapsed });
 		await svc.authenticate('someone', 'pw', 'QK4TX');
 		expect(svc.current()).toBeDefined();
 
-		clock += 16 * 60_000;
+		// Wall time is timestamp provenance, not credential age. An operating-system
+		// clock correction must not silently discard or prolong the signed-in session.
+		wall += 24 * 60 * 60_000;
+		expect(svc.current()).toBeDefined();
+
+		elapsed += 16 * 60_000;
 		expect(svc.current()).toBeUndefined();
 	});
 

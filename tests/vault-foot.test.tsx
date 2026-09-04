@@ -33,7 +33,12 @@ const ACCOUNT: AccountSummary = accountSummary.parse({
 	hasRevocationCode: true,
 	hasProxy: false,
 	routing: 'off',
-	autoConfirm: { marketListings: false, trades: false, pollIntervalSeconds: 30 }
+	autoConfirm: {
+		marketListings: false,
+		trades: false,
+		pollIntervalSeconds: 30,
+		notify: { enabled: false, detail: 'full' }
+	}
 });
 
 const noop = (): void => {};
@@ -47,6 +52,7 @@ const render = (accounts: AccountSummary[]) =>
 			onBackUpRevocationCode={noop}
 			onChangeRouting={noop}
 			onShowConfirmations={noop}
+			requireProxies={false}
 			onOpenBrowser={() => Promise.resolve({ signInRequired: false })}
 			onRemoveAccount={noop}
 			onMove={noop}
@@ -55,7 +61,8 @@ const render = (accounts: AccountSummary[]) =>
 			onRecover={noop}
 			onEnrol={noop}
 			onFinishActivation={noop}
-			onExport={() => Promise.resolve({ written: false } as never)}
+			onFinishRecoveryBackup={noop}
+			onExport={noop}
 			onSettings={noop}
 			onAbout={noop}
 			onActivity={noop}

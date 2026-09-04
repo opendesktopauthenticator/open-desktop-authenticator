@@ -1,0 +1,193 @@
+name: SBOM
+
+# The release path that nothing but a release ever walked.
+#
+# `release.yml` assembles a tree describing what the installer contains, scans
+# it, and refuses to publish unless the result matches the shipping closure
+# exactly. All three steps are correct today and all three were broken for the
+# life of one commit, because the only trigger that runs them is a version tag.
+# The assembly step deleted the lockfile before the scan; the scanner has no npm
+# inventory on a directory scan except a lockfile; the guard therefore reported
+# forty missing packages and failed. Every release, and no pull request could
+# say so.
+#
+# So the same three steps run here, on every push and pull request, from the
+# same scripts and the same pinned scanner action. Nothing is published and no
+# secret is used: this job exists to notice.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sbom-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shipping-tree:
+    name: the SBOM path a release depends on
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to the same commits `release.yml` uses, which is the point rather
+      # than caution: an action resolved differently here would mean this job
+      # exercises a scanner the release does not run, and the whole value of it
+      # is that the two are the same. `ci.yml` may use mutable major tags
+      # because nothing it does depends on a specific build of them.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      # No `npm ci` at the repository root, and that is deliberate rather than
+      # an oversight. The assembly script installs the production tree into
+      # `sbom-root` itself, and the guard reads package.json, package-lock.json
+      # and electron-builder.config.mjs — none of which needs a dependency
+      # installed here. A root install would only hide a script that had quietly
+      # grown one.
+      - name: Assemble the tree the SBOM describes
+        run: node .github/scripts/assemble-shipping-tree.mjs
+
+      - name: Show what the scanner was told
+        run: cat sbom-syft.yaml
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: sbom-root
+          config: sbom-syft.yaml
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # What the release would refuse to publish on. If this goes red, the next
+      # release would have died at the same step — which is the entire reason
+      # this workflow exists.
+      - name: The SBOM must list the shipping tree, exactly
+        env:
+          SBOM: sbom.spdx.json
+          MANIFEST: package.json
+          LOCKFILE: package-lock.json
+          BUILDER_CONFIG: electron-builder.config.mjs
+        run: |
+          RECEIPT="$RUNNER_TEMP/sbom-verified.sha256" \
+            node .github/scripts/assert-sbom-is-the-shipping-tree.mjs
+          echo "--- receipt ---"
+          cat "$RUNNER_TEMP/sbom-verified.sha256"
+
+      # And that the guard still rejects what it claims to.
+      #
+      # A green check is worth nothing until it has been seen to go red for the
+      # right reason, and the step above is green whether it is comparing
+      # carefully or comparing nothing — that is exactly how the check this one
+      # replaced survived three separate ways through it. So the three failures
+      # that matter are produced from the real scanner output and fed back in.
+      # All must be rejected, and none may leave a receipt behind, because
+      # the receipt is what the release's checksum step trusts.
+      - name: Check the guard still fails on an SBOM it should reject
+        run: |
+          receipt="$RUNNER_TEMP/selftest.sha256"
+
+          expect_red() {
+            rm -f "$receipt"
+            if SBOM="$2" MANIFEST=package.json LOCKFILE=package-lock.json \
+               BUILDER_CONFIG=electron-builder.config.mjs RECEIPT="$receipt" \
+               node .github/scripts/assert-sbom-is-the-shipping-tree.mjs; then
+              echo "::error::the guard accepted $1, so it is not a gate and a release could publish one"
+              exit 1
+            fi
+            if [ -f "$receipt" ]; then
+              echo "::error::the guard rejected $1 and still left a receipt, which the checksum step would accept as proof the SBOM was checked"
+              exit 1
+            fi
+            echo "correctly rejected, and left no receipt: $1"
+          }
+
+          # Two documents, both derived from the one the scanner just produced,
+          # each carrying exactly one of the faults this guard exists to catch:
+          # a dev closure, which is what deleting `--omit=dev` from the assembly
+          # produces, and a missing runtime, which is what scanning without the
+          # electron entry produces. Both were real defects here.
+          node - <<'MUTATE'
+          const fs = require('node:fs');
+          const sbom = JSON.parse(fs.readFileSync('sbom.spdx.json', 'utf8'));
+
+          const withDevPackages = structuredClone(sbom);
+          for (const [name, version] of [['eslint', '10.8.1'], ['vitest', '4.1.10'], ['typescript', '5.7.3']]) {
+            withDevPackages.packages.push({
+              SPDXID: `SPDXRef-Package-npm-${name}-selftest`,
+              name,
+              versionInfo: version,
+              externalRefs: [{ referenceCategory: 'PACKAGE-MANAGER', referenceType: 'purl', referenceLocator: `pkg:npm/${name}@${version}` }]
+            });
+          }
+          fs.writeFileSync('selftest-dev-closure.spdx.json', JSON.stringify(withDevPackages));
+
+          const withoutElectron = structuredClone(sbom);
+          withoutElectron.packages = withoutElectron.packages.filter((entry) => entry.name !== 'electron');
+          if (withoutElectron.packages.length === sbom.packages.length) {
+            console.log('::error::the scanner produced no electron entry to remove, so this fixture would prove nothing');
+            process.exit(1);
+          }
+          fs.writeFileSync('selftest-no-electron.spdx.json', JSON.stringify(withoutElectron));
+          MUTATE
+
+          expect_red 'an SBOM containing development dependencies' selftest-dev-closure.spdx.json
+          expect_red 'an SBOM missing the Electron runtime' selftest-no-electron.spdx.json
+
+          # And the duplicate check added since. A guard is worth nothing until
+          # it has been seen to go red for the right reason, and this rule had
+          # shipped with nothing anywhere exercising it.
+          node - <<'MUTATE2'
+          const fs = require('node:fs');
+          const sbom = JSON.parse(fs.readFileSync('sbom.spdx.json', 'utf8'));
+
+          // What two catalogers answering about one tree produce: every npm
+          // record a second time. This is the document that was published.
+          const doubled = structuredClone(sbom);
+          const npm = sbom.packages.filter((entry) =>
+            (entry.externalRefs ?? []).some((ref) => String(ref.referenceLocator ?? '').startsWith('pkg:npm/'))
+          );
+          if (npm.length === 0) {
+            console.log('::error::the scan catalogued no npm packages, so this fixture would prove nothing');
+            process.exit(1);
+          }
+          doubled.packages = [
+            ...sbom.packages,
+            ...npm.map((entry, index) => ({ ...entry, SPDXID: `${entry.SPDXID}-selftest-${index}` }))
+          ];
+          fs.writeFileSync('selftest-doubled.spdx.json', JSON.stringify(doubled));
+          MUTATE2
+
+          expect_red 'an SBOM listing every package twice' selftest-doubled.spdx.json
+
+      # And that the report still says how each dependency reaches the user,
+      # which is the sentence the SBOM's readers act on. Asserted on the run
+      # that passed, because a shape check on a failing run proves nothing.
+      - name: The report must still classify every dependency
+        env:
+          SBOM: sbom.spdx.json
+          MANIFEST: package.json
+          LOCKFILE: package-lock.json
+          BUILDER_CONFIG: electron-builder.config.mjs
+          TREE: sbom-root
+        run: |
+          report="$(node .github/scripts/assert-sbom-is-the-shipping-tree.mjs)"
+          echo "$report"
+          for phrase in             'as package directories inside the asar'             'compiled into the renderer bundle'             'as the application runtime itself'; do
+            case "$report" in
+              *"$phrase"*) ;;
+              *)
+                echo "::error::the report no longer says \"$phrase\", so a group of dependencies has stopped being described"
+                exit 1
+                ;;
+            esac
+          done

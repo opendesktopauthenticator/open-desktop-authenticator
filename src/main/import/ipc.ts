@@ -5,6 +5,7 @@ import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
 import type { ImportReport } from '../../shared/ipc';
 import { looksEncrypted } from './sda-crypto';
+import { ProxyConsent } from '../net/proxy-consent';
 import type { ImportService, StagedFile } from './service';
 
 /**
@@ -61,7 +62,18 @@ export function manifestsFirst(paths: string[]): string[] {
 	return [...manifests, ...rest];
 }
 
-export function registerImportHandlers(imports: ImportService): void {
+export function registerImportHandlers(
+	imports: ImportService,
+	/**
+	 * Defaulted the way `registerVaultHandlers` defaults it: a fresh
+	 * `ProxyConsent` has no way to ask, and a `ProxyConsent` with no way to ask
+	 * refuses. So a wiring mistake that forgets to pass the application's instance
+	 * costs the user the ability to adopt a maFile's proxy — it does not silently
+	 * hand that adoption back to whoever wrote the file, which is the failure this
+	 * gate exists to prevent.
+	 */
+	proxyConsent: ProxyConsent = new ProxyConsent()
+): void {
 	registerHandler(CHANNELS.importScan, async (): Promise<ImportReport> => {
 		// Checked before the picker opens, so a locked vault never even asks.
 		imports.assertUnlocked();
@@ -152,9 +164,42 @@ export function registerImportHandlers(imports: ImportService): void {
 		return imports.unlock(passphrase);
 	});
 
-	registerHandler(CHANNELS.importCommit, async ({ selections }) => ({
-		outcomes: await imports.commit(selections)
-	}));
+	registerHandler(CHANNELS.importCommit, async ({ selections }) => {
+		/*
+		 * **A proxy inside a maFile is a destination like any other, and this was
+		 * the one path that adopted one without asking.**
+		 *
+		 * `accountSetProxy`, `enrollmentBegin` and `transferAuthenticate` all put a
+		 * new endpoint to the user before it can be stored — see `ProxyConsent` for
+		 * why that gate exists at all. Import did not, and it is the worst place to
+		 * miss: the address was chosen by whoever wrote the file rather than by the
+		 * user, the screen cannot show it (a proxy URL usually embeds credentials,
+		 * so `ImportCandidate` carries only `hasProxy`), and once stored it carries
+		 * every later Steam request for that account.
+		 *
+		 * Asked **before** `commit`, on the same reasoning as `accountSetProxy`: a
+		 * refusal throws out of here, so the vault is never opened for writing and
+		 * nothing about this import — not the account, not the secrets, not the
+		 * proxy — reaches disk. A refusal that had to be undone would be a
+		 * different and much weaker promise.
+		 *
+		 * Sequential rather than `Promise.all`, because these are modal OS dialogs:
+		 * raising four at once puts four windows on screen with nothing to say
+		 * which is which. The list is deduplicated by address first, so a folder of
+		 * twenty accounts behind one proxy is one question.
+		 */
+		for (const adoption of imports.proxiesToAdopt(selections)) {
+			await proxyConsent.require(adoption.proxyUrl, {
+				accountName: adoption.accountName,
+				reason: 'route'
+			});
+		}
+
+		// `commit` re-validates the staging on its own — the dialogs above are
+		// answered by a person and can hold this handler open for minutes, during
+		// which the TTL can lapse or the vault can lock.
+		return { outcomes: await imports.commit(selections) };
+	});
 
 	registerHandler(CHANNELS.importDiscard, () => {
 		imports.discard();

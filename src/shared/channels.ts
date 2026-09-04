@@ -112,6 +112,12 @@ export const CHANNELS = {
 	 * alongside the passphrase.
 	 */
 	accountRemove: 'account:remove',
+	/**
+	 * Clear the record of an irreversible operation whose outcome was never
+	 * established. The user saying they have checked the account is the only
+	 * thing that can settle it; nothing local can.
+	 */
+	accountResolveOperation: 'account:resolveOperation',
 
 	/**
 	 * Import (§12 F2). Three channels, because the secrets stay in the main
@@ -241,10 +247,17 @@ export const CHANNELS = {
 	/** Finish storing a replacement Steam already issued. Safe to repeat. */
 	transferRetryPersist: 'transfer:retryPersist',
 	transferStatus: 'transfer:status',
+	/** Resolve a durable post-submit transfer record after checking Steam. */
+	transferResolve: 'transfer:resolve',
 	transferCancel: 'transfer:cancel',
 	enrollBegin: 'enroll:begin',
 	enrollEmailCode: 'enroll:emailCode',
 	enrollActivate: 'enroll:activate',
+	/** Read/resolve AddAuthenticator attempts that have no vault account row. */
+	enrollStatus: 'enroll:status',
+	/** Persist a ciphertext-backed AddAuthenticator reply without contacting Steam. */
+	enrollRetryPersist: 'enroll:retryPersist',
+	enrollResolve: 'enroll:resolve',
 	/**
 	 * Abandon a sign-in that has not attached anything yet.
 	 *
@@ -262,6 +275,14 @@ export const CHANNELS = {
 	 * IPC in either direction — the same rule import follows.
 	 */
 	accountExport: 'account:export',
+
+	/**
+	 * Finish the separate encrypted recovery backup for one stored account.
+	 *
+	 * This is local file repair only: the main process identifies the owned file
+	 * from durable vault state, and no path or secret crosses IPC.
+	 */
+	accountFinishRecoveryBackup: 'account:finishRecoveryBackup',
 
 	/**
 	 * Detach an authenticator from Steam entirely (F-09, Q15).
@@ -284,7 +305,48 @@ export const CHANNELS = {
 	 * exists. The passphrase inbound is the one the vault had when the file was
 	 * written, which is not necessarily the current one.
 	 */
-	accountRecover: 'account:recover'
+	accountRecover: 'account:recover',
+
+	/**
+	 * Collect a notification click the renderer was not there to receive.
+	 *
+	 * The push above is the fast path and nothing depends on it landing. A lock
+	 * **reloads** the window, so a click can arrive at a document that is about
+	 * to be replaced, or at the unlock screen — in both cases the listener is
+	 * gone. Main remembers the intent; the renderer peeks once it has an account
+	 * list to navigate within, and an exact token acknowledgement clears it only
+	 * after navigation succeeds.
+	 */
+	takePendingConfirmations: 'app:takePendingConfirmations'
 } as const;
 
 export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];
+
+/**
+ * Main→renderer pushes, which are a different kind of thing from everything
+ * above.
+ *
+ * `CHANNELS` entries are `ipcMain.handle` request/response pairs, and every one
+ * of them is required to have an `IPC_CONTRACT` schema — a test enforces it,
+ * which is what stops a channel being added without one. A `webContents.send`
+ * has no request to validate and no response to return, so putting one in that
+ * table would mean weakening the rule for the sake of a single entry.
+ *
+ * They are named here rather than written inline because the alternative is
+ * what the browser chrome does today: the same string typed out in the main
+ * process and again in the preload, where a typo produces a listener that is
+ * simply never called and nothing fails to say so.
+ */
+export const PUSH_CHANNELS = {
+	/**
+	 * A clicked notification asking for one account's confirmations.
+	 *
+	 * Carries a SteamID the main process already holds. It does not *act* —
+	 * navigating is all it does, and the renderer ignores an id that is not in
+	 * the account list it already has. Approving still goes through the
+	 * confirmation channels with their own checks.
+	 */
+	openConfirmations: 'app:open-confirmations'
+} as const;
+
+export type PushChannelName = (typeof PUSH_CHANNELS)[keyof typeof PUSH_CHANNELS];

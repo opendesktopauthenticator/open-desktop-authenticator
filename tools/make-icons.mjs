@@ -164,6 +164,54 @@ emit(
 	encodeBmp24(150, 57, renderInto(150, 57, 44, 98, 6), INSTALLER_BACKGROUND)
 );
 
+/* ------------------------------------------------------- listing avatar -- */
+
+/**
+ * The profile picture for a listing page — Trustpilot, a directory, a press kit.
+ *
+ * **Not the application icon, and the difference is padding.** An icon is drawn
+ * to fill its square, because a taskbar button is already a box and inset art
+ * only makes the mark smaller than its neighbours. An avatar sits inside
+ * someone else's frame and is frequently cropped to a circle, which takes about
+ * 15% off each corner — and on this mark the first thing to go would be the
+ * shield's point.
+ *
+ * Emitted here, with the icons, rather than by a tool of its own. `icons.test`
+ * regenerates this directory and compares every byte, which is the entire
+ * argument for committing binaries to an authenticator's repository at all; a
+ * second generator writing into the same tree would have quietly voided it, and
+ * did, until this moved.
+ */
+const AVATAR = 1024;
+/** Wide enough that a circular crop still misses the shield. */
+const AVATAR_MARK = Math.round(AVATAR * 0.72);
+const AVATAR_INSET = Math.round((AVATAR - AVATAR_MARK) / 2);
+
+/** The mark centred on an opaque field, or on nothing. */
+function avatar(background) {
+	const canvas = renderInto(AVATAR, AVATAR, AVATAR_MARK, AVATAR_INSET, AVATAR_INSET);
+	if (!background) {
+		return canvas;
+	}
+	// Under, not over: the mark is already in place and its edge is antialiased,
+	// so the field has to be composited beneath it to keep that edge smooth.
+	for (let i = 0; i < canvas.length; i += 4) {
+		const alpha = canvas[i + 3] / 255;
+		for (let channel = 0; channel < 3; channel++) {
+			canvas[i + channel] = Math.round(
+				canvas[i + channel] * alpha + background[channel] * (1 - alpha)
+			);
+		}
+		canvas[i + 3] = 255;
+	}
+	return canvas;
+}
+
+// The app's own near-black, so the avatar matches the window it stands for.
+emit('listing/logo-on-dark-1024.png', encodePng(AVATAR, avatar([0x07, 0x0a, 0x0e])));
+// For a surface that supplies its own background and does not letterbox.
+emit('listing/logo-transparent-1024.png', encodePng(AVATAR, avatar()));
+
 const total = written.reduce((sum, [, bytes]) => sum + bytes, 0);
 for (const [name, bytes] of written) {
 	process.stdout.write(`${name.padEnd(28)} ${String(bytes).padStart(8)} bytes\n`);

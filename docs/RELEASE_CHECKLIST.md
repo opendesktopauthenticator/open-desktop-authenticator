@@ -17,9 +17,29 @@ Platforms: **Windows and Linux** (D11 — macOS built but not published; see
 - [ ] `main` is green: lint, format, typecheck, build, tests on both platforms.
 - [ ] `npm audit --omit=dev` clean, or every finding has a written, dated
       justification linked from the release notes. Never "we'll look at it later".
+- [ ] `osv-scanner --lockfile=package-lock.json` clean, on the same terms. It
+      covers advisories npm's own database does not, which is the entire reason
+      CI gates on it — and for a while the release workflow did not, so a
+      finding only OSV knows about could block every pull request and not block
+      a release.
 - [ ] Dependency diff since the last release reviewed by a human. Any new
       transitive dependency understood and named.
 - [ ] CHANGELOG entry written — user-facing language, not commit subjects.
+- [ ] **Confirm the release page actually lists `SHA256SUMS.txt.sig` and
+      `SHA256SUMS.txt.pem`**, then flip `release.signed` in `site/build.mjs`
+      and the canary in `tests/site-release-gaps.test.ts` in the same change.
+      That flag says "a signature is on the release somebody can download", not
+      "the workflow signs" — it was true for three days before any signed
+      release existed, and /verify spent that time telling visitors to fetch two
+      files that were not there. A missing signature file is what tampering
+      looks like, so the page was teaching people to distrust a release that was
+      fine.
+- [ ] **Run the published verify command against a real asset**, exactly as
+      written on /verify and in the draft release notes, with the tag
+      substituted. The workflow verifies its own signature with an identity it
+      builds itself; that proves nothing about the command strangers are handed.
+      Those two drifted once — the published copy checked only that the signer
+      was somewhere under the GitHub organisation.
 - [ ] Version bumped, `.nvmrc` and `engines` still correct.
 - [ ] **Branding resolved.** `hasUnresolvedBranding()` returns false.
 - [ ] **`branding.repository` opened in a browser and it loads.** The automated
@@ -68,7 +88,8 @@ real commitment; none of them blocks a release today, and no page may claim any
 of them while it is on this list.
 
 - Signed Git tags. The v1.0.0 tag is unsigned.
-- Code-signing for the Windows direct downloads. Blocked on SignPath Foundation.
+- Code-signing for the Windows direct downloads. Not planned: the SignPath Foundation
+  declined, and a bought certificate would not clear the SmartScreen warning on its own.
   The Store package is signed by Microsoft on ingestion, which is a different
   channel with a different guarantee.
 - Reproducible builds.
@@ -83,6 +104,11 @@ Automation does not catch a broken installer.
       behaviour and confirm `/download` describes it honestly.
 - [ ] Upgrade install over the previous version. Vault survives, settings survive.
 - [ ] App launches, vault unlocks, codes generate.
+- [ ] Force-close the portable launcher once while it is running. Any abandoned
+      Windows Temp stage contains only extracted Electron/Chromium runtime files,
+      never `vault.json`, settings, account secrets or recovery records. Record
+      runtime residue as launcher cleanup, not as leaked account data; the normal
+      exit cleanup is enforced by the packaged-executable workflow fixture.
 
 **Linux**
 
@@ -150,6 +176,15 @@ The trust story is only real if it works for someone who does not trust us.
 - [ ] Release notes include: changes, hashes, verification links, and any
       dependency-advisory justifications.
 - [ ] Draft reviewed by a human, then published.
+- [ ] **GitHub marker, independently:** open the public release page in a logged-out
+      browser, confirm the exact version, date, checksums, signature and artifacts
+      that are actually listed, then add that version under `github` in
+      `site/publication.mjs` and its exact evidence in `site/build.mjs`. A green
+      workflow or draft is not publication.
+- [ ] **Store marker, independently:** open Partner Center and the public Store
+      listing, confirm the exact version has completed publication, then add that
+      version under `store` in `site/publication.mjs`. A GitHub release and a
+      submitted Store package prove neither this transition nor each other.
 - [ ] Website `/download` updated. Official domains registry still accurate.
 - [ ] If this fixes a Valve breakage: pinned status issue updated and closed, with
       a short public post-mortem in the CHANGELOG.

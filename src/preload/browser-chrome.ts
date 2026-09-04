@@ -66,8 +66,10 @@ contextBridge.exposeInMainWorld(BRIDGE, {
 	go: (address: string) => ipcRenderer.send('browser-chrome:go', address),
 	newTab: () => ipcRenderer.send('browser-chrome:new-tab'),
 	/** Ids come from the state the main process pushed; the chrome invents none. */
-	selectTab: (id: number) => ipcRenderer.send('browser-chrome:select-tab', id),
-	closeTab: (id: number) => ipcRenderer.send('browser-chrome:close-tab', id),
+	selectTab: (id: number, keepChromeFocus = false) =>
+		ipcRenderer.send('browser-chrome:select-tab', id, keepChromeFocus),
+	closeTab: (id: number, keepChromeFocus = false) =>
+		ipcRenderer.send('browser-chrome:close-tab', id, keepChromeFocus),
 	onState: (listener: (state: ChromeState) => void) => {
 		ipcRenderer.on('browser-chrome:state', (_event, state: ChromeState) => listener(state));
 	},

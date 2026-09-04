@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * The forced revocation-code backup ceremony (§11 S12).
@@ -44,17 +45,26 @@ export function RevocationBackup({
 		if (busy) {
 			return;
 		}
+		const submittedPassphrase = passphrase;
 		setBusy(true);
 		setError(undefined);
-		onReveal(passphrase)
+		let attempt: Promise<{ revocationCode: string }>;
+		try {
+			attempt = onReveal(submittedPassphrase);
+		} catch (err) {
+			attempt = Promise.reject(err instanceof Error ? err : new Error(messageOf(err)));
+		}
+		attempt
 			.then((result) => {
 				setCode(result.revocationCode);
-				// The passphrase has done its job; there is no reason for the input to
-				// keep holding it.
-				setPassphrase('');
 			})
 			.catch((err: unknown) => setError(messageOf(err)))
-			.finally(() => setBusy(false));
+			.finally(() => {
+				// Relinquish the secret after either outcome, but never erase text that
+				// belongs to a later edit rather than this settled attempt.
+				setPassphrase('');
+				setBusy(false);
+			});
 	};
 
 	const confirm = (): void => {
@@ -82,7 +92,7 @@ export function RevocationBackup({
 				{accountName} <span className="muted">{steamId64}</span>
 			</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError id="revocation-reveal-error">{error}</DynamicError>}
 
 			{code === undefined ? (
 				<>
@@ -102,6 +112,8 @@ export function RevocationBackup({
 						<label htmlFor="ceremony-passphrase">Confirm your vault passphrase</label>
 						<input
 							id="ceremony-passphrase"
+							aria-invalid={error !== undefined}
+							aria-describedby={error === undefined ? undefined : 'revocation-reveal-error'}
 							type="password"
 							value={passphrase}
 							onChange={(event) => setPassphrase(event.target.value)}

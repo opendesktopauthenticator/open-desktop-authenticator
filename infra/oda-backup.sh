@@ -21,20 +21,84 @@
 # which is the owner's decision rather than something to invent — see
 # infra/README.md.
 set -euo pipefail
-dest=/var/backups/oda
+dest=${ODA_BACKUP_DEST:-/var/backups/oda}
+config_root=${ODA_CONFIG_ROOT:-/}
+tickets_dir=${ODA_TICKETS_DIR:-/var/lib/tickets}
+tickets_unit=${ODA_TICKETS_UNIT:-tickets}
 stamp=$(date -u +%Y-%m-%dT%H%M%SZ)
+
+snapshot=""
+attachment_snapshot=""
+tickets=""
+config_stage=""
+ticket_archive_complete=0
+tickets_was_active=0
+
+# Restore availability and remove an incomplete archive on every failure path.
+# `systemctl stop` waits for the Node process to exit, so once it returns no
+# upload, withdrawal, or retention sweep can change either half of the backup.
+finish() {
+  status=$?
+  trap - EXIT
+  if [ -n "$snapshot" ] && [ -d "$snapshot" ]; then
+    rm -rf "$snapshot"
+  fi
+  if [ -n "$attachment_snapshot" ] && [ -d "$attachment_snapshot" ]; then
+    rm -rf "$attachment_snapshot"
+  fi
+  # A configuration archive is not a restore point until it has been read back,
+  # made private, and published under the final name. A failed tar used to leave
+  # its partial output looking exactly like a successful backup.
+	if [ -n "$config_stage" ]; then
+		rm -f -- "$config_stage"
+  fi
+  if [ "$ticket_archive_complete" -ne 1 ] && [ -n "$tickets" ]; then
+    rm -f "$tickets"
+  fi
+  if [ "$tickets_was_active" -eq 1 ]; then
+    if ! systemctl start "$tickets_unit"; then
+      echo "oda-backup: failed to restart ${tickets_unit}.service" >&2
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+trap finish EXIT
 
 mkdir -p "$dest"
 
 # ── configuration ────────────────────────────────────────────────────────────
 config="$dest/config-$stamp.tar.gz"
-tar -czf "$config" \
-  -C / etc/letsencrypt etc/nginx etc/ufw etc/fail2ban etc/ssh/sshd_config.d \
+config_stage=$(mktemp "$dest/.config-$stamp.XXXXXX.tar.gz")
+tar -czf "$config_stage" \
+  -C "$config_root" etc/letsencrypt etc/nginx etc/ufw etc/fail2ban etc/ssh/sshd_config.d \
        etc/sysctl.d/99-hardening.conf usr/local/sbin 2>/dev/null
+
+# A zero exit alone is not enough: a wrapper, filesystem, or interrupted write
+# can still leave bytes tar cannot read. Validate the exact staged object before
+# it becomes visible to restore tooling or retention.
+tar -tzf "$config_stage" >/dev/null
 
 # Contains private keys. Readable by root and nobody else, and never anywhere
 # nginx can serve from.
-chmod 600 "$config"
+chmod 600 -- "$config_stage"
+
+# The stage lives beside the destination, so a hard link is an atomic
+# no-overwrite publication on the same filesystem. Unlike `mv -n`, `ln` returns
+# nonzero when another same-second run already owns the name instead of silently
+# reporting success. Remove the temporary name only after the final name exists.
+if ! ln -- "$config_stage" "$config"; then
+  echo "oda-backup: configuration backup $config already exists or could not be published" >&2
+  exit 1
+fi
+if ! rm -f -- "$config_stage"; then
+  # Do not report a completed publication while an unpublished alias remains.
+  # Best effort removes the final link; the EXIT trap retries the stage.
+	rm -f -- "$config" || true
+  echo "oda-backup: could not remove the configuration backup staging file" >&2
+  exit 1
+fi
+config_stage=""
 
 # ── reports and attachments ──────────────────────────────────────────────────
 #
@@ -48,7 +112,21 @@ chmod 600 "$config"
 # box and is not worth installing for one statement: the service already depends
 # on node's own SQLite, so the backup uses the same engine that wrote the file.
 tickets="$dest/tickets-$stamp.tar.gz"
-if [ -f /var/lib/tickets/tickets.db ]; then
+tickets_db="$tickets_dir/tickets.db"
+attachments_dir="$tickets_dir/attachments"
+if [ -f "$tickets_db" ]; then
+  # Stop even if the service was already inactive: this also cancels an
+  # in-progress automatic restart. Only restore a unit that was active when the
+  # backup began; an operator-stopped service must stay stopped.
+  if systemctl is-active --quiet "$tickets_unit"; then
+    tickets_was_active=1
+  fi
+  systemctl stop "$tickets_unit"
+  if systemctl is-active --quiet "$tickets_unit"; then
+    echo "oda-backup: ${tickets_unit}.service is still active; refusing an inconsistent backup" >&2
+    exit 1
+  fi
+
   snapshot=$(mktemp -d)
   # Owned by the service account, because the snapshot is *written* by it. The
   # first version left this root-owned at mode 700 and the vacuum failed with
@@ -65,24 +143,87 @@ if [ -f /var/lib/tickets/tickets.db ]; then
   # root-owned should be left behind in /var/lib/tickets.
   runuser -u tickets -- node --input-type=module -e "
     const { DatabaseSync } = await import('node:sqlite');
-    const db = new DatabaseSync('/var/lib/tickets/tickets.db', { readOnly: true });
-    db.exec(\"VACUUM INTO '$snapshot/tickets.db'\");
+    const { writeFileSync } = await import('node:fs');
+    const [source, target, manifest] = process.argv.slice(1);
+    const db = new DatabaseSync(source, { readOnly: true });
+    const quotedTarget = target.replaceAll(\"'\", \"''\");
+    db.exec(\"VACUUM INTO '\" + quotedTarget + \"'\");
     db.close();
-  "
-  # **`attachments` only when it exists.** The service creates that directory
-  # lazily, on the first upload, so a fresh or text-only deployment has a
-  # database and no directory — and `tar` exits 1 on a path it cannot visit.
-  # Under `set -e` that killed the job before retention, chmod, snapshot
-  # cleanup and the success log, so systemd reported a failed backup every day
-  # while config archives piled up unpruned and the ticket archive that *was*
-  # written was never verified.
-  if [ -d /var/lib/tickets/attachments ]; then
-    tar -czf "$tickets" -C "$snapshot" tickets.db \
-        -C /var/lib/tickets attachments
+    const copy = new DatabaseSync(target, { readOnly: true });
+    const ids = copy.prepare('SELECT id FROM attachments ORDER BY id').all().map((row) => String(row.id));
+    copy.close();
+    const invalid = ids.filter((id) => !/^[0-9a-f]{32}$/.test(id));
+    if (invalid.length) throw new Error('snapshot contains an invalid attachment id');
+    writeFileSync(manifest, ids.length ? ids.join('\\n') + '\\n' : '');
+  " "$tickets_db" "$snapshot/tickets.db" "$snapshot/db-attachments.manifest"
+
+  # Build the archive manifest from what is actually on disk, then require it
+  # to be exactly the ID set in the SQLite snapshot. Missing bytes make a
+  # restore incomplete; extra bytes retain a screenshot the database no longer
+  # owns. Neither may be hidden inside an archive reported as successful.
+  if [ -d "$attachments_dir" ]; then
+    find "$attachments_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort \
+      > "$snapshot/attachments.manifest"
   else
-    tar -czf "$tickets" -C "$snapshot" tickets.db
+    : > "$snapshot/attachments.manifest"
   fi
+  if ! cmp -s "$snapshot/db-attachments.manifest" "$snapshot/attachments.manifest"; then
+    echo 'oda-backup: attachment manifest does not match the snapshot database' >&2
+    echo 'missing attachment files:' >&2
+    comm -23 "$snapshot/db-attachments.manifest" "$snapshot/attachments.manifest" >&2 || true
+    echo 'orphaned attachment files:' >&2
+    comm -13 "$snapshot/db-attachments.manifest" "$snapshot/attachments.manifest" >&2 || true
+    exit 1
+  fi
+
+  # Freeze the file set with hard links on the attachments' own filesystem.
+  # This is fast and consumes no second copy of a potentially large archive.
+  # The service only creates and unlinks immutable attachment files, so once a
+  # link exists a later withdrawal or retention sweep cannot change its bytes.
+  # That lets the service restart before compression without weakening the
+  # point-in-time snapshot.
+  attachment_snapshot=$(mktemp -d "$tickets_dir/.backup-attachments-XXXXXX")
+  chmod 700 "$attachment_snapshot"
+  mkdir "$attachment_snapshot/attachments"
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    ln "$attachments_dir/$id" "$attachment_snapshot/attachments/$id"
+  done < "$snapshot/attachments.manifest"
+  find "$attachment_snapshot/attachments" -mindepth 1 -maxdepth 1 -printf '%f\n' \
+    | LC_ALL=C sort > "$snapshot/frozen-attachments.manifest"
+  if ! cmp -s "$snapshot/db-attachments.manifest" "$snapshot/frozen-attachments.manifest"; then
+    echo 'oda-backup: frozen attachment manifest does not match the snapshot database' >&2
+    exit 1
+  fi
+
+  if [ "$tickets_was_active" -eq 1 ]; then
+    systemctl start "$tickets_unit"
+    tickets_was_active=0
+  fi
+
+  sed 's#^#attachments/#' "$snapshot/attachments.manifest" > "$snapshot/archive-files.list"
+  tar -czf "$tickets" \
+    -C "$snapshot" tickets.db attachments.manifest \
+    -C "$attachment_snapshot" --files-from="$snapshot/archive-files.list"
+
+  # Verify the archive member list as well as tar's exit code. This catches a
+  # disappearing file at the final publication boundary and proves the manifest
+  # shipped beside exactly the files it names.
+  {
+    printf '%s\n' tickets.db attachments.manifest
+    cat "$snapshot/archive-files.list"
+  } | LC_ALL=C sort > "$snapshot/expected-archive-members"
+  tar -tzf "$tickets" | LC_ALL=C sort > "$snapshot/actual-archive-members"
+  if ! cmp -s "$snapshot/expected-archive-members" "$snapshot/actual-archive-members"; then
+    echo 'oda-backup: ticket archive members do not match the attachment manifest' >&2
+    exit 1
+  fi
+
+  ticket_archive_complete=1
+  rm -rf "$attachment_snapshot"
+  attachment_snapshot=""
   rm -rf "$snapshot"
+  snapshot=""
   chmod 600 "$tickets"
 else
   tickets=""
@@ -95,10 +236,67 @@ fi
 # holding backups of deleted reports for longer than the reports themselves
 # would make that promise false.
 ls -1t "$dest"/config-*.tar.gz 2>/dev/null | tail -n +15 | xargs -r rm -f
-find "$dest" -name 'tickets-*.tar.gz' -mtime +90 -delete 2>/dev/null || true
+#
+# **`-mtime +90` kept the archives for ninety-one days, and the page said
+# ninety.**
+#
+# `find` divides a file's age by 24 hours and throws the remainder away, so
+# `-mtime +90` reads as "the whole-day age is greater than 90" — which a file
+# only satisfies once it is 91 complete days old. A ticket archive written on
+# day 0 matched nothing on day 90 and survived to be swept on day 91, so
+# strangers' support reports and the screenshots attached to them outlived the
+# date /privacy promises they are gone by a full day. That is the wrong
+# direction for a retention claim to be wrong in: nobody is harmed by a backup
+# being deleted early, and the promise is what people weighed when they decided
+# whether to attach a screenshot at all.
+#
+# `! -newermt '90 days ago'` is the same comparison with the truncation removed
+# — delete anything whose timestamp is at or before the cutoff — and it spells
+# the number the page states rather than that number minus one, so nobody
+# reading the script and the page side by side has to re-derive an off-by-one
+# before believing they agree. It needs findutils 4.3.3 or newer for
+# `-newerXY`, which is 2006 and far behind anything this box runs.
+#
+# The sweep is still once a day (oda-backup.timer: `OnCalendar=daily` with 30
+# minutes of jitter), so an archive goes at the first run on or after its 90th
+# day rather than the instant it turns 90. That is the resolution of a daily
+# job, not a second day of retention.
+# **The cutoff is computed once, checked, and never swallowed.**
+#
+# `! -newermt '90 days ago'` parses that string at runtime, and the first draft
+# ended `2>/dev/null || true` — which hides both the error and the exit status.
+# So a findutils build or a locale that could not read it would turn retention
+# off **permanently and silently**, while this job went on logging success. A
+# retention promise that fails open is worse than one that is a day late, and it
+# fails in the direction the privacy page cannot afford.
+#
+# The range check catches the rest of the family without needing `find` to
+# cooperate: a sense error or a dropped "ago" resolves to a date in the future,
+# which would delete every ticket archive on every run, and a wrong unit lands
+# far outside 90 days. Both abort instead.
+cutoff=$(date -d '90 days ago' '+%Y-%m-%d %H:%M:%S') || {
+	echo 'oda-backup: cannot compute the 90-day cutoff; ticket archives NOT swept' >&2
+	exit 1
+}
+cutoff_age=$(( $(date '+%s') - $(date -d "$cutoff" '+%s') ))
+# 89 to 91 days, in seconds. Wide enough for a daylight-saving hour, narrow
+# enough that nothing but "about ninety days ago" gets through.
+if [ "$cutoff_age" -lt 7689600 ] || [ "$cutoff_age" -gt 7862400 ]; then
+	echo "oda-backup: refusing to sweep — the cutoff is ${cutoff_age}s old, not ~90 days" >&2
+	exit 1
+fi
+find "$dest" -name 'tickets-*.tar.gz' ! -newermt "$cutoff" -delete
 
-kept_config=$(ls -1 "$dest"/config-*.tar.gz 2>/dev/null | wc -l)
-kept_tickets=$(ls -1 "$dest"/tickets-*.tar.gz 2>/dev/null | wc -l)
+# `find`, not `ls`, because an empty glob is an ordinary state here and `ls` treats
+# it as an error: it exits 2, `pipefail` carries that to the assignment, and
+# `set -e` kills the run. On a fresh box - the timer enabled before the ticket
+# service has ever started - that happened after the config archive had been
+# written and the retention sweep had run, so a backup that had in fact succeeded
+# was reported as `status=2/INVALIDARGUMENT` with nothing in the journal, and the
+# `else` branch written for exactly that case was unreachable. `find` exits 0 when
+# it matches nothing.
+kept_config=$(find "$dest" -maxdepth 1 -name 'config-*.tar.gz' | wc -l)
+kept_tickets=$(find "$dest" -maxdepth 1 -name 'tickets-*.tar.gz' | wc -l)
 if [ -n "$tickets" ]; then
   logger -t oda-backup "config $(du -h "$config" | cut -f1) ($kept_config kept), tickets $(du -h "$tickets" | cut -f1) ($kept_tickets kept)"
 else

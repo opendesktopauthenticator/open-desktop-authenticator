@@ -88,11 +88,27 @@
 
 		const submit = form.querySelector('button[type="submit"]');
 		let inFlight = 0;
+		/*
+		 * Removals count too, and they did not.
+		 *
+		 * Send stayed live while a Remove was still talking to the server, and the
+		 * id stayed in the form until the delete came back. Press Remove, press
+		 * Send: the report claimed the attachment, and the delete that arrived a
+		 * moment later found it claimed and left it alone — by design, because an
+		 * id attached to a report belongs to that report. So a screenshot somebody
+		 * pulled back after spotting their account name in the corner went out on
+		 * the report anyway, and the page said it had been removed.
+		 */
+		let removing = 0;
 		const settle = () => {
 			if (submit) {
-				submit.disabled = inFlight > 0;
+				submit.disabled = inFlight + removing > 0;
 				submit.textContent =
-					inFlight > 0 ? 'Uploading…' : submit.dataset.label || submit.textContent;
+					inFlight > 0
+						? 'Uploading…'
+						: removing > 0
+							? 'Removing…'
+							: submit.dataset.label || submit.textContent;
 			}
 		};
 		if (submit) {
@@ -212,27 +228,72 @@
 				remove.type = 'button';
 				remove.textContent = 'Remove';
 				remove.addEventListener('click', async () => {
-					// Tell the server first. Dropping the card and leaving the file on
-					// disk is what this button used to do, and a delete control that
-					// does not delete is worse than no button — somebody who spots
-					// their account name in a screenshot and pulls it back has to
-					// actually have pulled it back.
 					remove.disabled = true;
 					remove.textContent = 'Removing…';
-					try {
-						await fetch('/support/attach/' + encodeURIComponent(payload.id), {
-							method: 'DELETE'
-						});
-					} catch {
-						// The upload is unclaimed either way, so it is swept within two
-						// hours. Better to let the card go than to trap the person on a
-						// page insisting they retry.
-					}
+
+					/*
+					 * **Out of the report first, off the server second.**
+					 *
+					 * These used to be the other way round: the id stayed in the form
+					 * until the DELETE came back. Whether it goes out on the report is
+					 * decided entirely by this form, so this is the half that has to
+					 * happen immediately — and it needs no network, so it cannot fail.
+					 */
 					const at = done.findIndex((a) => a.id === payload.id);
 					if (at >= 0) done.splice(at, 1);
 					sync();
+
+					/*
+					 * And Send waits, so nothing can be submitted in the gap. Belt to
+					 * the braces above: the id is already gone from the form, and this
+					 * keeps the page honest about what it is still doing.
+					 */
+					removing += 1;
+					settle();
+					// Uninitialised on purpose: both paths below set it, and a default
+					// here would be a third answer nothing ever reads.
+					let stillOurs;
+					try {
+						const withdrawn = await fetch('/support/attach/' + encodeURIComponent(payload.id), {
+							method: 'DELETE'
+						});
+						// `fetch` rejects for a dropped connection and resolves for a
+						// refusal, so a 403 or a 500 arrived here looking exactly like
+						// success and the page said the file was gone.
+						stillOurs = !withdrawn.ok;
+					} catch {
+						stillOurs = true;
+					} finally {
+						removing -= 1;
+						settle();
+					}
+
 					URL.revokeObjectURL(url);
 					li.remove();
+
+					if (stillOurs) {
+						/*
+						 * **Said plainly, and with no deadline this service cannot keep.**
+						 *
+						 * The reason for pressing Remove is usually that the file has
+						 * something private in it, so the message has to be honest about
+						 * both halves: it is off the report either way, and our own copy
+						 * goes with a later sweep.
+						 *
+						 *
+						 * This used to name the unclaimed lifetime as a hard deadline —
+						 * but the sweep runs hourly and only takes files already older
+						 * than it, so one uploaded just after a sweep waits half again as
+						 * long. And a filesystem failure that persists has no upper bound
+						 * at all. A privacy promise with a number in it had better be a
+						 * number that holds.
+						 */
+						complain(
+							'That file has been taken off your report. Our copy could not be deleted just ' +
+								'now — a later cleanup removes it, usually within a few hours. Write to ' +
+								'support if it matters that it goes sooner.'
+						);
+					}
 				});
 				li.appendChild(remove);
 			} catch (error) {

@@ -2,11 +2,12 @@ import {
 	BROWSER_ONLY_HEADERS,
 	describeNetworkError,
 	describesDirectRoute,
-	routedEndpoint,
+	routedVia,
 	EgressError,
 	redactCredentials,
 	isSteamEndpoint,
 	planProxy,
+	PROXY_REQUIRED,
 	STEAM_MOBILE_CLIENT_COOKIE,
 	STEAM_USER_AGENT,
 	type ProxyPlan
@@ -100,6 +101,8 @@ export interface ProxyCapableSession {
 	 * was supposed to end it.
 	 */
 	clearStorageData?(): Promise<void>;
+	/** Closes sockets owned by an attempt-scoped session before it is retired. */
+	closeAllConnections?(): Promise<void>;
 
 	// Deliberately no `login` event. Electron's `Session` does not emit one —
 	// only `App`, `ClientRequest`, `UtilityProcess` and `WebContents` do. An
@@ -221,6 +224,13 @@ export class SteamTransportFactory {
 	private readonly clearing = new Map<string, Promise<void>>();
 	private readonly routing = new Map<string, RoutingStatus>();
 	/**
+	 * How many times this account's jar refused to empty.
+	 *
+	 * Part of the partition name, so a jar that could not be emptied is never
+	 * handed back. See `partitionFor`.
+	 */
+	private readonly spoiled = new Map<string, number>();
+	/**
 	 * Requests currently on the wire, per account, so a lock can cancel them.
 	 *
 	 * Without this, "everything stops while the vault is locked" is only true
@@ -260,9 +270,40 @@ export class SteamTransportFactory {
 	private generation = 0;
 	private readonly now: () => number;
 
-	constructor(electron: ElectronNetworking, now: () => number = () => Date.now()) {
+	/**
+	 * The name every session this factory builds is partitioned under.
+	 *
+	 * **Two factories must never share one.** Electron returns the *same* session
+	 * object for the same partition name, so a second factory using `steam-` too
+	 * would not get a second session — it would get this one, and `setProxy` on
+	 * it would silently unroute an account whose proxy nobody touched. Every
+	 * later request for that account would then be refused by `assertRouted`,
+	 * correctly and inexplicably.
+	 *
+	 * This exists so the browser's *Direct* option can mint a token off the
+	 * account's route without borrowing the account's session to do it.
+	 */
+	private readonly partitionPrefix: string;
+
+	/**
+	 * Whether the vault refuses to talk to Steam without a proxy.
+	 *
+	 * A function rather than a value: it is read at construction time for each
+	 * transport, so turning the setting on stops the next request rather than
+	 * only the next launch.
+	 */
+	private readonly requireProxies: () => boolean;
+
+	constructor(
+		electron: ElectronNetworking,
+		now: () => number = () => Date.now(),
+		partitionPrefix = 'steam-',
+		requireProxies: () => boolean = () => false
+	) {
 		this.electron = electron;
 		this.now = now;
+		this.partitionPrefix = partitionPrefix;
+		this.requireProxies = requireProxies;
 	}
 
 	/**
@@ -285,6 +326,38 @@ export class SteamTransportFactory {
 	 * they would have no way to notice.
 	 */
 	async forAccount(account: EgressAccount): Promise<SteamTransport> {
+		/*
+		 * **`Require proxies`, enforced where every request has to pass.**
+		 *
+		 * It was enforced in three handlers — opening a browser, an explicitly
+		 * direct sign-in, the update check — and that is not what the setting
+		 * says. Everything else this application does to Steam goes through here:
+		 * fetching confirmations, approving them, the background auto-confirm
+		 * loop, clock synchronisation, enrolling an authenticator, transferring
+		 * one. On an account with no proxy stored, every one of those went out
+		 * over the machine's own connection from a vault whose owner had said
+		 * that must not happen, and nothing anywhere said so.
+		 *
+		 * Guarding each caller would have been the same mistake a fourth time:
+		 * the next feature to make a Steam request would be unguarded, and would
+		 * look exactly as correct as these did. A transport is the thing that
+		 * makes requests, so a transport that cannot honour the policy is not
+		 * built.
+		 *
+		 * This covers the `directTransports` factory too, whose accounts never
+		 * carry a proxy by construction — under this setting it can build
+		 * nothing, which is the intent.
+		 *
+		 * The clock is the one caller that treats this as ordinary. It borrows a
+		 * routed account when it can find one, and its catch leaves the offset
+		 * unset, so under this setting a vault with no proxied account simply
+		 * stays clock-unverified — which the UI already reports, and which is the
+		 * honest answer rather than a time fetched the forbidden way.
+		 */
+		if (this.requireProxies() && (account.proxyUrl === undefined || account.proxyUrl === '')) {
+			throw new EgressError(PROXY_REQUIRED, false);
+		}
+
 		// **Captured before the first await, and carried into every request this
 		// transport ever makes.**
 		//
@@ -307,11 +380,31 @@ export class SteamTransportFactory {
 		try {
 			this.assertGranted(account.steamId64, granted);
 		} catch (err) {
-			// `sessionFor` cached this session *after* the teardown had already looked
-			// for it, so nothing wiped it and nothing will. It holds no cookies yet —
-			// no request was ever made through it — but a session the lock never saw
-			// is exactly the state this class promises not to keep.
-			this.forget(account.steamId64);
+			/*
+			 * **Why the grant went stale decides what to clean up.**
+			 *
+			 * A **lock** invalidates everything for this account, and `sessionFor`
+			 * cached this session *after* the sweep had already looked for it — so
+			 * nothing wiped it and nothing will. It holds no cookies yet, no request
+			 * was ever made through it, but a session the lock never saw is exactly
+			 * the state this class promises not to keep. It goes.
+			 *
+			 * A **routing change** is the opposite: it means a replacement
+			 * construction was authorised, and it may already have finished.
+			 * `dropAccountRouting` has already cleared and wiped this partition on
+			 * its way through, and what is cached now belongs to that replacement —
+			 * the same Electron session object, since a partition name yields one
+			 * session. Calling `forget` here bumped the epoch a *second* time and
+			 * dropped that cache, so a confirmation started right after saving a new
+			 * proxy failed with "this account was closed before the request was
+			 * sent", using the new configuration, for no reason the user could see.
+			 *
+			 * Fail-closed either way; the difference is whether a valid replacement
+			 * is taken down with the stale one.
+			 */
+			if (this.generation !== granted.generation) {
+				this.forget(account.steamId64);
+			}
 			throw err;
 		}
 
@@ -354,14 +447,19 @@ export class SteamTransportFactory {
 		session: ProxyCapableSession,
 		steamId64: string,
 		plan: ProxyPlan,
-		url: string
+		url: string,
+		granted: Grant
 	): Promise<void> {
 		const block = (reason: string): never => {
-			this.routing.set(steamId64, { state: 'blocked', via: plan.redacted, reason });
+			// Recorded only if the account is still the one that asked. The refusal
+			// below is thrown either way — a request that cannot be vouched for is
+			// refused whatever else has happened.
+			this.recordRouting(steamId64, granted, { state: 'blocked', via: plan.redacted, reason });
 			throw new EgressError(
 				`this account is set to route through ${plan.redacted}, but ${reason}. ` +
 					'Refusing to connect: sending this request anyway would expose the address the ' +
-					'proxy exists to hide.'
+					'proxy exists to hide.',
+				false
 			);
 		};
 
@@ -385,16 +483,43 @@ export class SteamTransportFactory {
 		// a different host and a different port, both containing the intended string
 		// — and approves an ordered list whose *first* entry, the one Chromium
 		// actually uses, is somebody else's proxy entirely.
-		const actual = routedEndpoint(resolved);
-		if (actual !== plan.endpoint) {
+		const actual = routedVia(resolved);
+		if (actual?.endpoint !== plan.endpoint) {
 			return block('a different proxy is applied to it');
 		}
 
-		this.routing.set(steamId64, {
+		// **The scheme is the other half of the route.** This compared `host:port`
+		// alone, so an `https://` proxy — configured so the hop to the operator is
+		// encrypted — passed against an applied `PROXY host:443`, which is the same
+		// operator reached in the clear. Same endpoint, different protocol, and
+		// every cookie on that hop readable by anything in between. The check that
+		// exists to fail closed recorded it `verified`.
+		if (actual.token !== plan.pacToken) {
+			return block(
+				`it is applied as ${actual.token} where ${plan.pacToken} was configured, which ` +
+					'reaches the same operator over a different protocol'
+			);
+		}
+
+		this.recordRouting(steamId64, granted, {
 			state: 'verified',
 			via: plan.redacted,
 			checkedAtMs: this.now()
 		});
+	}
+
+	/**
+	 * The partition name this account's sessions are built under.
+	 *
+	 * Normally one name for the life of the account. It changes only when a wipe
+	 * failed: see the `catch` in `forget` for why a spoiled jar has to be
+	 * abandoned rather than reused.
+	 */
+	private partitionFor(steamId64: string): string {
+		const spoiled = this.spoiled.get(steamId64) ?? 0;
+		return spoiled === 0
+			? `${this.partitionPrefix}${steamId64}`
+			: `${this.partitionPrefix}${steamId64}-${spoiled}`;
 	}
 
 	/**
@@ -437,7 +562,25 @@ export class SteamTransportFactory {
 		const cleared = session?.clearStorageData?.();
 		if (cleared) {
 			const pending = cleared
-				.catch(() => undefined)
+				.catch(() => {
+					/*
+					 * **The jar is still full, and the name is what makes it reachable.**
+					 *
+					 * This was swallowed. `fromPartition` returns the same session object
+					 * for the same partition name, so the next sign-in for this account
+					 * was handed back the very session whose cookies had just refused to
+					 * be destroyed — a live Steam credential outliving the vault lock
+					 * that exists to end it, with nothing anywhere reporting a problem.
+					 *
+					 * Retrying is not the answer: the call that refused would be asked
+					 * again with nothing changed. So the partition is abandoned instead.
+					 * Chromium keeps the old session alive in memory, unreferenced and
+					 * unreachable by us, and builds this account an empty one under the
+					 * next name. Memory held by a jar we failed to empty is a far
+					 * smaller thing than that jar being reused.
+					 */
+					this.spoiled.set(steamId64, (this.spoiled.get(steamId64) ?? 0) + 1);
+				})
 				.finally(() => {
 					if (this.clearing.get(steamId64) === pending) {
 						this.clearing.delete(steamId64);
@@ -481,14 +624,35 @@ export class SteamTransportFactory {
 		return { generation: this.generation, epoch: this.epoch.get(steamId64) ?? 0 };
 	}
 
+	/** Whether the permission granted earlier is still the current one. */
+	private stillGranted(steamId64: string, granted: Grant): boolean {
+		return (
+			this.generation === granted.generation && (this.epoch.get(steamId64) ?? 0) === granted.epoch
+		);
+	}
+
 	/** Throw unless the permission granted earlier is still the current one. */
 	private assertGranted(steamId64: string, granted: Grant): void {
-		if (
-			this.generation !== granted.generation ||
-			(this.epoch.get(steamId64) ?? 0) !== granted.epoch
-		) {
-			throw new EgressError('this account was closed before the request was sent');
+		if (!this.stillGranted(steamId64, granted)) {
+			throw new EgressError('this account was closed before the request was sent', false);
 		}
+	}
+
+	/**
+	 * Record what was learned about a route, unless the account moved on.
+	 *
+	 * `assertRouted` awaits `resolveProxy`, and a lock can land inside that await.
+	 * `forget` deletes the routing entry precisely so nothing claims to know the
+	 * route of a session that no longer exists — and then the late resolution
+	 * wrote `verified` back, restoring a yes about a session that had been torn
+	 * down. On the one control whose job is to say whether traffic really left
+	 * through the proxy, a stale yes is the answer it must never give.
+	 */
+	private recordRouting(steamId64: string, granted: Grant, status: RoutingStatus): void {
+		if (!this.stillGranted(steamId64, granted)) {
+			return;
+		}
+		this.routing.set(steamId64, status);
 	}
 
 	private abortInFlight(steamId64: string): void {
@@ -506,14 +670,99 @@ export class SteamTransportFactory {
 		}
 	}
 
+	/**
+	 * Proxy applications for one account, strictly in the order they were asked
+	 * for.
+	 *
+	 * **Two overlapping `setProxy` calls land on the same Electron session**, and
+	 * whichever finishes last is the configuration in force. So saving a
+	 * replacement proxy while an older application was still pending could leave
+	 * the *old* one applied: the replacement transport then asked `assertRouted`
+	 * what Chromium would do, was told the address it had just replaced, and
+	 * refused every request with "a different proxy is applied" — the new route
+	 * unusable until a lock or another routing change.
+	 *
+	 * Fail-closed, so nothing leaked. It simply stopped working, for the one
+	 * action the user had just taken.
+	 *
+	 * A chain rather than a cancel: an application already in flight cannot be
+	 * recalled, so the only way to make the newest win is to make it last.
+	 */
+	private readonly proxyOrder = new Map<string, Promise<unknown>>();
+
+	private async applyProxy(
+		steamId64: string,
+		session: ProxyCapableSession,
+		config: { mode: ProxyMode; proxyRules?: string }
+	): Promise<void> {
+		const queued = (this.proxyOrder.get(steamId64) ?? Promise.resolve()).then(
+			() => session.setProxy(config),
+			// A predecessor's failure is its own caller's problem; this one still has
+			// to be applied, and applied after it.
+			() => session.setProxy(config)
+		);
+		// Kept unhandled-safe: the caller below awaits and reports, and the chain
+		// itself must never become an unhandled rejection.
+		this.proxyOrder.set(
+			steamId64,
+			queued.then(
+				() => undefined,
+				() => undefined
+			)
+		);
+		await queued;
+	}
+
+	/**
+	 * The proxy configuration each session **actually has**, as applied.
+	 *
+	 * Keyed by account, holding `proxyRules` or the string `system`. Not derived
+	 * from the account: the point is to notice when the two disagree.
+	 *
+	 * **This is the record that was missing.** Electron returns the same session
+	 * object for a partition name forever, so a proxy applied to it outlives our
+	 * cache of it — and `sessionFor` returned a cached session without looking at
+	 * what that session was configured with. Clearing an account's proxy could
+	 * therefore reuse a session still holding the old one: the request went out
+	 * through a proxy the user had deleted, `applyProxy` never ran, and the
+	 * account card said routing was off. Deliberately kept across `forget`,
+	 * because Chromium keeps the rule across `forget` too.
+	 */
+	private readonly appliedProxy = new Map<string, string>();
+
+	/** How a proxy configuration is written down for the comparison above. */
+	private static describeProxy(plan: ProxyPlan | undefined): string {
+		return plan ? plan.proxyRules : 'system';
+	}
+
 	private async sessionFor(account: EgressAccount): Promise<ProxyCapableSession> {
+		// Validated here rather than left to Chromium. A scheme it does not know is
+		// accepted by `setProxy` without complaint and only fails much later, per
+		// request, as `ERR_NO_SUPPORTED_PROXIES` — an error the user cannot connect
+		// back to the address they typed. Computed once, before the cache is
+		// consulted, because the comparison below needs it too.
+		const wanted =
+			account.proxyUrl !== undefined && account.proxyUrl !== ''
+				? planProxy(account.proxyUrl)
+				: undefined;
+		const wantedKey = SteamTransportFactory.describeProxy(wanted);
+
 		const existing = this.sessions.get(account.steamId64);
 		if (existing) {
+			/*
+			 * A cached session is only reusable if it is configured the way this
+			 * account is configured now. When it is not, the fix is to apply the
+			 * new configuration rather than to build another session: Electron
+			 * would hand back this same object anyway.
+			 */
+			if (this.appliedProxy.get(account.steamId64) !== wantedKey) {
+				await this.applyProxyFor(account.steamId64, existing, wanted);
+			}
 			return existing;
 		}
 
 		// No `persist:` prefix: in-memory, so cookies never touch the disk.
-		const session = this.electron.sessionFromPartition(`steam-${account.steamId64}`, {
+		const session = this.electron.sessionFromPartition(this.partitionFor(account.steamId64), {
 			cache: false
 		});
 		session.setUserAgent?.(STEAM_USER_AGENT);
@@ -530,17 +779,52 @@ export class SteamTransportFactory {
 			callback({ requestHeaders: headers });
 		});
 
-		let plan: ProxyPlan | undefined;
-		if (account.proxyUrl !== undefined && account.proxyUrl !== '') {
-			// Validated here rather than left to Chromium. A scheme it does not know
-			// is accepted by `setProxy` without complaint and only fails much later,
-			// per request, as `ERR_NO_SUPPORTED_PROXIES` — an error the user cannot
-			// connect back to the address they typed.
-			plan = planProxy(account.proxyUrl);
-		}
+		await this.applyProxyFor(account.steamId64, session, wanted);
 
+		// Credentials are NOT attached here. They are answered per request, in
+		// `perform` — Electron emits `login` on the ClientRequest, never on the
+		// Session. Attaching them to the session also solved a problem that no
+		// longer exists: `fromPartition` returns the same object every time, so
+		// handlers stacked across proxy changes and an old one could answer the new
+		// proxy's challenge with the previous operator's password. A request built
+		// from the current plan cannot do that.
+
+		this.sessions.set(account.steamId64, session);
+		return session;
+	}
+
+	/**
+	 * Apply one account's proxy configuration to its session, and remember it.
+	 *
+	 * The recording is the load-bearing half: `sessionFor` compares against it
+	 * before reusing a session, so a configuration applied without updating this
+	 * map would be invisible to the check that exists to catch a stale one.
+	 */
+	private async applyProxyFor(
+		steamId64: string,
+		session: ProxyCapableSession,
+		plan: ProxyPlan | undefined
+	): Promise<void> {
+		/*
+		 * **Cleared first.** If `applyProxy` rejects, the session keeps whatever
+		 * rule it had, and a record saying otherwise would let the next call reuse
+		 * it as though the new configuration had landed. An absent record means
+		 * "unknown", which fails toward applying it again.
+		 */
+		this.appliedProxy.delete(steamId64);
+		/*
+		 * **Wrapped here, not at the call site.**
+		 *
+		 * Only the fresh-session path used to translate this failure, so the same
+		 * rejection produced two different messages depending on whether the
+		 * session happened to be cached — and the cached one skipped
+		 * `redactCredentials`, which is the function that keeps a proxy password
+		 * out of a message shown to the user. One caller, one translation.
+		 */
 		try {
-			await session.setProxy(
+			await this.applyProxy(
+				steamId64,
+				session,
 				plan
 					? { mode: 'fixed_servers', proxyRules: plan.proxyRules }
 					: // **`system`, and it is worth being precise about what that means.**
@@ -564,20 +848,11 @@ export class SteamTransportFactory {
 			throw new EgressError(
 				`could not route this account through ${plan?.redacted ?? 'the network'}: ${redactCredentials(
 					err instanceof Error ? err.message : String(err)
-				)}`
+				)}`,
+				false
 			);
 		}
-
-		// Credentials are NOT attached here. They are answered per request, in
-		// `perform` — Electron emits `login` on the ClientRequest, never on the
-		// Session. Attaching them to the session also solved a problem that no
-		// longer exists: `fromPartition` returns the same object every time, so
-		// handlers stacked across proxy changes and an old one could answer the new
-		// proxy's challenge with the previous operator's password. A request built
-		// from the current plan cannot do that.
-
-		this.sessions.set(account.steamId64, session);
-		return session;
+		this.appliedProxy.set(steamId64, SteamTransportFactory.describeProxy(plan));
 	}
 
 	private async perform(
@@ -597,7 +872,7 @@ export class SteamTransportFactory {
 		// refusal to route is not a reason to look at the URL — it is a reason to
 		// send nothing at all.
 		if (plan) {
-			await this.assertRouted(session, steamId64, plan, ROUTING_PROBE_URL);
+			await this.assertRouted(session, steamId64, plan, ROUTING_PROBE_URL, granted);
 		}
 
 		// Re-checked after the await. A lock or a routing change landing inside it
@@ -620,9 +895,18 @@ export class SteamTransportFactory {
 			// "nothing currently" is not a control, and the cost of being wrong is a
 			// session posted to somebody else's server.
 			if (!isSteamEndpoint(request.url)) {
-				reject(new EgressError('refusing to send a Steam session anywhere but Steam'));
+				reject(new EgressError('refusing to send a Steam session anywhere but Steam', false));
 				return;
 			}
+
+			/**
+			 * Handoff is the irreversible boundary. Once `end()` or `write()` is
+			 * called, Steam may have received the request. A later proxy-looking code
+			 * cannot move that boundary backwards: Chromium can replay a rewindable
+			 * upload internally, and the fresh tunnel for that replay can fail after
+			 * the first connection already delivered the POST.
+			 */
+			let handedToChromium = false;
 
 			const handle = this.electron.request({
 				url: request.url,
@@ -691,7 +975,13 @@ export class SteamTransportFactory {
 				settled = true;
 				clearTimeout(timer);
 				outstanding.delete(handle);
-				if (outstanding.size === 0) {
+				// **Only if the map still points at this set.** `outstanding` is a
+				// closure capture, and `abortInFlight` deletes the key outright — so a
+				// newer request installs a fresh set under it, and this older request
+				// settling afterwards emptied its own dead set and then deleted the
+				// *newer* one from the map. The next lock had nothing to cancel while a
+				// live request carried on running against a sealed vault.
+				if (outstanding.size === 0 && this.inFlight.get(steamId64) === outstanding) {
 					this.inFlight.delete(steamId64);
 				}
 				run();
@@ -713,15 +1003,20 @@ export class SteamTransportFactory {
 				}
 				finish(() =>
 					reject(
-						new EgressError('Steam did not answer in time; the connection or proxy may be down.')
+						new EgressError(
+							'Steam did not answer in time; the connection or proxy may be down.',
+							handedToChromium
+						)
 					)
 				);
 			}, REQUEST_TIMEOUT_MS);
 			timer.unref?.();
 
-			handle.on('error', (error) =>
-				finish(() => reject(new EgressError(describeNetworkError(error, routedThrough))))
-			);
+			handle.on('error', (error) => {
+				finish(() =>
+					reject(new EgressError(describeNetworkError(error, routedThrough), handedToChromium))
+				);
+			});
 
 			handle.on('response', (response) => {
 				// Bytes, decoded **once** at the end — never chunk by chunk. Chromium
@@ -756,13 +1051,15 @@ export class SteamTransportFactory {
 						} catch {
 							// Already finished or never connected. Nothing to stop.
 						}
-						finish(() => reject(new EgressError('Steam sent an implausibly large response.')));
+						finish(() =>
+							reject(new EgressError('Steam sent an implausibly large response.', true))
+						);
 						return;
 					}
 					chunks.push(bytes);
 				});
 				response.on('error', (error) =>
-					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough))))
+					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), true)))
 				);
 				response.on('end', () =>
 					finish(() => {
@@ -780,6 +1077,13 @@ export class SteamTransportFactory {
 				);
 			});
 
+			/*
+			 * Set immediately before the first handoff to Chromium. `write()` itself can
+			 * begin transmission or synchronously emit `error`; setting this afterwards
+			 * would label that network attempt definitely pre-send and make an
+			 * irreversible operation look safe to repeat.
+			 */
+			handedToChromium = true;
 			if (request.body) {
 				handle.write(request.body.toString());
 			}

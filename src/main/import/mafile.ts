@@ -202,8 +202,26 @@ export function parseMaFile(text: string, fileName: string, nowMs: number): Pars
 	try {
 		json = JSON.parse(raw);
 	} catch (err) {
+		/*
+		 * **The parser's message quotes the file, and the file is full of secrets.**
+		 *
+		 * V8 builds a `SyntaxError` like `Unexpected token 'x', ..."ret":"AAAA","x"...
+		 * is not valid JSON` — an excerpt of the source either side of the fault.
+		 * A maFile is `shared_secret` and `identity_secret` and little else, so a
+		 * truncated one faults somewhere inside them and the excerpt carries ten
+		 * characters of the seed every Steam Guard code for that account comes
+		 * from. Forwarded straight to the renderer, which displays it, and to
+		 * anything that logs it.
+		 *
+		 * Only the position survives. It is the whole of what a person can act on
+		 * — "the file is cut short here" — and it quotes nothing.
+		 */
+		const message = err instanceof Error ? err.message : String(err);
+		const where = /at position \d+(?: \(line \d+ column \d+\))?/.exec(message)?.[0];
 		throw new MaFileParseError(
-			`not valid JSON: ${err instanceof Error ? err.message : String(err)}`
+			where === undefined
+				? 'not valid JSON — the file is malformed or was cut short.'
+				: `not valid JSON — the file is malformed ${where}.`
 		);
 	}
 
@@ -308,8 +326,30 @@ export function parseMaFile(text: string, fileName: string, nowMs: number): Pars
 	if (data.uri !== undefined && data.uri !== '') parsed.uri = data.uri;
 	if (data.secret_1 !== undefined && data.secret_1 !== '') parsed.secret1 = data.secret_1;
 
-	if (data.revocation_code !== undefined) parsed.revocationCode = data.revocation_code;
-	if (data.device_id !== undefined) parsed.deviceId = data.device_id;
+	/*
+	 * **Empty is absent, the same as it is for every field above.**
+	 *
+	 * These two checked only for `undefined` while `serial_number`, `token_gid`,
+	 * `uri` and `secret_1` beside them all reject `''` — and the empty string is
+	 * not hypothetical here: this application's own export writes
+	 * `revocation_code: account.revocationCode ?? ''` for an account that has no
+	 * code, and tools that strip the code write the same.
+	 *
+	 * The file contradicted itself over it. The warning above tests
+	 * `!data.revocation_code`, so `''` already raises "NO REVOCATION CODE" — and
+	 * then it was stored as though it were one. An account imported that way sits
+	 * permanently in the revocation-backup ceremony, because both
+	 * `revocationReveal` and `markRevocationBackedUp` refuse an empty code, with a
+	 * warning nothing can clear.
+	 *
+	 * Worse on a replace: `mergeAccount` resolves these with
+	 * `parsed.revocationCode ?? existing.revocationCode`, and `''` is not nullish,
+	 * so re-importing the account overwrote a stored revocation code with nothing
+	 * — the one loss that docblock says a replace can never cause.
+	 */
+	if (data.revocation_code !== undefined && data.revocation_code !== '')
+		parsed.revocationCode = data.revocation_code;
+	if (data.device_id !== undefined && data.device_id !== '') parsed.deviceId = data.device_id;
 	if (steamId64 !== undefined) parsed.steamId64 = steamId64;
 	if (steamIdSource !== undefined) parsed.steamIdSource = steamIdSource;
 	if (data.fully_enrolled !== undefined) parsed.fullyEnrolled = data.fully_enrolled;

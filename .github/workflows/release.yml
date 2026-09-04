@@ -37,6 +37,7 @@ jobs:
   # actually being shipped.
   # ---------------------------------------------------------------------------
   verify:
+    needs: version
     name: verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -64,11 +65,41 @@ jobs:
       - run: npm test
       - run: node site/build.mjs
       - run: node site/verify.mjs
+      - run: node site/selftest.mjs
 
       # Production dependencies are what ships. A release is exactly the moment
       # a known-vulnerable transitive dependency must not go out quietly.
       - name: npm audit (production)
         run: npm audit --audit-level=high --omit=dev
+
+      # **The other half of CI's gate, and it was left behind.**
+      #
+      # The job header above says "the same gate CI runs, re-run against the
+      # tag". Whoever wrote it deliberately pulled the production audit across
+      # from CI's separate `security` job — and took one of that job's three
+      # steps. This is the other gating one. `osv-scanner` exists precisely to
+      # cover advisories npm's own database misses, so without it an advisory
+      # present in OSV and absent from npm blocked every pull request and could
+      # not block a release.
+      #
+      # Pinned to a SHA like everything else in this file; `ci.yml` may use a
+      # mutable tag because that job holds no secrets, and this one signs.
+      #
+      # **Linux only, and that is not an optimisation.** This action declares
+      # `runs.using: docker`, and GitHub runs Docker actions on Linux runners
+      # only — so on the Windows leg of this matrix it does not skip, it fails.
+      # `ci.yml` never hit this because its `security` job is single-runner
+      # Linux; this job is a matrix, which is exactly the difference a copied
+      # step does not carry with it.
+      #
+      # The scan is of `package-lock.json`, which is identical on both legs, so
+      # one run answers for both.
+      - name: osv-scanner (shipping dependencies)
+        if: runner.os == 'Linux'
+        uses: google/osv-scanner-action/osv-scanner-action@8deb546fdb875b9996d27d4950be7312dac076a1 # v2.5.0
+        with:
+          scan-args: |-
+            --lockfile=package-lock.json
 
   # ---------------------------------------------------------------------------
   # The tag says one thing; package.json must say the same.
@@ -82,6 +113,22 @@ jobs:
     name: tag matches package.json
     runs-on: ubuntu-latest
     steps:
+      - name: Validate the release ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          node -e "
+          const dispatched = process.env.EVENT_NAME === 'workflow_dispatch';
+          const exactTag = process.env.REF_TYPE === 'tag' && process.env.REF_NAME === process.env.TAG_INPUT;
+          if (dispatched && !exactTag) {
+            console.error('A manual release must be dispatched from that exact tag.');
+            process.exit(1);
+          }
+          "
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
@@ -89,8 +136,20 @@ jobs:
 
       - name: Compare
         shell: bash
+        env:
+          TAG_INPUT: ${{ inputs.tag }}
         run: |
-          tag="${{ inputs.tag || github.ref_name }}"
+          # Through the environment, not interpolated into the script. GitHub
+          # substitutes expressions before the shell parses, so a dispatch input
+          # written straight into this script is a command-injection sink. It
+          # takes repository write access, which is already a total compromise —
+          # and it is one line.
+          #
+          # Do not write an empty expression here to illustrate the point. An
+          # earlier version of this comment did, and GitHub evaluates expressions
+          # inside `run:` bodies too: the empty one failed the whole workflow at
+          # load, with no job and no log to say why.
+          tag="${TAG_INPUT:-$GITHUB_REF_NAME}"
           manifest="v$(node -p "require('./package.json').version")"
           echo "tag=$tag manifest=$manifest"
           # The dispatched ref must BE a pushed tag, not merely equal a version
@@ -173,6 +232,38 @@ jobs:
           node-version-file: '.nvmrc'
           cache: npm
 
+      # One deliberate switch controls both signing and publication. Secrets may
+      # be populated before the account is ready; that must not quietly change
+      # the release. Conversely, saying it is ready while one credential is
+      # absent must fail before a long package build produces an unusable DMG.
+      - name: Validate macOS signing readiness
+        if: runner.os == 'macOS'
+        env:
+          MACOS_SIGNING_READY: ${{ vars.MACOS_SIGNING_READY }}
+          MACOS_CERTIFICATE_P12: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_P12 || '' }}
+          MACOS_CERTIFICATE_PASSWORD:
+            ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
+          APPLE_API_KEY_P8: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_KEY_P8 || '' }}
+          APPLE_API_KEY_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_ISSUER || '' }}
+          APPLE_TEAM_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_TEAM_ID || '' }}
+        run: |
+          node -e "
+          if (process.env.MACOS_SIGNING_READY !== 'true') process.exit(0);
+          const required = ['MACOS_CERTIFICATE_P12', 'MACOS_CERTIFICATE_PASSWORD', 'APPLE_API_KEY_P8', 'APPLE_API_KEY_ID', 'APPLE_API_ISSUER', 'APPLE_TEAM_ID'];
+          const missing = required.filter((name) => !(process.env[name] || '').trim());
+          if (missing.length) {
+            console.error('MACOS_SIGNING_READY is true but these credentials are empty: ' + missing.join(', '));
+            process.exit(1);
+          }
+          "
+
       - run: npm ci
 
       # `--publish never`. This workflow uploads deliberately, in one place,
@@ -196,7 +287,8 @@ jobs:
         if: runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true'
         shell: bash
         env:
-          KEY_BASE64: ${{ secrets.APPLE_API_KEY_P8 }}
+          KEY_BASE64: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_KEY_P8 || '' }}
         run: |
           if [ -z "$KEY_BASE64" ]; then
             echo "::error::MACOS_SIGNING_READY is true but APPLE_API_KEY_P8 is empty."
@@ -217,15 +309,33 @@ jobs:
       # which Gatekeeper blocks everywhere except the machine that built it.
       - name: Package
         env:
-          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_P12 || '' }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
+          CSC_LINK: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_P12 || '' }}
+          CSC_KEY_PASSWORD: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
           # The path written above, not the key itself. See that step.
           APPLE_API_KEY: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
             format('{0}/apple-api-key.p8', runner.temp) || '' }}
-          APPLE_API_KEY_ID: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY_ID || '' }}
-          APPLE_API_ISSUER: ${{ runner.os == 'macOS' && secrets.APPLE_API_ISSUER || '' }}
-          APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_API_KEY_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_ISSUER || '' }}
+          APPLE_TEAM_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_TEAM_ID || '' }}
         run: npm run build && npx electron-builder --config electron-builder.config.mjs ${{ matrix.targets }} --publish never
+
+      - name: Verify the packaged portable runtime contract
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $portable = @(Get-ChildItem -LiteralPath release -File -Filter '*-portable.exe')
+          if ($portable.Count -ne 1) {
+            throw "Expected exactly one packaged portable executable, found $($portable.Count)."
+          }
+          ./.github/scripts/verify-portable-runtime.ps1 -PortablePath $portable[0].FullName
+
+      - name: Verify the first-party licence in every packaged application archive
+        run: node .github/scripts/verify-packaged-license.mjs --tree release
 
       # The private key does not outlive the step that needed it. `RUNNER_TEMP`
       # is discarded with the runner, so this is belt and braces — but a signing
@@ -249,12 +359,31 @@ jobs:
       # `continue-on-error`, because the direct-download channel must not stop
       # shipping over a Store tool. The step's own conclusion still shows.
       - name: Package for the Store
+        id: store_package
         if: runner.os == 'Windows'
         continue-on-error: true
         run: npx electron-builder --config electron-builder.config.mjs --win appx --publish never
 
+      # A toast can be displayed without either activation declaration, so a
+      # successful AppX build alone does not prove that clicking its Action
+      # Center history can launch the application. Inspect the manifest that is
+      # actually inside the package, including the executable and fixed CLSID.
+      - name: Verify Store notification activation
+        id: store_manifest
+        if: runner.os == 'Windows' && steps.store_package.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: ./.github/scripts/verify-appx-toast-manifest.ps1
+
+      - name: Verify the first-party licence in the Store package
+        id: store_license
+        if: runner.os == 'Windows' && steps.store_manifest.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: ./.github/scripts/verify-appx-license.ps1
+
       - name: Collect the Store package
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.store_license.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
@@ -263,7 +392,7 @@ jobs:
           ls -l dist-store || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.store_license.outcome == 'success'
         continue-on-error: true
         with:
           name: store-package
@@ -373,19 +502,164 @@ jobs:
           fi
           echo "Every staged artifact is one the attestation covers."
 
+      # ---------------------------------------------------------------------
+      # An SBOM of the application, not of the checkout.
+      #
+      # This scanned `path: .`, and what that published was worse than
+      # publishing nothing at all.
+      #
+      # Scanning the checkout catalogues `spike/` — the Phase 0 proof of
+      # concept whose own `package.json` describes itself as "Not shipped" — so
+      # the public document advertised `request` and `steamcommunity`, which
+      # between them reach eleven advisories with no fix available. §2.3 of
+      # docs/THREAT_MODEL.md exists to say those are deliberately not in the
+      # product and to show the measurements that got them out; the SBOM sat on
+      # the release page saying the opposite.
+      #
+      # And it left Electron out. The scanner skips `devDependencies` by
+      # default, and `electron` is one — because at development time it is a
+      # build tool, while the thing a user downloads embeds the entire runtime.
+      # So the document named vulnerable packages the product does not ship and
+      # was silent about the largest thing it does.
+      #
+      # The scan therefore runs over a tree assembled to hold what the
+      # installer contains, and the step after it checks the result says so.
+      # `path: .` is one word and it reintroduces both halves at once.
+      #
+      # **And then the assembly broke, and no test could see it.** The step that
+      # fixed the two faults above ended by deleting the lockfile from the
+      # assembled tree, to stop the scanner honouring npm's `dev` flags and
+      # dropping the electron entry it had just added. The flags are real and
+      # the scanner does honour them. What the reasoning missed is that on a
+      # *directory* scan the lockfile is the only npm inventory there is: Syft's
+      # `javascript-package-cataloger`, the one that reads `node_modules`, is
+      # tagged `installed` and `image` and carries no `directory` tag, so it
+      # never ran. Deleting the lockfile deleted everything. An audit against
+      # the scanner version this pinned action ships got three document entries
+      # and no package URLs at all, and the guard below then reported forty
+      # missing packages and two foreign entries and failed. Every release, from
+      # the moment that line was written.
+      #
+      # Nothing caught it because nothing but a real release ever walked this
+      # path. That is the more important half of the repair:
+      # `.github/workflows/sbom.yml` now runs this same assembly, the same
+      # scanner and the same guard on every push and pull request, against the
+      # same scripts, so the next time this breaks it breaks in front of
+      # somebody rather than on release day.
+      # ---------------------------------------------------------------------
+      - name: Node, to assemble the shipping tree
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      # Installs production dependencies into `sbom-root`, writes the manifest
+      # and lockfile the scanner reads, adds electron, and writes the scanner's
+      # configuration. All of that lives in the script rather than here, and
+      # deliberately: `sbom.yml` runs the identical line on every pull request,
+      # and two copies of this in two files would drift until a release found
+      # the difference.
+      - name: Assemble the tree the SBOM describes
+        shell: bash
+        run: node .github/scripts/assemble-shipping-tree.mjs
+
+      - name: Show what the scanner was told
+        shell: bash
+        run: cat sbom-syft.yaml
+
+      # `config:` restricts this to the JavaScript catalogers. Without it the
+      # scanner brings its whole directory set to a tree that holds nothing but
+      # package metadata, and anything they find arrives without an npm package
+      # URL — which is both noise in a published document and the shape
+      # contamination takes when it wants to slip past a comparison made on
+      # package URLs. The guard below rejects such entries outright, so this is
+      # what keeps that rejection from being a permanent red.
+      #
+      # The scanner version is fixed by the action's pinned SHA, not named
+      # separately here: pinning it twice would let a Dependabot bump of the
+      # action move one and not the other, and `sbom.yml` runs this same SHA on
+      # every pull request, so a bump that changes cataloguing behaviour is
+      # caught on the pull request that makes it.
       - name: Generate SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          path: .
+          path: sbom-root
+          config: sbom-syft.yaml
           format: spdx-json
           output-file: staging/sbom.spdx.json
           upload-artifact: false
           upload-release-assets: false
 
+      # The step above is a run of shell commands whose failure mode is
+      # silence: a scan that finds nothing still writes a valid SPDX document,
+      # and the release would publish it with a straight face. So the file that
+      # ships is checked here, before the checksum list is written over it.
+      #
+      # The check that used to live here named `request`, `steamcommunity` and
+      # `spike-cli` as forbidden strings and otherwise asked only for ten
+      # packages and an electron entry. An adversarial review defeated it three
+      # ways in an afternoon: delete `--omit=dev` from the assembly above and
+      # the SBOM becomes 495 packages of eslint and vitest and the check prints
+      # success; call the spike package `phase0-spike` and the deny-list of
+      # three never sees a fourth name; hand it an SBOM of a completely
+      # different application with one correct electron entry and it passes
+      # that too.
+      #
+      # So the script states what SHIPS. It walks package.json and
+      # package-lock.json — neither of which the assembly step touches — to
+      # derive the production dependency closure npm would install, and the
+      # SBOM has to be that set exactly: nothing outside it, nothing missing
+      # from it. All three escapes are outside it, and so is the next one
+      # nobody has thought of yet.
+      #
+      # `BUILDER_CONFIG` is new and it is not optional. The script used to
+      # report the closure as "packages the installer contains", and for three
+      # of them that was false: `electron-builder.config.mjs` excludes
+      # `react`, `react-dom` and `scheduler` from the asar because Vite has
+      # already compiled them into the renderer. Their code ships, so they
+      # belong in the SBOM and the check still demands them — but it now reads
+      # the exclusions out of the packaging configuration and says which of the
+      # two shapes each package ships in, rather than asserting something a
+      # reader could check and find untrue.
+      #
+      # **`continue-on-error: true` must never appear on this step.** It would
+      # turn the one gate standing between a wrong SBOM and the release page
+      # into a suggestion, and that idiom is used three times elsewhere in this
+      # file for genuinely optional things, so it is a plausible edit. Rather
+      # than trusting a comment to prevent it, the script writes a receipt
+      # naming the digest of the document it approved, and `Generate
+      # SHA256SUMS.txt` refuses to run without one that matches. That step
+      # cannot be made advisory in turn: cosign signs its output and the step
+      # after that verifies the signature, so a release which skips it has no
+      # signed checksum list and dies anyway.
+      - name: The SBOM must list the shipping tree, exactly
+        shell: bash
+        env:
+          SBOM: staging/sbom.spdx.json
+          MANIFEST: package.json
+          LOCKFILE: package-lock.json
+          BUILDER_CONFIG: electron-builder.config.mjs
+        run: |
+          RECEIPT="$RUNNER_TEMP/sbom-verified.sha256" \
+            node .github/scripts/assert-sbom-is-the-shipping-tree.mjs
+
       - name: Generate SHA256SUMS.txt
         shell: bash
         working-directory: staging
         run: |
+          # The receipt the step above leaves behind, checked before anything is
+          # hashed. Absent, it means the guard did not run or did not pass —
+          # skipped, or made advisory — and this release has no statement about
+          # what its SBOM contains. Present but not matching, it means something
+          # rewrote the document after it was inspected, so what would ship is
+          # not what was checked.
+          receipt="$RUNNER_TEMP/sbom-verified.sha256"
+          if [ ! -f "$receipt" ]; then
+            echo "::error::the SBOM guard left no receipt, so it did not run or did not pass. Nothing here can vouch for sbom.spdx.json, and this release will not publish an SBOM nobody checked."
+            exit 1
+          fi
+          sha256sum --check --strict "$receipt"
+
           # Removed first. On a re-run the file is already there, the glob picks
           # it up, and the list gains an entry for its own earlier contents —
           # which can never verify, on a file whose whole job is verifying.
@@ -437,31 +711,38 @@ jobs:
       - name: Verify the signature we just made
         shell: bash
         working-directory: staging
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          # **Matched by pattern, not by `$GITHUB_REF`.** An exact identity built
-          # from that variable is correct only for a tag push: this workflow also
-          # runs from `workflow_dispatch` with an `inputs.tag`, and there
-          # `GITHUB_REF` is the branch the dispatch came from while the
-          # certificate names the tag. The check would then look for an identity
-          # that was never issued and fail the release — on the dispatched path
-          # the version job exists specifically to support.
+          # **An exact identity, bound to the tag being built.**
           #
-          # The pattern is still tight: this repository, this workflow file, and
-          # `refs/tags/` only. That last part is an assertion worth making rather
-          # than a wildcard for convenience — a signature minted by a run from a
-          # branch must not satisfy it.
-          repo_escaped=$(printf '%s' "$GITHUB_REPOSITORY" | sed 's/[.[\*^$()+?{}|]/\\&/g')
-          identity="^https://github\.com/${repo_escaped}/\.github/workflows/release\.yml@refs/tags/"
-          echo "expecting identity matching: $identity"
+          # This was a regexp ending at `@refs/tags/`, on the reasoning that a
+          # dispatch run could not know the tag. That reasoning was inverted:
+          # Fulcio derives the certificate SAN from the run's **workflow ref**,
+          # not from what the job checked out. On a tag push that is
+          # `refs/tags/<tag>`; on a dispatch with a tag as the ref it is also
+          # `refs/tags/<tag>`; on a dispatch from a branch it is
+          # `refs/heads/<branch>`, which the old prefix already rejected. So the
+          # exactness the comment said was impossible costs nothing on every path
+          # that is supposed to work.
+          #
+          # What the prefix did allow, and this forbids: a dispatch carrying
+          # `ref: v0.0.1` with `inputs.tag: v9.9.9`. Every checkout uses the
+          # input, the version job compares HEAD against v9.9.9 and passes, and
+          # `gh release create` publishes under v9.9.9 — while the certificate
+          # says `@refs/tags/v0.0.1`. A prefix accepts that. Signature and
+          # release would then name different tags with nothing comparing them.
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG}"
+          echo "expecting identity: $identity"
           cosign verify-blob SHA256SUMS.txt \
             --signature SHA256SUMS.txt.sig \
             --certificate SHA256SUMS.txt.pem \
-            --certificate-identity-regexp "$identity" \
+            --certificate-identity "$identity" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
 
       # Proof of *where* the bytes came from: which workflow, which commit,
       # which runner. This is the closest thing to a signature the direct
-      # download channel has until the SignPath certificate exists, and unlike a
+      # download channel has, there being no code-signing certificate, and unlike a
       # certificate it says something a certificate cannot — that these bytes
       # were produced by this public workflow from this tag.
       - name: Attest build provenance
@@ -472,6 +753,36 @@ jobs:
             staging/*.AppImage
             staging/*.deb
             staging/*.dmg
+
+      # The direct Windows/Linux channel is deliberately unsigned. A macOS DMG
+      # is published only when the readiness gate made it signed and notarised,
+      # so one blanket sentence about "the files" becomes false at that point.
+      # Generate the copy from the same switch that names the macOS artifact.
+      - name: Generate draft release notes
+        env:
+          MACOS_SIGNING_READY: ${{ vars.MACOS_SIGNING_READY }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          node -e "
+          const mac = process.env.MACOS_SIGNING_READY === 'true'
+            ? '**The published macOS DMGs are Developer ID-signed and notarized by Apple.** Gatekeeper can verify their Developer ID and notarization ticket.'
+            : '**No macOS DMG is included in this release.** The continuously tested unsigned macOS build stays inside CI until signing and notarization are ready.';
+          const identity = 'https://github.com/' + process.env.GITHUB_REPOSITORY + '/.github/workflows/release.yml@refs/tags/' + process.env.TAG;
+          const fence = String.fromCharCode(96).repeat(3);
+          const slash = String.fromCharCode(92);
+          const code = (language, command) => '\n\n' + fence + language + '\n' + command + '\n' + fence;
+          process.stdout.write([
+            'Draft. Release notes are written by hand before publishing — see docs/RELEASE_CHECKLIST.md.',
+            '**On Windows, most people want the Microsoft Store instead.** Microsoft re-signs that package, so it never trips SmartScreen and there is nothing to check by hand.',
+            '**Windows and Linux direct downloads are unsigned.** They carry no code-signing certificate and none is planned, so Windows warns on first run. Check them against SHA256SUMS.txt and the provenance attestation on this release.',
+            mac,
+            'Verify on Linux:' + code('shell', 'sha256sum --check --ignore-missing SHA256SUMS.txt'),
+            'Verify on macOS:' + code('shell', 'shasum -a 256 --check --ignore-missing SHA256SUMS.txt'),
+            'Verify on Windows PowerShell:' + code('powershell', 'Get-FileHash .' + slash + '<file> -Algorithm SHA256'),
+            'The checksum list itself is signed. Verify it with cosign:' + code('shell', 'cosign verify-blob SHA256SUMS.txt --signature SHA256SUMS.txt.sig --certificate SHA256SUMS.txt.pem --certificate-identity ' + identity + ' --certificate-oidc-issuer https://token.actions.githubusercontent.com')
+          ].join('\n\n') + '\n');
+          " > "$RUNNER_TEMP/release-notes.md"
 
       # A draft, always. The checklist requires a human to read the notes and
       # the asset list before anything is public, and "published automatically
@@ -486,32 +797,6 @@ jobs:
             --verify-tag \
             --draft \
             --title "$TAG" \
-            --notes "Draft. Release notes are written by hand before publishing — see docs/RELEASE_CHECKLIST.md.
-
-          **On Windows, most people want [the Microsoft Store](https://apps.microsoft.com/detail/9NMM2XJ6HZ1D) instead.** Microsoft re-signs that package, so it never trips SmartScreen and there is nothing to check by hand.
-
-          **The files below are unsigned.** They carry no code-signing certificate yet, so Windows warns on first run — that warning is about a missing certificate, not a bad file. Take these if you are on Linux, if your Windows image has no Store, if you want the portable build, or if you would rather verify a download than be told it is fine. Check them against \`SHA256SUMS.txt\` below and the provenance attestation on this release.
-
-          Verify on Linux:
-          \`\`\`
-          sha256sum --check --ignore-missing SHA256SUMS.txt
-          \`\`\`
-          Verify on macOS — a stock Mac ships \`shasum\`, not \`sha256sum\`:
-          \`\`\`
-          shasum -a 256 --check --ignore-missing SHA256SUMS.txt
-          \`\`\`
-          Verify on Windows PowerShell:
-          \`\`\`
-          Get-FileHash .\\<file> -Algorithm SHA256
-          \`\`\`
-
-          The checksum list itself is signed, so you can check the list came from this workflow rather than only that your file matches it:
-          \`\`\`
-          cosign verify-blob SHA256SUMS.txt \\
-            --signature SHA256SUMS.txt.sig \\
-            --certificate SHA256SUMS.txt.pem \\
-            --certificate-identity-regexp '^https://github.com/opendesktopauthenticator/' \\
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
-          \`\`\`" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             staging/*
           echo "Draft created. Nothing is public until a human publishes it."
