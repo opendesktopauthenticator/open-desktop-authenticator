@@ -1,6 +1,6 @@
 import {
 	app,
-	BaseWindow,
+	BrowserWindow,
 	ipcMain,
 	screen,
 	session,
@@ -17,6 +17,7 @@ import { addressToUrl, isSteamHost } from './window';
 import { denyAllPermissions, SECURE_WEB_PREFERENCES } from '../security';
 import { windowImage } from '../logo-image';
 import { applyWindowsTaskbarIdentity } from '../windows-taskbar-identity';
+import { markAccountBrowserWindow } from '../window-role';
 
 import type {
 	BrowserHost,
@@ -86,6 +87,27 @@ const HARDENED = {
 	// people about. There is no preload on these views for the same reason.
 	webviewTag: false
 } as const;
+
+/** Reveal a judged account window without relying on an API Wayland does not support. */
+export function revealAccountBrowserWindow(
+	window: Pick<BrowserWindow, 'show' | 'showInactive' | 'focus'>,
+	platform: NodeJS.Platform
+): void {
+	if (platform === 'win32') {
+		/*
+		 * A hidden BrowserWindow whose child page already owns focus can report
+		 * itself focused before it is visible. On Electron 43 for Windows,
+		 * `show()` then emits `show` but leaves `isVisible()` false. Reveal it
+		 * without changing activation first, then explicitly focus it.
+		 */
+		window.showInactive();
+	} else {
+		// showInactive is explicitly unsupported on Wayland. Ordinary show is the
+		// supported reveal path on Linux and macOS and does not hit the Windows bug.
+		window.show();
+	}
+	window.focus();
+}
 
 /**
  * Sessions this module created, so the process-wide navigation lock can tell
@@ -158,7 +180,7 @@ export const electronBrowserHost: BrowserHost = {
 		);
 
 		/*
-		 * **Two views, not one window with a bar drawn inside it.**
+		 * **Two contents, not one page with a bar drawn inside it.**
 		 *
 		 * The toolbar and the site are separate `WebContents`. The toolbar has a
 		 * preload and no access to Steam; the site has Steam and no preload at all.
@@ -166,11 +188,13 @@ export const electronBrowserHost: BrowserHost = {
 		 * restyle, move and forge — the exact trick /scam-clones documents, and it
 		 * would be this application drawing it.
 		 *
-		 * `BaseWindow` has no `page-title-updated` handling of its own, so the page
-		 * cannot rename the window even by accident: the title is only ever what
-		 * `setTitle` is given.
+		 * The shell is a `BrowserWindow` because Explorer renders a `BaseWindow`
+		 * taskbar button with its generic window icon on Windows even when its native
+		 * HICON and AppUserModel properties contain the product art. Its owned
+		 * contents are the trusted toolbar; open-web pages remain separate child
+		 * views and never gain this preload.
 		 */
-		const window = new BaseWindow({
+		const window = new BrowserWindow({
 			width,
 			height,
 			title: options.title,
@@ -182,11 +206,26 @@ export const electronBrowserHost: BrowserHost = {
 			// Electron's default and announced itself as a generic Electron app in
 			// the taskbar, while holding a live Steam session.
 			icon: windowImage(),
-			autoHideMenuBar: true
+			autoHideMenuBar: true,
+			webPreferences: {
+				...HARDENED,
+				partition: 'browser-chrome',
+				preload: join(__dirname, '../preload/browser-chrome.js')
+			}
 		});
+		markAccountBrowserWindow(window);
+		window.setMenu(null);
+		// BrowserWindow normally adopts its document title. Only the trusted toolbar
+		// lives there, but the account/address title is a security control and has one
+		// writer below, so even the toolbar cannot replace it accidentally.
+		window.on('page-title-updated', (event) => event.preventDefault());
 		applyWindowsTaskbarIdentity(window, {
 			platform: process.platform,
 			packaged: app.isPackaged,
+			windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true,
+			portable: process.env.PORTABLE_EXECUTABLE_DIR !== undefined,
+			developmentIdentity: process.env.ODA_WINDOWS_IDENTITY === '1',
+			portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE,
 			applicationPath: app.getAppPath(),
 			executablePath: process.execPath
 		});
@@ -199,13 +238,7 @@ export const electronBrowserHost: BrowserHost = {
 		 * navigation lock the tabs are exempt from. The chrome never navigates; if
 		 * it ever tried, it would be stopped.
 		 */
-		const chrome = new WebContentsView({
-			webPreferences: {
-				...HARDENED,
-				partition: 'browser-chrome',
-				preload: join(__dirname, '../preload/browser-chrome.js')
-			}
-		});
+		const chrome = window.webContents;
 		/*
 		 * **The toolbar's own session, hardened like the tabs'.**
 		 *
@@ -215,8 +248,7 @@ export const electronBrowserHost: BrowserHost = {
 		 * views while the spellchecker was still enabled on this one. Its partition
 		 * had simply never been through the hardening the others get.
 		 */
-		denyAllPermissions(chrome.webContents.session);
-		window.contentView.addChildView(chrome);
+		denyAllPermissions(chrome.session);
 
 		/*
 		 * **Closed windows still receive events.**
@@ -224,7 +256,7 @@ export const electronBrowserHost: BrowserHost = {
 		 * When the landing check refuses a page, `openAccountBrowser` closes this
 		 * window — and the tab's own loading events keep arriving afterwards.
 		 * `publish` guarded the contents but not the window, so the next one
-		 * reached `setTitle` on a destroyed `BaseWindow` and took the main process
+		 * reached `setTitle` on a destroyed native window and took the main process
 		 * down with "Object has been destroyed", in front of the user, on the
 		 * screen that was telling them to sign in.
 		 *
@@ -258,6 +290,8 @@ export const electronBrowserHost: BrowserHost = {
 		const tabs = new Map<number, WebContentsView>();
 		let nextId = 1;
 		let activeId = 0;
+		let lastFocusedSurface: 'page' | 'toolbar' = 'page';
+		let restorePageOnWindowFocus = true;
 		let windowOpenPolicy: (details: { url: string }) => { action: 'allow' | 'deny' } = () => ({
 			action: 'allow'
 		});
@@ -288,7 +322,7 @@ export const electronBrowserHost: BrowserHost = {
 		};
 
 		const publish = (): void => {
-			if (!alive() || chrome.webContents.isDestroyed()) {
+			if (!alive() || chrome.isDestroyed()) {
 				return;
 			}
 			const active = living(activeId);
@@ -305,7 +339,7 @@ export const electronBrowserHost: BrowserHost = {
 				lastAnnounced = url;
 				navigated();
 			}
-			chrome.webContents.send('browser-chrome:state', {
+			chrome.send('browser-chrome:state', {
 				url,
 				canGoBack: active ? active.webContents.navigationHistory.canGoBack() : false,
 				canGoForward: active ? active.webContents.navigationHistory.canGoForward() : false,
@@ -355,6 +389,22 @@ export const electronBrowserHost: BrowserHost = {
 			const view = tabs.get(id);
 			return view && !view.webContents.isDestroyed() ? view : undefined;
 		};
+
+		// BrowserWindow gives its owned toolbar contents focus whenever Windows
+		// reactivates it. Remember what the user had focused before deactivation and
+		// restore the page only when the page was that surface; an address bar the
+		// user deliberately left focused must remain focused.
+		chrome.on('focus', () => {
+			lastFocusedSurface = 'toolbar';
+		});
+		window.on('blur', () => {
+			restorePageOnWindowFocus = lastFocusedSurface === 'page';
+		});
+		window.on('focus', () => {
+			if (restorePageOnWindowFocus) {
+				living(activeId)?.webContents.focus();
+			}
+		});
 
 		const show = (id: number): void => {
 			const chosen = living(id);
@@ -577,7 +627,7 @@ export const electronBrowserHost: BrowserHost = {
 					return;
 				}
 				// The security callback may have closed the window and every view.
-				if (!alive() || chrome.webContents.isDestroyed()) {
+				if (!alive() || chrome.isDestroyed()) {
 					return;
 				}
 				publish();
@@ -587,6 +637,9 @@ export const electronBrowserHost: BrowserHost = {
 			view.webContents.on('did-start-loading', publish);
 			view.webContents.on('did-stop-loading', publish);
 			view.webContents.on('page-title-updated', publish);
+			view.webContents.on('focus', () => {
+				lastFocusedSurface = 'page';
+			});
 
 			// Matches the chrome, so a blank tab does not flash white in a dark
 			// window before anything loads.
@@ -688,24 +741,19 @@ export const electronBrowserHost: BrowserHost = {
 			if (!alive()) {
 				return;
 			}
-			const bounds = window.getContentBounds();
-			chrome.setBounds({ x: 0, y: 0, width: bounds.width, height: CHROME_HEIGHT });
 			const active = tabs.get(activeId);
 			if (active) {
 				active.setBounds(bodyBounds());
 			}
 		};
 		layout();
-		// Explicit, because `BaseWindow` does not resize its children. This is also
-		// what keeps the proportions right when the window is maximised rather than
-		// merely correct at the size it opened.
+		// BrowserWindow resizes its owned toolbar. The child site view still needs an
+		// explicit content-region bound when the shell is resized or maximised.
 		window.on('resize', layout);
 		window.on('enter-full-screen', layout);
 		window.on('leave-full-screen', layout);
 
-		void chrome.webContents.loadURL(
-			'data:text/html;charset=utf-8,' + encodeURIComponent(CHROME_HTML)
-		);
+		void chrome.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(CHROME_HTML));
 
 		/*
 		 * The chrome's verbs, and nothing else.
@@ -714,7 +762,7 @@ export const electronBrowserHost: BrowserHost = {
 		 * browser window has chrome, so without the check one window's toolbar
 		 * would steer all of them — including one signed in as another account.
 		 */
-		const mine = (event: IpcMainEvent): boolean => event.sender === chrome.webContents;
+		const mine = (event: IpcMainEvent): boolean => event.sender === chrome;
 		// A dead tab answers nothing: every verb below would otherwise reach into
 		// destroyed contents the moment a popup closed itself.
 		const active = (): WebContentsView | undefined => living(activeId);
@@ -753,9 +801,9 @@ export const electronBrowserHost: BrowserHost = {
 			 */
 			if (mine(event)) {
 				openTab();
-				if (!chrome.webContents.isDestroyed()) {
-					chrome.webContents.send('browser-chrome:focus-address');
-					chrome.webContents.focus();
+				if (!chrome.isDestroyed()) {
+					chrome.send('browser-chrome:focus-address');
+					chrome.focus();
 				}
 			}
 		};
@@ -765,8 +813,8 @@ export const electronBrowserHost: BrowserHost = {
 			// ARIA tab activation by Enter/Space keeps keyboard focus in the
 			// tablist. Pointer selection omits this flag and keeps the ordinary
 			// browser behavior: the selected page receives focus.
-			if (keepChromeFocus === true && alive() && !chrome.webContents.isDestroyed()) {
-				chrome.webContents.focus();
+			if (keepChromeFocus === true && alive() && !chrome.isDestroyed()) {
+				chrome.focus();
 			}
 		};
 		const onCloseTab = (event: IpcMainEvent, id: unknown, keepChromeFocus: unknown): void => {
@@ -785,8 +833,8 @@ export const electronBrowserHost: BrowserHost = {
 			 * tab still focuses the page as normal. The last tab may already have
 			 * closed the whole window, so both native objects are checked first.
 			 */
-			if (keepChromeFocus === true && alive() && !chrome.webContents.isDestroyed()) {
-				chrome.webContents.focus();
+			if (keepChromeFocus === true && alive() && !chrome.isDestroyed()) {
+				chrome.focus();
 			}
 		};
 
@@ -809,15 +857,13 @@ export const electronBrowserHost: BrowserHost = {
 			ipcMain.removeListener('browser-chrome:close-tab', onCloseTab);
 
 			/*
-			 * **A `BaseWindow` does not take its views with it.**
+			 * **A top-level window does not take added child views with it.**
 			 *
-			 * This is the one place the migration off `BrowserWindow` changed a
-			 * guarantee rather than a mechanism. A `BrowserWindow` destroys the
-			 * `WebContents` it owns; a `BaseWindow` owns views, and a
-			 * `WebContentsView` outlives the window it was added to. Measured in a
-			 * real Electron 43 run rather than reasoned about: after closing,
-			 * `window.isDestroyed()` was true, the tab's `webContents.isDestroyed()`
-			 * was false, and script in it still executed.
+			 * A `BrowserWindow` destroys the toolbar `WebContents` it owns, but an
+			 * added `WebContentsView` can outlive the window. Measured in a real
+			 * Electron 43 run rather than reasoned about: after closing the old shell,
+			 * `window.isDestroyed()` was true, the tab's
+			 * `webContents.isDestroyed()` was false, and script in it still ran.
 			 *
 			 * So the close handler that removed the IPC listeners was tidying the
 			 * small half of the leak. The large half is a live renderer, still
@@ -830,8 +876,8 @@ export const electronBrowserHost: BrowserHost = {
 			 *  - and accumulates, one native `WebContents` per open/close cycle,
 			 *    for as long as the process runs.
 			 *
-			 * The chrome goes the same way. It has no Steam session, but it is the
-			 * same kind of leak and there is no reason to keep it.
+			 * The toolbar is now the `BrowserWindow`'s owned contents and is destroyed
+			 * by Electron; closing it here as if it were a child would race ownership.
 			 */
 			for (const view of tabs.values()) {
 				if (!view.webContents.isDestroyed()) {
@@ -839,9 +885,6 @@ export const electronBrowserHost: BrowserHost = {
 				}
 			}
 			tabs.clear();
-			if (!chrome.webContents.isDestroyed()) {
-				chrome.webContents.close();
-			}
 		});
 
 		return {
@@ -878,7 +921,9 @@ export const electronBrowserHost: BrowserHost = {
 			},
 			show: () => {
 				if (alive()) {
-					window.show();
+					// The window-level focus handler restores whichever page/toolbar surface
+					// the user last held after this activates the native shell.
+					revealAccountBrowserWindow(window, process.platform);
 				}
 			},
 			// Guarded like the rest: the lock sweep and the landing check both close

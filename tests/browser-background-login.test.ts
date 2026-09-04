@@ -10,6 +10,7 @@ import {
 
 type Listener = (...args: unknown[]) => void;
 type TestContents = {
+	focus(): void;
 	navigate(url: string): void;
 	prime(url: string): void;
 	windowOpen(url: string):
@@ -31,6 +32,7 @@ const observed = vi.hoisted(() => ({
 		closed: boolean;
 		shown: number;
 		titles: string[];
+		emit(event: string): void;
 	}[],
 	ipc: new Map<string, Listener[]>(),
 	actions: [] as string[],
@@ -157,6 +159,7 @@ vi.mock('electron', () => {
 		}
 		focus(): void {
 			observed.actions.push(`focus:${this.label}`);
+			this.emit('focus');
 		}
 		close(): void {
 			if (this.destroyed) return;
@@ -195,17 +198,34 @@ vi.mock('electron', () => {
 		}
 	}
 
-	class BaseWindow {
+	class BrowserWindow {
 		private readonly listeners = new Map<string, Listener[]>();
 		private readonly recorded: (typeof observed.windows)[number];
+		readonly webContents: FakeContents;
 		readonly contentView = {
 			addChildView: () => undefined,
 			removeChildView: () => undefined
 		};
 
-		constructor() {
-			this.recorded = { closed: false, shown: 0, titles: [] };
+		constructor(options: { webPreferences?: { partition?: string } }) {
+			this.recorded = {
+				closed: false,
+				shown: 0,
+				titles: [],
+				emit: (event) => {
+					for (const listener of [...(this.listeners.get(event) ?? [])]) listener();
+				}
+			};
 			observed.windows.push(this.recorded);
+			this.webContents = new FakeContents(options.webPreferences?.partition ?? '');
+			const label = `view-${observed.views.length}`;
+			this.webContents.label = label;
+			observed.views.push({
+				label,
+				contents: this.webContents,
+				loaded: this.webContents.loaded,
+				visible: []
+			});
 		}
 		on(event: string, listener: Listener): this {
 			const listeners = this.listeners.get(event) ?? [];
@@ -225,6 +245,10 @@ vi.mock('electron', () => {
 		restore(): void {}
 		focus(): void {}
 		setAppDetails(): void {}
+		setMenu(): void {}
+		showInactive(): void {
+			this.recorded.shown += 1;
+		}
 		show(): void {
 			this.recorded.shown += 1;
 		}
@@ -235,12 +259,13 @@ vi.mock('electron', () => {
 			if (this.recorded.closed) return;
 			observed.actions.push('window:close');
 			this.recorded.closed = true;
+			this.webContents.close();
 			for (const listener of [...(this.listeners.get('closed') ?? [])]) listener();
 		}
 	}
 
 	return {
-		BaseWindow,
+		BrowserWindow,
 		WebContentsView,
 		ipcMain: {
 			on: (channel: string, listener: Listener) => {
@@ -371,5 +396,31 @@ describe('the browser lifetime login-page guard across tabs', () => {
 		expect(observed.actions).not.toContain(`visible:${first.label}:true`);
 		expect(observed.actions).not.toContain(`focus:${first.label}`);
 		handle.close();
+	});
+
+	it('restores the active page after the account window is reactivated', async () => {
+		const { window, toolbar, second } = await twoTabs();
+		second.contents.focus();
+		window.emit('blur');
+		// Native BrowserWindow focuses its owned contents before its window-level
+		// focus event. That must not overwrite the choice captured at blur.
+		toolbar.contents.focus();
+		observed.actions.length = 0;
+
+		// BrowserWindow focuses its owned toolbar before reporting native focus.
+		window.emit('focus');
+
+		expect(observed.actions).toContain(`focus:${second.label}`);
+	});
+
+	it('keeps toolbar focus when the user left the toolbar focused', async () => {
+		const { window, toolbar, second } = await twoTabs();
+		toolbar.contents.focus();
+		window.emit('blur');
+		observed.actions.length = 0;
+
+		window.emit('focus');
+
+		expect(observed.actions).not.toContain(`focus:${second.label}`);
 	});
 });

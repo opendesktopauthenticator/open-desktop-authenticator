@@ -110,6 +110,12 @@ toolbar was last intentionally focused when the window blurs, and restore that
 surface on activation. Do not always force the site: a user who left the address
 bar focused expects to return to it.
 
+The same hidden-window probe found that Electron 43 on Windows can report the
+child-focused shell as focused before it is visible; `show()` then emits its
+event without making the window visible. Reveal it with `showInactive()` and
+then `focus()` on Windows. Keep `show()` followed by `focus()` on Linux and
+macOS, because `showInactive()` is explicitly unsupported on Wayland.
+
 Ordinary development then needs no explicit per-window AppUserModelID: both
 top-level windows are real `BrowserWindow`s carrying the product icon. Only the
 development notification opt-in and portable channel need explicit relaunch

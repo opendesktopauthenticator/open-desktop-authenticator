@@ -2,7 +2,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
-import { electronBrowserHost } from '../src/main/browser/electron-host';
+import { electronBrowserHost, revealAccountBrowserWindow } from '../src/main/browser/electron-host';
+import { CHROME_HEIGHT } from '../src/main/browser/chrome-html';
 import { SECURE_WEB_PREFERENCES } from '../src/shared/security-policy';
 import { windowsTaskbarDetails } from '../src/main/windows-taskbar-identity';
 
@@ -63,7 +64,13 @@ const record = vi.hoisted(() => ({
 	 * object **as Electron received it**: after every spread, every shared
 	 * constant and every variable, because that is the object Chromium reads.
 	 */
-	views: [] as { options: ViewOptions; loaded: string[] }[],
+	views: [] as {
+		options: ViewOptions;
+		loaded: string[];
+		bounds: { x: number; y: number; width: number; height: number }[];
+	}[],
+	/** The BrowserWindow-owned toolbar contents and their resolved preferences. */
+	toolbars: [] as { options: ViewOptions; loaded: string[] }[],
 	/** The window-open handlers tabs installed, so the popup path can be driven. */
 	windowOpenHandlers: [] as WindowOpenHandler[],
 	/** Explicit page-identity overrides attempted by the adapter. */
@@ -73,6 +80,7 @@ const record = vi.hoisted(() => ({
 		options: Record<string, unknown>;
 		shown: number;
 		closed: boolean;
+		menuCleared: boolean;
 		appDetails: Record<string, unknown>[];
 		events: string[];
 	}[],
@@ -175,7 +183,11 @@ vi.mock('electron', () => {
 			if (given.webPreferences) {
 				options.webPreferences = { ...given.webPreferences };
 			}
-			const entry = { options, loaded: [] as string[] };
+			const entry = {
+				options,
+				loaded: [] as string[],
+				bounds: [] as { x: number; y: number; width: number; height: number }[]
+			};
 			record.views.push(entry);
 			const adopted = given.webContents;
 			if (adopted instanceof FakeContents) {
@@ -192,21 +204,36 @@ vi.mock('electron', () => {
 			}
 		}
 		setBackgroundColor(): void {}
-		setBounds(): void {}
+		setBounds(bounds: { x: number; y: number; width: number; height: number }): void {
+			const entry = record.views.find((view) => view.loaded === this.webContents.loaded);
+			entry?.bounds.push({ ...bounds });
+		}
 		setVisible(): void {}
 	}
 
-	class BaseWindow {
+	class BrowserWindow {
 		private readonly recorded: (typeof record.nativeWindows)[number];
+		readonly webContents: FakeContents;
 		readonly contentView = {
 			addChildView: () => undefined,
 			removeChildView: () => undefined
 		};
 		constructor(options: Record<string, unknown>) {
+			const webPreferences =
+				typeof options.webPreferences === 'object' && options.webPreferences !== null
+					? { ...(options.webPreferences as Record<string, unknown>) }
+					: {};
+			const toolbar = { options: { webPreferences }, loaded: [] as string[] };
+			record.toolbars.push(toolbar);
+			this.webContents = new FakeContents(
+				toolbar.loaded,
+				typeof webPreferences.partition === 'string' ? webPreferences.partition : ''
+			);
 			this.recorded = {
 				options: { ...options },
 				shown: 0,
 				closed: false,
+				menuCleared: false,
 				appDetails: [],
 				events: []
 			};
@@ -215,6 +242,10 @@ vi.mock('electron', () => {
 		setAppDetails(details: Record<string, unknown>): void {
 			this.recorded.appDetails.push({ ...details });
 			this.recorded.events.push('app-details');
+		}
+		setMenu(menu: unknown): void {
+			this.recorded.menuCleared = menu === null;
+			this.recorded.events.push('menu-cleared');
 		}
 		on(): this {
 			return this;
@@ -229,7 +260,13 @@ vi.mock('electron', () => {
 			return false;
 		}
 		restore(): void {}
-		focus(): void {}
+		focus(): void {
+			this.recorded.events.push('focus');
+		}
+		showInactive(): void {
+			this.recorded.shown += 1;
+			this.recorded.events.push('show-inactive');
+		}
 		show(): void {
 			this.recorded.shown += 1;
 			this.recorded.events.push('show');
@@ -243,7 +280,7 @@ vi.mock('electron', () => {
 	record.pendingContents = (): unknown => new FakeContents([], 'persist:pending-popup');
 
 	return {
-		BaseWindow,
+		BrowserWindow,
 		WebContentsView,
 		ipcMain: { on: () => undefined, removeListener: () => undefined },
 		screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }) },
@@ -264,8 +301,12 @@ vi.mock('electron', () => {
  * constructions: this process building fresh contents, and Chromium handing us
  * contents it already built for a `window.open`.
  */
-function openWindow(): { toolbar: { options: ViewOptions } | undefined; pages: ViewOptions[] } {
+function openWindow(): {
+	toolbar: { options: ViewOptions; loaded: string[] } | undefined;
+	pages: ViewOptions[];
+} {
 	record.views.length = 0;
+	record.toolbars.length = 0;
 	record.windowOpenHandlers.length = 0;
 	record.userAgentOverrides.length = 0;
 	record.sessionPreloads.length = 0;
@@ -296,10 +337,10 @@ function openWindow(): { toolbar: { options: ViewOptions } | undefined; pages: V
 	 * the partition name, to decide which view is the toolbar would be deciding
 	 * the answer from the thing being asked about.
 	 */
-	const toolbar = record.views.find((view) => view.loaded[0]?.startsWith('data:text/html'));
+	const toolbar = record.toolbars.at(-1);
 	return {
 		toolbar,
-		pages: record.views.filter((view) => view !== toolbar).map((view) => view.options)
+		pages: record.views.map((view) => view.options)
 	};
 }
 
@@ -327,6 +368,29 @@ function keyPaths(value: unknown, at = ''): string[] {
 }
 
 describe('the Electron adapter for the in-app browser', () => {
+	it('uses the Windows-specific two-step reveal for an already-focused hidden window', () => {
+		const window = { show: vi.fn(), showInactive: vi.fn(), focus: vi.fn() };
+
+		revealAccountBrowserWindow(window, 'win32');
+
+		expect(window.show).not.toHaveBeenCalled();
+		expect(window.showInactive).toHaveBeenCalledOnce();
+		expect(window.focus).toHaveBeenCalledOnce();
+	});
+
+	it.each(['linux', 'darwin'] as const)(
+		'uses the supported ordinary reveal path on %s',
+		(platform) => {
+			const window = { show: vi.fn(), showInactive: vi.fn(), focus: vi.fn() };
+
+			revealAccountBrowserWindow(window, platform);
+
+			expect(window.show).toHaveBeenCalledOnce();
+			expect(window.showInactive).not.toHaveBeenCalled();
+			expect(window.focus).toHaveBeenCalledOnce();
+		}
+	);
+
 	/**
 	 * **This used to check the wrong thing, and passed while the posture was
 	 * weaker than the main window's.**
@@ -453,6 +517,10 @@ describe('the Electron adapter for the in-app browser', () => {
 			typeof bridge === 'string' ? bridge : '',
 			'the toolbar lost the bridge it needs to drive navigation'
 		).toMatch(/browser-chrome\.js$/);
+		expect(
+			toolbar?.loaded[0],
+			'the BrowserWindow-owned toolbar never loaded its trusted document'
+		).toMatch(/^data:text\/html;charset=utf-8,/);
 
 		expect(
 			pages.length,
@@ -532,8 +600,9 @@ describe('the Electron adapter for the in-app browser', () => {
 		// The toolbar shares no cookies with Steam, and because its partition is
 		// not one the browser registers, it keeps the application-wide navigation
 		// lock the page view is exempt from.
-		const chromeView = ADAPTER.slice(ADAPTER.indexOf('const chrome = new WebContentsView'));
-		expect(chromeView.slice(0, chromeView.indexOf('});'))).toMatch(/partition: 'browser-chrome'/);
+		const { toolbar, pages } = openWindow();
+		expect(toolbar?.options.webPreferences?.partition).toBe('browser-chrome');
+		expect(pages[0]?.webPreferences?.partition).toBe('persist:account-demo');
 	});
 
 	/*
@@ -631,15 +700,16 @@ describe('the Electron adapter for the in-app browser', () => {
 	 * :: Trade Offers" while a test that searched the file for the event name
 	 * passed.
 	 *
-	 * `BaseWindow` has no such behaviour at all: its title is only ever what
-	 * `setTitle` is given. The protection is now structural rather than a
-	 * listener somebody has to remember, which is why this asserts the base
-	 * class instead of the handler.
+	 * The account shell now has to be a BrowserWindow for Windows Explorer to use
+	 * its taskbar icon. Its owned document is only the trusted toolbar, while open
+	 * web pages remain child views. The window-level event is nevertheless
+	 * cancelled so the security title still has exactly one writer.
 	 */
-	it('uses a window whose title a page cannot touch', () => {
-		expect(ADAPTER).toMatch(/new BaseWindow\(/);
-		expect(ADAPTER, 'a BrowserWindow takes its title from the document').not.toMatch(
-			/new BrowserWindow\(/
+	it('uses a real BrowserWindow shell without giving a site control of its title', () => {
+		expect(ADAPTER).toMatch(/new BrowserWindow\(/);
+		expect(ADAPTER).not.toMatch(/new BaseWindow\(/);
+		expect(ADAPTER).toMatch(
+			/window\.on\('page-title-updated',\s*\(event\)\s*=>\s*event\.preventDefault\(\)\)/
 		);
 	});
 
@@ -659,6 +729,11 @@ describe('the Electron adapter for the in-app browser', () => {
 
 		handle.show();
 		expect(native?.shown).toBe(1);
+		expect(native?.events).toEqual([
+			'menu-cleared',
+			process.platform === 'win32' ? 'show-inactive' : 'show',
+			'focus'
+		]);
 	});
 
 	it('preserves visible-by-default semantics for direct host consumers', () => {
@@ -673,7 +748,7 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(record.nativeWindows.at(-1)?.options.show).toBe(true);
 	});
 
-	it('gives the account window the product taskbar identity exactly once', () => {
+	it('finishes the account window taskbar identity before showing it', () => {
 		record.nativeWindows.length = 0;
 		const handle = electronBrowserHost.createWindow({
 			width: 800,
@@ -688,11 +763,21 @@ describe('the Electron adapter for the in-app browser', () => {
 		const expected = windowsTaskbarDetails({
 			platform: process.platform,
 			packaged: false,
+			windowsStore: false,
+			portable: false,
+			developmentIdentity: false,
+			portableExecutablePath: undefined,
 			applicationPath: process.cwd(),
 			executablePath: process.execPath
 		});
-		expect(native?.appDetails).toEqual(expected ? [expected] : []);
-		expect(native?.events).toEqual(expected ? ['app-details', 'show'] : ['show']);
+		expect(native?.appDetails).toEqual(expected ? [expected, { appId: expected.appId }] : []);
+		expect(native?.menuCleared).toBe(true);
+		const revealEvent = process.platform === 'win32' ? 'show-inactive' : 'show';
+		expect(native?.events).toEqual(
+			expected
+				? ['menu-cleared', 'app-details', 'app-details', revealEvent, 'focus']
+				: ['menu-cleared', revealEvent, 'focus']
+		);
 	});
 
 	/*
@@ -777,18 +862,18 @@ describe('the Electron adapter for the in-app browser', () => {
 
 	it('builds tab views nowhere else', () => {
 		/*
-		 * Three constructions in the file: the chrome, and the two branches of
-		 * `newTab` — one that makes fresh contents, one that adopts the contents
-		 * Chromium already built for a popup. Both are inside `newTab`, which is
-		 * what "one place" means here.
+		 * Two constructions in the file, both branches of `newTab`: one makes fresh
+		 * contents and one adopts the contents Chromium already built for a popup.
+		 * The toolbar is the BrowserWindow's owned contents, so constructing a third
+		 * view for it would add an unnecessary renderer.
 		 */
 		const constructions = ADAPTER.match(/new WebContentsView\(/g) ?? [];
-		expect(constructions).toHaveLength(3);
+		expect(constructions).toHaveLength(2);
 		const outside = ADAPTER.slice(0, ADAPTER.indexOf('const newTab ='));
 		expect(
 			(outside.match(/new WebContentsView\(/g) ?? []).length,
 			'a tab view is built outside newTab'
-		).toBe(1);
+		).toBe(0);
 	});
 
 	/*
@@ -810,7 +895,7 @@ describe('the Electron adapter for the in-app browser', () => {
 	 * including one signed in as a different account.
 	 */
 	it('answers only its own toolbar', () => {
-		expect(ADAPTER).toMatch(/event\.sender === chrome\.webContents/);
+		expect(ADAPTER).toMatch(/event\.sender === chrome/);
 	});
 
 	it('stops listening when the window closes', () => {
@@ -821,11 +906,24 @@ describe('the Electron adapter for the in-app browser', () => {
 	});
 
 	it('lays the views out again when the window changes size', () => {
-		// `BaseWindow` does not resize its children, so without this the page
-		// keeps the size it had when it opened — which is what "the proportions
-		// are bad in fullscreen" looked like.
+		// BrowserWindow resizes its owned toolbar, but not an added site view. Without
+		// this the page keeps the size it had when it opened — which is what "the
+		// proportions are bad in fullscreen" looked like.
 		expect(ADAPTER).toMatch(/window\.on\('resize', layout\)/);
 		expect(ADAPTER).toMatch(/enter-full-screen/);
+	});
+
+	it('keeps every site view below the trusted toolbar', () => {
+		openWindow();
+		expect(record.views.length).toBe(2);
+		for (const page of record.views) {
+			expect(page.bounds.at(-1)).toEqual({
+				x: 0,
+				y: CHROME_HEIGHT,
+				width: 1280,
+				height: 860 - CHROME_HEIGHT
+			});
+		}
 	});
 });
 

@@ -7,8 +7,9 @@
  * That proved the toolbar renders and missed where a new tab actually goes,
  * because it never ran the code that decides. This one calls the real
  * `electronBrowserHost`: real session, real permissions refusal, real
- * `BaseWindow`, real tabs, real navigation. Everything the account's trading
- * browser control does except the part that needs a Steam account.
+ * `BrowserWindow` shell, real child tabs, real navigation. Everything the
+ * account's trading browser control does except the part that needs a Steam
+ * account.
  *
  * Every unhandled error in the main process is collected and reported, because
  * "there are a lot of errors" should be a thing this prints rather than a thing
@@ -226,7 +227,12 @@ const main = async () => {
 			.some((candidate) => candidate.getURL().endsWith('/popup'))
 	);
 	hidden.show();
-	check('an accepted landing can then be revealed', hiddenNative?.isVisible() === true);
+	const revealed = await waitFor(() => hiddenNative?.isVisible() === true, 1000);
+	check(
+		'an accepted landing can then be revealed',
+		revealed,
+		`visible = ${String(hiddenNative?.isVisible())}; destroyed = ${String(hiddenNative?.isDestroyed())}`
+	);
 
 	/*
 	 * A response can be alive enough to deliver headers and a body prefix while
@@ -377,7 +383,6 @@ const main = async () => {
 		app.exit(1);
 		return;
 	}
-
 	const run = async (js) => {
 		try {
 			return await Promise.race([
@@ -388,6 +393,50 @@ const main = async () => {
 			return `<threw: ${err instanceof Error ? err.message : String(err)}>`;
 		}
 	};
+	const nativeWindow = BaseWindow.getAllWindows().find(
+		(candidate) => candidate.getTitle() === 'smoke — browser'
+	);
+	let titleUpdateObserved = false;
+	const titleUpdate = nativeWindow
+		? new Promise((resolve) => {
+				nativeWindow.once('page-title-updated', () => {
+					titleUpdateObserved = true;
+					resolve(undefined);
+				});
+			})
+		: Promise.resolve();
+	await run("document.title = 'forged toolbar title'");
+	await Promise.race([titleUpdate, wait(1000)]);
+	check(
+		'the owned toolbar document cannot replace the controlled native title',
+		titleUpdateObserved && nativeWindow?.getTitle() === 'smoke — browser',
+		`event = ${String(titleUpdateObserved)}; title = ${nativeWindow?.getTitle() ?? '<no native window>'}`
+	);
+	const activePage = webContents
+		.getAllWebContents()
+		.find((candidate) => candidate.getURL() === first);
+	const focusSink = new BaseWindow({ width: 200, height: 120, show: true });
+	activePage?.focus();
+	focusSink.focus();
+	await wait(150);
+	window.focus();
+	await wait(150);
+	check(
+		'reactivating the account window restores focus to the page that held it',
+		activePage?.isFocused() === true && !chrome.isFocused(),
+		`page focused = ${String(activePage?.isFocused())}; chrome focused = ${chrome.isFocused()}`
+	);
+	chrome.focus();
+	focusSink.focus();
+	await wait(150);
+	window.focus();
+	await wait(150);
+	check(
+		'reactivating preserves deliberate toolbar focus',
+		chrome.isFocused(),
+		`chrome focused = ${chrome.isFocused()}`
+	);
+	focusSink.close();
 
 	check(
 		'the toolbar bridge is live in the real window',

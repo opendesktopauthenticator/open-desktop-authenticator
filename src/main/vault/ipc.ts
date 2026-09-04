@@ -3,6 +3,7 @@ import type { VaultService } from './service';
 import { RevocationCeremony } from './revocation-ceremony';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
+import { preferredApplicationWindow } from '../window-role';
 import { planProxy } from '../net/egress';
 import { ProxyConsent } from '../net/proxy-consent';
 import type { RoutingStatus } from '../net/transport';
@@ -213,7 +214,10 @@ export function registerVaultHandlers(
 	registerHandler(CHANNELS.vaultAdopt, async ({ passphrase }) => {
 		return keyCoordinator.duringVaultReplacement(async () => {
 			requireNoProcessOnlyWorkflowCleanupDebt();
-			const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+			const parent = preferredApplicationWindow(
+				BrowserWindow.getFocusedWindow() ?? undefined,
+				BrowserWindow.getAllWindows()
+			);
 			const options = {
 				title: 'Choose a vault file',
 				properties: ['openFile', 'dontAddToRecent'] as const,

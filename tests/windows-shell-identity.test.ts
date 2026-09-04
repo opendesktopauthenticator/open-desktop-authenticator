@@ -1,5 +1,17 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { claimsWindowsShellIdentity } from '../src/main/windows-identity';
+import { branding } from '../src/shared/branding';
+import {
+	developmentWindowsAppId,
+	portableWindowsAppId,
+	windowsProcessAppId
+} from '../src/main/windows-identity';
+
+const MAIN = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf8').replace(
+	/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*/g,
+	''
+);
 
 /**
  * **Who is allowed to be "Open Desktop Authenticator" as far as the shell is
@@ -12,26 +24,33 @@ import { claimsWindowsShellIdentity } from '../src/main/windows-identity';
  * fell back to the icon of the running executable and put Electron's mark on the
  * taskbar, whatever `BrowserWindow.icon` was handed.
  *
- * So a development run does not claim it, and everything that ships does. These
- * cases are the whole of that rule; each one is a build somebody actually runs.
+ * So a development run does not claim it, an installed or portable process uses
+ * its own desktop channel ID, and a Store process keeps its package identity.
+ * These cases are the whole rule; each one is a build somebody actually runs.
  */
 describe('claiming the Windows shell identity', () => {
-	const dev = { packaged: false, portable: false, override: undefined };
+	const dev = {
+		appId: branding.appId,
+		packaged: false,
+		portable: false,
+		windowsStore: false,
+		override: undefined
+	};
 
 	it('is skipped by an ordinary development run', () => {
 		expect(
-			claimsWindowsShellIdentity(dev),
+			windowsProcessAppId(dev),
 			'`npm start` claims the AppUserModelID, which hands the taskbar button back to ' +
 				'electron.exe and puts the Electron mark where the product mark should be'
-		).toBe(false);
+		).toBeUndefined();
 	});
 
 	it('is claimed by a packaged build, which is what ships', () => {
 		expect(
-			claimsWindowsShellIdentity({ ...dev, packaged: true }),
+			windowsProcessAppId({ ...dev, packaged: true }),
 			'an installed build must claim its identity: without it a toast is captioned with the ' +
 				'raw appId and Action Center cannot route a click back to the confirmation'
-		).toBe(true);
+		).toBe(branding.appId);
 	});
 
 	/*
@@ -41,7 +60,17 @@ describe('claiming the Windows shell identity', () => {
 	 * does not fold those two together.
 	 */
 	it('is claimed by the portable build too', () => {
-		expect(claimsWindowsShellIdentity({ ...dev, portable: true })).toBe(true);
+		expect(windowsProcessAppId({ ...dev, packaged: true, portable: true })).toBe(
+			portableWindowsAppId(branding.appId)
+		);
+		expect(portableWindowsAppId(branding.appId)).not.toBe(branding.appId);
+	});
+
+	it('never overrides the identity derived from a Microsoft Store package', () => {
+		expect(
+			windowsProcessAppId({ ...dev, packaged: true, windowsStore: true }),
+			'a Store package must keep the AUMID derived from its signed package manifest'
+		).toBeUndefined();
 	});
 
 	/*
@@ -51,9 +80,9 @@ describe('claiming the Windows shell identity', () => {
 	 */
 	it('is restored in development by ODA_WINDOWS_IDENTITY=1', () => {
 		expect(
-			claimsWindowsShellIdentity({ ...dev, override: '1' }),
+			windowsProcessAppId({ ...dev, override: '1' }),
 			'the documented escape hatch does not work, so testing notifications means editing source'
-		).toBe(true);
+		).toBe(developmentWindowsAppId(branding.appId));
 	});
 
 	/*
@@ -68,6 +97,19 @@ describe('claiming the Windows shell identity', () => {
 		['false', 'false'],
 		['true', 'true']
 	])('is not restored by ODA_WINDOWS_IDENTITY=%s', (_name, value) => {
-		expect(claimsWindowsShellIdentity({ ...dev, override: value })).toBe(false);
+		expect(windowsProcessAppId({ ...dev, override: value })).toBeUndefined();
+	});
+
+	it('uses the selected channel ID and leaves the Store package ID untouched at startup', () => {
+		expect(MAIN).toMatch(/const windowsStore\s*=/);
+		expect(MAIN).toMatch(/windowsProcessAppId\(\{[\s\S]*?windowsStore,[\s\S]*?\}\)/);
+		expect(MAIN).toMatch(
+			/if \(process\.platform === 'win32' && windowsAppId !== undefined\)\s*\{\s*app\.setAppUserModelId\(windowsAppId\)/
+		);
+		expect(MAIN).not.toMatch(/app\.setAppUserModelId\(branding\.appId\)/);
+		expect(MAIN).toMatch(
+			/portableDir === undefined && !windowsStore && windowsAppId !== undefined/
+		);
+		expect(MAIN).toMatch(/registerWindowsIdentity\(\{\s*appId: windowsAppId,/);
 	});
 });

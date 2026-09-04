@@ -7,41 +7,48 @@ import { encodePng } from './png';
 
 const run = promisify(execFile);
 
+/** Keep development, portable and installed windows out of each other's groups. */
+export function developmentWindowsAppId(appId: string): string {
+	return `${appId}.development`;
+}
+
+export function portableWindowsAppId(appId: string): string {
+	return `${appId}.portable`;
+}
+
 /**
- * Whether this run may claim the Windows shell identity.
+ * The AppUserModelID this process is allowed to claim.
  *
- * Claiming it means `setAppUserModelId`, the toast activator, and the two
- * registry values below. It also decides the **taskbar button's icon**, and that
- * is why an ordinary development run does not claim it: Windows resolves that
- * icon through the identity — via a Start Menu shortcut carrying
- * `System.AppUserModel.ID`, which the installer writes and a source checkout has
- * no equivalent of — and finding none, falls back to the icon of the running
- * executable. Unpackaged that is `electron.exe`, so the taskbar showed Electron's
- * mark whatever `BrowserWindow.icon` was given, and `IconUri` could not help
- * because the shell will not take a PNG for a taskbar button.
- *
- * Measured twice: removing the call puts the product mark on the taskbar, and
- * moving it after the window is built does not work — the right icon appears
- * while the window is created and flips back the instant the identity is set.
- *
- * The cost falls only on development, where a toast is then attributed to
- * Electron's default and Action Center cannot route a click. Anyone testing
- * notifications sets `ODA_WINDOWS_IDENTITY=1` and gets all of it back.
- *
- * Portable claims it: it is a real build a real user runs, and its window has the
- * same right to its own name. What portable skips is the *registry* write, which
- * is a separate decision made where that write happens.
+ * Store packages already have an identity derived from their signed manifest.
+ * Overriding it with the desktop installer's ID breaks the package's grouping
+ * and activation contract. Portable has a separate ID because it has a separate
+ * vault and relaunch target. An ordinary development process and its windows
+ * stay anonymous; the notification-test opt-in receives development-only
+ * relaunch metadata separately.
  */
-export function claimsWindowsShellIdentity({
+export function windowsProcessAppId({
+	appId,
 	packaged,
 	portable,
+	windowsStore,
 	override
 }: {
+	appId: string;
 	packaged: boolean;
 	portable: boolean;
+	windowsStore: boolean;
 	override: string | undefined;
-}): boolean {
-	return packaged || portable || override === '1';
+}): string | undefined {
+	if (windowsStore) {
+		return undefined;
+	}
+	if (portable) {
+		return portableWindowsAppId(appId);
+	}
+	if (packaged) {
+		return appId;
+	}
+	return override === '1' ? developmentWindowsAppId(appId) : undefined;
 }
 
 /**

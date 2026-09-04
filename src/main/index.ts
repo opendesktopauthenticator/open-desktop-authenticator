@@ -65,8 +65,9 @@ import {
 	WindowsToastActivationRouter
 } from './confirmations/windows-toast-activation';
 import { createTray } from './tray';
-import { claimsWindowsShellIdentity, registerWindowsIdentity } from './windows-identity';
+import { registerWindowsIdentity, windowsProcessAppId } from './windows-identity';
 import { applyWindowsTaskbarIdentity } from './windows-taskbar-identity';
+import { applicationWindows, preferredApplicationWindow } from './window-role';
 import { registerConfirmationHandlers } from './confirmations/ipc';
 import { SteamClock } from './steam/clock';
 import {
@@ -155,14 +156,17 @@ function createMainWindow(): BrowserWindow {
 		}
 	});
 
-	// `icon` supplies the native window mark. The taskbar group is a separate
-	// Windows property: when Trade adds a second top-level window, an unpackaged
-	// run is otherwise grouped under electron.exe and the group changes to
-	// Electron's icon. Give every top-level window the same explicit identity
-	// before it can be shown; the account browser uses this helper too.
+	// `icon` supplies the ordinary development window mark. Explicit taskbar
+	// relaunch details are needed only by portable and by the opt-in persistent
+	// notification test identity; installed and Store channels own real shell
+	// identities already. The account browser uses the same policy.
 	applyWindowsTaskbarIdentity(window, {
 		platform: process.platform,
 		packaged: app.isPackaged,
+		windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true,
+		portable: process.env.PORTABLE_EXECUTABLE_DIR !== undefined,
+		developmentIdentity: process.env.ODA_WINDOWS_IDENTITY === '1',
+		portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE,
 		applicationPath: app.getAppPath(),
 		executablePath: process.execPath
 	});
@@ -208,8 +212,8 @@ function start(): void {
 	 * otherwise identical to the installed one.
 	 */
 	const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
-	const persistentWindowsToastActivation =
-		process.platform === 'win32' && portableDir === undefined;
+	const windowsStore =
+		(process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true;
 	app.setPath(
 		'userData',
 		portableDir
@@ -225,48 +229,36 @@ function start(): void {
 	}
 
 	/*
-	 * Windows identifies an application by its AppUserModelID, not by its window
-	 * title or executable name. Without this, `branding.appId` exists only as a
-	 * string in a config file: taskbar pinning breaks, the app groups under a
-	 * generic "Electron" identity, and anything shell-facing points at the wrong
-	 * place. It has to be set before any window is created.
-	 *
-	 * ## Why development is excluded
-	 *
-	 * Setting it also decides the taskbar button's icon, and not in our favour.
-	 * Windows resolves that icon through the identity — by way of a Start Menu
-	 * shortcut carrying `System.AppUserModel.ID`, which the installer creates and
-	 * a source checkout has no equivalent of. Finding none, it falls back to the
-	 * icon of the running executable, which unpackaged is `electron.exe`. So an
-	 * unpackaged run showed Electron's mark no matter what `BrowserWindow.icon`
-	 * was given, and `windows-identity.ts`'s `IconUri` cannot help: that is a
-	 * PNG for toast captions, and the shell will not take it for a taskbar button.
-	 *
-	 * Measured, twice. Commenting out this one call puts the product mark on the
-	 * taskbar. Moving it to after `createMainWindow()` does not work either — the
-	 * correct icon appears while the window is built and flips back the moment the
-	 * identity is set, because Windows re-resolves it then.
-	 *
-	 * The cost is real and confined to development: without the identity, a toast
-	 * is attributed to Electron's default rather than to this application, and the
-	 * activator below cannot route an Action Center click. `ODA_WINDOWS_IDENTITY=1`
-	 * restores both for anyone actually testing notifications, which is the only
-	 * work that needs them. A packaged build is unaffected in every respect.
+	 * Windows shell identities are channel-specific. The installer owns the base
+	 * ID, portable owns a separate ID because it has a different vault and outer
+	 * launcher, and the Store owns the package-derived identity from its signed
+	 * manifest. Overwriting the Store ID here would break its grouping and
+	 * activation contract. Ordinary development keeps no process-wide or
+	 * per-window ID and uses each BrowserWindow's native product icon. The opt-in
+	 * adds a complete development identity for persistent-notification testing.
 	 */
-	const windowsShellIdentity = claimsWindowsShellIdentity({
+	const windowsAppId = windowsProcessAppId({
+		appId: branding.appId,
 		packaged: app.isPackaged,
 		portable: portableDir !== undefined,
+		windowsStore,
 		override: process.env.ODA_WINDOWS_IDENTITY
 	});
-	if (process.platform === 'win32' && windowsShellIdentity) {
-		app.setAppUserModelId(branding.appId);
-		// A stable activator is what lets Action Center route a click after the
-		// original Notification object — or the whole process — is gone. Portable
-		// deliberately keeps the per-run identity: its contract forbids leaving COM
-		// registration or shortcut state on the host machine.
-		if (persistentWindowsToastActivation) {
-			app.setToastActivatorCLSID(WINDOWS_TOAST_ACTIVATOR_CLSID);
-		}
+	if (process.platform === 'win32' && windowsAppId !== undefined) {
+		app.setAppUserModelId(windowsAppId);
+	}
+	// The Store's package manifest supplies its AppUserModelID, but the running
+	// process still has to name the same toast activator declared there. Keep
+	// that decision separate from the desktop-ID override so Store activation is
+	// preserved while its package identity remains untouched. Ordinary
+	// development opts in with ODA_WINDOWS_IDENTITY=1 as before; portable leaves
+	// no persistent COM/registry state on the host.
+	const persistentWindowsToastActivation =
+		process.platform === 'win32' &&
+		portableDir === undefined &&
+		(windowsStore || windowsAppId !== undefined);
+	if (persistentWindowsToastActivation) {
+		app.setToastActivatorCLSID(WINDOWS_TOAST_ACTIVATOR_CLSID);
 	}
 
 	// Tell Windows what to call us above a notification. Deliberately not awaited:
@@ -285,9 +277,9 @@ function start(): void {
 	// these values hang off the AppUserModelID, which is not set there (see
 	// above), so writing them leaves registry state on the machine that nothing
 	// reads. `ODA_WINDOWS_IDENTITY=1` restores the identity and this with it.
-	if (portableDir === undefined && windowsShellIdentity) {
+	if (portableDir === undefined && !windowsStore && windowsAppId !== undefined) {
 		void registerWindowsIdentity({
-			appId: branding.appId,
+			appId: windowsAppId,
 			displayName: branding.productName,
 			userDataPath: app.getPath('userData')
 		});
@@ -457,7 +449,7 @@ function start(): void {
 			// A reload destroys the document and everything injected into it, so
 			// passphrase entry always happens somewhere that has never rendered
 			// anything but our own bundle.
-			for (const window of BrowserWindow.getAllWindows()) {
+			for (const window of applicationWindows(BrowserWindow.getAllWindows())) {
 				window.webContents.reload();
 			}
 
@@ -851,7 +843,7 @@ function start(): void {
 	const toastClicks = new ToastClickRouter({
 		reveal: () => revealWindow?.(),
 		push: (click) => {
-			for (const window of BrowserWindow.getAllWindows()) {
+			for (const window of applicationWindows(BrowserWindow.getAllWindows())) {
 				window.webContents.send(PUSH_CHANNELS.openConfirmations, click);
 			}
 		}
@@ -1242,7 +1234,10 @@ function start(): void {
 				// The OS dialog is the only thing that names a location. The renderer
 				// asks for a file; it never says, and is never told, where it went.
 				show: async (suggestedName) => {
-					const parent = BrowserWindow.getFocusedWindow();
+					const parent = preferredApplicationWindow(
+						BrowserWindow.getFocusedWindow() ?? undefined,
+						BrowserWindow.getAllWindows()
+					);
 					const options = {
 						title: 'Save maFile',
 						defaultPath: suggestedName,
@@ -1264,7 +1259,10 @@ function start(): void {
 				// The picker is the only thing that names a file, exactly as import.
 				// The contents come back, never the path.
 				pick: async () => {
-					const parent = BrowserWindow.getFocusedWindow();
+					const parent = preferredApplicationWindow(
+						BrowserWindow.getFocusedWindow() ?? undefined,
+						BrowserWindow.getAllWindows()
+					);
 					const options = {
 						title: 'Open a recovery file',
 						// `dontAddToRecent` because recovery files are named for their
@@ -1592,7 +1590,8 @@ function start(): void {
 		 * on another — the same "two things that must agree" shape the shared
 		 * `showMainWindow` was introduced to remove, reintroduced by introducing it.
 		 */
-		const liveWindow = (): BrowserWindow | undefined => BrowserWindow.getAllWindows()[0];
+		const liveWindow = (): BrowserWindow | undefined =>
+			applicationWindows(BrowserWindow.getAllWindows())[0];
 
 		const showMainWindow = (): void => {
 			const window = liveWindow();

@@ -447,9 +447,9 @@ describe('production Windows activation wiring', () => {
 		''
 	);
 
-	it('uses a stable activator only for installed Windows builds', () => {
+	it('keeps Store activation while excluding portable and ordinary development runs', () => {
 		expect(main).toMatch(
-			/const persistentWindowsToastActivation\s*=\s*process\.platform === 'win32'\s*&&\s*portableDir === undefined/
+			/const persistentWindowsToastActivation\s*=\s*process\.platform === 'win32'\s*&&\s*portableDir === undefined\s*&&\s*\(windowsStore \|\| windowsAppId !== undefined\)/
 		);
 		expect(main).toMatch(
 			/if \(persistentWindowsToastActivation\)\s*\{\s*app\.setToastActivatorCLSID\(WINDOWS_TOAST_ACTIVATOR_CLSID\)/

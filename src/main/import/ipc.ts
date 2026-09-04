@@ -3,6 +3,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { CHANNELS } from '../../shared/channels';
 import { registerHandler } from '../ipc/router';
+import { preferredApplicationWindow } from '../window-role';
 import type { ImportReport } from '../../shared/ipc';
 import { looksEncrypted } from './sda-crypto';
 import { ProxyConsent } from '../net/proxy-consent';
@@ -78,7 +79,10 @@ export function registerImportHandlers(
 		// Checked before the picker opens, so a locked vault never even asks.
 		imports.assertUnlocked();
 
-		const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+		const parent = preferredApplicationWindow(
+			BrowserWindow.getFocusedWindow() ?? undefined,
+			BrowserWindow.getAllWindows()
+		);
 
 		const picked = await (parent
 			? dialog.showOpenDialog(parent, PICKER_OPTIONS)

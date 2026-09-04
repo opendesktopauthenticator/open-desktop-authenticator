@@ -74,8 +74,11 @@ never have to think about.
   the account proxy. Changing modes also retires connections opened by the
   previous route before the new signed-in window is created.
 - Opening the account browser no longer makes a multi-window Windows taskbar
-  group fall back to Electron's icon. Both top-level windows now carry the same
-  explicit product identity and icon resource.
+  group fall back to Electron's icon. Its isolated toolbar now uses a real
+  application window while trading pages remain separate, sandboxed views.
+  Installed, portable and Microsoft Store builds keep separate shell identities;
+  portable relaunch metadata points at its durable outer launcher, and Store
+  builds retain the identity from their signed package.
 - A passphrase change that could not finish no longer leaves the file and the
   running session disagreeing about which passphrase opens it.
 - The backup beside your vault is re-sealed under the new passphrase when you
