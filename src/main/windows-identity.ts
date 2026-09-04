@@ -7,9 +7,16 @@ import { encodePng } from './png';
 
 const run = promisify(execFile);
 
-/** Keep development, portable and installed windows out of each other's groups. */
+/**
+ * Keep development, portable and installed windows out of each other's groups.
+ *
+ * `icon1` is a one-time revision from the unreleased `.development` ID. Windows
+ * cached Electron's atom while that earlier ID was being debugged and kept
+ * drawing it after the real ICO arrived. Changing only the development channel
+ * retires that poisoned cache entry without touching any shipped identity.
+ */
 export function developmentWindowsAppId(appId: string): string {
-	return `${appId}.development`;
+	return `${appId}.development.icon1`;
 }
 
 export function portableWindowsAppId(appId: string): string {

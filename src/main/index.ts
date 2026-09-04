@@ -66,7 +66,11 @@ import {
 } from './confirmations/windows-toast-activation';
 import { createTray } from './tray';
 import { registerWindowsIdentity, windowsProcessAppId } from './windows-identity';
-import { applyWindowsTaskbarIdentity } from './windows-taskbar-identity';
+import {
+	applyWindowsTaskbarIdentity,
+	browserWindowIcon,
+	type WindowsTaskbarEnvironment
+} from './windows-taskbar-identity';
 import { applicationWindows, preferredApplicationWindow } from './window-role';
 import { registerConfirmationHandlers } from './confirmations/ipc';
 import { SteamClock } from './steam/clock';
@@ -116,6 +120,15 @@ const rendererTarget: NavigationTarget =
 			{ kind: 'file', href: pathToFileURL(join(__dirname, '../renderer/index.html')).href };
 
 function createMainWindow(): BrowserWindow {
+	const taskbarEnvironment: WindowsTaskbarEnvironment = {
+		platform: process.platform,
+		packaged: app.isPackaged,
+		windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true,
+		portable: process.env.PORTABLE_EXECUTABLE_DIR !== undefined,
+		portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE,
+		applicationPath: app.getAppPath(),
+		executablePath: process.execPath
+	};
 	const window = new BrowserWindow({
 		width: 1000,
 		height: 700,
@@ -124,9 +137,10 @@ function createMainWindow(): BrowserWindow {
 		show: false,
 		title: branding.productName,
 		autoHideMenuBar: true,
-		// The native mark for the title bar and Alt-Tab. Windows taskbar grouping
-		// is supplied separately through complete AppDetails below.
-		icon: windowImage(),
+		// Unpackaged Windows needs the real ICO for the one-window taskbar state;
+		// complete AppDetails below supplies the grouped state. Other channels keep
+		// the generated native image or their branded executable/package resource.
+		icon: browserWindowIcon(taskbarEnvironment, windowImage),
 		// Painted before the renderer has drawn anything, so a resize or a slow
 		// first paint shows the app's own black rather than white.
 		backgroundColor: WINDOW_CHROME.background,
@@ -159,15 +173,7 @@ function createMainWindow(): BrowserWindow {
 	// group icon, so complete relaunch details are applied before reveal. Installed
 	// and Store channels own real shell identities already. The account browser
 	// uses the same policy.
-	applyWindowsTaskbarIdentity(window, {
-		platform: process.platform,
-		packaged: app.isPackaged,
-		windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true,
-		portable: process.env.PORTABLE_EXECUTABLE_DIR !== undefined,
-		portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE,
-		applicationPath: app.getAppPath(),
-		executablePath: process.execPath
-	});
+	applyWindowsTaskbarIdentity(window, taskbarEnvironment);
 
 	// Show only once painted, so the user never sees an empty frame.
 	window.once('ready-to-show', () => window.show());

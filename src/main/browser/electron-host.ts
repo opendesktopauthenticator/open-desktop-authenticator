@@ -16,7 +16,11 @@ import { addressToUrl, isSteamHost } from './window';
 
 import { denyAllPermissions, SECURE_WEB_PREFERENCES } from '../security';
 import { windowImage } from '../logo-image';
-import { applyWindowsTaskbarIdentity } from '../windows-taskbar-identity';
+import {
+	applyWindowsTaskbarIdentity,
+	browserWindowIcon,
+	type WindowsTaskbarEnvironment
+} from '../windows-taskbar-identity';
 import { markAccountBrowserWindow } from '../window-role';
 
 import type {
@@ -178,6 +182,15 @@ export const electronBrowserHost: BrowserHost = {
 			area.height - 80,
 			Math.max(options.height, Math.round(area.height * 0.85))
 		);
+		const taskbarEnvironment: WindowsTaskbarEnvironment = {
+			platform: process.platform,
+			packaged: app.isPackaged,
+			windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true,
+			portable: process.env.PORTABLE_EXECUTABLE_DIR !== undefined,
+			portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE,
+			applicationPath: app.getAppPath(),
+			executablePath: process.execPath
+		};
 
 		/*
 		 * **Two contents, not one page with a bar drawn inside it.**
@@ -202,9 +215,9 @@ export const electronBrowserHost: BrowserHost = {
 			// landing passes the main-process sign-in check. Direct host users such as
 			// the smoke harness keep Electron's existing visible default.
 			show: options.show ?? true,
-			// The native mark for the title bar and Alt-Tab. Complete Windows taskbar
-			// group details are applied below before this window is revealed.
-			icon: windowImage(),
+			// The real ICO keeps the unpackaged singleton state branded; complete
+			// AppDetails below keeps the multi-window group branded.
+			icon: browserWindowIcon(taskbarEnvironment, windowImage),
 			autoHideMenuBar: true,
 			webPreferences: {
 				...HARDENED,
@@ -218,15 +231,7 @@ export const electronBrowserHost: BrowserHost = {
 		// lives there, but the account/address title is a security control and has one
 		// writer below, so even the toolbar cannot replace it accidentally.
 		window.on('page-title-updated', (event) => event.preventDefault());
-		applyWindowsTaskbarIdentity(window, {
-			platform: process.platform,
-			packaged: app.isPackaged,
-			windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true,
-			portable: process.env.PORTABLE_EXECUTABLE_DIR !== undefined,
-			portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE,
-			applicationPath: app.getAppPath(),
-			executablePath: process.execPath
-		});
+		applyWindowsTaskbarIdentity(window, taskbarEnvironment);
 
 		/*
 		 * The chrome runs in its own partition, deliberately not the account's.

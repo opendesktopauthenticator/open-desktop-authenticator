@@ -76,8 +76,11 @@ never have to think about.
 - Opening the account browser no longer makes a multi-window Windows taskbar
   group fall back to Electron's icon. Development runs now use a separate stable
   group ID and give Windows the product icon and relaunch details before either
-  window is shown. The isolated toolbar uses a real application window while
-  trading pages remain separate, sandboxed views.
+  window is shown, while each unpackaged Windows window uses the real ICO so the icon
+  also stays branded before grouping and after either window closes. The
+  development group has a one-time identity revision so Windows does not reuse
+  Electron artwork cached by earlier test builds. The isolated toolbar uses a
+  real application window while trading pages remain separate, sandboxed views.
   Installed, portable and Microsoft Store builds keep separate shell identities;
   portable relaunch metadata points at its durable outer launcher, and Store
   builds retain the identity from their signed package.

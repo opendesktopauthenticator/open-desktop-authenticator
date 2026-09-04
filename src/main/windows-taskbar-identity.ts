@@ -38,6 +38,31 @@ export interface WindowsTaskbarDetails {
 	relaunchDisplayName: string;
 }
 
+/**
+ * The native icon handed to a BrowserWindow constructor.
+ *
+ * Windows development is the one channel whose executable is Electron's and
+ * whose real ICO is available outside an archive. A generated NativeImage looks
+ * correct in the title bar, but Explorer falls back to electron.exe when a
+ * taskbar group collapses to one window. Passing the tracked ICO path keeps the
+ * singleton icon stable. The process/window AppUserModelID below remains
+ * necessary for the grouped state.
+ *
+ * Packaged Windows executables already carry the product resource, Store owns
+ * its package identity, and non-Windows platforms use Electron's normal native
+ * image path. Keep the fallback lazy so the unused generated image is not built
+ * on the development Windows path.
+ */
+export function browserWindowIcon<T>(
+	{ platform, packaged, windowsStore, portable, applicationPath }: WindowsTaskbarEnvironment,
+	fallback: () => T
+): string | T {
+	if (platform === 'win32' && !packaged && !windowsStore && !portable) {
+		return resolve(applicationPath, 'build', 'icon.ico');
+	}
+	return fallback();
+}
+
 function quoteWindowsCommandArgument(value: string): string {
 	// Windows paths cannot contain a double quote, so no further escaping is
 	// possible or necessary. Always quote: every supported path may contain a

@@ -36,6 +36,7 @@ describe('claiming the Windows shell identity', () => {
 	};
 
 	it('uses a separate stable identity in ordinary development', () => {
+		expect(developmentWindowsAppId(branding.appId)).toBe(`${branding.appId}.development.icon1`);
 		expect(
 			windowsProcessAppId(dev),
 			'two development windows without their own AUMID regroup under electron.exe'

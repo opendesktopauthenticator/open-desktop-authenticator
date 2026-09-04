@@ -471,17 +471,30 @@ you would otherwise see when it is hidden behind the app.
 
 ### T33a · Opening the browser keeps the product taskbar icon
 
-Run this on the Windows release candidate, not only in development.
+Run the complete sequence twice: first in ordinary Windows development (which
+exercises the development-only ICO and shell identity), then on the packaged
+Windows release candidate (which exercises the stamped executable identity).
 
 1. Start with the authenticator window open and check its taskbar icon.
 2. Press **Open trading browser** so Windows forms a two-window taskbar group.
 3. Hover or expand that group and inspect both window previews.
+4. Close the trading browser and confirm the remaining authenticator button
+   still has the product icon.
+5. Open the trading browser again, close the authenticator window, and confirm
+   the remaining trading-browser button still has the product icon.
+6. Close that window, reopen the authenticator, and check the fresh singleton
+   button once more.
+7. Fully quit the Electron process, launch the same build again, and confirm
+   the cold-start singleton still has the product icon.
 
-**Pass:** the group and both previews keep the Open Desktop Authenticator icon.
-**Fails if:** opening the browser changes the group or either preview to the
-generic Electron icon. The automated suite proves both native windows receive
-the same application identity before they are shown; only this manual check can
-prove how Windows Explorer actually renders the group.
+**Pass:** every singleton, the group, and both previews keep the Open Desktop
+Authenticator icon throughout the complete lifecycle. **Fails if:** opening or
+closing either window, or restarting the process, changes the group, remaining
+button, or either preview to the generic Electron icon. The automated suite
+proves both native windows receive the expected channel identity and icon input
+before they are shown; only these two manual runs can prove how Windows Explorer
+renders development cache state and the packaged release through every
+transition.
 
 ---
 

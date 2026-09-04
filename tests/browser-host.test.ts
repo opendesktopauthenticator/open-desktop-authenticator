@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -726,6 +726,13 @@ describe('the Electron adapter for the in-app browser', () => {
 		const native = record.nativeWindows.at(-1);
 		expect(native?.options.show).toBe(false);
 		expect(native?.shown).toBe(0);
+		if (process.platform === 'win32') {
+			const icon = native?.options.icon;
+			expect(icon).toBe(join(process.cwd(), 'build', 'icon.ico'));
+			expect(existsSync(icon as string), 'the account window ICO is missing').toBe(true);
+		} else {
+			expect(native?.options.icon).toBeTruthy();
+		}
 
 		handle.show();
 		expect(native?.shown).toBe(1);

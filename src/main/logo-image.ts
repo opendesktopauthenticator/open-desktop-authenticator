@@ -5,16 +5,14 @@ import { premultipliedBgra } from '../shared/logo';
  * The application mark as something Electron can draw.
  *
  * Built from the geometry in `shared/logo.ts` rather than loaded from
- * `build/icon.ico`, for two reasons. A path into `build/` resolves differently
- * in development and inside an asar archive, which is a footgun for the sake of
- * a file that is generated from this same source anyway. And it keeps the
- * property the tray has always had here: the artwork the running application
- * draws is code, not a binary.
+ * `build/icon.ico`. That keeps tray and notification artwork independent of
+ * development/asar paths and preserves the property the tray has always had
+ * here: the artwork it draws is code, not a binary.
  *
  * The `.ico` files still matter. They stamp the executable and installer, and
- * unpackaged Windows windows name `build/icon.ico` in their shell-group details.
- * The pixels Electron draws on native window surfaces still come from this
- * module.
+ * unpackaged Windows BrowserWindows use the tracked `build/icon.ico` directly
+ * because Explorer ignores their generated HICON when a taskbar group collapses
+ * to one window. Other native window surfaces still use this module.
  *
  * ## Why several representations
  *
@@ -61,8 +59,9 @@ export const notificationImage = (): NativeImage => logoImage(256, [1]);
  * The native window icon: title-bar, Alt-Tab, and the window list.
  *
  * Windows taskbar grouping is a separate shell identity. In an unpackaged
- * Windows run, `windows-taskbar-identity.ts` gives the group a development-only
- * AppUserModelID and names the ICO resource before either window is shown. This
- * image remains the correct source for the windows themselves.
+ * Windows run, `windows-taskbar-identity.ts` selects the real ICO for the native
+ * singleton icon and gives the group a development-only AppUserModelID plus ICO
+ * resource. This generated image remains the fallback for packaged and
+ * non-Windows windows.
  */
 export const windowImage = (): NativeImage => logoImage(32, [1, 1.5, 2, 4, 8]);

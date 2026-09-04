@@ -1,10 +1,12 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve } from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it, vi } from 'vitest';
 import { branding } from '../src/shared/branding';
 import { developmentWindowsAppId, portableWindowsAppId } from '../src/main/windows-identity';
 import {
 	applyWindowsTaskbarIdentity,
+	browserWindowIcon,
 	windowsTaskbarDetails
 } from '../src/main/windows-taskbar-identity';
 
@@ -23,24 +25,58 @@ const development = {
 };
 
 describe('the taskbar identity shared by every top-level window', () => {
-	it('keeps both constructors on the native image and applies identity separately', () => {
+	it('uses the same environment for each constructor icon and its group identity', () => {
 		for (const [name, source] of [
 			['main', MAIN],
 			['account', ACCOUNT_BROWSER]
 		] as const) {
 			const construction = source.indexOf('new BrowserWindow(');
 			const identity = source.indexOf('applyWindowsTaskbarIdentity(window', construction);
+			const environment = source.lastIndexOf('const taskbarEnvironment:', construction);
+			const environmentBoundary = source.slice(environment, construction);
 			const constructorBoundary = source.slice(construction, identity);
 
+			expect(environment, `${name} taskbar environment is missing`).toBeGreaterThanOrEqual(0);
 			expect(construction, `${name} BrowserWindow constructor is missing`).toBeGreaterThanOrEqual(
 				0
 			);
 			expect(identity, `${name} taskbar identity boundary is missing`).toBeGreaterThan(
 				construction
 			);
-			expect(constructorBoundary).toContain('icon: windowImage()');
-			expect(constructorBoundary).not.toContain('browserWindowIcon');
+			expect(environmentBoundary).toContain('platform: process.platform');
+			expect(constructorBoundary).toContain(
+				'icon: browserWindowIcon(taskbarEnvironment, windowImage)'
+			);
+			expect(constructorBoundary).not.toContain('icon: windowImage()');
+			expect(constructorBoundary).not.toContain('nativeImage.createFromPath');
+			expect(source.slice(identity, identity + 100)).toContain(
+				'applyWindowsTaskbarIdentity(window, taskbarEnvironment)'
+			);
 		}
+	});
+
+	it('hands ordinary Windows development the tracked ICO without building the fallback', () => {
+		const fallback = vi.fn(() => ({ generated: true }));
+		const icon = browserWindowIcon(development, fallback);
+
+		expect(icon).toBe(join(ROOT, 'build/icon.ico'));
+		expect(isAbsolute(icon as string)).toBe(true);
+		expect(existsSync(icon as string), 'the constructor ICO is missing').toBe(true);
+		expect(fallback).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		['installed', { packaged: true }],
+		['Store', { packaged: true, windowsStore: true }],
+		['portable', { packaged: true, portable: true }],
+		['Linux', { platform: 'linux' as const }],
+		['macOS', { platform: 'darwin' as const }]
+	])('keeps the generated window image for %s', (_name, override) => {
+		const generated = { generated: true };
+		const fallback = vi.fn(() => generated);
+
+		expect(browserWindowIcon({ ...development, ...override }, fallback)).toBe(generated);
+		expect(fallback).toHaveBeenCalledOnce();
 	});
 
 	it('uses the real ICO and complete group details in ordinary development', () => {
@@ -142,24 +178,93 @@ describe('the taskbar identity shared by every top-level window', () => {
 			['account', ACCOUNT_BROWSER]
 		] as const) {
 			const construction = source.indexOf('new BrowserWindow(');
+			const environment = source.lastIndexOf('const taskbarEnvironment:', construction);
 			const identity = source.indexOf('applyWindowsTaskbarIdentity(window', construction);
+			const declaration = source.slice(environment, construction);
 			const beforeIdentity = source.slice(construction, identity);
-			const call = source.slice(identity, identity + 750);
 
+			expect(environment, `${name} taskbar environment is missing`).toBeGreaterThanOrEqual(0);
 			expect(identity, `${name} taskbar identity call is missing`).toBeGreaterThan(construction);
 			expect(beforeIdentity, `${name} taskbar identity is conditional`).not.toMatch(/\bif\s*\(/);
 			expect(beforeIdentity).not.toContain('ODA_WINDOWS_IDENTITY');
-			expect(call).toContain('platform: process.platform');
-			expect(call).toContain('packaged: app.isPackaged');
-			expect(call).toContain(
+			expect(declaration).toContain('platform: process.platform');
+			expect(declaration).toContain('packaged: app.isPackaged');
+			expect(declaration).toContain(
 				'windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true'
 			);
-			expect(call).toContain('process.env.PORTABLE_EXECUTABLE_DIR !== undefined');
-			expect(call).toContain('portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE');
-			expect(call).toContain('applicationPath: app.getAppPath()');
-			expect(call).toContain('executablePath: process.execPath');
-			expect(call).not.toContain('developmentIdentity');
-			expect(call).not.toContain('ODA_WINDOWS_IDENTITY');
+			expect(declaration).toContain('process.env.PORTABLE_EXECUTABLE_DIR !== undefined');
+			expect(declaration).toContain('portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE');
+			expect(declaration).toContain('applicationPath: app.getAppPath()');
+			expect(declaration).toContain('executablePath: process.execPath');
+			expect(declaration).not.toContain('developmentIdentity');
+			expect(declaration).not.toContain('ODA_WINDOWS_IDENTITY');
+			expect(source.slice(identity, identity + 100)).toContain(
+				'applyWindowsTaskbarIdentity(window, taskbarEnvironment)'
+			);
+		}
+	});
+
+	it('requires every production BrowserWindow constructor to use the shared icon selector', () => {
+		const filesBelow = (directory: string): string[] =>
+			readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+				const path = join(directory, entry.name);
+				if (entry.isDirectory()) return filesBelow(path);
+				return entry.isFile() && path.endsWith('.ts') && !path.endsWith('.d.ts') ? [path] : [];
+			});
+		const constructors: { file: string; icon: string | undefined }[] = [];
+
+		for (const path of filesBelow(join(ROOT, 'src/main'))) {
+			const source = ts.createSourceFile(
+				path,
+				readFileSync(path, 'utf8'),
+				ts.ScriptTarget.Latest,
+				true,
+				ts.ScriptKind.TS
+			);
+			const browserWindowNames = new Set<string>();
+			for (const statement of source.statements) {
+				if (
+					ts.isImportDeclaration(statement) &&
+					ts.isStringLiteral(statement.moduleSpecifier) &&
+					statement.moduleSpecifier.text === 'electron' &&
+					statement.importClause?.namedBindings &&
+					ts.isNamedImports(statement.importClause.namedBindings)
+				) {
+					for (const imported of statement.importClause.namedBindings.elements) {
+						if ((imported.propertyName ?? imported.name).text === 'BrowserWindow') {
+							browserWindowNames.add(imported.name.text);
+						}
+					}
+				}
+			}
+			const visit = (node: ts.Node): void => {
+				if (
+					ts.isNewExpression(node) &&
+					ts.isIdentifier(node.expression) &&
+					browserWindowNames.has(node.expression.text)
+				) {
+					const options = node.arguments?.[0];
+					const icon =
+						options && ts.isObjectLiteralExpression(options)
+							? options.properties
+									.find(
+										(property): property is ts.PropertyAssignment =>
+											ts.isPropertyAssignment(property) && property.name.getText(source) === 'icon'
+									)
+									?.initializer.getText(source)
+							: undefined;
+					constructors.push({ file: relative(ROOT, path), icon });
+				}
+				ts.forEachChild(node, visit);
+			};
+			visit(source);
+		}
+
+		expect(constructors, 'the production BrowserWindow inventory changed').toHaveLength(2);
+		for (const constructor of constructors) {
+			expect(constructor.icon, constructor.file).toBe(
+				'browserWindowIcon(taskbarEnvironment, windowImage)'
+			);
 		}
 	});
 
