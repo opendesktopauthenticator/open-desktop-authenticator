@@ -1652,6 +1652,18 @@ describe('two exports whose destinations are spelled differently', () => {
 		 * to the raw value. Built by concatenation instead, so what the dialog
 		 * returns really is two different strings that `resolve` collapses to one.
 		 */
+		/*
+		 * **`elsewhere` has to exist.** Windows collapses `a\b\..\c` lexically, so
+		 * this passed there with no such directory — but on Linux traversing `..`
+		 * requires the segment before it, and both `realpathSync.native` in
+		 * `lockKey` and the staged write beside the destination failed with the
+		 * account's own name in the message. The handler is right to assume it:
+		 * `lockKey` says so in as many words ("The directory does exist — the
+		 * dialog just picked it"), and no save dialog returns a path through a
+		 * directory that is not there. What the test needs is two strings that
+		 * resolve to one file, which this still is.
+		 */
+		mkdirSync(join(dir, 'elsewhere'));
 		const spellings = [
 			join(dir, 'shared.maFile'),
 			`${join(dir, 'elsewhere')}${sep}..${sep}shared.maFile`
