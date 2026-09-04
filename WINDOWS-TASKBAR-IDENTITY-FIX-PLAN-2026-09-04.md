@@ -82,6 +82,38 @@ needed: the complete per-window relaunch properties are the documented
 shortcut-free identity route, and that exact route passed the foreground-mapped
 native check.
 
+### Fourth manual-gate correction — 2026-09-05
+
+The foreground-mapped two-window check passed, but it still sampled only one
+point in the window lifecycle. After the probe's two windows closed, the real
+development app remained under the same
+`com.opendesktopauthenticator.desktop.development` taskbar identity and its
+single taskbar button changed back to Electron's atom. A fresh screen capture
+and UI Automation lookup identified the same button at X=1403–1447; this was
+not another adjacent-icon error.
+
+The third conclusion was therefore incomplete, not wholly wrong. Process and
+per-window AppUserModelID metadata controls a multi-window **group**. When that
+group collapses to one window, Explorer can draw the native icon of the
+remaining window instead. The current generated `NativeImage` does not displace
+the `electron.exe` icon on that singleton path. Conversely, an absolute ICO
+without the group identity fixed a singleton in the earlier matrix but failed
+as soon as two windows grouped. The product needs both layers.
+
+No source change is accepted from that inference alone. Before implementation,
+a native transition probe must hold the current process ID and AppDetails
+policy constant, change only the constructor icon to the real absolute ICO,
+and identify the exact taskbar button through all of these states:
+
+1. main window alone;
+2. main plus account browser, with the account browser foreground;
+3. account browser closed, main alone again;
+4. account browser reopened, then main closed so the account browser remains;
+5. both windows closed and a fresh main window opened.
+
+Every live state must show the ODA shield. A green sample at only one state is
+not a pass.
+
 ## Related release identities found during the pre-fix review
 
 The same helper is used by four materially different Windows environments, so
@@ -89,7 +121,7 @@ the corrective change must not treat `app.isPackaged` as the whole decision:
 
 | Environment               | Shell identity                                  | Durable icon / relaunch target                                                              |
 | ------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Development               | stable development process/window ID            | source ICO in complete per-window AppDetails; constructor keeps its generated NativeImage   |
+| Development               | stable development process/window ID            | source ICO in complete per-window AppDetails and as the real Windows constructor icon       |
 | Installed / unpacked NSIS | the desktop product ID used by Electron Builder | the packaged executable and installer shortcut; no per-window override                      |
 | Portable                  | a portable-specific per-window ID               | `PORTABLE_EXECUTABLE_FILE`, the stable outer launcher, never the temporary inner executable |
 | Microsoft Store           | the package manifest's identity                 | Windows package metadata; no desktop AppUserModelID override                                |
@@ -160,10 +192,14 @@ macOS, because `showInactive()` is explicitly unsupported on Wayland.
 
 Ordinary Windows development must claim its stable development-specific
 AppUserModelID at the process boundary, and every top-level development window
-must receive complete relaunch details before it is shown. Keep the generated
-NativeImage in the BrowserWindow constructor; the exact native matrix proves it
-works once the group has a complete identity. Development and portable windows
-apply one complete details object and repeat the ID:
+must receive complete relaunch details before it is shown. On unpackaged
+Windows, each BrowserWindow constructor must also receive the absolute tracked
+`build/icon.ico` path. The group metadata fixes the two-window state; the real
+constructor ICO fixes the singleton state before, between and after grouped
+windows. On packaged Windows the branded executable remains the durable icon,
+and on non-Windows platforms the existing generated `NativeImage` remains the
+window icon. Development and portable windows apply one complete details object
+and repeat the ID:
 
 1. store `{ appId, appIconPath, appIconIndex, relaunchCommand,
 relaunchDisplayName }`;
@@ -221,8 +257,10 @@ security regression.
   for ordinary development and portable windows.
 - Assert both calls happen before the main window and account browser are
   shown.
-- Assert both constructors retain `windowImage()`; wrapping or replacing it is
-  not the shell-group fix and would expand the platform surface unnecessarily.
+- Assert both constructors select the absolute tracked ICO on unpackaged
+  Windows and retain `windowImage()` everywhere else. An ICO-only change is not
+  the shell-group fix, so the process ID and complete AppDetails assertions must
+  remain alongside it.
 - Assert ordinary Windows development always selects the development process
   ID and both call sites pass the inputs that produce complete per-window
   AppDetails. The old environment gate must not survive.
@@ -234,11 +272,11 @@ security regression.
 - Preserve the installed executable resource and non-Windows no-op behavior.
 - Run the focused identity/browser-host tests, format, lint, both typechecks,
   the full suite, and the build.
-- The final release gate remains a manual Windows check with both taskbar
-  windows open. The evidence must identify the account button itself; absence
-  of a new button or an unchanged crop is not a pass. Restarting the running
-  development process is required because it cannot hot-reload main-process
-  code.
+- The final release gate is the five-state Windows lifecycle above, not merely
+  both windows open. Evidence must identify the exact taskbar button and focused
+  HWND at every state. Absence of a new button, an unchanged crop, or a green
+  icon that later reverts is not a pass. Restarting the running development
+  process is required because it cannot hot-reload main-process code.
 
 ## Commit strategy
 
@@ -249,4 +287,7 @@ security regression.
 4. Commit this foreground-mapped plan correction by itself.
 5. Commit the default development identity, complete per-window details,
    non-vacuous regression tests and changelog correction together.
-6. Leave the unrelated untracked audit and release documents untouched.
+6. Commit this lifecycle correction by itself before changing product code.
+7. Commit the Windows constructor-ICO selector, lifecycle regression tests and
+   changelog correction together only after the five-state native probe passes.
+8. Leave the unrelated untracked audit and release documents untouched.
