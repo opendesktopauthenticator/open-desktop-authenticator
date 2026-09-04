@@ -87,7 +87,7 @@ The first version that exists as an installable file rather than as source.
 
 **Published in the Microsoft Store**, which re-signs the package it
 distributes, so SmartScreen never warns on that channel. The direct downloads
-on this release carry no code-signing certificate yet: Windows warns on first
+on this release carry no code-signing certificate: Windows warns on first
 run, and `/download` says so. Verify those against the published
 `SHA256SUMS.txt` and the build provenance attestation, both produced by the
 public workflow from this tag.

@@ -100,7 +100,18 @@ describe('what the project says about signing', () => {
 		['site/markup.mjs', read('site', 'markup.mjs')],
 		['site/build.mjs', BUILD],
 		['README.md', read('README.md')],
-		['.github/workflows/release.yml', read('.github', 'workflows', 'release.yml')]
+		['.github/workflows/release.yml', read('.github', 'workflows', 'release.yml')],
+		/*
+		 * **The changelog was the surface nobody remembered.** This list was
+		 * written to stop exactly that — "a guard that only looks where you
+		 * remembered to look" — and then omitted the one document a reader opens
+		 * to find out what a release contains. The 1.0.0 entry said the direct
+		 * downloads "carry no code-signing certificate yet" for a week after the
+		 * application was declined, so the file recording what is true of each
+		 * release was the last place still promising one.
+		 */
+		['CHANGELOG.md', read('CHANGELOG.md')],
+		['docs/RELEASE_CHECKLIST.md', read('docs', 'RELEASE_CHECKLIST.md')]
 	];
 
 	it('has surfaces to check at all', () => {
