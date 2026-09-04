@@ -56,7 +56,14 @@ function archiveBytes(members: TarMember[]): Buffer {
 		const put = (value: string, offset: number, length: number) =>
 			header.write(value, offset, Math.min(length, Buffer.byteLength(value)), 'ascii');
 		put(member.name, 0, 100);
-		put('0000644\0', 100, 8);
+		/*
+		 * **A directory needs its execute bit or nothing can be read out of it.**
+		 * This wrote 0644 for every member, so `assets/` extracted as `drw-r--r--`
+		 * and the deploy script's own `find` over the stage stopped at
+		 * "Permission denied" on the file inside it. Windows ignores tar modes
+		 * entirely, which is the only reason this fixture ever worked.
+		 */
+		put(member.type === 'directory' ? '0000755\0' : '0000644\0', 100, 8);
 		put('0000000\0', 108, 8);
 		put('0000000\0', 116, 8);
 		put(`${(member.type === 'file' ? body.length : 0).toString(8).padStart(11, '0')}\0`, 124, 12);
