@@ -51,15 +51,26 @@ Master Bridge explicitly routes `challenges.cloudflare.com` with the supported
 third-party site. Cloudflare documents a challenge request and solve arriving
 from different IPs as invalid and a cause of challenge loops.
 
+The comparison also confirmed that CSGOEmpire's real Steam OpenID return has
+used the separate hosts `csgoempirelogin2.com` and
+`csgoempirelogin7.com`. Master Bridge keeps those on the third-party route.
+ODA currently treats them as unknown and switches the callback back to the
+account proxy, creating the same mid-flow IP split after the challenge. These
+are observed exact origins, not evidence for a numbered wildcard.
+
 Fix: keep the leak-safe proxy default, but add a separate, exact-host challenge
 support list to the Steam-only bypass. It will contain Cloudflare Turnstile and
 the documented Google reCAPTCHA runtime hosts. Exact hosts avoid making all of
 `google.com` or `gstatic.com` direct. Trade sites remain the only suffix/wildcard
-entries. Fully proxied and Direct modes do not change.
+entries. Add the two observed CSGOEmpire callback origins as a separate exact
+list, and disclose that callback exception in the route's tooltip. Fully
+proxied and Direct modes do not change.
 
 Acceptance:
 
 - CSGOEmpire and each challenge support host resolve `DIRECT` in Steam-only;
+- the two observed CSGOEmpire callback origins resolve `DIRECT`, while other
+  numbered names, their subdomains, and lookalikes remain proxied;
 - Steam, unknown hosts, lookalikes, and sibling Google hosts still resolve to
   the account proxy;
 - real Electron traffic reaches a local direct endpoint for the site and
