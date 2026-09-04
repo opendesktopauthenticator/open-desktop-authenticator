@@ -39,6 +39,10 @@ never have to think about.
   hiding a control.
 - An activity entry for a Steam session that has expired, so an account that
   quietly stopped working says so instead of simply never showing anything.
+- **A Windows installer for arm64.** The build configuration has always declared
+  it, and every release so far built x64 only — so Windows-on-ARM machines have
+  had nothing but the x64 build under emulation. The release page now carries a
+  native arm64 installer beside it. The portable executable is still x64 only.
 
 ### Changed
 
@@ -80,6 +84,19 @@ never have to think about.
 - The installer no longer carries test harnesses, and every dependency that
   ships now carries the licence text its licence requires — including the three
   that ship no licence file of their own.
+- **The checksum list is signed.** `SHA256SUMS.txt` is signed keylessly with
+  sigstore, and `SHA256SUMS.txt.sig` and `SHA256SUMS.txt.pem` are published
+  beside it, so the list you check a download against can itself be checked.
+  `/verify` gives the command.
+- **The direct downloads are not code-signed, and none is planned.** We applied
+  to the SignPath Foundation for a free certificate during this cycle and were
+  declined, so the Windows and Linux files on the release page carry no
+  certificate and Windows warns on first run. Nothing on this project's pages
+  says otherwise any more. What replaces it is the chain that was always the
+  real answer: public source, a build produced by public CI from a named commit,
+  provenance attestations, and the signed checksum list above. The Microsoft
+  Store package is a separate case — Microsoft re-signs it on ingestion, so
+  SmartScreen does not warn on that channel.
 
 ## [1.0.0] — first packaged build
 
