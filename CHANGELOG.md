@@ -46,6 +46,10 @@ never have to think about.
 
 ### Changed
 
+- Account rows now call out the full signed-in trading browser as a primary
+  action instead of hiding it behind a muted `Trade` label. Clipboard expiry
+  now stays beside the Copy button that caused it rather than appearing under
+  the account name and SteamID.
 - **Steam's answers are reported as what they are.** A dozen messages named a
   specific cause for a reply that did not carry one — a missing phone number, a
   mistyped code, an authenticator "in the Steam mobile app" — and sent people to

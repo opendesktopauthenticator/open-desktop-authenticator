@@ -1315,8 +1315,9 @@ input::placeholder {
  * Four full-size buttons on every row, repeated down the list, was the loudest
  * thing on the screen — louder than the codes they sit beside. They keep their
  * shape and lose their weight: smaller, quieter, and only colouring up under the
- * pointer. Copy is the one anybody came here to press, so it is the one that
- * still looks like a button.
+ * pointer. Copy is what people use most often, while the signed-in trading
+ * browser is the largest capability on the row, so those two retain visual
+ * weight for different reasons.
  */
 .accounts .controls button {
 	padding: 7px 13px;
@@ -1336,6 +1337,32 @@ input::placeholder {
 	border-color: rgba(66, 242, 154, 0.34);
 	background: rgba(66, 242, 154, 0.07);
 	color: var(--mint);
+}
+
+/* The browser is a full signed-in workspace, not a one-shot trade command. */
+.accounts .controls button.browser-primary {
+	border-color: transparent;
+	background: var(--accent-gradient);
+	color: #04140c;
+	box-shadow: 0 8px 22px -14px rgba(66, 242, 154, 0.65);
+}
+
+.accounts .controls button.browser-primary:hover:not(:disabled) {
+	border-color: transparent;
+	background: var(--accent-gradient);
+	color: #04140c;
+	box-shadow: var(--glow);
+}
+
+/* The clipboard deadline belongs to Copy, so it sits with the action instead of
+   making the account name and SteamID look like a transient status panel. */
+.accounts .controls .copy-status {
+	flex: 0 0 auto;
+	font-family: var(--font-small);
+	font-size: 0.76rem;
+	line-height: 1.2;
+	color: var(--muted);
+	white-space: nowrap;
 }
 
 .accounts .controls button.danger:hover:not(:disabled) {

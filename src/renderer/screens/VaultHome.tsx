@@ -60,6 +60,53 @@ export const noted =
 		return next;
 	};
 
+/**
+ * The copy action and the short-lived clipboard notice that belongs to it.
+ *
+ * Keeping these in one component makes the visual relationship the accessible
+ * one too: while the notice exists, the button describes itself with that exact
+ * element. The account name is identity, not an action-status area.
+ */
+export function CopyCodeButton({
+	steamId64,
+	clipboardClearsInSeconds,
+	busy,
+	onCopy
+}: {
+	steamId64: string;
+	clipboardClearsInSeconds: number | undefined;
+	busy: boolean;
+	onCopy: () => void;
+}): React.JSX.Element {
+	const copied = clipboardClearsInSeconds !== undefined;
+	const statusId = copied ? `clipboard-clear-status-${steamId64}` : undefined;
+
+	return (
+		<>
+			<button
+				type="button"
+				className={copied ? 'secondary copy copied' : 'secondary copy'}
+				disabled={busy}
+				aria-describedby={statusId}
+				onClick={onCopy}
+			>
+				{busy ? 'Copying…' : copied ? 'Copied' : 'Copy'}
+			</button>
+			{copied && (
+				<span
+					id={statusId}
+					className="copy-status"
+					role="status"
+					aria-live="polite"
+					aria-atomic="true"
+				>
+					Code clears from clipboard in {clipboardClearsInSeconds}s
+				</span>
+			)}
+		</>
+	);
+}
+
 export function VaultHome({
 	accounts,
 	codes,
@@ -464,12 +511,6 @@ export function VaultHome({
 									<strong>{account.accountName}</strong>
 									<span className="muted"> {account.steamId64}</span>
 									{failure && <DynamicError className="hint bad">{failure}</DynamicError>}
-									{justCopied && (
-										<p className="hint">
-											Copied. The clipboard is cleared in {copied.seconds}s unless you copy
-											something else.
-										</p>
-									)}
 									{copyError?.steamId64 === account.steamId64 && (
 										<DynamicError className="hint bad">{copyError.message}</DynamicError>
 									)}
@@ -540,18 +581,14 @@ export function VaultHome({
 											>
 												<span aria-hidden="true">{code.secondsRemaining}</span>
 											</span>
-											<button
-												type="button"
-												// **Confirms on the control that was pressed.** The sentence
-												// below the row already said the copy worked, but it is under
-												// the account name, several inches from the button and easy
-												// to miss — so the click read as having done nothing.
-												className={justCopied ? 'secondary copy copied' : 'secondary copy'}
+											<CopyCodeButton
+												steamId64={account.steamId64}
+												clipboardClearsInSeconds={justCopied ? copied.seconds : undefined}
 												// The first copy after an unlock waits on the Steam clock
 												// sync, which can take seconds. Without this the button
 												// looked inert and invited a second click.
-												disabled={copying.has(account.steamId64)}
-												onClick={() => {
+												busy={copying.has(account.steamId64)}
+												onCopy={() => {
 													const mine = (copyAttempt.current += 1);
 													const newest = (): boolean => copyAttempt.current === mine;
 													setCopyError(undefined);
@@ -586,13 +623,7 @@ export function VaultHome({
 															setCopying(finished(account.steamId64))
 														);
 												}}
-											>
-												{copying.has(account.steamId64)
-													? 'Copying…'
-													: justCopied
-														? 'Copied'
-														: 'Copy'}
-											</button>
+											/>
 										</>
 									)}
 									<button
@@ -632,7 +663,7 @@ export function VaultHome({
 									    `steamOnlyBypass`. */}
 									<button
 										type="button"
-										className="secondary"
+										className="browser-primary"
 										disabled={opening.has(account.steamId64)}
 										title={
 											account.hasProxy
@@ -649,10 +680,10 @@ export function VaultHome({
 										}
 									>
 										{opening.has(account.steamId64)
-											? 'Opening…'
+											? 'Opening browser…'
 											: account.hasProxy
-												? 'Trade (proxied)'
-												: 'Trade'}
+												? 'Open trading browser (proxied)'
+												: 'Open trading browser'}
 									</button>
 									{/* Both of the alternatives go under `Require proxies`, not just
 									    Direct. "Steam only" keeps Steam on the proxy but sends a short

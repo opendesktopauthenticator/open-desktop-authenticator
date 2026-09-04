@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { VaultHome } from '../src/renderer/screens/VaultHome';
+import { CopyCodeButton, VaultHome } from '../src/renderer/screens/VaultHome';
 import { AddAuthenticator } from '../src/renderer/screens/AddAuthenticator';
 import { accountSummary, type AccountSummary } from '../src/shared/ipc';
 
@@ -73,9 +73,9 @@ function buttons(html: string): string[] {
 	return [...html.matchAll(/<button[^>]*>[\s\S]*?<\/button>/g)].map((match) => match[0]);
 }
 
-/** The button that opens the browser — labelled differently when routed. */
-const tradeButton = (html: string): string | undefined =>
-	buttons(html).find((button) => />Trade(\s*\(proxied\))?</.test(button));
+/** The primary button that opens the browser — labelled differently when routed. */
+const browserButton = (html: string): string | undefined =>
+	buttons(html).find((button) => />Open trading browser(\s*\(proxied\))?</.test(button));
 
 /** The second button a routed account gets, for going around its proxy. */
 const directButton = (html: string): string | undefined =>
@@ -85,15 +85,22 @@ const directButton = (html: string): string | undefined =>
 const steamOnlyButton = (html: string): string | undefined =>
 	buttons(html).find((button) => button.includes('>Steam only<'));
 
-describe('the trade button', () => {
+describe('the trading-browser button', () => {
 	it('is on the row, and reachable without opening anything first', () => {
 		const html = render([account()]);
-		expect(tradeButton(html), 'the browser has no way in from the account list').toBeDefined();
+		expect(browserButton(html), 'the browser has no way in from the account list').toBeDefined();
 	});
 
 	it('appears once per account, not once per screen', () => {
 		const two = render([account(), account({ steamId64: '76561198000000002' })]);
-		expect(buttons(two).filter((button) => />Trade</.test(button))).toHaveLength(2);
+		expect(buttons(two).filter((button) => />Open trading browser</.test(button))).toHaveLength(2);
+	});
+
+	it('names the browser capability and gives the main route primary visual weight', () => {
+		const button = browserButton(render([account()]));
+		expect(button).toMatch(/class="browser-primary"/);
+		expect(button).toContain('>Open trading browser<');
+		expect(button).not.toMatch(/>Trade</);
 	});
 
 	/*
@@ -107,7 +114,7 @@ describe('the trade button', () => {
 	 */
 	it('offers a direct alternative only to an account that is routed', () => {
 		const routed = render([account({ hasProxy: true, routing: 'verified' })]);
-		expect(tradeButton(routed)).toMatch(/proxied/i);
+		expect(browserButton(routed)).toMatch(/proxied/i);
 		expect(directButton(routed), 'a routed account has no way around its proxy').toBeDefined();
 
 		const plain = render([account({ hasProxy: false })]);
@@ -115,7 +122,7 @@ describe('the trade button', () => {
 			directButton(plain),
 			'an unrouted account was offered a pointless choice'
 		).toBeUndefined();
-		expect(tradeButton(plain)).not.toMatch(/proxied/i);
+		expect(browserButton(plain)).not.toMatch(/proxied/i);
 	});
 
 	/*
@@ -155,12 +162,12 @@ describe('the trade button', () => {
 		const plain = render([account({ hasProxy: false })]);
 		expect(directButton(routed)).toMatch(/asks for a username and password/i);
 		expect(directButton(routed)).toMatch(/Proxy field.*proxied route/i);
-		expect(tradeButton(plain)).toMatch(/asks for a username and password/i);
-		expect(tradeButton(plain)).toMatch(/Proxy field/i);
+		expect(browserButton(plain)).toMatch(/asks for a username and password/i);
+		expect(browserButton(plain)).toMatch(/Proxy field/i);
 	});
 
 	it('is not disabled when nothing is being opened', () => {
-		expect(tradeButton(render([account()]))).not.toMatch(/disabled/);
+		expect(browserButton(render([account()]))).not.toMatch(/disabled/);
 	});
 
 	/*
@@ -217,7 +224,7 @@ describe('the trade button', () => {
 	 */
 	it('puts all three routing choices on one row', () => {
 		const routed = render([account({ hasProxy: true, routing: 'verified' })]);
-		expect(tradeButton(routed)).toBeDefined();
+		expect(browserButton(routed)).toBeDefined();
 		expect(steamOnlyButton(routed)).toBeDefined();
 		expect(directButton(routed)).toBeDefined();
 	});
@@ -231,10 +238,10 @@ describe('the trade button', () => {
 	 * account with none would be the same lie in a smaller font.
 	 */
 	it('promises a proxy only to an account that has one', () => {
-		expect(tradeButton(render([account({ hasProxy: true, routing: 'verified' })]))).toMatch(
+		expect(browserButton(render([account({ hasProxy: true, routing: 'verified' })]))).toMatch(
 			/through this account’s proxy/i
 		);
-		expect(tradeButton(render([account({ hasProxy: false })]))).not.toMatch(
+		expect(browserButton(render([account({ hasProxy: false })]))).not.toMatch(
 			/through this account’s proxy/i
 		);
 	});
@@ -244,13 +251,13 @@ describe('the trade button', () => {
 	 * "routed except for a list nobody was shown".
 	 */
 	it('says the routed window routes everything', () => {
-		expect(tradeButton(render([account({ hasProxy: true, routing: 'verified' })]))).toMatch(
+		expect(browserButton(render([account({ hasProxy: true, routing: 'verified' })]))).toMatch(
 			/everything in the window goes through it/i
 		);
 	});
 
 	it('says where the window starts, so pressing it is not a guess', () => {
-		expect(tradeButton(render([account()]))).toMatch(/trade offers/i);
+		expect(browserButton(render([account()]))).toMatch(/trade offers/i);
 	});
 
 	/*
@@ -260,7 +267,7 @@ describe('the trade button', () => {
 	 * for the button to send even if it wanted to.
 	 */
 	it('carries no address of its own', () => {
-		expect(tradeButton(render([account()]))).not.toMatch(/https?:/);
+		expect(browserButton(render([account()]))).not.toMatch(/https?:/);
 	});
 });
 
@@ -294,12 +301,12 @@ describe('the account list when the vault requires proxies', () => {
 	});
 
 	it('keeps the fully routed button, which is the one that still works', () => {
-		expect(tradeButton(render([routed()], true))).toBeDefined();
+		expect(browserButton(render([routed()], true))).toBeDefined();
 	});
 
 	it('keeps all three when the setting is off', () => {
 		const html = render([routed()], false);
-		expect(tradeButton(html)).toBeDefined();
+		expect(browserButton(html)).toBeDefined();
 		expect(steamOnlyButton(html)).toBeDefined();
 		expect(directButton(html)).toBeDefined();
 	});
@@ -314,7 +321,39 @@ describe('the account list when the vault requires proxies', () => {
 	 * outcome than a row with no controls at all and no explanation.
 	 */
 	it('still shows the button on an account with no proxy', () => {
-		expect(tradeButton(render([account({ hasProxy: false })], true))).toBeDefined();
+		expect(browserButton(render([account({ hasProxy: false })], true))).toBeDefined();
+	});
+});
+
+describe('copy feedback', () => {
+	it('keeps the clipboard deadline beside Copy and binds the control to a polite status', () => {
+		const html = renderToStaticMarkup(
+			<CopyCodeButton
+				steamId64="76561198000000001"
+				clipboardClearsInSeconds={30}
+				busy={false}
+				onCopy={noop}
+			/>
+		);
+		const button = buttons(html)[0];
+		expect(button).toMatch(/aria-describedby="clipboard-clear-status-76561198000000001"/);
+		expect(button).toContain('>Copied<');
+		expect(html).toMatch(
+			/<\/button><span id="clipboard-clear-status-76561198000000001" class="copy-status" role="status" aria-live="polite" aria-atomic="true">Code clears from clipboard in 30s<\/span>/
+		);
+	});
+
+	it('does not describe Copy with a status that is not on screen', () => {
+		const html = renderToStaticMarkup(
+			<CopyCodeButton
+				steamId64="76561198000000001"
+				clipboardClearsInSeconds={undefined}
+				busy={false}
+				onCopy={noop}
+			/>
+		);
+		expect(buttons(html)[0]).not.toMatch(/aria-describedby/);
+		expect(html).not.toMatch(/role="status"/);
 	});
 });
 
