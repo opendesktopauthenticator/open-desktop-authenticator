@@ -231,18 +231,22 @@ What it is given, and nothing more:
   Steam Android app. Sharing that one would either serve Steam's web pages to an
   `okhttp` client or strip the disguise off the application's own requests.
 - **The account's proxy, on one of three routes the user picks per window.** An
-  account with a proxy is offered _Trade (proxied)_, _Steam only_ and _Direct_;
-  an account without one gets a single button, because there is nothing to route
-  through. Once a route is asked for it is absolute — if it cannot be applied,
-  or Chromium says it would go somewhere else, **no window opens**, the same
-  fail-closed rule the transport follows with a window as the unit of work
-  instead of a request. Nothing skips it either: Chromium bypasses loopback and
-  link-local by default, so `<-loopback>` removes that list rather than adding
-  to it, and WebRTC — which opens its own UDP around any proxy — is turned off
-  for the window.
+  account with a proxy is offered _Open trading browser (proxied)_, _Steam only_
+  and _Direct_; an account without one gets a single button, because there is
+  nothing to route through. Once a route is asked for it is absolute — if it
+  cannot be applied, or Chromium says it would go somewhere else, **no window
+  opens**, the same fail-closed rule the transport follows with a window as the
+  unit of work instead of a request. Nothing skips it either: Chromium bypasses
+  loopback and link-local by default, so `<-loopback>` removes that list rather
+  than adding to it, and WebRTC — which opens its own UDP around any proxy — is
+  turned off for the window.
 
   **_Steam only_ routes Steam and everything it does not recognise**, and lets
-  out a short, named list of third-party trade sites. It is not "Steam through
+  out a short, named list of third-party trade sites. The exact Cloudflare and
+  reCAPTCHA runtime hosts those sites need, plus two observed exact CSGOEmpire
+  sign-in callback hosts, follow that same direct route for the whole session.
+  They are exact-host exceptions rather than suffix rules, so a subdomain,
+  numbered guess, or lookalike does not inherit them. It is not "Steam through
   the proxy, everything else direct": that was the first design, and it put the
   cost of an incomplete list on the wrong side. Valve renames CDN hosts without
   announcing it, and under that rule the first one nobody had listed became a

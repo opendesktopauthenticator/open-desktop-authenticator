@@ -48,6 +48,9 @@ vi.mock('electron', () => {
 		setProxy(): Promise<void> {
 			return Promise.resolve();
 		}
+		closeAllConnections(): Promise<void> {
+			return Promise.resolve();
+		}
 		resolveProxy(): Promise<string> {
 			return Promise.resolve('DIRECT');
 		}
@@ -221,6 +224,7 @@ vi.mock('electron', () => {
 		}
 		restore(): void {}
 		focus(): void {}
+		setAppDetails(): void {}
 		show(): void {
 			this.recorded.shown += 1;
 		}
@@ -254,7 +258,7 @@ vi.mock('electron', () => {
 		screen: { getPrimaryDisplay: () => ({ workAreaSize: { width: 1920, height: 1080 } }) },
 		session: { fromPartition: (partition: string) => sessionFor(partition) },
 		nativeImage: { createEmpty: () => ({ addRepresentation: () => undefined }) },
-		app: { isPackaged: false },
+		app: { isPackaged: false, getAppPath: () => process.cwd() },
 		shell: { openExternal: () => Promise.resolve() }
 	};
 });

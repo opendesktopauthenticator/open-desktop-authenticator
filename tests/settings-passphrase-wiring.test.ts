@@ -360,21 +360,50 @@ describe('per-account status on the account list', () => {
 		 * routing the same way. The Steam-only button would have opened a fully
 		 * proxied window — the mode the user pressed it to get away from — while
 		 * every other test in the suite stayed green. So the label, the tooltip
-		 * and the route are asserted in the same component invocation rather than
-		 * as three facts that happen to be true separately.
+		 * and the route are asserted through the presentation binding and the
+		 * corresponding click in the same control block.
 		 */
 		expect(source).toMatch(
-			/<BrowserRouteButton\s+route="steam-only"\s+openingRoute=\{openingRoute\}\s+label="Steam only"[\s\S]*?onOpen=\{\(route\) => openBrowserAs\(account, route\)\}\s+\/>/
+			/const steamOnlyBrowser = browserRoutePresentation\(\s*'steam-only',\s*openingRoute,\s*'Steam only'\s*\);/
 		);
+		expect(source).toMatch(/onClick=\{\(\) => openBrowserAs\(account, 'steam-only'\)\}/);
 		expect(source).toMatch(
-			/<BrowserRouteButton\s+route="direct"\s+openingRoute=\{openingRoute\}\s+label="Direct"[\s\S]*?onOpen=\{\(route\) => openBrowserAs\(account, route\)\}\s+\/>/
+			/const directBrowser = browserRoutePresentation\('direct', openingRoute, 'Direct'\);/
 		);
+		expect(source).toMatch(/onClick=\{\(\) => openBrowserAs\(account, 'direct'\)\}/);
 		// The first button is the only one that reads the account: an unrouted
 		// account has no proxy to send anything through.
 		expect(source).toMatch(
 			/const primaryBrowserRoute: BrowserRoute = account\.hasProxy \? 'proxy' : 'direct';/
 		);
-		expect(source).toMatch(/<BrowserRouteButton\s+route=\{primaryBrowserRoute\}/);
+		expect(source).toMatch(/const primaryBrowser = browserRoutePresentation\(/);
+		expect(source).toMatch(/openBrowserAs\(account, primaryBrowserRoute\)/);
+
+		/*
+		 * The pure presentation helper proves which state each route should get.
+		 * This second half pins those values to the real JSX controls: removing a
+		 * disabled, busy, or label binding from one button must not leave the helper
+		 * test green while the screen silently ignores it.
+		 */
+		const buttonFor = (needle: string): string => {
+			const action = source.indexOf(needle);
+			expect(action, `the ${needle} browser action is missing`).toBeGreaterThanOrEqual(0);
+			const start = source.lastIndexOf('<button', action);
+			const end = source.indexOf('</button>', action);
+			expect(start, `the ${needle} action has no button`).toBeGreaterThanOrEqual(0);
+			expect(end, `the ${needle} button never closes`).toBeGreaterThan(action);
+			return source.slice(start, end + '</button>'.length);
+		};
+		for (const [route, state] of [
+			['primaryBrowserRoute', 'primaryBrowser'],
+			["'steam-only'", 'steamOnlyBrowser'],
+			["'direct'", 'directBrowser']
+		] as const) {
+			const button = buttonFor(`openBrowserAs(account, ${route})`);
+			expect(button).toContain(`disabled={${state}.disabled}`);
+			expect(button).toContain(`aria-busy={${state}.busy ? 'true' : undefined}`);
+			expect(button).toContain(`{${state}.label}`);
+		}
 
 		/*
 		 * And the failure itself is per account. One object served the whole list,

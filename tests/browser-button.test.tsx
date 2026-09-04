@@ -1,6 +1,10 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
-import { BrowserRouteButton, CopyCodeButton, VaultHome } from '../src/renderer/screens/VaultHome';
+import {
+	browserRoutePresentation,
+	CopyCodeButton,
+	VaultHome
+} from '../src/renderer/screens/VaultHome';
 import { AddAuthenticator } from '../src/renderer/screens/AddAuthenticator';
 import { accountSummary, type AccountSummary } from '../src/shared/ipc';
 
@@ -81,7 +85,7 @@ const browserButton = (html: string): string | undefined =>
 const directButton = (html: string): string | undefined =>
 	buttons(html).find((button) => button.includes('>Direct<'));
 
-/** The third: Steam through the proxy, everything else straight out. */
+/** The third: Steam and unknown hosts proxied, with named support hosts direct. */
 const steamOnlyButton = (html: string): string | undefined =>
 	buttons(html).find((button) => button.includes('>Steam only<'));
 
@@ -273,35 +277,12 @@ describe('the trading-browser button', () => {
 	});
 });
 
-function renderRouteButtons(openingRoute: 'proxy' | 'steam-only' | 'direct' | undefined): string {
-	return renderToStaticMarkup(
-		<>
-			<BrowserRouteButton
-				route="proxy"
-				openingRoute={openingRoute}
-				label="Open trading browser (proxied)"
-				className="browser-primary"
-				title="Fully proxied"
-				onOpen={noop}
-			/>
-			<BrowserRouteButton
-				route="steam-only"
-				openingRoute={openingRoute}
-				label="Steam only"
-				className="secondary"
-				title="Steam proxied"
-				onOpen={noop}
-			/>
-			<BrowserRouteButton
-				route="direct"
-				openingRoute={openingRoute}
-				label="Direct"
-				className="secondary"
-				title="Machine route"
-				onOpen={noop}
-			/>
-		</>
-	);
+function routePresentations(openingRoute: 'proxy' | 'steam-only' | 'direct' | undefined) {
+	return [
+		browserRoutePresentation('proxy', openingRoute, 'Open trading browser (proxied)'),
+		browserRoutePresentation('steam-only', openingRoute, 'Steam only'),
+		browserRoutePresentation('direct', openingRoute, 'Direct')
+	];
 }
 
 describe('browser-route progress', () => {
@@ -310,28 +291,31 @@ describe('browser-route progress', () => {
 		['steam-only', 1],
 		['direct', 2]
 	] as const)('shows progress only on the %s button that was pressed', (route, selectedAt) => {
-		const rendered = buttons(renderRouteButtons(route));
-		expect(rendered).toHaveLength(3);
-		expect(rendered.filter((button) => button.includes('Opening browser…'))).toHaveLength(1);
-		expect(rendered[selectedAt]).toContain('Opening browser…');
-		expect(rendered[selectedAt]).toMatch(/aria-busy="true"/);
-		for (const [at, button] of rendered.entries()) {
-			expect(button).toMatch(/disabled/);
+		const presented = routePresentations(route);
+		expect(presented).toHaveLength(3);
+		expect(presented.filter(({ label }) => label === 'Opening browser…')).toHaveLength(1);
+		expect(presented[selectedAt]).toEqual({
+			busy: true,
+			disabled: true,
+			label: 'Opening browser…'
+		});
+		for (const [at, state] of presented.entries()) {
+			expect(state.disabled).toBe(true);
 			if (at !== selectedAt) {
-				expect(button).not.toMatch(/aria-busy/);
+				expect(state.busy).toBe(false);
 			}
 		}
 	});
 
 	it('leaves every route enabled and labelled normally while none is opening', () => {
-		const rendered = buttons(renderRouteButtons(undefined));
-		expect(rendered.map((button) => button.match(/>([^<]+)<\/button>/)?.[1])).toEqual([
+		const presented = routePresentations(undefined);
+		expect(presented.map(({ label }) => label)).toEqual([
 			'Open trading browser (proxied)',
 			'Steam only',
 			'Direct'
 		]);
-		for (const button of rendered) {
-			expect(button).not.toMatch(/disabled|aria-busy/);
+		for (const state of presented) {
+			expect(state).toMatchObject({ busy: false, disabled: false });
 		}
 	});
 });

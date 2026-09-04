@@ -64,6 +64,8 @@ interface Recorded {
 	permissionsDenied: number;
 	/** Every URL `resolveProxy` was asked about, in order. */
 	resolved: string[];
+	/** Proxy setup, pool retirement, route checks and cookie writes in execution order. */
+	routingEvents: string[];
 }
 
 type AppliedProxy = { mode?: string; proxyRules?: string; proxyBypassRules?: string };
@@ -91,6 +93,7 @@ function fakeResolvedRoute(proxy: AppliedProxy | undefined, target: string): str
 function harness(
 	overrides: {
 		setProxy?: () => Promise<void>;
+		closeAllConnections?: () => Promise<void>;
 		landsOn?: string;
 		/** The exact tab loaded by `loadURL`, separate from whichever tab is active later. */
 		loadResult?: string;
@@ -148,7 +151,8 @@ function harness(
 		proxyCredentials: [],
 		windowOpenPolicies: [],
 		permissionsDenied: 0,
-		resolved: []
+		resolved: [],
+		routingEvents: []
 	};
 
 	const session: BrowserSessionHandle = {
@@ -176,6 +180,7 @@ function harness(
 		 */
 		resolveProxy: (url: string) => {
 			recorded.resolved.push(url);
+			recorded.routingEvents.push('resolve');
 			if (overrides.resolvesTo !== undefined) {
 				return Promise.resolve(overrides.resolvesTo);
 			}
@@ -190,8 +195,13 @@ function harness(
 			overrides.setProxy ??
 			((config) => {
 				recorded.proxies.push(config);
+				recorded.routingEvents.push('set-proxy');
 				return Promise.resolve();
 			}),
+		closeAllConnections: () => {
+			recorded.routingEvents.push('close-connections');
+			return overrides.closeAllConnections?.() ?? Promise.resolve();
+		},
 		clearStorageData: () => {
 			recorded.wiped.push(partitionName);
 			// A wipe that rejects is the case the manager used to swallow: the
@@ -216,6 +226,7 @@ function harness(
 		cookies: {
 			set: (cookie) => {
 				recorded.cookies.push({ url: cookie.url, name: cookie.name, value: cookie.value });
+				recorded.routingEvents.push('cookie');
 				/*
 				 * **The second host rejects, not the first.** Seeding is a loop over
 				 * Steam's domains, so the case that matters is a *partial* success:
@@ -505,6 +516,32 @@ describe('the in-app browser', () => {
 		 * is the point of the check.
 		 */
 		expect(JSON.stringify(recorded.proxies[0])).not.toContain('hunter2');
+	});
+
+	it('retires connections from the previous route before checking or signing in', async () => {
+		const { host, recorded } = harness();
+		await openAccountBrowser(host, { ...ACCOUNT, proxyUrl: 'http://10.0.0.9:8080' });
+
+		expect(recorded.routingEvents[0]).toBe('set-proxy');
+		expect(recorded.routingEvents[1]).toBe('close-connections');
+		expect(recorded.routingEvents.filter((event) => event === 'close-connections')).toHaveLength(1);
+		expect(recorded.routingEvents.indexOf('resolve')).toBeGreaterThan(1);
+		expect(recorded.routingEvents.indexOf('cookie')).toBeGreaterThan(
+			recorded.routingEvents.indexOf('resolve')
+		);
+	});
+
+	it('opens no signed-in window when the previous route’s connections cannot be retired', async () => {
+		const { host, recorded } = harness({
+			closeAllConnections: () => Promise.reject(new Error('connection pool unavailable'))
+		});
+
+		await expect(
+			openAccountBrowser(host, { ...ACCOUNT, proxyUrl: 'http://10.0.0.9:8080' })
+		).rejects.toBeInstanceOf(BrowserSessionError);
+		expect(recorded.resolved, 'routing was trusted despite a live old pool').toHaveLength(0);
+		expect(recorded.cookies, 'the rejected setup wrote a Steam cookie').toHaveLength(0);
+		expect(recorded.windows, 'the rejected setup created a window').toHaveLength(0);
 	});
 
 	/**
@@ -1022,6 +1059,7 @@ describe('closing every browser when the vault locks', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
+				closeAllConnections: () => Promise.resolve(),
 				clearStorageData: () => {
 					order.push('wipe');
 					return Promise.resolve();
@@ -1069,6 +1107,7 @@ describe('closing every browser when the vault locks', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
+				closeAllConnections: () => Promise.resolve(),
 				clearStorageData: () => {
 					cleared.push(partition);
 					return Promise.resolve();
@@ -1106,6 +1145,7 @@ describe('closing every browser when the vault locks', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
+				closeAllConnections: () => Promise.resolve(),
 				clearStorageData: () => Promise.reject(new Error('session gone')),
 				cookies: { set: () => Promise.resolve() }
 			}),
@@ -1160,6 +1200,7 @@ function lockHarness(cleared: string[], closed: string[]): BrowserHost {
 			denyPermissions: () => undefined,
 			resolveProxy: () => Promise.resolve('DIRECT'),
 			setProxy: () => Promise.resolve(),
+			closeAllConnections: () => Promise.resolve(),
 			clearStorageData: () => {
 				cleared.push(partition);
 				return Promise.resolve();
@@ -1258,6 +1299,7 @@ function slowHarness(options: { gateLoad?: boolean; gateResolve?: boolean } = {}
 					proxies.push(config);
 					gates.push(resolve);
 				}),
+			closeAllConnections: () => Promise.resolve(),
 			clearStorageData: () => {
 				wiped.push(partition);
 				return Promise.resolve();
@@ -1525,6 +1567,7 @@ describe('a browser whose account changed underneath it', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
+				closeAllConnections: () => Promise.resolve(),
 				clearStorageData: () => Promise.resolve(),
 				cookies: { set: () => Promise.resolve() }
 			}),
@@ -1737,6 +1780,7 @@ function routingHarness() {
 				proxies.push(config);
 				return Promise.resolve();
 			},
+			closeAllConnections: () => Promise.resolve(),
 			clearStorageData: () => {
 				wiped.push(partition);
 				return Promise.resolve();
@@ -1859,8 +1903,8 @@ describe('pressing the other routing button', () => {
 	 * **Three buttons now, and the third is not either of the other two.**
 	 *
 	 * "Steam only" shares the proxy with the fully routed window and shares
-	 * `DIRECT` for everything else with the direct one, so a key built from the
-	 * proxy URL alone — or from a boolean — collapses it into whichever it was
+	 * named direct exceptions with the direct one, so a key built from the proxy
+	 * URL alone — or from a boolean — collapses it into whichever it was
 	 * opened beside. The user presses the third button and is handed back a
 	 * window running the route they were trying to change away from.
 	 */
@@ -2229,6 +2273,7 @@ describe('a browser opened while the previous session is still being wiped', () 
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
+				closeAllConnections: () => Promise.resolve(),
 				clearStorageData: () =>
 					new Promise<void>((resolve) => {
 						order.push(`wipe:${partition}`);
@@ -2334,6 +2379,7 @@ describe('a retired browser attempt that settles after its replacement was reque
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
+				closeAllConnections: () => Promise.resolve(),
 				clearStorageData: () => {
 					cookiePresent = false;
 					return Promise.resolve();
@@ -2412,6 +2458,7 @@ describe('a retired browser attempt that settles after its replacement was reque
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
+				closeAllConnections: () => Promise.resolve(),
 				clearStorageData: () => {
 					if (failWipes) {
 						return Promise.reject(new Error('partition is busy'));
@@ -2610,7 +2657,7 @@ describe('a queued route switch when the account’s routing changes', () => {
 });
 
 /*
- * **Steam through the proxy, everything else direct.**
+ * **Steam and unknown hosts through the proxy, named support hosts direct.**
  *
  * The mode exists because a fully routed window is often the one that will not
  * load: a proxy address shared between accounts collects the rate limits and
@@ -2620,12 +2667,23 @@ describe('a queued route switch when the account’s routing changes', () => {
  * on the account, which is what the proxy was for.
  *
  * So the promise has two halves, and only one of them is a security property:
- * **every** Steam request goes through the proxy, and non-Steam requests are
- * allowed not to. A bug in the second half is slow browsing. A bug in the first
- * half is the user's real address arriving at Steam on a routed account, from a
+ * **every** Steam request goes through the proxy, and only named third-party
+ * support requests are allowed not to. A bug in the second half is slow
+ * browsing. A bug in the first half is the user's real address arriving at Steam on a routed account, from a
  * window that looks exactly like the one they asked for.
  */
 describe('routing only Steam through the proxy', () => {
+	it('pins every documented challenge and observed callback exception independently', () => {
+		expect(CHALLENGE_SUPPORT_HOSTS).toEqual([
+			'challenges.cloudflare.com',
+			'www.google.com',
+			'www.gstatic.com',
+			'recaptcha.google.com',
+			'www.recaptcha.net'
+		]);
+		expect(DIRECT_CALLBACK_HOSTS).toEqual(['csgoempirelogin2.com', 'csgoempirelogin7.com']);
+	});
+
 	/** The bypass list the session was actually given. */
 	function bypassOf(proxies: unknown[]): string {
 		return String((proxies.at(-1) as { proxyBypassRules?: string }).proxyBypassRules ?? '');
@@ -3093,6 +3151,7 @@ describe('closing the windows a new policy forbids', () => {
 				denyPermissions: () => undefined,
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				setProxy: () => Promise.resolve(),
+				closeAllConnections: () => Promise.resolve(),
 				clearStorageData: () =>
 					partition === browserPartitionFor(first) ? slowWipe : Promise.resolve(),
 				cookies: { set: () => Promise.resolve() }
@@ -3451,6 +3510,7 @@ describe('an owner claimed before the cookie boundary', () => {
 			sessionFromPartition: () => ({
 				denyPermissions: () => undefined,
 				setProxy: () => Promise.resolve(),
+				closeAllConnections: () => Promise.resolve(),
 				resolveProxy: () => Promise.resolve('DIRECT'),
 				clearStorageData: async () => {
 					wipes += 1;
@@ -3909,6 +3969,7 @@ describe('an account close during cookie handoff', () => {
 			denyPermissions: () => undefined,
 			resolveProxy: () => Promise.resolve('DIRECT'),
 			setProxy: () => Promise.resolve(),
+			closeAllConnections: () => Promise.resolve(),
 			clearStorageData: () => {
 				wipes += 1;
 				cookiePresent = false;

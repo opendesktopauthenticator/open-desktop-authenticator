@@ -97,8 +97,12 @@ Acceptance:
 
 - main and account window fakes receive identical app details exactly once;
 - non-Windows behavior is unchanged;
-- a Windows Electron harness creates both window types and verifies the
-  application did not omit either taskbar identity assignment.
+- automated adapter checks verify that both window types receive the same
+  identity before either is shown;
+- a manual Windows release-candidate check opens both windows and confirms the
+  shell keeps the product icon when it forms the two-window taskbar group. The
+  Windows shell does not expose that rendered grouping back through Electron,
+  so an automated API-call assertion cannot substitute for this check.
 
 ### 4. Clipboard expiry feedback is in the account identity column
 

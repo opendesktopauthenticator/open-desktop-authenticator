@@ -157,7 +157,25 @@ describe('the real-Electron harness process boundary', () => {
 			string
 		>;
 		const combined = `${scripts['smoke:browser']} ${scripts['stress:browser']}`;
-		expect(combined.match(/node tools\/run-electron-harness\.mjs/g)).toHaveLength(4);
+		expect(
+			[...combined.matchAll(/node tools\/run-electron-harness\.mjs\s+(\S+)/g)].map(
+				([, target]) => target
+			)
+		).toEqual([
+			'out/smoke/system-login.js',
+			'out/smoke/browser-routing.js',
+			'tools/smoke-browser-chrome.mjs',
+			'out/smoke/browser-window.js',
+			'out/stress/browser.js'
+		]);
 		expect(combined).not.toMatch(/(?:^|&&\s*)electron\s+(?:out|tools)[/\\]/);
+	});
+
+	it('gives the same-session route probe a hard deadline', () => {
+		const source = readFileSync(join(ROOT, 'tools/smoke-browser-routing.mjs'), 'utf8');
+		expect(source).toMatch(
+			/const deadline = setTimeout\(\(\) => \{[\s\S]*?app\.exit\(1\);[\s\S]*?\}, 30_000\);/
+		);
+		expect(source).toMatch(/clearTimeout\(deadline\);\s*app\.exit\(failed === 0 \? 0 : 1\);/);
 	});
 });

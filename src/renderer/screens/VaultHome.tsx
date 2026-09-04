@@ -92,35 +92,24 @@ export const browserFinished =
 		return next;
 	};
 
-/** A route button that distinguishes the selected attempt from its disabled siblings. */
-export function BrowserRouteButton({
-	route,
-	openingRoute,
-	label,
-	className,
-	title,
-	onOpen
-}: {
-	route: BrowserRoute;
-	openingRoute: BrowserRoute | undefined;
-	label: string;
-	className: string;
-	title: string;
-	onOpen: (route: BrowserRoute) => void;
-}): React.JSX.Element {
-	const selected = openingRoute === route;
-	return (
-		<button
-			type="button"
-			className={className}
-			disabled={openingRoute !== undefined}
-			aria-busy={selected ? 'true' : undefined}
-			title={title}
-			onClick={() => onOpen(route)}
-		>
-			{selected ? 'Opening browser…' : label}
-		</button>
-	);
+export interface BrowserRoutePresentation {
+	readonly busy: boolean;
+	readonly disabled: boolean;
+	readonly label: string;
+}
+
+/** Distinguish the selected attempt from its disabled sibling routes. */
+export function browserRoutePresentation(
+	route: BrowserRoute,
+	openingRoute: BrowserRoute | undefined,
+	label: string
+): BrowserRoutePresentation {
+	const busy = openingRoute === route;
+	return {
+		busy,
+		disabled: openingRoute !== undefined,
+		label: busy ? 'Opening browser…' : label
+	};
 }
 
 /**
@@ -145,7 +134,7 @@ export function CopyCodeButton({
 	const statusId = copied ? `clipboard-clear-status-${steamId64}` : undefined;
 
 	return (
-		<>
+		<div className="controls">
 			<button
 				type="button"
 				className={copied ? 'secondary copy copied' : 'secondary copy'}
@@ -166,7 +155,7 @@ export function CopyCodeButton({
 					Code clears from clipboard in {clipboardClearsInSeconds}s
 				</span>
 			)}
-		</>
+		</div>
 	);
 }
 
@@ -555,6 +544,17 @@ export function VaultHome({
 						const justCopied = copied?.steamId64 === account.steamId64;
 						const openingRoute = opening.get(account.steamId64)?.route;
 						const primaryBrowserRoute: BrowserRoute = account.hasProxy ? 'proxy' : 'direct';
+						const primaryBrowser = browserRoutePresentation(
+							primaryBrowserRoute,
+							openingRoute,
+							account.hasProxy ? 'Open trading browser (proxied)' : 'Open trading browser'
+						);
+						const steamOnlyBrowser = browserRoutePresentation(
+							'steam-only',
+							openingRoute,
+							'Steam only'
+						);
+						const directBrowser = browserRoutePresentation('direct', openingRoute, 'Direct');
 
 						/* Steam Guard codes run on a thirty-second window. Set once per row
 						   and inherited, so the drain under the glyphs and the ring around the
@@ -725,27 +725,27 @@ export function VaultHome({
 									 hosts goes direct. Fixed-server bypasses apply to the whole session, so
 									 those support hosts are direct even when another page requested
 									 them. Unknown stays proxied on purpose — see `steamOnlyBypass`. */}
-									<BrowserRouteButton
-										route={primaryBrowserRoute}
-										openingRoute={openingRoute}
-										label={
-											account.hasProxy ? 'Open trading browser (proxied)' : 'Open trading browser'
-										}
+									<button
+										type="button"
 										className="browser-primary"
+										disabled={primaryBrowser.disabled}
+										aria-busy={primaryBrowser.busy ? 'true' : undefined}
 										title={
 											account.hasProxy
 												? 'Open a signed-in browser routed through this account’s proxy. Everything in the window goes through it. Starts at your trade offers.'
 												: 'Open a signed-in browser for this account using this machine’s network settings. If its system proxy asks for a username and password, add that proxy to this account’s Proxy field first. Starts at your trade offers.'
 										}
-										onOpen={(route) =>
+										onClick={() =>
 											// A routed account's first button is the fully proxied one. An
 											// unrouted account has no proxy to route through, so its only
 											// button is the direct one — and saying that outright, rather
 											// than passing a route meaning "proxy if there is one", keeps
 											// the token mint on the same session the window will use.
-											openBrowserAs(account, route)
+											openBrowserAs(account, primaryBrowserRoute)
 										}
-									/>
+									>
+										{primaryBrowser.label}
+									</button>
 									{/* Both of the alternatives go under `Require proxies`, not just
 									    Direct. "Steam only" keeps Steam on the proxy but sends a short
 									    list of trade, callback and challenge-service hosts straight out from this
@@ -754,22 +754,26 @@ export function VaultHome({
 									    main process refuses both; this only stops offering them. */}
 									{account.hasProxy && !requireProxies && (
 										<>
-											<BrowserRouteButton
-												route="steam-only"
-												openingRoute={openingRoute}
-												label="Steam only"
+											<button
+												type="button"
 												className="secondary"
+												disabled={steamOnlyBrowser.disabled}
+												aria-busy={steamOnlyBrowser.busy ? 'true' : undefined}
 												title="Open the same browser with Steam — including its image and video hosts — still going through the proxy. A short list of known trade sites, exact sign-in callback hosts and exact challenge-service hosts goes direct for this whole browser session so each third-party flow stays on one connection. Anything else still goes through the proxy. Steam never sees your real address."
-												onOpen={(route) => openBrowserAs(account, route)}
-											/>
-											<BrowserRouteButton
-												route="direct"
-												openingRoute={openingRoute}
-												label="Direct"
+												onClick={() => openBrowserAs(account, 'steam-only')}
+											>
+												{steamOnlyBrowser.label}
+											</button>
+											<button
+												type="button"
 												className="secondary"
+												disabled={directBrowser.disabled}
+												aria-busy={directBrowser.busy ? 'true' : undefined}
 												title="Open the same browser without this account’s proxy. Your machine’s own network settings still apply — including a system or company proxy, if this machine has one — so Steam sees whatever address this machine normally uses. If that proxy asks for a username and password, add it to this account’s Proxy field and use the proxied route instead."
-												onOpen={(route) => openBrowserAs(account, route)}
-											/>
+												onClick={() => openBrowserAs(account, 'direct')}
+											>
+												{directBrowser.label}
+											</button>
 										</>
 									)}
 									{/* Last, and visually quietest of the three. It is the only one

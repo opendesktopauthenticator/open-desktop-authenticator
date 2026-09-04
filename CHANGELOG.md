@@ -71,7 +71,8 @@ never have to think about.
   Chrome-only identity. In Steam-only mode, supported trade sites, their exact
   challenge-service hosts and observed sign-in callbacks now stay on the same
   direct route; the fully proxied mode still sends every destination through
-  the account proxy.
+  the account proxy. Changing modes also retires connections opened by the
+  previous route before the new signed-in window is created.
 - Opening the account browser no longer makes a multi-window Windows taskbar
   group fall back to Electron's icon. Both top-level windows now carry the same
   explicit product identity and icon resource.

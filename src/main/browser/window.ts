@@ -64,6 +64,15 @@ export interface BrowserSessionHandle {
 		proxyBypassRules?: string;
 	}): Promise<void>;
 	/**
+	 * Retire sockets created under the previous proxy configuration.
+	 *
+	 * Electron documents this as the companion to `setProxy`: changing the
+	 * configuration does not stop Chromium reusing pooled connections that were
+	 * opened on the old route. This is required rather than optional because a
+	 * route check cannot see which path an already-open socket used.
+	 */
+	closeAllConnections(): Promise<void>;
+	/**
 	 * Ask Chromium what it would actually do with a URL.
 	 *
 	 * `setProxy` resolving means the configuration was accepted, not that it is
@@ -497,6 +506,13 @@ export async function openAccountBrowser(
 					 */
 					{ mode: 'system' }
 		);
+		/*
+		 * `setProxy` changes route selection, not the sockets Chromium already has.
+		 * Flush them before asking `resolveProxy` or writing the signed-in cookie;
+		 * otherwise a new fully-proxied window can reuse a direct keep-alive from
+		 * the previous Steam-only window despite every route probe passing.
+		 */
+		await session.closeAllConnections();
 	} catch (cause) {
 		throw new BrowserSessionError(
 			plan

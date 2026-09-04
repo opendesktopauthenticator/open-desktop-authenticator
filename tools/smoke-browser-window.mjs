@@ -7,8 +7,8 @@
  * That proved the toolbar renders and missed where a new tab actually goes,
  * because it never ran the code that decides. This one calls the real
  * `electronBrowserHost`: real session, real permissions refusal, real
- * `BaseWindow`, real tabs, real navigation. Everything the Trade button does
- * except the part that needs a Steam account.
+ * `BaseWindow`, real tabs, real navigation. Everything the account's trading
+ * browser control does except the part that needs a Steam account.
  *
  * Every unhandled error in the main process is collected and reported, because
  * "there are a lot of errors" should be a thing this prints rather than a thing
@@ -27,6 +27,10 @@ import {
 	planProxy,
 	steamOnlyBypass
 } from '../src/main/net/egress.ts';
+
+// The harness tests browser semantics, not GPU drivers. Software rendering
+// keeps it usable on build hosts with no working graphics process.
+app.disableHardwareAcceleration();
 
 const DIRECT_SITE_FIXTURE_HOST = 'csgoempire.com';
 const DIRECT_CHALLENGE_FIXTURE_HOST = 'challenges.cloudflare.com';
@@ -308,6 +312,25 @@ const main = async () => {
 	hidden.close();
 	hiddenLanding.close();
 	await wait(200);
+
+	/*
+	 * One hermetic origin for address-bar, popup and interrupted-load checks.
+	 * These used to depend on example.com, so an offline machine could turn a
+	 * browser regression into a DNS or internet failure. `/slow` deliberately
+	 * never finishes until the window closes; every other path is immediate.
+	 */
+	const navigationSite = createServer((request, response) => {
+		response.writeHead(200, { 'Content-Type': 'text/html' });
+		if (request.url === '/slow') {
+			response.write('<title>Waiting</title>');
+			return;
+		}
+		response.end(`<title>Local page</title><h1>${request.url ?? '/'}</h1>`);
+	});
+	await new Promise((resolve) => navigationSite.listen(0, '127.0.0.1', resolve));
+	const navigationPort = navigationSite.address().port;
+	const navigationUrl = (path) => `http://127.0.0.1:${navigationPort}${path}`;
+
 	window.on('navigated', (url) => titles.push(url));
 	window.setWebRtcPolicy('default');
 	check('the window is created without throwing', !window.isDestroyed());
@@ -391,16 +414,16 @@ const main = async () => {
 		).includes('New tab')
 	);
 
-	// Typing an address, for real.
+	// Typing an address, for real, into an offline local origin.
 	await run(`(() => {
 		const a = document.getElementById('address');
-		a.value = ${JSON.stringify('example.com')};
+		a.value = ${JSON.stringify(navigationUrl('/typed'))};
 		a.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
 	})()`);
-	await waitFor(() => window.currentUrl().startsWith('https://example.com'));
+	await waitFor(() => window.currentUrl().startsWith(navigationUrl('/typed')));
 	check(
-		'typing a bare host navigates the active tab',
-		window.currentUrl().startsWith('https://example.com'),
+		'typing an address navigates the active tab',
+		window.currentUrl().startsWith(navigationUrl('/typed')),
 		window.currentUrl()
 	);
 
@@ -497,7 +520,7 @@ const main = async () => {
 	const focusedAfterSpace = await run("document.activeElement?.getAttribute('role')");
 	check(
 		'Space activates another tab without leaving the strip',
-		window.currentUrl().startsWith('https://example.com') &&
+		window.currentUrl().startsWith(navigationUrl('/typed')) &&
 			chrome.isFocused() &&
 			focusedAfterSpace === 'tab',
 		`url = ${JSON.stringify(window.currentUrl())}; chrome focused = ${chrome.isFocused()}; DOM role = ${String(focusedAfterSpace)}`
@@ -544,7 +567,7 @@ const main = async () => {
 	 * named in the detail below instead of being either swallowed or miscounted.
 	 */
 	let loadOutcome = 'never settled';
-	const doomedLoad = doomed.loadURL('https://example.com/').then(
+	const doomedLoad = doomed.loadURL(navigationUrl('/slow')).then(
 		() => {
 			loadOutcome = 'resolved';
 		},
@@ -773,11 +796,9 @@ const main = async () => {
 	 * text.
 	 */
 	/*
-	 * Identity, not a URL match. The first smoke window already has a tab on
-	 * example.com, so finding "the contents whose URL contains example.com"
-	 * found *that* one — and the popups were opened in the wrong window while
-	 * this counted tabs in the right one. Both checks then reported a gate that
-	 * was never exercised.
+	 * Identity, not a broad URL match. The first smoke window already has a tab
+	 * on this local origin, so finding by hostname would select the wrong one and
+	 * let both popup checks report a gate they never exercised.
 	 */
 	const beforeOpener = new Set(webContents.getAllWebContents().map((c) => c.id));
 	const opener = electronBrowserHost.createWindow({
@@ -792,7 +813,7 @@ const main = async () => {
 	 * scheme test for the wrong reason — nothing reached the handler at all — and
 	 * would have kept passing with the gate removed.
 	 */
-	await opener.loadURL('https://example.com/');
+	await opener.loadURL(navigationUrl('/opener'));
 	await wait(1200);
 
 	const openerViews = () => webContents.getAllWebContents().filter((c) => !beforeOpener.has(c.id));
@@ -803,7 +824,7 @@ const main = async () => {
 			: await openerChrome.executeJavaScript('document.querySelectorAll(".tab").length', true);
 
 	const tabsBefore = await tabCount();
-	const page = openerViews().find((c) => c.getURL().includes('example.com'));
+	const page = openerViews().find((c) => c.getURL().includes(`${navigationPort}/opener`));
 	if (page) {
 		for (const url of [
 			'file:///C:/Windows/win.ini',
@@ -823,7 +844,7 @@ const main = async () => {
 
 	if (page) {
 		await page
-			.executeJavaScript(`window.open('https://example.com/opened-by-page');`, true)
+			.executeJavaScript(`window.open(${JSON.stringify(navigationUrl('/opened-by-page'))});`, true)
 			.catch(() => {});
 	}
 	await wait(900);
@@ -960,6 +981,14 @@ const main = async () => {
 
 	// A plain visit first, so the destination gets to set its cookies.
 	await submit('/warm', 'application/x-www-form-urlencoded', '_blank');
+	const seededCookieNames = (
+		await session.cookies.get({ url: `http://127.0.0.1:${targetPort}/` })
+	).map(({ name }) => name);
+	check(
+		'the SameSite control cookies were really stored before the popup comparison',
+		seededCookieNames.includes('strict_session') && seededCookieNames.includes('lax_session'),
+		seededCookieNames.join(', ') || 'the cookie jar is empty'
+	);
 	await submit('/posted', 'application/x-www-form-urlencoded', '_blank');
 
 	const posted = arrived.find((r) => r.url === '/posted');
@@ -1030,6 +1059,20 @@ const main = async () => {
 			control.cookie.includes('strict_session') === posted.cookie.includes('strict_session') &&
 			control.fetchSite === posted.fetchSite,
 		`control: ${control?.fetchSite} / ${control?.cookie || '(none)'} · popup: ${posted?.fetchSite} / ${posted?.cookie || '(none)'}`
+	);
+	/*
+	 * `/control` left this WebContents on the destination origin. A second post
+	 * is therefore same-site and must carry the Strict cookie. This positive
+	 * control stops an empty cookie jar from making every negative assertion
+	 * above look correct.
+	 */
+	await submit('/same-site-control', 'application/x-www-form-urlencoded', undefined);
+	const sameSiteControl = arrived.find((r) => r.url === '/same-site-control');
+	check(
+		'a same-site navigation sends the seeded Strict and Lax cookies',
+		sameSiteControl?.cookie.includes('strict_session') === true &&
+			sameSiteControl.cookie.includes('lax_session'),
+		`cookie: ${sameSiteControl?.cookie || '(none)'}`
 	);
 
 	poster.close();
@@ -1430,6 +1473,7 @@ const main = async () => {
 		),
 		proxyDuringDirectFixtures.join(', ') || 'no proxy observation'
 	);
+
 	await pacWindow.loadURL('http://store.steampowered.com/oda-smoke').catch(() => undefined);
 	await wait(800);
 	await pacWindow.loadURL('http://oda-smoke.invalid/not-steam').catch(() => undefined);
@@ -1459,6 +1503,7 @@ const main = async () => {
 	siteFixture.close();
 	challengeFixture.close();
 	pacProxy.close();
+	navigationSite.close();
 
 	check('no unhandled errors in the main process', problems.length === 0, problems.join(' | '));
 

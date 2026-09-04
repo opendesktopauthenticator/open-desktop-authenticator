@@ -340,7 +340,7 @@ token this application minted for the mobile client.** That is a fact about
 Valve's servers. No type and no test here can establish it, and the whole feature
 rests on it.
 
-1. Account list → **Trade** on an account with a live session.
+1. Account list → **Open trading browser** on an account with a live session.
 2. A window titled `<account name> — browser` opens on your trade offers.
 
 **Pass:** the page shows _your_ trade offers, with your account name in Steam's
@@ -364,23 +364,24 @@ The failure this feature exists to prevent is finishing a trade in an ordinary
 browser, which puts your own address on an account you were careful to route —
 while you are signed in and trading, which is the worst possible moment for it.
 
-1. On a **routed** account, press **Trade**.
+1. On a **routed** account, press **Open trading browser (proxied)**.
 2. In that window, visit any page that reports the address you are coming from.
 
 **Pass:** it is the proxy's address, not your machine's. **Fails if** it is
 yours — the window would then be worse than no feature at all.
 
-Then repeat T17's broken-proxy setup and press **Trade** on that account.
+Then repeat T17's broken-proxy setup and press **Open trading browser
+(proxied)** on that account.
 
 **Pass:** no window opens at all, and the row says the browser could not be
 routed. **Fails if** a window opens anyway, however it looks.
 
 ### T31a · The three routing buttons, and what each one shows Steam
 
-A routed account offers **Trade (proxied)**, **Steam only** and **Direct**. T31
-covered the first. These two are the ones a person will actually reach for when
-a proxied page will not load, so what they show Steam is worth seeing once with
-your own eyes.
+A routed account offers **Open trading browser (proxied)**, **Steam only** and
+**Direct**. T31 covered the first. These two are the ones a person will actually
+reach for when a proxied page will not load, so what they show Steam is worth
+seeing once with your own eyes.
 
 1. On a routed account, press **Steam only**. Visit a page that reports your
    address.
@@ -414,7 +415,8 @@ people who want the choice gone.
 
 1. Turn it on. Look at a routed account's row.
 
-**Pass:** only **Trade (proxied)** remains — Steam only and Direct are gone.
+**Pass:** only **Open trading browser (proxied)** remains — Steam only and
+Direct are gone.
 
 2. Look at an account with **no** proxy and press its button.
 
@@ -451,20 +453,35 @@ says that request should not be made unrouted.
 live Steam web session outliving the lock is a smaller lock than the one you
 set.
 
-Then unlock and press **Trade** again. It should open normally. What it must
-never do is open **without** the unlock: while the vault is locked there is no
-way to reach that window at all.
+Then unlock and press **Open trading browser** again. It should open normally.
+What it must never do is open **without** the unlock: while the vault is locked
+there is no way to reach that window at all.
 
-### T33 · Two browsers, two accounts, and pressing Trade twice
+### T33 · Two browsers, two accounts, and pressing the browser button twice
 
 1. Open browsers for two accounts routed through different proxies.
 2. In each, check the account name Steam shows in its header.
-3. Go back to the account list and press **Trade** again on one of them.
+3. Go back to the account list and press **Open trading browser** again on one
+   of them.
 
 **Pass:** each window is signed in as its own account and neither picks up the
 other's session — the browser half of T19. And the second press brings the
 window you already have to the front rather than doing nothing, which is what
 you would otherwise see when it is hidden behind the app.
+
+### T33a · Opening the browser keeps the product taskbar icon
+
+Run this on the Windows release candidate, not only in development.
+
+1. Start with the authenticator window open and check its taskbar icon.
+2. Press **Open trading browser** so Windows forms a two-window taskbar group.
+3. Hover or expand that group and inspect both window previews.
+
+**Pass:** the group and both previews keep the Open Desktop Authenticator icon.
+**Fails if:** opening the browser changes the group or either preview to the
+generic Electron icon. The automated suite proves both native windows receive
+the same application identity before they are shown; only this manual check can
+prove how Windows Explorer actually renders the group.
 
 ---
 
