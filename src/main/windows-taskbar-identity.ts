@@ -25,7 +25,6 @@ export interface WindowsTaskbarEnvironment {
 	packaged: boolean;
 	windowsStore: boolean;
 	portable: boolean;
-	developmentIdentity: boolean;
 	portableExecutablePath?: string;
 	applicationPath: string;
 	executablePath: string;
@@ -50,10 +49,9 @@ function quoteWindowsCommandArgument(value: string): string {
  * The properties Windows uses for the taskbar group, rather than for the
  * title-bar or Alt-Tab icon.
  *
- * An opted-in development identity has no installed shortcut, and a portable
- * run executes an inner binary from a temporary directory. Those two channels
- * therefore need complete per-window relaunch metadata. Ordinary development
- * uses the BrowserWindows' native icons. Installed builds already have the
+ * A development identity has no installed shortcut, and a portable run executes
+ * an inner binary from a temporary directory. Those two channels therefore need
+ * complete per-window relaunch metadata. Installed builds already have the
  * matching executable and shortcut; Store builds already have package identity.
  */
 export function windowsTaskbarDetails({
@@ -61,7 +59,6 @@ export function windowsTaskbarDetails({
 	packaged,
 	windowsStore,
 	portable,
-	developmentIdentity,
 	portableExecutablePath,
 	applicationPath,
 	executablePath
@@ -93,10 +90,6 @@ export function windowsTaskbarDetails({
 	if (packaged) {
 		return undefined;
 	}
-	if (!developmentIdentity) {
-		return undefined;
-	}
-
 	const appPath = resolve(applicationPath);
 	const electronPath = resolve(executablePath);
 	return {

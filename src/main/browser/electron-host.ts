@@ -202,9 +202,8 @@ export const electronBrowserHost: BrowserHost = {
 			// landing passes the main-process sign-in check. Direct host users such as
 			// the smoke harness keep Electron's existing visible default.
 			show: options.show ?? true,
-			// The same mark the main window carries. Without it this window took
-			// Electron's default and announced itself as a generic Electron app in
-			// the taskbar, while holding a live Steam session.
+			// The native mark for the title bar and Alt-Tab. Complete Windows taskbar
+			// group details are applied below before this window is revealed.
 			icon: windowImage(),
 			autoHideMenuBar: true,
 			webPreferences: {
@@ -224,7 +223,6 @@ export const electronBrowserHost: BrowserHost = {
 			packaged: app.isPackaged,
 			windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true,
 			portable: process.env.PORTABLE_EXECUTABLE_DIR !== undefined,
-			developmentIdentity: process.env.ODA_WINDOWS_IDENTITY === '1',
 			portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE,
 			applicationPath: app.getAppPath(),
 			executablePath: process.execPath

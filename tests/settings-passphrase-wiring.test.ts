@@ -183,14 +183,20 @@ describe('the portable build', () => {
 		 * that the call is behind a condition, and that the condition still asks
 		 * about portable.
 		 */
-		const guard = main.match(/if \(([^)]*)\)\s*\{\s*void registerWindowsIdentity\(/);
+		const registration = main.indexOf('void registerWindowsIdentity(');
+		const guardStart = main.lastIndexOf('\n\tif (', registration);
 		expect(
-			guard,
+			registration,
+			'registerWindowsIdentity is no longer present at startup'
+		).toBeGreaterThanOrEqual(0);
+		expect(
+			guardStart,
 			'registerWindowsIdentity is no longer directly behind an `if`, so this test can no ' +
 				'longer see what guards it — read the call site and rewrite this assertion'
-		).not.toBeNull();
+		).toBeGreaterThanOrEqual(0);
+		const guard = main.slice(guardStart, registration);
 		expect(
-			guard?.[1],
+			guard,
 			'the portable build now writes the Windows identity keys: two values under HKCU, one ' +
 				'of them a path pointing back at a copy the user was only trying out'
 		).toContain('portableDir === undefined');

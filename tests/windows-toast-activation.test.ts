@@ -449,11 +449,24 @@ describe('production Windows activation wiring', () => {
 
 	it('keeps Store activation while excluding portable and ordinary development runs', () => {
 		expect(main).toMatch(
-			/const persistentWindowsToastActivation\s*=\s*process\.platform === 'win32'\s*&&\s*portableDir === undefined\s*&&\s*\(windowsStore \|\| windowsAppId !== undefined\)/
+			/const persistentDevelopmentIdentity\s*=\s*!app\.isPackaged && process\.env\.ODA_WINDOWS_IDENTITY === '1'/
+		);
+		expect(main).toMatch(
+			/const persistentWindowsToastActivation\s*=\s*process\.platform === 'win32'\s*&&\s*portableDir === undefined\s*&&\s*\(windowsStore \|\| app\.isPackaged \|\| persistentDevelopmentIdentity\)/
 		);
 		expect(main).toMatch(
 			/if \(persistentWindowsToastActivation\)\s*\{\s*app\.setToastActivatorCLSID\(WINDOWS_TOAST_ACTIVATOR_CLSID\)/
 		);
+	});
+
+	it('does not turn taskbar identity into persistent development registration', () => {
+		const start = main.indexOf('const persistentDevelopmentIdentity');
+		const end = main.indexOf("nativeTheme.themeSource = 'dark'", start);
+		expect(start).toBeGreaterThanOrEqual(0);
+		expect(end).toBeGreaterThan(start);
+		const registration = main.slice(start, end);
+		expect(registration).toContain('(app.isPackaged || persistentDevelopmentIdentity)');
+		expect(registration).not.toContain('windowsAppId !== undefined) {');
 	});
 
 	it('places opaque launch metadata in each persistent Windows toast', () => {

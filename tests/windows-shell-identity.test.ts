@@ -19,30 +19,28 @@ const MAIN = readFileSync(join(__dirname, '..', 'src', 'main', 'index.ts'), 'utf
  *
  * Claiming the AppUserModelID is not free. It is what names a toast and lets
  * Action Center route a click, and it is also what decides the taskbar button's
- * icon — through a Start Menu shortcut carrying `System.AppUserModel.ID`, which
- * only an installer writes. A source checkout has no such shortcut, so Windows
- * fell back to the icon of the running executable and put Electron's mark on the
- * taskbar, whatever `BrowserWindow.icon` was handed.
+ * icon. An installed build gets that mapping from its executable and shortcut;
+ * a source checkout has neither, so every development window supplies complete
+ * relaunch properties under a separate development ID.
  *
- * So a development run does not claim it, an installed or portable process uses
- * its own desktop channel ID, and a Store process keeps its package identity.
- * These cases are the whole rule; each one is a build somebody actually runs.
+ * Installed, portable and development processes use separate desktop IDs, and a
+ * Store process keeps its package identity. These cases are the whole rule;
+ * each one is a build somebody actually runs.
  */
 describe('claiming the Windows shell identity', () => {
 	const dev = {
 		appId: branding.appId,
 		packaged: false,
 		portable: false,
-		windowsStore: false,
-		override: undefined
+		windowsStore: false
 	};
 
-	it('is skipped by an ordinary development run', () => {
+	it('uses a separate stable identity in ordinary development', () => {
 		expect(
 			windowsProcessAppId(dev),
-			'`npm start` claims the AppUserModelID, which hands the taskbar button back to ' +
-				'electron.exe and puts the Electron mark where the product mark should be'
-		).toBeUndefined();
+			'two development windows without their own AUMID regroup under electron.exe'
+		).toBe(developmentWindowsAppId(branding.appId));
+		expect(windowsProcessAppId(dev)).not.toBe(branding.appId);
 	});
 
 	it('is claimed by a packaged build, which is what ships', () => {
@@ -73,42 +71,20 @@ describe('claiming the Windows shell identity', () => {
 		).toBeUndefined();
 	});
 
-	/*
-	 * The escape hatch exists because the cost of skipping is paid entirely by
-	 * notification work: attribution and Action Center routing. Anyone testing
-	 * that needs the real thing, and should not have to edit source to get it.
-	 */
-	it('is restored in development by ODA_WINDOWS_IDENTITY=1', () => {
-		expect(
-			windowsProcessAppId({ ...dev, override: '1' }),
-			'the documented escape hatch does not work, so testing notifications means editing source'
-		).toBe(developmentWindowsAppId(branding.appId));
-	});
-
-	/*
-	 * Exactly "1". An unset variable reads as undefined and an unrelated value
-	 * must not switch behaviour on — "0" turning the identity ON is the kind of
-	 * thing nobody notices until a taskbar icon is wrong again.
-	 */
-	it.each([
-		['unset', undefined],
-		['empty', ''],
-		['zero', '0'],
-		['false', 'false'],
-		['true', 'true']
-	])('is not restored by ODA_WINDOWS_IDENTITY=%s', (_name, value) => {
-		expect(windowsProcessAppId({ ...dev, override: value })).toBeUndefined();
-	});
-
 	it('uses the selected channel ID and leaves the Store package ID untouched at startup', () => {
-		expect(MAIN).toMatch(/const windowsStore\s*=/);
-		expect(MAIN).toMatch(/windowsProcessAppId\(\{[\s\S]*?windowsStore,[\s\S]*?\}\)/);
+		expect(MAIN).toMatch(
+			/const windowsStore\s*=\s*\(process as NodeJS\.Process & \{ windowsStore\?: boolean \}\)\.windowsStore === true/
+		);
+		expect(MAIN).toMatch(
+			/windowsProcessAppId\(\{\s*appId:\s*branding\.appId,\s*packaged:\s*app\.isPackaged,\s*portable:\s*portableDir !== undefined,\s*windowsStore\s*\}\)/
+		);
+		expect(MAIN).not.toMatch(/windowsProcessAppId\(\{[\s\S]*?override:/);
 		expect(MAIN).toMatch(
 			/if \(process\.platform === 'win32' && windowsAppId !== undefined\)\s*\{\s*app\.setAppUserModelId\(windowsAppId\)/
 		);
 		expect(MAIN).not.toMatch(/app\.setAppUserModelId\(branding\.appId\)/);
 		expect(MAIN).toMatch(
-			/portableDir === undefined && !windowsStore && windowsAppId !== undefined/
+			/portableDir === undefined\s*&&\s*!windowsStore\s*&&\s*windowsAppId !== undefined\s*&&\s*\(app\.isPackaged \|\| persistentDevelopmentIdentity\)/
 		);
 		expect(MAIN).toMatch(/registerWindowsIdentity\(\{\s*appId: windowsAppId,/);
 	});

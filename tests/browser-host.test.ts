@@ -731,6 +731,7 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(native?.shown).toBe(1);
 		expect(native?.events).toEqual([
 			'menu-cleared',
+			...(process.platform === 'win32' ? ['app-details', 'app-details'] : []),
 			process.platform === 'win32' ? 'show-inactive' : 'show',
 			'focus'
 		]);
@@ -765,7 +766,6 @@ describe('the Electron adapter for the in-app browser', () => {
 			packaged: false,
 			windowsStore: false,
 			portable: false,
-			developmentIdentity: false,
 			portableExecutablePath: undefined,
 			applicationPath: process.cwd(),
 			executablePath: process.execPath

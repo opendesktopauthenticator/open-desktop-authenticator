@@ -74,8 +74,10 @@ never have to think about.
   the account proxy. Changing modes also retires connections opened by the
   previous route before the new signed-in window is created.
 - Opening the account browser no longer makes a multi-window Windows taskbar
-  group fall back to Electron's icon. Its isolated toolbar now uses a real
-  application window while trading pages remain separate, sandboxed views.
+  group fall back to Electron's icon. Development runs now use a separate stable
+  group ID and give Windows the product icon and relaunch details before either
+  window is shown. The isolated toolbar uses a real application window while
+  trading pages remain separate, sandboxed views.
   Installed, portable and Microsoft Store builds keep separate shell identities;
   portable relaunch metadata points at its durable outer launcher, and Store
   builds retain the identity from their signed package.

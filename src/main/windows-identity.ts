@@ -22,22 +22,20 @@ export function portableWindowsAppId(appId: string): string {
  * Store packages already have an identity derived from their signed manifest.
  * Overriding it with the desktop installer's ID breaks the package's grouping
  * and activation contract. Portable has a separate ID because it has a separate
- * vault and relaunch target. An ordinary development process and its windows
- * stay anonymous; the notification-test opt-in receives development-only
- * relaunch metadata separately.
+ * vault and relaunch target. Development uses its own stable ID so two windows
+ * form a product-icon taskbar group rather than inheriting Electron's executable
+ * identity. Persistent notification registration remains a separate opt-in.
  */
 export function windowsProcessAppId({
 	appId,
 	packaged,
 	portable,
-	windowsStore,
-	override
+	windowsStore
 }: {
 	appId: string;
 	packaged: boolean;
 	portable: boolean;
 	windowsStore: boolean;
-	override: string | undefined;
 }): string | undefined {
 	if (windowsStore) {
 		return undefined;
@@ -48,7 +46,7 @@ export function windowsProcessAppId({
 	if (packaged) {
 		return appId;
 	}
-	return override === '1' ? developmentWindowsAppId(appId) : undefined;
+	return developmentWindowsAppId(appId);
 }
 
 /**

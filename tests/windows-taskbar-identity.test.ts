@@ -10,21 +10,41 @@ import {
 
 const ROOT = resolve(__dirname, '..');
 const MAIN = readFileSync(join(ROOT, 'src/main/index.ts'), 'utf8');
+const ACCOUNT_BROWSER = readFileSync(join(ROOT, 'src/main/browser/electron-host.ts'), 'utf8');
 
 const development = {
 	platform: 'win32' as const,
 	packaged: false,
 	windowsStore: false,
 	portable: false,
-	developmentIdentity: false,
 	portableExecutablePath: undefined,
 	applicationPath: ROOT,
 	executablePath: join(ROOT, 'node_modules/electron/dist/electron.exe')
 };
 
 describe('the taskbar identity shared by every top-level window', () => {
-	it('uses the real ICO when persistent development identity is explicitly enabled', () => {
-		const details = windowsTaskbarDetails({ ...development, developmentIdentity: true });
+	it('keeps both constructors on the native image and applies identity separately', () => {
+		for (const [name, source] of [
+			['main', MAIN],
+			['account', ACCOUNT_BROWSER]
+		] as const) {
+			const construction = source.indexOf('new BrowserWindow(');
+			const identity = source.indexOf('applyWindowsTaskbarIdentity(window', construction);
+			const constructorBoundary = source.slice(construction, identity);
+
+			expect(construction, `${name} BrowserWindow constructor is missing`).toBeGreaterThanOrEqual(
+				0
+			);
+			expect(identity, `${name} taskbar identity boundary is missing`).toBeGreaterThan(
+				construction
+			);
+			expect(constructorBoundary).toContain('icon: windowImage()');
+			expect(constructorBoundary).not.toContain('browserWindowIcon');
+		}
+	});
+
+	it('uses the real ICO and complete group details in ordinary development', () => {
+		const details = windowsTaskbarDetails(development);
 
 		expect(details).toEqual({
 			appId: developmentWindowsAppId(branding.appId),
@@ -36,10 +56,6 @@ describe('the taskbar identity shared by every top-level window', () => {
 		expect(isAbsolute(details!.appIconPath)).toBe(true);
 		expect(details!.appIconPath).not.toBe(development.executablePath);
 		expect(existsSync(details!.appIconPath), 'the development taskbar ICO is missing').toBe(true);
-	});
-
-	it('leaves an ordinary development BrowserWindow on its native product icon', () => {
-		expect(windowsTaskbarDetails(development)).toBeUndefined();
 	});
 
 	it('leaves an installed executable on its matching process and shortcut identity', () => {
@@ -105,10 +121,9 @@ describe('the taskbar identity shared by every top-level window', () => {
 			if (details.appIconPath) storedIcon = details.appIconPath;
 		});
 
-		const optedIn = { ...development, developmentIdentity: true };
-		applyWindowsTaskbarIdentity({ setAppDetails }, optedIn);
+		applyWindowsTaskbarIdentity({ setAppDetails }, development);
 
-		const details = windowsTaskbarDetails(optedIn)!;
+		const details = windowsTaskbarDetails(development)!;
 		expect(setAppDetails.mock.calls).toEqual([[details], [{ appId: details.appId }]]);
 		expect(iconSeenByTaskbar).toBe(details.appIconPath);
 	});
@@ -121,16 +136,31 @@ describe('the taskbar identity shared by every top-level window', () => {
 		expect(setAppDetails).not.toHaveBeenCalled();
 	});
 
-	it('passes Store and portable runtime signals at the main-window boundary', () => {
-		const construction = MAIN.indexOf('const window = new BrowserWindow(');
-		const identity = MAIN.indexOf('applyWindowsTaskbarIdentity(window', construction);
-		const reveal = MAIN.indexOf("window.once('ready-to-show'", construction);
-		const call = MAIN.slice(identity, reveal);
+	it('passes the complete ungated runtime identity to both window boundaries', () => {
+		for (const [name, source] of [
+			['main', MAIN],
+			['account', ACCOUNT_BROWSER]
+		] as const) {
+			const construction = source.indexOf('new BrowserWindow(');
+			const identity = source.indexOf('applyWindowsTaskbarIdentity(window', construction);
+			const beforeIdentity = source.slice(construction, identity);
+			const call = source.slice(identity, identity + 750);
 
-		expect(call).toContain('windowsStore:');
-		expect(call).toContain('process.env.PORTABLE_EXECUTABLE_DIR !== undefined');
-		expect(call).toContain("developmentIdentity: process.env.ODA_WINDOWS_IDENTITY === '1'");
-		expect(call).toContain('portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE');
+			expect(identity, `${name} taskbar identity call is missing`).toBeGreaterThan(construction);
+			expect(beforeIdentity, `${name} taskbar identity is conditional`).not.toMatch(/\bif\s*\(/);
+			expect(beforeIdentity).not.toContain('ODA_WINDOWS_IDENTITY');
+			expect(call).toContain('platform: process.platform');
+			expect(call).toContain('packaged: app.isPackaged');
+			expect(call).toContain(
+				'windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true'
+			);
+			expect(call).toContain('process.env.PORTABLE_EXECUTABLE_DIR !== undefined');
+			expect(call).toContain('portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE');
+			expect(call).toContain('applicationPath: app.getAppPath()');
+			expect(call).toContain('executablePath: process.execPath');
+			expect(call).not.toContain('developmentIdentity');
+			expect(call).not.toContain('ODA_WINDOWS_IDENTITY');
+		}
 	});
 
 	it('assigns the main window before any ready-to-show handler can reveal it', () => {

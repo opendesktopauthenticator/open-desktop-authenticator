@@ -12,9 +12,9 @@ import { premultipliedBgra } from '../shared/logo';
  * draws is code, not a binary.
  *
  * The `.ico` files still matter. They stamp the executable and installer, and
- * development windows also hand `build/icon.ico` to Windows as the taskbar
- * group's explicit icon resource. The pixels Electron draws inside native
- * windows and notifications still come from this module.
+ * unpackaged Windows windows name `build/icon.ico` in their shell-group details.
+ * The pixels Electron draws on native window surfaces still come from this
+ * module.
  *
  * ## Why several representations
  *
@@ -60,11 +60,9 @@ export const notificationImage = (): NativeImage => logoImage(256, [1]);
 /**
  * The native window icon: title-bar, Alt-Tab, and the window list.
  *
- * Windows taskbar grouping is a separate shell identity. In development the
- * process executable is Electron, so opening the account browser can make a
- * newly formed two-window group fall back to Electron's mark even though both
- * windows carry this image. `windows-taskbar-identity.ts` gives every top-level
- * window the product AppUserModelID and a real ICO resource before it is shown;
- * this image remains the correct source for Electron's own window surfaces.
+ * Windows taskbar grouping is a separate shell identity. In an unpackaged
+ * Windows run, `windows-taskbar-identity.ts` gives the group a development-only
+ * AppUserModelID and names the ICO resource before either window is shown. This
+ * image remains the correct source for the windows themselves.
  */
 export const windowImage = (): NativeImage => logoImage(32, [1, 1.5, 2, 4, 8]);

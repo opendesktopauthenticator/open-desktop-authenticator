@@ -124,9 +124,8 @@ function createMainWindow(): BrowserWindow {
 		show: false,
 		title: branding.productName,
 		autoHideMenuBar: true,
-		// Alt-Tab and the taskbar button. A packaged Windows build takes these from
-		// the executable, so this is the development case — which is the one the
-		// people building it look at all day.
+		// The native mark for the title bar and Alt-Tab. Windows taskbar grouping
+		// is supplied separately through complete AppDetails below.
 		icon: windowImage(),
 		// Painted before the renderer has drawn anything, so a resize or a slow
 		// first paint shows the app's own black rather than white.
@@ -156,16 +155,15 @@ function createMainWindow(): BrowserWindow {
 		}
 	});
 
-	// `icon` supplies the ordinary development window mark. Explicit taskbar
-	// relaunch details are needed only by portable and by the opt-in persistent
-	// notification test identity; installed and Store channels own real shell
-	// identities already. The account browser uses the same policy.
+	// Development and portable windows have no installed shortcut to supply their
+	// group icon, so complete relaunch details are applied before reveal. Installed
+	// and Store channels own real shell identities already. The account browser
+	// uses the same policy.
 	applyWindowsTaskbarIdentity(window, {
 		platform: process.platform,
 		packaged: app.isPackaged,
 		windowsStore: (process as NodeJS.Process & { windowsStore?: boolean }).windowsStore === true,
 		portable: process.env.PORTABLE_EXECUTABLE_DIR !== undefined,
-		developmentIdentity: process.env.ODA_WINDOWS_IDENTITY === '1',
 		portableExecutablePath: process.env.PORTABLE_EXECUTABLE_FILE,
 		applicationPath: app.getAppPath(),
 		executablePath: process.execPath
@@ -233,16 +231,14 @@ function start(): void {
 	 * ID, portable owns a separate ID because it has a different vault and outer
 	 * launcher, and the Store owns the package-derived identity from its signed
 	 * manifest. Overwriting the Store ID here would break its grouping and
-	 * activation contract. Ordinary development keeps no process-wide or
-	 * per-window ID and uses each BrowserWindow's native product icon. The opt-in
-	 * adds a complete development identity for persistent-notification testing.
+	 * activation contract. Development uses its own stable ID and complete window
+	 * details so a second window does not hand the grouped icon back to Electron.
 	 */
 	const windowsAppId = windowsProcessAppId({
 		appId: branding.appId,
 		packaged: app.isPackaged,
 		portable: portableDir !== undefined,
-		windowsStore,
-		override: process.env.ODA_WINDOWS_IDENTITY
+		windowsStore
 	});
 	if (process.platform === 'win32' && windowsAppId !== undefined) {
 		app.setAppUserModelId(windowsAppId);
@@ -250,13 +246,14 @@ function start(): void {
 	// The Store's package manifest supplies its AppUserModelID, but the running
 	// process still has to name the same toast activator declared there. Keep
 	// that decision separate from the desktop-ID override so Store activation is
-	// preserved while its package identity remains untouched. Ordinary
-	// development opts in with ODA_WINDOWS_IDENTITY=1 as before; portable leaves
-	// no persistent COM/registry state on the host.
+	// preserved while its package identity remains untouched. Development's
+	// taskbar identity is always in-memory; persistent notification registration
+	// remains opt-in. Portable leaves no persistent COM/registry state on the host.
+	const persistentDevelopmentIdentity = !app.isPackaged && process.env.ODA_WINDOWS_IDENTITY === '1';
 	const persistentWindowsToastActivation =
 		process.platform === 'win32' &&
 		portableDir === undefined &&
-		(windowsStore || windowsAppId !== undefined);
+		(windowsStore || app.isPackaged || persistentDevelopmentIdentity);
 	if (persistentWindowsToastActivation) {
 		app.setToastActivatorCLSID(WINDOWS_TOAST_ACTIVATOR_CLSID);
 	}
@@ -273,11 +270,15 @@ function start(): void {
 	// it is a plainer caption on a toast notification, which is the right trade
 	// against leaving registry state on somebody else's machine.
 	//
-	// **Nor in an ordinary development run**, for the same reason and one more:
-	// these values hang off the AppUserModelID, which is not set there (see
-	// above), so writing them leaves registry state on the machine that nothing
-	// reads. `ODA_WINDOWS_IDENTITY=1` restores the identity and this with it.
-	if (portableDir === undefined && !windowsStore && windowsAppId !== undefined) {
+	// **Nor in an ordinary development run.** Its process/window taskbar identity
+	// is ephemeral; `ODA_WINDOWS_IDENTITY=1` remains the explicit permission to
+	// leave notification name/icon registration behind in HKCU.
+	if (
+		portableDir === undefined &&
+		!windowsStore &&
+		windowsAppId !== undefined &&
+		(app.isPackaged || persistentDevelopmentIdentity)
+	) {
 		void registerWindowsIdentity({
 			appId: windowsAppId,
 			displayName: branding.productName,
