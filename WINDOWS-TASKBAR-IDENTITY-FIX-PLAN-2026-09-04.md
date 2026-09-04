@@ -57,6 +57,31 @@ compatible but is not the controlled variable. Therefore the remaining defect
 is the representation passed to Electron, not another window-class or refresh
 ordering problem.
 
+### Third manual-gate correction — 2026-09-05
+
+The second conclusion was also rejected before implementation was committed.
+Its green shield belonged to a separate, one-window ODA process. A new probe
+enumerated the exact account HWND, made that HWND the foreground window, read
+the taskbar button's accessibility identity and captured the highlighted
+button. With two top-level windows, the absolute ICO string alone still grouped
+under `electron.app.Electron` and still drew the atom.
+
+The controlled result is now:
+
+| Two-window development variant                                                                   | Exact foreground group |
+| ------------------------------------------------------------------------------------------------ | ---------------------- |
+| absolute constructor ICO only                                                                    | Electron atom          |
+| fresh process AUMID + complete per-window AppDetails                                             | ODA shield             |
+| stable `com.opendesktopauthenticator.desktop.development` AUMID + complete per-window AppDetails | ODA shield             |
+| same complete identity with the original constructor NativeImage                                 | ODA shield             |
+
+The actual boundary is therefore Windows shell group identity, not the
+constructor icon representation. The absolute-path selector drafted after the
+second conclusion is unnecessary and must not ship. No Start Menu shortcut is
+needed: the complete per-window relaunch properties are the documented
+shortcut-free identity route, and that exact route passed the foreground-mapped
+native check.
+
 ## Related release identities found during the pre-fix review
 
 The same helper is used by four materially different Windows environments, so
@@ -64,7 +89,7 @@ the corrective change must not treat `app.isPackaged` as the whole decision:
 
 | Environment               | Shell identity                                  | Durable icon / relaunch target                                                              |
 | ------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Development               | no process/window ID in the ordinary run        | absolute source-tree `build/icon.ico` string passed to each real `BrowserWindow`            |
+| Development               | stable development process/window ID            | source ICO in complete per-window AppDetails; constructor keeps its generated NativeImage   |
 | Installed / unpacked NSIS | the desktop product ID used by Electron Builder | the packaged executable and installer shortcut; no per-window override                      |
 | Portable                  | a portable-specific per-window ID               | `PORTABLE_EXECUTABLE_FILE`, the stable outer launcher, never the temporary inner executable |
 | Microsoft Store           | the package manifest's identity                 | Windows package metadata; no desktop AppUserModelID override                                |
@@ -133,14 +158,12 @@ event without making the window visible. Reveal it with `showInactive()` and
 then `focus()` on Windows. Keep `show()` followed by `focus()` on Linux and
 macOS, because `showInactive()` is explicitly unsupported on Wayland.
 
-Ordinary development needs no explicit per-window AppUserModelID, but both
-top-level BrowserWindow constructors must receive the absolute source-tree ICO
-as a **string**. Do not convert it to `NativeImage`; the live taskbar matrix
-proves that apparently equivalent representation falls back to Electron's
-atom. Packaged and non-Windows windows keep the generated native image because
-the source-tree path is not durable there. Only the development notification
-opt-in and portable channel need explicit relaunch details. For those two
-cases, apply one complete details object and repeat the ID:
+Ordinary Windows development must claim its stable development-specific
+AppUserModelID at the process boundary, and every top-level development window
+must receive complete relaunch details before it is shown. Keep the generated
+NativeImage in the BrowserWindow constructor; the exact native matrix proves it
+works once the group has a complete identity. Development and portable windows
+apply one complete details object and repeat the ID:
 
 1. store `{ appId, appIconPath, appIconIndex, relaunchCommand,
 relaunchDisplayName }`;
@@ -153,19 +176,24 @@ first call also remains safe if Electron later starts enforcing its documented
 statement that an AppUserModelID is required for the other options to have an
 effect.
 
-For development with `ODA_WINDOWS_IDENTITY=1`, include a development-specific
-ID, source ICO and a relaunch command containing Electron plus the application
-path. Ordinary development sets none of those properties. For portable,
+For ordinary development, include a development-specific ID, source ICO and a
+relaunch command containing Electron plus the application path. Remove the
+`ODA_WINDOWS_IDENTITY=1` gate from process and window taskbar identity: leaving
+either optional recreates the reported bug in the normal run. Retain that flag
+only for development's persistent notification registration; the taskbar fix
+does not need to leave registry or toast-activation state behind. For portable,
 include the outer launcher's stable path as the icon resource and relaunch
 command, with the product display name. For Store, return no per-window
 override. Installed/unpacked NSIS uses its process-level product ID and branded
 executable/shortcut, so it needs no per-window override.
 
 The process-level policy must make the same distinctions: desktop ID for NSIS,
-portable ID for portable, no desktop override for Store or ordinary
-development. Store still receives its manifest-matched toast activator; that
-decision must no longer be coupled to whether the desktop AppUserModelID is
-claimed. Registry display/icon metadata remains non-Store and non-portable.
+portable ID for portable, development ID for unpackaged Windows, and no desktop
+override for Store. Store still receives its manifest-matched toast activator;
+that decision must not be coupled to whether the desktop AppUserModelID is
+claimed. Registry display/icon metadata remains non-Store and non-portable, and
+ordinary development keeps the existing `ODA_WINDOWS_IDENTITY=1` opt-in for
+those persistent notification side effects.
 
 Do not add a timed refresh, hide the account browser from the taskbar, retain an
 unused renderer, or spoof process metadata. Each would either leave the
@@ -187,17 +215,17 @@ security regression.
   above.
 - Drive both focus histories: page -> deactivate -> activate restores the active
   page, while toolbar -> deactivate -> activate leaves focus in the toolbar.
-- Model the Windows property-store refresh for the opt-in development and
+- Model the Windows property-store refresh for ordinary development and
   portable paths. One combined call without the final ID refresh must fail.
 - Assert exactly two calls, full metadata first and AppUserModelID-only second,
-  for opted-in development and portable windows; ordinary development gets
-  none.
+  for ordinary development and portable windows.
 - Assert both calls happen before the main window and account browser are
   shown.
-- Prove the shared constructor-icon resolver returns an absolute
-  `build/icon.ico` string only for unpackaged Windows and a generated
-  `NativeImage` for packaged or non-Windows runs. Assert both top-level window
-  call sites use it.
+- Assert both constructors retain `windowImage()`; wrapping or replacing it is
+  not the shell-group fix and would expand the platform surface unnecessarily.
+- Assert ordinary Windows development always selects the development process
+  ID and both call sites pass the inputs that produce complete per-window
+  AppDetails. The old environment gate must not survive.
 - Cover the complete development / installed / portable / Store matrix.
 - Parse or inspect the AppX configuration and prove the Store path never writes
   the desktop AppUserModelID.
@@ -218,6 +246,7 @@ security regression.
 2. Commit the account-shell migration, channel-specific identity policy,
    regression tests, and corrected changelog wording together.
 3. Commit this second, screenshot-driven plan correction by itself.
-4. Commit the constructor-icon fix, non-vacuous regression tests and changelog
-   correction together.
-5. Leave the unrelated untracked audit and release documents untouched.
+4. Commit this foreground-mapped plan correction by itself.
+5. Commit the default development identity, complete per-window details,
+   non-vacuous regression tests and changelog correction together.
+6. Leave the unrelated untracked audit and release documents untouched.
