@@ -2,13 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { CompanyMark } from '../CompanyMark';
 import { Logo } from '../Logo';
 import { branding } from '../../shared/branding';
-import type {
-	AccountSummary,
-	BrowserRoute,
-	CodesList,
-	ExportResult,
-	OpenBrowserResult
-} from '../../shared/ipc';
+import type { AccountSummary, BrowserRoute, CodesList, OpenBrowserResult } from '../../shared/ipc';
+import { DynamicError } from '../DynamicError';
 import { messageOf } from '../ipc-message';
 
 /**
@@ -82,7 +77,11 @@ export function VaultHome({
 	onEnrol,
 	onMove,
 	onFinishActivation,
+	onFinishRecoveryBackup,
+	finishingRecovery,
+	recoveryErrors,
 	onExport,
+	exporting,
 	onSettings,
 	onAbout,
 	onActivity,
@@ -138,8 +137,16 @@ export function VaultHome({
 	onMove: () => void;
 	/** Resume an enrollment that was never activated. */
 	onFinishActivation: (account: AccountSummary) => void;
-	/** Write one account out as a maFile. */
-	onExport: (account: AccountSummary) => Promise<ExportResult>;
+	/** Finish a retained local recovery-file write; this never contacts Steam. */
+	onFinishRecoveryBackup: (account: AccountSummary) => void;
+	/** Recovery writes in flight, owned by `App` so navigation cannot erase them. */
+	finishingRecovery?: ReadonlySet<string>;
+	/** Per-account recovery failures, also retained across account-list remounts. */
+	recoveryErrors?: ReadonlyMap<string, string>;
+	/** Start writing one account as a maFile; `App` owns the in-flight result. */
+	onExport: (account: AccountSummary) => void;
+	/** Account exports in flight, owned above this routinely-unmounted screen. */
+	exporting?: ReadonlySet<string>;
 	onSettings: () => void;
 	onAbout: () => void;
 	onActivity: () => void;
@@ -147,6 +154,9 @@ export function VaultHome({
 	activityUrgent: boolean;
 	onLock: () => void;
 }): React.JSX.Element {
+	const exportBusy = exporting ?? new Set<string>();
+	const recoveryBusy = finishingRecovery ?? new Set<string>();
+	const recoveryFailure = recoveryErrors ?? new Map<string, string>();
 	/** Which account was copied last, so the confirmation lands on the right row. */
 	const [copied, setCopied] = useState<{ steamId64: string; seconds: number } | undefined>();
 	/** A copy that failed. Silently doing nothing is the one response a button must never give. */
@@ -174,28 +184,6 @@ export function VaultHome({
 	 * success, leaving the row that actually worked showing another row's error.
 	 */
 	const copyAttempt = useRef(0);
-
-	/**
-	 * And which export attempt owns the export slot, which is a different slot.
-	 *
-	 * **One counter used to serve both, and that made them cancel each other.**
-	 * Copy writes `copied`; export writes `exported`; they are rendered
-	 * separately and neither is a reason to discard the other. Sharing the
-	 * counter meant starting an export while a copy was still waiting on the
-	 * clock sync made the copy — which then succeeded, and put a live Steam Guard
-	 * code on the clipboard with a timer running — say nothing at all. The
-	 * reverse silenced a save that had already written a file holding the keys to
-	 * an account.
-	 *
-	 * The rule this file already applies to the browser button: a counter guards
-	 * one status slot, and a separate slot gets a separate counter.
-	 */
-	const exportAttempt = useRef(new Map<string, number>());
-
-	/** The same, for exports. See `copying`. */
-	const [exporting, setExporting] = useState<ReadonlySet<string>>(() => new Set());
-	/** What came of the last export. */
-	const [exported, setExported] = useState<ReadonlyMap<string, string>>(() => new Map());
 
 	/** The account whose browser is being opened, and why the last one was not. */
 	const [opening, setOpening] = useState<ReadonlySet<string>>(() => new Set());
@@ -229,12 +217,6 @@ export function VaultHome({
 	 * A's failure was then discarded as stale. A's browser had not opened and
 	 * nothing on screen said why.
 	 */
-	const claimExport = (steamId64: string): (() => boolean) => {
-		const mine = (exportAttempt.current.get(steamId64) ?? 0) + 1;
-		exportAttempt.current.set(steamId64, mine);
-		return () => exportAttempt.current.get(steamId64) === mine;
-	};
-
 	const claimBrowser = (steamId64: string): (() => boolean) => {
 		const mine = (browserAttempt.current.get(steamId64) ?? 0) + 1;
 		browserAttempt.current.set(steamId64, mine);
@@ -481,7 +463,7 @@ export function VaultHome({
 								<div>
 									<strong>{account.accountName}</strong>
 									<span className="muted"> {account.steamId64}</span>
-									{failure && <p className="hint bad">{failure}</p>}
+									{failure && <DynamicError className="hint bad">{failure}</DynamicError>}
 									{justCopied && (
 										<p className="hint">
 											Copied. The clipboard is cleared in {copied.seconds}s unless you copy
@@ -489,7 +471,34 @@ export function VaultHome({
 										</p>
 									)}
 									{copyError?.steamId64 === account.steamId64 && (
-										<p className="hint bad">{copyError.message}</p>
+										<DynamicError className="hint bad">{copyError.message}</DynamicError>
+									)}
+									{account.recoveryBackup !== undefined && (
+										<div className="hint bad">
+											<p>
+												This account is stored in the vault, but its separate encrypted recovery
+												backup is{' '}
+												{account.recoveryBackup === 'pending' ? 'not finished' : 'out of date'}.
+												This repairs only a local file; Steam is not contacted.
+											</p>
+											<div className="controls">
+												<button
+													type="button"
+													className="secondary"
+													disabled={recoveryBusy.has(account.steamId64)}
+													onClick={() => onFinishRecoveryBackup(account)}
+												>
+													{recoveryBusy.has(account.steamId64)
+														? 'Finishing…'
+														: 'Finish recovery backup'}
+												</button>
+											</div>
+											{recoveryFailure.has(account.steamId64) && (
+												<DynamicError className="hint bad">
+													{recoveryFailure.get(account.steamId64)}
+												</DynamicError>
+											)}
+										</div>
 									)}
 								</div>
 
@@ -628,7 +637,7 @@ export function VaultHome({
 										title={
 											account.hasProxy
 												? 'Open a signed-in browser routed through this account’s proxy. Everything in the window goes through it. Starts at your trade offers.'
-												: 'Open a signed-in browser for this account. Starts at your trade offers.'
+												: 'Open a signed-in browser for this account using this machine’s network settings. If its system proxy asks for a username and password, add that proxy to this account’s Proxy field first. Starts at your trade offers.'
 										}
 										onClick={() =>
 											// A routed account's first button is the fully proxied one. An
@@ -665,7 +674,7 @@ export function VaultHome({
 												type="button"
 												className="secondary"
 												disabled={opening.has(account.steamId64)}
-												title="Open the same browser without this account’s proxy. Your machine’s own network settings still apply — including a system or company proxy, if this machine has one — so Steam sees whatever address this machine normally uses. Use it when a proxied page is rate-limited or stuck on a Cloudflare check."
+												title="Open the same browser without this account’s proxy. Your machine’s own network settings still apply — including a system or company proxy, if this machine has one — so Steam sees whatever address this machine normally uses. If that proxy asks for a username and password, add it to this account’s Proxy field and use the proxied route instead."
 												onClick={() => openBrowserAs(account, 'direct')}
 											>
 												Direct
@@ -680,43 +689,11 @@ export function VaultHome({
 									<button
 										type="button"
 										className="secondary"
-										disabled={exporting.has(account.steamId64)}
-										onClick={() => {
-											const newest = claimExport(account.steamId64);
-											setExported(noted(account.steamId64, undefined));
-											setExporting(running(account.steamId64));
-											onExport(account)
-												.then((result) => {
-													if (!newest()) {
-														return;
-													}
-													setExported(
-														noted(
-															account.steamId64,
-															result.state === 'saved'
-																? // The stale copy is named, because a second plaintext file
-																	// nobody mentions is worse than one they can go and delete.
-																	`Saved as ${result.fileName}. Treat that file as a key to this account.` +
-																		(result.staleCopy
-																			? ` The previous export could not be deleted — a file ending “.prev” is still beside it, holding the older secrets. Delete it when you can.`
-																			: '')
-																: 'Nothing was saved.'
-														)
-													);
-												})
-												.catch((err: unknown) => {
-													if (!newest()) {
-														return;
-													}
-													setExported(
-														noted(account.steamId64, `It could not be saved: ${messageOf(err)}`)
-													);
-												})
-												.finally(() => setExporting(finished(account.steamId64)));
-										}}
+										disabled={exportBusy.has(account.steamId64)}
+										onClick={() => onExport(account)}
 										title="Save this account as a .maFile, readable by SDA and anything else in the ecosystem. It carries the authenticator secrets in plain text, and it does NOT carry this account's proxy or its Steam session — set the routing again after importing it somewhere else."
 									>
-										{exporting.has(account.steamId64) ? 'Saving…' : 'Export'}
+										{exportBusy.has(account.steamId64) ? 'Saving…' : 'Export'}
 									</button>
 									<button
 										type="button"
@@ -726,11 +703,10 @@ export function VaultHome({
 									>
 										Remove
 									</button>
-									{exported.has(account.steamId64) && (
-										<p className="hint">{exported.get(account.steamId64)}</p>
-									)}
 									{browserError.has(account.steamId64) && (
-										<p className="hint bad">{browserError.get(account.steamId64)}</p>
+										<DynamicError className="hint bad">
+											{browserError.get(account.steamId64)}
+										</DynamicError>
 									)}
 								</div>
 

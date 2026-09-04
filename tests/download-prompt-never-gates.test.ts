@@ -63,14 +63,14 @@ function el(attributes: Record<string, string> = {}): FakeEl {
 		},
 		focus: () => undefined,
 		dispatch: (type, event) => {
-			for (const fn of node.listeners[type] ?? []) fn.call(node, event);
+			for (const fn of node.listeners[type] ?? []) fn.call(node, { currentTarget: node, ...event });
 		}
 	};
 	return node;
 }
 
 /** The download page as the script finds it, with a store link and a prompt. */
-function page(options: { dismissed?: boolean } = {}) {
+function page(options: { dismissed?: boolean; storageThrows?: boolean } = {}) {
 	const root = el({ 'data-download': '' });
 	const route = el({ 'data-got-it': 'the Store build', href: 'https://store.example/app' });
 	const proceed = el({ href: '#', 'data-review-continue': '' });
@@ -97,11 +97,16 @@ function page(options: { dismissed?: boolean } = {}) {
 		navigator: { userAgent: 'Mozilla/5.0 (Windows NT 10.0)', platform: 'Win32' },
 		window: {
 			localStorage: {
-				getItem: (k: string) => store[k] ?? null,
+				getItem: (k: string) => {
+					if (options.storageThrows === true) throw new Error('storage is blocked');
+					return store[k] ?? null;
+				},
 				setItem: (k: string, v: string) => {
+					if (options.storageThrows === true) throw new Error('storage is blocked');
 					store[k] = v;
 				},
 				removeItem: (k: string) => {
+					if (options.storageThrows === true) throw new Error('storage is blocked');
 					delete store[k];
 				}
 			},
@@ -125,6 +130,24 @@ function page(options: { dismissed?: boolean } = {}) {
 		store,
 		press: (key: string) => keys.forEach((fn) => fn({ key }))
 	};
+}
+
+/**
+ * Dispatch the event handlers a browser invokes for an anchor activation.
+ *
+ * The asset currently installs the continuation through the `onclick`
+ * property, while the safe implementation is expected to use ordinary event
+ * listeners and leave the anchor's native navigation alone. Exercising both
+ * makes the regression fail before that implementation without prescribing
+ * which registration API it must use afterwards.
+ */
+function dispatchActivation(
+	node: FakeEl,
+	type: 'click' | 'auxclick',
+	event: Record<string, unknown>
+) {
+	if (type === 'click') node.onclick?.call(node, event);
+	node.dispatch(type, event);
 }
 
 /** A plain left click, as a mouse makes one. */
@@ -171,6 +194,91 @@ describe('a download click with the prompt unanswered', () => {
 		route.dispatch('click', plainClick().event);
 
 		expect(proceed.textContent).toContain('the Store build');
+	});
+});
+
+/**
+ * The continuation is an anchor, not a scripted redirect.
+ *
+ * Once the prompt is open, the browser must still own navigation. Replacing
+ * that default with `window.location.href` makes Ctrl/Cmd/Shift-click silently
+ * navigate the current tab instead of the new tab/window the reader requested.
+ */
+describe('following the continuation link', () => {
+	function openedPage(options: { storageThrows?: boolean } = {}) {
+		const current = page(options);
+		current.route.dispatch('click', plainClick().event);
+		expect(current.proceed.getAttribute('href')).toBe('https://store.example/app');
+		return current;
+	}
+
+	it('leaves a plain click to the anchor instead of manually redirecting', () => {
+		const current = openedPage();
+		const click = plainClick();
+
+		dispatchActivation(current.proceed, 'click', click.event);
+
+		expect(click.wasPrevented(), 'the native anchor navigation was cancelled').toBe(false);
+		expect(
+			current.navigated,
+			'the handler replaced the anchor navigation with a forced same-tab redirect'
+		).toEqual([]);
+		expect(current.store['oda.review-prompt.dismissed']).toBe('1');
+		expect(current.prompt.hidden, 'the answered prompt still covers the originating tab').toBe(
+			true
+		);
+	});
+
+	it.each(['metaKey', 'ctrlKey', 'shiftKey', 'altKey'])(
+		'preserves the destination context requested with %s',
+		(modifier) => {
+			const current = openedPage();
+			const click = plainClick();
+			(click.event as unknown as Record<string, unknown>)[modifier] = true;
+
+			dispatchActivation(current.proceed, 'click', click.event);
+
+			expect(click.wasPrevented(), `the ${modifier} activation was cancelled`).toBe(false);
+			expect(current.navigated, `the ${modifier} activation was forced into this tab`).toEqual([]);
+			expect(current.store['oda.review-prompt.dismissed']).toBe('1');
+			expect(
+				current.prompt.hidden,
+				`the answered prompt still covers the originating tab after ${modifier}`
+			).toBe(true);
+		}
+	);
+
+	it('leaves a middle click to the anchor and remembers that the reader continued', () => {
+		const current = openedPage();
+		const click = plainClick();
+		(click.event as unknown as Record<string, unknown>).button = 1;
+
+		dispatchActivation(current.proceed, 'auxclick', click.event);
+
+		expect(click.wasPrevented(), 'the middle-click navigation was cancelled').toBe(false);
+		expect(current.navigated, 'the middle click was forced into this tab').toEqual([]);
+		expect(current.store['oda.review-prompt.dismissed']).toBe('1');
+		expect(
+			current.prompt.hidden,
+			'the answered prompt still covers the originating tab after a middle click'
+		).toBe(true);
+	});
+
+	it('still leaves native navigation alone when dismissal storage throws', () => {
+		const current = openedPage({ storageThrows: true });
+		const click = plainClick();
+
+		expect(() => dispatchActivation(current.proceed, 'click', click.event)).not.toThrow();
+		expect(click.wasPrevented(), 'a storage failure cancelled the native download link').toBe(
+			false
+		);
+		expect(current.navigated, 'a storage failure fell back to a manual same-tab redirect').toEqual(
+			[]
+		);
+		expect(
+			current.prompt.hidden,
+			'a storage failure left the already-answered prompt covering the original tab'
+		).toBe(true);
 	});
 });
 

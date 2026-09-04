@@ -1,9 +1,17 @@
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EnrollmentService } from '../src/main/steam/enrollment';
 import type { LoginSessionLike } from '../src/main/steam/login';
 import type { StartedEnrollment } from '../src/main/steam/enroll';
 import type { SteamTransportFactory } from '../src/main/net/transport';
 import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
+import { memoryWorkflowJournal } from '../src/main/steam/workflow-journal';
+import { openBytesWithKey, sealBytesWithKey } from '../src/main/vault/crypto';
+import type { Envelope, Kdf } from '../src/shared/vault-format';
+import { toMaFile } from '../src/main/import/export';
+import { authenticatorFingerprint } from '../src/main/steam/authenticator-secrets';
+import { successfulRecoveryPath } from './recovery-fixture';
 
 /**
  * Enrolling a brand-new account (§12 F3).
@@ -23,6 +31,18 @@ const STEAM_ID = '76561198000000001';
 const NOW = Date.parse('2026-08-10T00:00:00Z');
 const SHARED = 'ASNFZ4mrze8BI0VniavN7wEjRWc=';
 const IDENTITY = '/ty6mHZUMhD+3LqYdlQyEP7cupg=';
+const TEST_KEY = Buffer.alloc(32, 41);
+const TEST_KDF: Kdf = {
+	type: 'scrypt',
+	N: 16384,
+	r: 8,
+	p: 1,
+	salt: Buffer.alloc(32, 42).toString('base64')
+};
+const workflowCrypto = {
+	sealScopedKey: (plaintext: Buffer) => sealBytesWithKey(plaintext, TEST_KEY, TEST_KDF),
+	openScopedEnvelope: (envelope: Envelope) => openBytesWithKey(envelope, TEST_KEY, TEST_KDF)
+};
 
 function jwt(claims: Record<string, unknown>): string {
 	const encode = (value: unknown): string =>
@@ -37,7 +57,8 @@ const STARTED: StartedEnrollment = {
 	identitySecret: IDENTITY,
 	revocationCode: 'R12345',
 	deviceId: 'android:abc',
-	accountName: 'trader'
+	accountName: 'trader',
+	secret1: Buffer.alloc(20, 9).toString('base64')
 };
 
 function fakeVault(): { vault: { read: () => { accounts: Account[] } }; accounts: Account[] } {
@@ -50,7 +71,8 @@ function fakeVault(): { vault: { read: () => { accounts: Account[] } }; accounts
 			mutate: async (apply: (draft: { accounts: Account[] }) => void) => {
 				apply({ accounts });
 				return Promise.resolve();
-			}
+			},
+			...workflowCrypto
 		} as never
 	};
 }
@@ -74,7 +96,7 @@ function fakeSession(): LoginSessionLike {
 	};
 }
 
-function harness(): {
+function harness(started: StartedEnrollment = STARTED): {
 	service: EnrollmentService;
 	accounts: Account[];
 	/** Proxy the LoginSession was built with. */
@@ -99,8 +121,9 @@ function harness(): {
 			loginProxy = proxyUrl;
 			return fakeSession();
 		},
-		startEnrollment: () => Promise.resolve(STARTED),
-		finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+		startEnrollment: () => Promise.resolve(started),
+		finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+		workflowJournal: memoryWorkflowJournal()
 	});
 
 	return { service, accounts, loginProxy: () => loginProxy, transportCalls };
@@ -121,6 +144,21 @@ describe('enrolling', () => {
 		expect(accounts).toHaveLength(1);
 		expect(accounts[0]?.sharedSecret).toBe(SHARED);
 		expect(accounts[0]?.revocationCode).toBe('R12345');
+		expect(accounts[0]?.secret1).toBe(STARTED.secret1);
+		expect(toMaFile(accounts[0]!)).toContain(`"secret_1": "${STARTED.secret1}"`);
+	});
+
+	it('stores usable keys without inventing a missing revocation code', async () => {
+		const { revocationCode: _omitted, ...withoutRevocation } = STARTED;
+		const { service, accounts } = harness(withoutRevocation);
+
+		await expect(service.begin('trader', 'a-password')).resolves.toMatchObject({
+			state: 'enrolled',
+			hasRevocationCode: false
+		});
+		expect(accounts[0]).not.toHaveProperty('revocationCode');
+		await expect(service.activate(STEAM_ID, '12345')).resolves.toBe('activated');
+		expect(accounts[0]?.status).toBe('active');
 	});
 
 	it('marks the account pendingActivation until Steam confirms', async () => {
@@ -203,6 +241,156 @@ describe('routing an enrollment', () => {
 
 		expect(accounts[0]?.proxyUrl).toBeUndefined();
 	});
+
+	it('never displays a proxy-controlled CONNECT reason phrase', async () => {
+		const proxyPassword = 'enrollment-proxy-reason-secret';
+		const accountPassword = 'account-password-must-stay-private';
+		let authorization: string | undefined;
+		const proxy = createServer();
+		proxy.on('connect', (request, socket) => {
+			authorization = request.headers['proxy-authorization'];
+			const supplied = Buffer.from(
+				authorization?.replace(/^Basic\s+/i, '') ?? '',
+				'base64'
+			).toString('utf8');
+			const password = supplied.split(':').slice(1).join(':');
+			// The proxy owns this prose and already knows the credentials it was
+			// sent. Echoing them proves enrollment never presents that prose as ours.
+			socket.end(`HTTP/1.1 407 rejected-${password}\r\nConnection: close\r\n\r\n`);
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const { vault } = fakeVault();
+			const port = (proxy.address() as AddressInfo).port;
+			const service = new EnrollmentService(vault as never, {} as SteamTransportFactory, {
+				workflowJournal: memoryWorkflowJournal()
+			});
+			const outcome = await service
+				.begin('trader', accountPassword, `http://alice:${proxyPassword}@127.0.0.1:${port}`)
+				.catch((error: unknown) => error);
+
+			expect(authorization).toBe(
+				`Basic ${Buffer.from(`alice:${proxyPassword}`, 'utf8').toString('base64')}`
+			);
+			expect(outcome).toBeInstanceOf(Error);
+			expect((outcome as Error).message).toMatch(/proxy requires.*CONNECT 407/i);
+			expect((outcome as Error).message).not.toContain(proxyPassword);
+			expect((outcome as Error).message).not.toContain(accountPassword);
+		} finally {
+			await new Promise<void>((resolve) => proxy.close(() => resolve()));
+		}
+	});
+
+	it('uses the same fixed proxy wording for a later session error', async () => {
+		const remoteText = 'proxy-controlled-late-error-secret';
+		const listeners: Record<string, ((error?: unknown) => void)[]> = {};
+		const session: LoginSessionLike = {
+			startWithCredentials: () => {
+				queueMicrotask(() =>
+					listeners.error?.forEach((listener) =>
+						listener(new Error(`Proxy CONNECT 407 rejected-${remoteText}`))
+					)
+				);
+				return Promise.resolve({ actionRequired: false });
+			},
+			submitSteamGuardCode: () => Promise.resolve(),
+			on: (event, listener) => {
+				(listeners[event] ??= []).push(listener);
+			},
+			cancelLoginAttempt: () => undefined,
+			refreshToken: '',
+			accessToken: ''
+		};
+		const { vault } = fakeVault();
+		const service = new EnrollmentService(vault as never, {} as SteamTransportFactory, {
+			loginSession: () => session,
+			workflowJournal: memoryWorkflowJournal()
+		});
+
+		const outcome = await service
+			.begin('trader', 'account-password')
+			.catch((error: unknown) => error);
+
+		expect(outcome).toBeInstanceOf(Error);
+		expect((outcome as Error).message).toMatch(/proxy requires.*CONNECT 407/i);
+		expect((outcome as Error).message).not.toContain(remoteText);
+	});
+
+	it('never displays proxy-controlled status text from email-code submission', async () => {
+		const remoteText = 'email-code-proxy-secret';
+		const session: LoginSessionLike = {
+			startWithCredentials: () =>
+				Promise.resolve({
+					actionRequired: true,
+					validActions: [{ type: 2, detail: 'example.com' }]
+				}),
+			submitSteamGuardCode: () =>
+				Promise.reject(new Error(`Proxy CONNECT 407 rejected-${remoteText}`)),
+			on: () => undefined,
+			cancelLoginAttempt: () => undefined,
+			refreshToken: '',
+			accessToken: ''
+		};
+		const { vault } = fakeVault();
+		const service = new EnrollmentService(vault as never, {} as SteamTransportFactory, {
+			loginSession: () => session,
+			workflowJournal: memoryWorkflowJournal()
+		});
+
+		await expect(service.begin('trader', 'password')).resolves.toMatchObject({
+			state: 'needsEmailCode'
+		});
+		const outcome = await service.submitEmailCode('ABCDE').catch((error: unknown) => error);
+
+		expect(outcome).toBeInstanceOf(Error);
+		expect((outcome as Error).message).toMatch(/proxy requires.*CONNECT 407/i);
+		expect((outcome as Error).message).not.toContain(remoteText);
+	});
+
+	it('keeps ordinary wrong-code wording and the same login available for retry', async () => {
+		const listeners: Record<string, ((error?: unknown) => void)[]> = {};
+		let submissions = 0;
+		const session: LoginSessionLike = {
+			startWithCredentials: () =>
+				Promise.resolve({
+					actionRequired: true,
+					validActions: [{ type: 2, detail: 'example.com' }]
+				}),
+			submitSteamGuardCode: () => {
+				submissions += 1;
+				if (submissions === 1) return Promise.reject(new Error('InvalidLoginAuthCode'));
+				queueMicrotask(() => listeners.authenticated?.forEach((listener) => listener()));
+				return Promise.resolve();
+			},
+			on: (event, listener) => {
+				(listeners[event] ??= []).push(listener);
+			},
+			cancelLoginAttempt: () => undefined,
+			refreshToken: MOBILE,
+			accessToken: MOBILE,
+			steamID: { getSteamID64: () => STEAM_ID }
+		};
+		const { vault } = fakeVault();
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			loginSession: () => session,
+			startEnrollment: () => Promise.resolve(STARTED),
+			workflowJournal: memoryWorkflowJournal()
+		});
+
+		await expect(service.begin('trader', 'password')).resolves.toMatchObject({
+			state: 'needsEmailCode'
+		});
+		await expect(service.submitEmailCode('wrong')).rejects.toThrow(
+			/Steam did not accept that code: InvalidLoginAuthCode/
+		);
+		await expect(service.submitEmailCode('right')).resolves.toMatchObject({ state: 'enrolled' });
+		expect(submissions).toBe(2);
+	});
 });
 
 /**
@@ -215,6 +403,54 @@ describe('routing an enrollment', () => {
  * stored during enrollment; it just was not being used.
  */
 describe('resuming an activation', () => {
+	it('does not ask Steam to activate while the pre-activation recovery backup is still missing', async () => {
+		const { vault, accounts } = fakeVault();
+		const account: Account = {
+			steamId64: STEAM_ID,
+			accountName: 'trader',
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345',
+			refreshToken: MOBILE,
+			status: 'pendingActivation',
+			addedAt: '2026-08-01T00:00:00.000Z',
+			autoConfirm: newAutoConfirm()
+		};
+		account.recoveryBackup = {
+			version: 1,
+			id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+			authenticatorFingerprint: authenticatorFingerprint(account),
+			state: 'pending',
+			changedAt: '2026-08-01T00:00:00.000Z'
+		};
+		accounts.push(account);
+
+		let finalized = 0;
+		let routed = 0;
+		const transports = {
+			forAccount: () => {
+				routed += 1;
+				return Promise.resolve(() =>
+					Promise.resolve({
+						status: 200,
+						text: JSON.stringify({ response: { access_token: MOBILE } })
+					})
+				);
+			}
+		} as unknown as SteamTransportFactory;
+		const service = new EnrollmentService(vault as never, transports, {
+			now: () => NOW,
+			finalizeEnrollment: () => {
+				finalized += 1;
+				return Promise.resolve({ state: 'activated' as const });
+			}
+		});
+
+		await expect(service.activate(STEAM_ID, '55555')).rejects.toThrow(/recovery backup/i);
+		expect(routed).toBe(0);
+		expect(finalized).toBe(0);
+	});
+
 	it('mints a fresh access token when the in-memory one is gone', async () => {
 		const { vault, accounts } = fakeVault();
 		accounts.push({
@@ -416,6 +652,7 @@ describe('when the vault write fails after Steam has already attached', () => {
 		return {
 			isUnlocked: () => true,
 			read: () => ({ accounts: [] }),
+			...workflowCrypto,
 			mutate: () =>
 				Promise.reject(
 					new Error("ENOSPC: no space left on device, open 'C:/Users/someone/AppData/vault.json'")
@@ -423,7 +660,7 @@ describe('when the vault write fails after Steam has already attached', () => {
 		} as never;
 	}
 
-	function serviceWith(options: { recovery?: (account: Account) => void }): EnrollmentService {
+	function serviceWith(options: { recovery?: (account: Account) => string }): EnrollmentService {
 		const transports = {
 			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
 		} as unknown as SteamTransportFactory;
@@ -433,31 +670,34 @@ describe('when the vault write fails after Steam has already attached', () => {
 			loginSession: () => fakeSession(),
 			startEnrollment: () => Promise.resolve(STARTED),
 			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
-			...(options.recovery ? { writeRecovery: options.recovery } : {})
+			...(options.recovery ? { writeRecovery: options.recovery } : {}),
+			workflowJournal: memoryWorkflowJournal()
 		});
 	}
 
-	it('has already written the recovery file before the vault is touched', async () => {
-		// The ordering is the entire fix. Written afterwards, a failed mutate left
-		// the secrets nowhere; written first, they are on disk before anything can
-		// go wrong, in a file the user can import back.
+	it('keeps the encrypted workflow authoritative when the vault refuses the row', async () => {
+		// The per-account recovery file is intentionally after the guarded vault
+		// write now: writing it first could overwrite a newer authenticator's file.
+		// The encrypted workflow already makes the reply restart-safe.
 		const written: Account[] = [];
-		const service = serviceWith({ recovery: (account) => written.push(account) });
+		const service = serviceWith({
+			recovery: (account) => {
+				written.push(account);
+				return successfulRecoveryPath(account);
+			}
+		});
 
-		await expect(service.begin('trader', 'password')).rejects.toThrow();
-
-		expect(written).toHaveLength(1);
-		expect(written[0]?.sharedSecret).toBe(SHARED);
-		expect(written[0]?.revocationCode).toBe('R12345');
+		await expect(service.begin('trader', 'password')).rejects.toThrow(/encrypted recovery/i);
+		expect(written).toEqual([]);
 	});
 
-	it('says the authenticator is attached and points at the recovery file', async () => {
+	it('says the authenticator is attached and points at the encrypted workflow', async () => {
 		// A generic failure would send the user round again against an account that
 		// now has an authenticator they cannot use.
-		const service = serviceWith({ recovery: () => undefined });
+		const service = serviceWith({ recovery: successfulRecoveryPath });
 
 		await expect(service.begin('trader', 'password')).rejects.toThrow(
-			/attached the authenticator.*recovery file was written/s
+			/attached the authenticator.*encrypted recovery record is intact/s
 		);
 	});
 
@@ -465,7 +705,7 @@ describe('when the vault write fails after Steam has already attached', () => {
 		// Node embeds the absolute path in every filesystem failure, so forwarding
 		// it would put the user's home directory into the renderer — the same leak
 		// the import path already had to fix once.
-		const service = serviceWith({ recovery: () => undefined });
+		const service = serviceWith({ recovery: successfulRecoveryPath });
 
 		const message = await service.begin('trader', 'password').catch((err: Error) => err.message);
 
@@ -473,10 +713,9 @@ describe('when the vault write fails after Steam has already attached', () => {
 		expect(message).not.toContain('ENOSPC');
 	});
 
-	it('gives the revocation code when the recovery file failed too', async () => {
-		// The one branch where it is the last copy in existence. The ceremony would
-		// have put it on screen a moment later anyway, and the activity log is in
-		// memory, so nothing of it reaches disk.
+	it('does not expose the revocation code when the optional recovery file failed', async () => {
+		// The encrypted workflow is the authoritative safety copy, so a secondary
+		// file failure is no reason to put a recovery secret in an error banner.
 		const service = serviceWith({
 			recovery: () => {
 				throw new Error('disk is gone');
@@ -485,14 +724,14 @@ describe('when the vault write fails after Steam has already attached', () => {
 
 		const message = await service.begin('trader', 'password').catch((err: Error) => err.message);
 
-		expect(message).toContain('R12345');
-		expect(message).toMatch(/write this down now/i);
+		expect(message).not.toContain('R12345');
+		expect(message).toMatch(/encrypted recovery record/i);
 	});
 
 	it('does not put the revocation code in the message when recovery succeeded', async () => {
 		// It is not needed there, and a code shown in an error banner is a code in
 		// one more place than it has to be.
-		const service = serviceWith({ recovery: () => undefined });
+		const service = serviceWith({ recovery: successfulRecoveryPath });
 
 		const message = await service.begin('trader', 'password').catch((err: Error) => err.message);
 
@@ -535,7 +774,8 @@ describe('abandoning a sign-in', () => {
 				steamID: { getSteamID64: () => STEAM_ID }
 			}),
 			startEnrollment: () => Promise.resolve(STARTED),
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		const outcome = await service.begin('trader', 'password');
@@ -625,7 +865,8 @@ describe('activating twice', () => {
 			finalizeEnrollment: async () => {
 				await gate;
 				return { state: 'activated' as const };
-			}
+			},
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		await service.begin('trader', 'password');
@@ -669,7 +910,8 @@ describe('one sign-in at a time', () => {
 				};
 			},
 			startEnrollment: () => Promise.resolve(STARTED),
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		const first = service.begin('trader', 'password');
@@ -708,7 +950,8 @@ describe('one sign-in at a time', () => {
 				}
 			}),
 			startEnrollment: () => Promise.resolve(STARTED),
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		// Parked inside `enrol`, past the point where `pendingLogin` exists.
@@ -740,6 +983,61 @@ describe('the pause waiting for an emailed code', () => {
 			cancels: () => cancels
 		};
 	}
+
+	/** A paused session that authenticates after its emailed code is submitted. */
+	function completablePause(): LoginSessionLike {
+		const listeners: Record<string, Array<() => void>> = {};
+		return {
+			startWithCredentials: () =>
+				Promise.resolve({ actionRequired: true, validActions: [{ type: 2 }] }),
+			submitSteamGuardCode: () => {
+				queueMicrotask(() => listeners.authenticated?.forEach((listener) => listener()));
+				return Promise.resolve();
+			},
+			on: ((event: string, listener: () => void) => {
+				(listeners[event] ??= []).push(listener);
+			}) as LoginSessionLike['on'],
+			cancelLoginAttempt: () => undefined,
+			refreshToken: MOBILE,
+			accessToken: MOBILE,
+			steamID: { getSteamID64: () => STEAM_ID }
+		};
+	}
+
+	it('uses elapsed time when wall time jumps forward and backward', async () => {
+		let wall = NOW;
+		let elapsed = 1_000;
+		vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+		const transports = {
+			forAccount: () => Promise.resolve(() => Promise.resolve({ status: 200, text: '{}' }))
+		} as unknown as SteamTransportFactory;
+		const service = (): EnrollmentService =>
+			new EnrollmentService(fakeVault().vault as never, transports, {
+				now: () => wall,
+				loginSession: () => completablePause(),
+				startEnrollment: () => Promise.resolve(STARTED),
+				finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+				workflowJournal: memoryWorkflowJournal()
+			});
+
+		const forward = service();
+		await expect(forward.begin('trader', 'password')).resolves.toMatchObject({
+			state: 'needsEmailCode'
+		});
+		// Beyond the fifteen-minute TTL, but without advancing elapsed time.
+		wall += 16 * 60_000;
+		await expect(forward.submitEmailCode('12345')).resolves.toMatchObject({ state: 'enrolled' });
+
+		wall = NOW;
+		elapsed = 10_000;
+		const backward = service();
+		await expect(backward.begin('trader', 'password')).resolves.toMatchObject({
+			state: 'needsEmailCode'
+		});
+		wall -= 24 * 60 * 60_000;
+		elapsed += 15 * 60_000 + 1;
+		await expect(backward.submitEmailCode('12345')).rejects.toThrow(/expired/i);
+	});
 
 	it('survives longer than the sign-in timeout', async () => {
 		// `PENDING_TTL_MS` says this pause may last fifteen minutes. The sign-in
@@ -792,8 +1090,15 @@ describe('the recovery file after activation', () => {
 			loginSession: () => fakeSession(),
 			startEnrollment: () => Promise.resolve(STARTED),
 			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
-			writeRecovery: (account) => written.push({ ...account }),
-			updateRecovery: (account) => updated.push({ ...account })
+			writeRecovery: (account) => {
+				written.push({ ...account });
+				return successfulRecoveryPath(account);
+			},
+			updateRecovery: (account) => {
+				updated.push({ ...account });
+				return 'updated' as const;
+			},
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		await service.begin('trader', 'password');
@@ -825,6 +1130,7 @@ describe('the recovery file after activation', () => {
 		const service = new EnrollmentService(
 			{
 				isUnlocked: () => !locked,
+				...workflowCrypto,
 				read: () => {
 					if (locked) {
 						throw new Error('the vault is locked');
@@ -846,8 +1152,9 @@ describe('the recovery file after activation', () => {
 					locked = true;
 					return Promise.resolve({ state: 'activated' as const });
 				},
-				writeRecovery: () => undefined,
-				updateRecovery: () => undefined
+				writeRecovery: successfulRecoveryPath,
+				updateRecovery: () => undefined,
+				workflowJournal: memoryWorkflowJournal()
 			}
 		);
 
@@ -868,15 +1175,19 @@ describe('the recovery file after activation', () => {
 			loginSession: () => fakeSession(),
 			startEnrollment: () => Promise.resolve(STARTED),
 			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
-			writeRecovery: () => undefined,
+			writeRecovery: successfulRecoveryPath,
 			updateRecovery: () => {
 				throw new Error('disk is gone');
-			}
+			},
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		await service.begin('trader', 'password');
 
-		await expect(service.activate(STEAM_ID, '12345')).resolves.toBe('activated');
+		await expect(service.activateWithRecoveryStatus(STEAM_ID, '12345')).resolves.toEqual({
+			state: 'activated',
+			recoveryWarning: expect.stringMatching(/recovery backup.*could not be updated/i)
+		});
 	});
 });
 
@@ -931,6 +1242,7 @@ describe('when Steam has acted and the vault write fails', () => {
 		let writes = 0;
 		return {
 			isUnlocked: () => true,
+			...workflowCrypto,
 			read: () => ({ accounts }),
 			mutate: (apply: (draft: { accounts: Account[] }) => void) => {
 				writes += 1;
@@ -959,7 +1271,8 @@ describe('when Steam has acted and the vault write fails', () => {
 			now: () => NOW,
 			loginSession: () => fakeSession(),
 			startEnrollment: () => Promise.resolve(STARTED),
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		await service.begin('trader', 'password');
@@ -979,7 +1292,8 @@ describe('when Steam has acted and the vault write fails', () => {
 			now: () => NOW,
 			loginSession: () => fakeSession(),
 			startEnrollment: () => Promise.resolve(STARTED),
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 		await service.begin('trader', 'password');
 
@@ -1038,7 +1352,8 @@ describe('a double-pressed email-code button', () => {
 				starts += 1;
 				return Promise.resolve(STARTED);
 			},
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		await service.begin('trader', 'a-password');
@@ -1104,7 +1419,8 @@ describe('begin while an email code is being checked', () => {
 				starts += 1;
 				return Promise.resolve(STARTED);
 			},
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		await service.begin('trader', 'a-password');
@@ -1184,7 +1500,7 @@ describe('deactivating twice at once', () => {
  * side, so it replaces rather than duplicates.
  */
 describe('an account inserted while Steam is enrolling it', () => {
-	it('ends with exactly one row, holding the fresh secrets', async () => {
+	it('preserves the row that arrived and refuses to overwrite it', async () => {
 		const { vault, accounts } = fakeVault();
 		let releaseStart: (() => void) | undefined;
 		const startGate = new Promise<void>((resolve) => {
@@ -1200,7 +1516,8 @@ describe('an account inserted while Steam is enrolling it', () => {
 				await startGate;
 				return STARTED;
 			},
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		const enrolling = service.begin('trader', 'a-password');
@@ -1217,10 +1534,10 @@ describe('an account inserted while Steam is enrolling it', () => {
 			autoConfirm: newAutoConfirm()
 		});
 		releaseStart?.();
-		await enrolling;
+		await expect(enrolling).rejects.toThrow(/different authenticator/i);
 
 		expect(accounts).toHaveLength(1);
-		expect(accounts[0]?.sharedSecret).toBe(SHARED);
+		expect(accounts[0]?.sharedSecret).toBe('b2xkLXNlY3JldC1mcm9tLWltcG9ydA==');
 	});
 });
 
@@ -1544,7 +1861,8 @@ describe('forgetting an unrouted enrolment', () => {
 				}
 			}),
 			startEnrollment: () => Promise.resolve(STARTED),
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		await service.begin('trader', 'a-password');
@@ -1711,7 +2029,8 @@ describe('a sign-in that fails to authenticate', () => {
 			now: () => NOW,
 			loginSession: () => (fail ? failingSession(cancelled) : fakeSession()),
 			startEnrollment: () => Promise.resolve(STARTED),
-			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const })
+			finalizeEnrollment: () => Promise.resolve({ state: 'activated' as const }),
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		await expect(service.begin('trader', 'wrong password')).rejects.toThrow();

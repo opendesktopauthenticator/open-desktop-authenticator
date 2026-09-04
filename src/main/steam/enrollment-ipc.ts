@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { chmod, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, link, open, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { CHANNELS } from '../../shared/channels';
@@ -7,14 +7,31 @@ import { registerHandler } from '../ipc/router';
 import { maFileName, toMaFile } from '../import/export';
 import { DEACTIVATE_ACK, matchesDeactivateAck } from '../../shared/ipc';
 import { readRecoveryFile, RecoveryError } from '../vault/recovery';
-import type { EnrollmentService } from './enrollment';
+import {
+	authenticatorFingerprint,
+	EnrollmentCleanupError,
+	type EnrollmentService,
+	type OperationCompanionIdentity,
+	type OperationResolutionGuard
+} from './enrollment';
 import { EnrollmentError } from './enroll';
-import { authenticatorFingerprint } from './enrollment';
 import type { Account } from '../../shared/vault-schema';
 import { PROXY_REQUIRED } from '../net/egress';
 import { ProxyConsent } from '../net/proxy-consent';
 import { VaultLockedError, type VaultService } from '../vault/service';
-import { noOperationJournal, type OperationJournal } from './operation-journal';
+import {
+	noOperationJournal,
+	type OperationJournal,
+	type PendingOperation
+} from './operation-journal';
+import type { EnrollmentWorkflowRecord } from './workflow-journal';
+import { VaultKeyOperationCoordinator } from '../vault/key-operation-coordinator';
+import { markRecoveryBackupNeeded } from '../vault/recovery-state';
+import {
+	isAuthenticatorFingerprint,
+	isOperationId,
+	operationRecordToken
+} from './authenticator-secrets';
 
 /**
  * IPC for enrollment and maFile export (§12 F2, F3).
@@ -36,27 +53,6 @@ export interface OpenRecoveryDialog {
 }
 
 /**
- * What identifies the authenticator this export is a copy of.
- *
- * Not the account id: an account removed and re-enrolled keeps its SteamID and
- * shares nothing else, and a maFile written from the old secrets would be a
- * backup of something Steam has already stopped accepting.
- */
-function fingerprint(account: {
-	steamId64: string;
-	sharedSecret: string;
-	identitySecret: string;
-	revocationCode?: string | undefined;
-}): string {
-	return [
-		account.steamId64,
-		account.sharedSecret,
-		account.identitySecret,
-		account.revocationCode ?? ''
-	].join('|');
-}
-
-/**
  * `rm`, answering whether the file is **gone** — not whether the call was made.
  *
  * `force: true` already treats an absent file as success, so `false` here means
@@ -72,6 +68,111 @@ async function removed(path: string): Promise<boolean> {
 	);
 }
 
+type FileIdentity = 'exact' | 'different' | 'absent' | 'unknown';
+
+async function identifies(path: string, expected: string): Promise<FileIdentity> {
+	return stat(path)
+		.then(async (info) => {
+			if (!info.isFile() || info.size !== Buffer.byteLength(expected, 'utf8')) {
+				return 'different' as const;
+			}
+			return (await readFile(path, 'utf8')) === expected
+				? ('exact' as const)
+				: ('different' as const);
+		})
+		.catch((err: NodeJS.ErrnoException) =>
+			err.code === 'ENOENT' ? ('absent' as const) : ('unknown' as const)
+		);
+}
+
+async function flushFile(path: string): Promise<void> {
+	const handle = await open(path, 'r+');
+	try {
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+}
+
+/** Directory fsync is unsupported on Windows, but real I/O failures elsewhere are not success. */
+async function flushDirectory(path: string): Promise<void> {
+	let handle: Awaited<ReturnType<typeof open>> | undefined;
+	try {
+		handle = await open(path, 'r');
+		await handle.sync();
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (
+			process.platform === 'win32' &&
+			['EACCES', 'EBADF', 'EINVAL', 'EPERM'].includes(code ?? '')
+		) {
+			return;
+		}
+		throw err;
+	} finally {
+		await handle?.close();
+	}
+}
+
+const LINK_UNSUPPORTED = new Set(['EACCES', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV']);
+
+type PublishAbsentResult = { published: true } | { published: false; destinationClaimed: boolean };
+
+/** Publish an already-durable stage without replacing a path another writer claimed. */
+async function publishAbsent(
+	stage: string,
+	destination: string,
+	contents: string
+): Promise<PublishAbsentResult> {
+	try {
+		await link(stage, destination);
+		try {
+			await rm(stage);
+			return { published: true };
+		} catch {
+			// Both names may now expose the same plaintext. Let the caller verify and
+			// clean each name rather than hiding the failed unlink.
+			return { published: false, destinationClaimed: true };
+		}
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (!LINK_UNSUPPORTED.has(code ?? '')) {
+			return { published: false, destinationClaimed: false };
+		}
+	}
+
+	let claimed: Awaited<ReturnType<typeof open>>;
+	try {
+		claimed = await open(destination, 'wx', 0o600);
+	} catch {
+		return { published: false, destinationClaimed: false };
+	}
+	let failed = false;
+	try {
+		await claimed.writeFile(contents, 'utf8');
+		await claimed.sync();
+	} catch {
+		failed = true;
+	}
+	try {
+		await claimed.close();
+	} catch {
+		failed = true;
+	}
+	if (failed || (await identifies(destination, contents)) !== 'exact') {
+		// Do not unlink here. Another process can replace the path while this
+		// handle is open. The caller owns the conservative identity check and the
+		// warning for a partial or otherwise unverifiable destination.
+		return { published: false, destinationClaimed: true };
+	}
+	try {
+		await rm(stage);
+	} catch {
+		return { published: false, destinationClaimed: true };
+	}
+	return { published: true };
+}
+
 /**
  * The sentence appended to any refusal whose cleanup did not finish.
  *
@@ -84,20 +185,14 @@ async function removed(path: string): Promise<boolean> {
  * Names, never paths: the rule at the top of this module. "The folder you
  * chose" is as precise as the *where* can honestly get from here — the OS
  * dialog is the only thing that knows the rest — and the name is what the user
- * needs to spot the file once they are looking in it. The set-aside copy in
- * particular carries a random suffix nobody would recognise otherwise.
+ * needs to spot the file once they are looking in it.
  */
 /**
  * One export at a time per destination path.
  *
- * Every step below — set the old file aside, rename the new one in, check the
- * account is still ours, undo if it is not — is a read-modify-write on one path,
- * spread across four awaits. Two exports aimed at the same file interleaved
- * freely through it, and the outcome was not a lost update but a **deleted**
- * one: export B renamed its file in and answered `saved`, then export A found
- * its own account gone, ran its rollback, and removed the destination. B's file
- * was the one that went, and nothing at either end said so — A reported a
- * refusal it had earned, B reported a success it no longer had.
+ * Staging, claiming the name, checking the live account, and rolling back span
+ * several awaits. Serialising the complete sequence prevents one export from
+ * removing the result another export has just published to the same path.
  *
  * Serialising the whole sequence is the fix rather than a longer chain of
  * checks, because there is no point in the sequence where "is this still mine"
@@ -212,6 +307,11 @@ function uncertainOrRethrow(err: unknown): {
 	guidance: string;
 	certain?: boolean;
 } {
+	if (err instanceof EnrollmentCleanupError) {
+		return err.certain
+			? { state: 'uncertain', guidance: err.message, certain: true }
+			: { state: 'uncertain', guidance: err.message };
+	}
 	if (err instanceof EnrollmentError && err.committed) {
 		return err.certain
 			? { state: 'uncertain', guidance: err.message, certain: true }
@@ -228,6 +328,14 @@ function stillOnDisk(names: readonly string[]): string {
 	return names.length === 1
 		? ` The plaintext file ${listed} could not be removed and is still in the folder you chose: it holds this account's shared_secret and identity_secret unencrypted, so delete it yourself.`
 		: ` The plaintext files ${listed} could not be removed and are still in the folder you chose: they hold this account's shared_secret and identity_secret unencrypted, so delete them yourself.`;
+}
+
+function possiblyStillOnDisk(names: readonly string[]): string {
+	if (names.length === 0) {
+		return '';
+	}
+	const listed = names.map((name) => `"${name}"`).join(' and ');
+	return ` The file ${listed} could not be verified or safely removed. It may contain part or all of this account's shared_secret and identity_secret unencrypted. Check it before deleting it, because another program may have replaced it.`;
 }
 
 /**
@@ -269,8 +377,8 @@ export function registerEnrollmentHandlers(
 	enrollment: EnrollmentService,
 	vault: VaultService,
 	dialog: SaveDialog,
-	/** Drops an account's in-memory session, exactly as a local removal does. */
-	onRemoved: (steamId64: string) => void = () => undefined,
+	/** Drops all account state after the vault row is gone; `true` prevents reroute-only cleanup. */
+	onRemoved: (steamId64: string, removed: true) => void = () => undefined,
 	recoveryDialog: OpenRecoveryDialog = { pick: () => Promise.resolve(undefined) },
 	/** See `ProxyConsent`. Refuses by default when nothing supplies a way to ask. */
 	proxyConsent: ProxyConsent = new ProxyConsent(),
@@ -282,8 +390,24 @@ export function registerEnrollmentHandlers(
 	 * because a dependency that quietly defaults to doing nothing is how
 	 * `requireProxies` shipped as a field no code read.
 	 */
-	journal: OperationJournal = noOperationJournal()
+	journal: OperationJournal = noOperationJournal(),
+	/** Shared with irreversible workflows and every other account identity mutation. */
+	keyCoordinator: VaultKeyOperationCoordinator = new VaultKeyOperationCoordinator(),
+	/** Refuses recovery-file insertion beside a durable workflow for the same account. */
+	accountMutationBlocked: (steamId64: string) => boolean = () => false,
+	/** Local-only publication of changed portable refusal state; never contacts Steam. */
+	onFinishRecoveryBackup: (steamId64: string) => Promise<void> | void = () => {
+		throw new Error('Recovery backup completion is not available.');
+	}
 ): void {
+	const tryRefreshRecoveryBackup = async (steamId64: string): Promise<void> => {
+		try {
+			await onFinishRecoveryBackup(steamId64);
+		} catch {
+			// The pending/stale account marker is durable, visible, and locally retryable.
+		}
+	};
+
 	/**
 	 * Checked before a password is sent anywhere, and before a secret is read.
 	 *
@@ -301,6 +425,39 @@ export function registerEnrollmentHandlers(
 		// would look like the app locking for no reason, because from the user's
 		// point of view they had been working the whole time.
 		vault.touch();
+	};
+
+	const durableEnrollmentOutcome = (
+		outcome: ReturnType<typeof uncertainOrRethrow>
+	): ReturnType<typeof uncertainOrRethrow> & {
+		kind?: 'enroll';
+		attemptId?: string;
+		steamId64?: string;
+		accountName?: string;
+		persisted?: boolean;
+		enrollmentState?: EnrollmentWorkflowRecord['state'];
+		recovery?: 'durable' | 'memory';
+		usable?: boolean;
+		stored?: boolean;
+	} => {
+		const pending = enrollment.unresolvedEnrollment?.();
+		const recovery = pending === undefined ? undefined : enrollment.recoveryState(pending);
+		const stored = pending === undefined ? false : enrollment.enrollmentStoredFaithfully(pending);
+		return pending === undefined
+			? { ...outcome, persisted: false }
+			: {
+					...outcome,
+					kind: 'enroll',
+					attemptId: pending.attemptId,
+					steamId64: pending.steamId64,
+					accountName: pending.accountName,
+					persisted: true,
+					stored,
+					enrollmentState: pending.state,
+					...(recovery === undefined
+						? {}
+						: { recovery, usable: enrollment.enrollmentRecoveryUsable(pending) })
+				};
 	};
 
 	registerHandler(CHANNELS.enrollBegin, async ({ accountName, password, proxyUrl }) => {
@@ -362,7 +519,7 @@ export function registerEnrollmentHandlers(
 		try {
 			return await enrollment.begin(accountName, password, proxyUrl);
 		} catch (err) {
-			return uncertainOrRethrow(err);
+			return durableEnrollmentOutcome(uncertainOrRethrow(err));
 		}
 	});
 
@@ -373,8 +530,53 @@ export function registerEnrollmentHandlers(
 		try {
 			return await enrollment.submitEmailCode(code);
 		} catch (err) {
-			return uncertainOrRethrow(err);
+			return durableEnrollmentOutcome(uncertainOrRethrow(err));
 		}
+	});
+
+	registerHandler(CHANNELS.enrollStatus, () => {
+		requireUnlocked();
+		try {
+			const pending = enrollment.unresolvedEnrollment();
+			const recovery = pending === undefined ? undefined : enrollment.recoveryState(pending);
+			return pending === undefined
+				? {}
+				: {
+						pending: {
+							attemptId: pending.attemptId,
+							steamId64: pending.steamId64,
+							accountName: pending.accountName,
+							state: pending.state,
+							at: pending.at,
+							stored: enrollment.enrollmentStoredFaithfully(pending),
+							certain: enrollment.enrollmentKnownAttached(pending),
+							...(recovery === undefined
+								? {}
+								: { recovery, usable: enrollment.enrollmentRecoveryUsable(pending) })
+						}
+					};
+		} catch {
+			return {
+				problem:
+					'A saved enrollment safety record cannot be read. No new authenticator will be ' +
+					'added until the application data folder is repaired or this app is updated.'
+			};
+		}
+	});
+
+	registerHandler(CHANNELS.enrollRetryPersist, async ({ attemptId, steamId64 }) => {
+		requireUnlocked();
+		try {
+			return await enrollment.retryEnrollmentPersist(attemptId, steamId64);
+		} catch (err) {
+			return durableEnrollmentOutcome(uncertainOrRethrow(err));
+		}
+	});
+
+	registerHandler(CHANNELS.enrollResolve, ({ attemptId, steamId64, resolution }) => {
+		requireUnlocked();
+		enrollment.resolveEnrollment(attemptId, steamId64, resolution);
+		return { ok: true as const };
 	});
 
 	// No `requireUnlocked` here, and that is deliberate: this only drops state we
@@ -402,7 +604,13 @@ export function registerEnrollmentHandlers(
 	/** The digest of the authenticator currently on an account, or none. */
 	function operatedOn(steamId64: string): string {
 		const account = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
-		return account === undefined ? '' : authenticatorFingerprint(account);
+		if (account === undefined) {
+			throw new EnrollmentError(
+				'That account is not in this vault, so no request was sent to Steam.',
+				false
+			);
+		}
+		return authenticatorFingerprint(account);
 	}
 
 	async function latch(
@@ -428,8 +636,8 @@ export function registerEnrollmentHandlers(
 		 * reason, and both reconciliations re-check it at the write. This is the
 		 * one path that did neither.
 		 */
-		fingerprint: string
-	): Promise<boolean> {
+		note: PendingOperation
+	): Promise<NonNullable<Account['unresolvedOperation']> | undefined> {
 		/*
 		 * **Two facts, and only one of them is "it was written".**
 		 *
@@ -442,12 +650,23 @@ export function registerEnrollmentHandlers(
 		 * promise this function exists to stop making, one level down.
 		 */
 		let updated = false;
-		let recorded = false;
+		let recoveryChanged = false;
+		let recorded: NonNullable<Account['unresolvedOperation']> | undefined;
+		const operation = {
+			kind,
+			guidance: outcome.guidance,
+			fingerprint: note.fingerprint,
+			at: note.at,
+			...(note.identity.source === 'v2' && isOperationId(note.identity.recordId)
+				? { operationId: note.identity.recordId }
+				: {}),
+			...(outcome.certain === true ? { certain: true } : {})
+		};
 		try {
 			await vault.mutate((draft) => {
 				const account = draft.accounts.find(
 					(entry) =>
-						entry.steamId64 === steamId64 && authenticatorFingerprint(entry) === fingerprint
+						entry.steamId64 === steamId64 && authenticatorFingerprint(entry) === note.fingerprint
 				);
 				if (account === undefined) {
 					// The row this operation was about is gone. There is nothing to
@@ -455,21 +674,70 @@ export function registerEnrollmentHandlers(
 					// defect the fingerprint argument exists to stop.
 					return;
 				}
-				account.unresolvedOperation = {
-					kind,
-					guidance: outcome.guidance,
-					fingerprint,
-					at: new Date().toISOString(),
-					...(outcome.certain === true ? { certain: true } : {})
-				};
+				account.unresolvedOperation = { ...operation };
+				markRecoveryBackupNeeded(account, account.recoveryBackup, note.at);
+				recoveryChanged = true;
 				updated = true;
 			});
 			// Only now: the write is done.
-			recorded = updated;
+			recorded = updated ? operation : undefined;
+			if (recoveryChanged) {
+				await tryRefreshRecoveryBackup(steamId64);
+			}
 		} catch (err) {
 			console.error('an unresolved Steam operation could not be recorded in the vault', err);
 		}
 		return recorded;
+	}
+
+	/**
+	 * Persist an unresolved outcome to both independent stores.
+	 *
+	 * A known Steam acceptance is too important for either write to suppress the
+	 * other. In particular, a failed journal-side certainty upgrade must not skip
+	 * the vault latch that may still be perfectly writable. Conversely, the
+	 * journal remains the fallback when the vault write is the failure that
+	 * produced the outcome in the first place.
+	 */
+	async function persistOperationOutcome(
+		steamId64: string,
+		kind: 'activate' | 'deactivate',
+		outcome: { guidance: string; certain?: boolean },
+		note: PendingOperation
+	): Promise<{
+		durableNote: PendingOperation;
+		persisted: NonNullable<Account['unresolvedOperation']> | undefined;
+	}> {
+		let durableNote = note;
+		let journalCertain = false;
+		if (outcome.certain === true) {
+			try {
+				const marked = journal.markCertain(note);
+				if (marked.certain !== true) {
+					throw new Error('the certainty record did not read back as certain');
+				}
+				durableNote = marked;
+				journalCertain = true;
+			} catch (err) {
+				// Do not return yet: the vault is an independent durability sink and
+				// may still retain the exact known outcome.
+				console.error('a known Steam outcome could not be recorded in the operation journal', err);
+			}
+		}
+
+		const persisted = await latch(steamId64, kind, outcome, durableNote);
+		if (outcome.certain === true && !journalCertain && persisted?.certain !== true) {
+			throw new EnrollmentError(
+				'Steam accepted the request, but neither durable certainty record could be written. ' +
+					'The pre-send safety record remains, so this action is blocked and will not be sent ' +
+					'again. Repair the application data folder before resolving the saved operation.',
+				true,
+				true,
+				true
+			);
+		}
+
+		return { durableNote, persisted };
 	}
 
 	/*
@@ -477,11 +745,19 @@ export function registerEnrollmentHandlers(
 	 * the latch is cleared by the person saying they have been and looked -
 	 * which is also the moment the guidance stops being useful to them.
 	 */
-	registerHandler(
-		CHANNELS.accountResolveOperation,
-		async ({ steamId64, kind, steamActed, passphrase }) => {
-			requireUnlocked();
-
+	registerHandler(CHANNELS.accountResolveOperation, async (request) => {
+		const { steamId64, kind } = request;
+		requireUnlocked();
+		let releaseAccountMutation: () => void;
+		try {
+			releaseAccountMutation = keyCoordinator.beginAccountMutation(steamId64);
+		} catch (err) {
+			throw new EnrollmentError(
+				err instanceof Error ? err.message : 'Another protected operation is in progress.',
+				false
+			);
+		}
+		try {
 			/*
 			 * **Three things have to match before this touches anything.**
 			 *
@@ -502,7 +778,35 @@ export function registerEnrollmentHandlers(
 			 * All three are refusals now. Nothing here guesses which operation a
 			 * person meant.
 			 */
-			const { account, held, stale } = recordFor(steamId64);
+			const { account, identified, unidentified } = locatedRecords(steamId64);
+
+			if ('discardStale' in request) {
+				/*
+				 * This is deliberately a different command from saying what Steam did.
+				 * The evidence names an authenticator that is no longer stored here, so
+				 * neither "Steam acted" answer may be applied to the current secrets.
+				 * Only the exact stale kind the screen displayed is removed; a current
+				 * note or a debt of the other kind stays untouched.
+				 */
+				const stale = identified.find(
+					(entry) => entry.record.kind === kind && entry.token === request.staleToken
+				);
+				if (account === undefined || stale === undefined) {
+					if (unidentified !== undefined) {
+						throw new EnrollmentError(
+							'That safety record does not identify which authenticator it describes, so it cannot be discarded. Keep your backup and contact support before changing Steam Guard.'
+						);
+					}
+					throw new EnrollmentError(
+						'That old safety record changed or is no longer present. Reopen the account before doing anything else.'
+					);
+				}
+				if (stale.record.fingerprint === authenticatorFingerprint(account)) {
+					throw new EnrollmentError(MOVED_ON);
+				}
+				await clearEvidence(stale, exactCompanion(stale, identified));
+				return { ok: true as const };
+			}
 
 			/*
 			 * **A record about an authenticator that is gone is cleared, not refused.**
@@ -514,34 +818,50 @@ export function registerEnrollmentHandlers(
 			 * record was about does not exist any more, and what the user needs back
 			 * is the account.
 			 */
-			if (stale) {
-				// The note goes with it. A record about an authenticator that no longer
-				// exists must not be able to come back from disk after the vault copy
-				// is cleared — that is how an account ends up refusing every operation
-				// with nothing in the application able to lift it.
-				journal.clear(steamId64, 'activate');
-				journal.clear(steamId64, 'deactivate');
-				await vault.mutate((draft) => {
-					const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
-					if (stored !== undefined) {
-						delete stored.unresolvedOperation;
-					}
-				});
-				return { ok: true as const };
-			}
-
-			if (account === undefined || held === undefined) {
+			const displayed = identified.find((entry) => entry.token === request.operationToken);
+			if (displayed !== undefined && displayed.record.kind !== kind) {
 				throw new EnrollmentError(
-					'There is nothing recorded against that account to resolve. It may have been ' +
-						'resolved already, or the record was never saved — check the account on Steam ' +
-						'before doing anything else here.'
+					'That account has a different unfinished operation recorded against it. Reopen the account and answer the operation actually displayed.'
 				);
 			}
-			if (held.kind !== kind) {
+			const held = displayed?.record.kind === kind ? displayed : undefined;
+			const currentFingerprint =
+				account === undefined ? undefined : authenticatorFingerprint(account);
+			if (
+				account === undefined ||
+				held === undefined ||
+				held.record.fingerprint !== currentFingerprint
+			) {
+				if (unidentified !== undefined) {
+					throw new EnrollmentError(
+						'That safety record does not identify which authenticator it describes, so it cannot be cleared or applied. Keep your backup and contact support before changing Steam Guard.'
+					);
+				}
 				throw new EnrollmentError(
-					'That account has a different unfinished operation recorded against it, so this ' +
-						'answer does not apply to it. Open the account and resolve the one it is ' +
-						'actually waiting on.'
+					'There is nothing recorded under that exact operation to resolve. It changed, was already resolved, or belongs to another authenticator; reopen the account before answering it.'
+				);
+			}
+			const { steamActed, passphrase } = request;
+			const companion = exactCompanion(held, identified);
+			const knownAccepted = [held, companion].some((entry) => entry?.record.certain === true);
+			if (knownAccepted && !steamActed) {
+				throw new EnrollmentError(
+					'Steam is known to have accepted that request, so it cannot be recorded as not having happened. Reopen the account and follow the recovery instructions.'
+				);
+			}
+			const guard: OperationResolutionGuard =
+				held.source === 'vault'
+					? { source: 'vault', operationToken: held.token }
+					: { source: 'journal', companion: companionIdentity(held) };
+			if (
+				steamActed &&
+				identified.some(
+					(entry) =>
+						entry !== held && entry !== companion && entry.record.fingerprint === currentFingerprint
+				)
+			) {
+				throw new EnrollmentError(
+					'This account has another unfinished Steam operation. Resolve that record before removing the account here.'
 				);
 			}
 
@@ -564,14 +884,11 @@ export function registerEnrollmentHandlers(
 			 */
 			if (!steamActed) {
 				// Steam did nothing, so the account is what it always was and the
-				// operation is worth trying again. Only the refusal is lifted.
-				await vault.mutate((draft) => {
-					const stored = draft.accounts.find((entry) => entry.steamId64 === steamId64);
-					if (stored !== undefined) {
-						delete stored.unresolvedOperation;
-					}
-				});
-				journal.clear(steamId64, kind);
+				// operation is worth trying again. Only the refusal for this exact
+				// kind and authenticator is lifted. A disk note for deactivation may
+				// coexist with an applicable activation record in the vault (or vice
+				// versa); resolving the note must not erase the other debt.
+				await clearEvidence(held, companion);
 				return { ok: true as const };
 			}
 
@@ -579,11 +896,30 @@ export function registerEnrollmentHandlers(
 				// The service owns what an activated account looks like — including the
 				// revocation-code ceremony and the recovery file, both of which the
 				// version written here skipped.
-				if (!(await enrollment.reconcileActivated(steamId64, authenticatorFingerprint(account)))) {
+				const reconciliation =
+					typeof enrollment.reconcileActivatedWithRecoveryStatus !== 'function'
+						? await enrollment.reconcileActivated(
+								steamId64,
+								authenticatorFingerprint(account),
+								guard
+							)
+						: await enrollment.reconcileActivatedWithRecoveryStatus(
+								steamId64,
+								authenticatorFingerprint(account),
+								guard
+							);
+				const reconciled =
+					typeof reconciliation === 'boolean' ? { applied: reconciliation } : reconciliation;
+				if (!reconciled.applied) {
 					throw new EnrollmentError(MOVED_ON);
 				}
-				journal.clear(steamId64, kind);
-				return { ok: true as const };
+				clearJournalEvidence(held, companion);
+				return {
+					ok: true as const,
+					...(reconciled.recoveryWarning === undefined
+						? {}
+						: { recoveryWarning: reconciled.recoveryWarning })
+				};
 			}
 
 			/*
@@ -601,19 +937,24 @@ export function registerEnrollmentHandlers(
 				!(await enrollment.reconcileDetached(
 					steamId64,
 					passphrase,
-					authenticatorFingerprint(account)
+					authenticatorFingerprint(account),
+					guard
 				))
 			) {
 				// Nothing was deleted, so nothing is torn down and nothing is claimed.
 				throw new EnrollmentError(MOVED_ON);
 			}
-			journal.clear(steamId64, kind);
 			// The same teardown a local removal does: cookie jar, cached session,
-			// pending list.
-			onRemoved(steamId64);
+			// pending list. Do it immediately after the local deletion: a later
+			// journal-cleanup failure must not leave a signed-in session for an
+			// account whose vault row is already gone.
+			onRemoved(steamId64, true);
+			clearJournalEvidence(held, companion);
 			return { ok: true as const };
+		} finally {
+			releaseAccountMutation();
 		}
-	);
+	});
 
 	/**
 	 * **The stored refusal, enforced rather than displayed.**
@@ -645,157 +986,384 @@ export function registerEnrollmentHandlers(
 	 * account was refused, the resolution refused too, and nothing in the
 	 * application could unblock it.
 	 */
-	function recordFor(steamId64: string): {
+	type LocatedOperation =
+		| {
+				source: 'vault';
+				steamId64: string;
+				record: NonNullable<Account['unresolvedOperation']>;
+				guidance: string;
+				token: string;
+		  }
+		| {
+				source: 'journal';
+				steamId64: string;
+				record: PendingOperation;
+				guidance: string;
+				token: string;
+		  };
+
+	function journalGuidance(note: PendingOperation): string {
+		if (note.certain === true) {
+			return note.kind === 'activate'
+				? 'Steam accepted the request to finish adding this authenticator, but the vault update did not finish. Do not say that Steam did nothing and do not send the request again; follow the recovery instructions.'
+				: 'Steam accepted the request to remove this authenticator, but the local vault update did not finish. Do not say that Steam did nothing and do not send the request again; follow the recovery instructions.';
+		}
+		return note.kind === 'activate'
+			? 'This app asked Steam to finish adding an authenticator to this account and never found out what happened — it was interrupted before Steam answered. Sign in to Steam and check whether Steam Guard is on this account before doing anything else here.'
+			: 'This app asked Steam to remove this authenticator and never found out what happened — it was interrupted before Steam answered. Sign in to Steam and check whether Steam Guard is still on this account before doing anything else here.';
+	}
+
+	function locatedRecords(steamId64: string): {
 		account: Account | undefined;
-		held: Account['unresolvedOperation'];
-		stale: boolean;
+		identified: LocatedOperation[];
+		unidentified?: { kind: 'activate' | 'deactivate'; guidance: string };
 	} {
 		const account = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
 		const stored = account?.unresolvedOperation;
-
-		/*
-		 * **The floor under the vault record.**
-		 *
-		 * `latch` runs after Steam answers and writes to the vault, so a lock, a
-		 * crash or a power cut between the send and the answer left nothing at all
-		 * — and the account then looked ordinary, with the same button offering the
-		 * same irreversible call. The note on disk was written before the send and
-		 * survives all three.
-		 *
-		 * Consulted only when the vault has nothing, so the guidance a real failure
-		 * produced always wins over this generic one.
-		 */
-		/*
-		 * **Whenever the vault's record does not apply — not merely when it is absent.**
-		 *
-		 * This read the note only for `stored === undefined`, and a record that is
-		 * present but *stale* is treated everywhere else as no record at all. So an
-		 * account carrying a left-over record about an authenticator since replaced
-		 * masked a note about the one it holds now — which is the single case this
-		 * file exists to cover — and the irreversible call went through.
-		 *
-		 * Stale records persist: `mergeAccount` in the import service spreads the
-		 * existing row and never clears `unresolvedOperation`, so a replace leaves one
-		 * behind indefinitely.
-		 */
-		const current = account === undefined ? undefined : authenticatorFingerprint(account);
-		const applies = (record: { fingerprint?: string } | undefined): boolean =>
-			record !== undefined && record.fingerprint !== undefined && record.fingerprint === current;
-
-		const note = account === undefined || applies(stored) ? undefined : journal.read(steamId64);
-		const noted =
-			note === undefined
-				? undefined
-				: {
-						kind: note.kind,
-						guidance:
-							note.kind === 'activate'
-								? 'This app asked Steam to finish adding an authenticator to this account ' +
-									'and never found out what happened — it was interrupted before Steam ' +
-									'answered. Sign in to Steam and check whether Steam Guard is on this ' +
-									'account before doing anything else here.'
-								: 'This app asked Steam to remove this authenticator and never found out ' +
-									'what happened — it was interrupted before Steam answered. Sign in to ' +
-									'Steam and check whether Steam Guard is still on this account before ' +
-									'doing anything else here.',
-						fingerprint: note.fingerprint,
-						at: note.at
-					};
-
-		if (account === undefined) {
-			// A note with no account row left to hang it on is unreachable from here.
-			// The initial-enrolment case, where there may never have been a row, needs
-			// a surface of its own.
-			return { account, held: undefined, stale: false };
+		const identified: LocatedOperation[] = [];
+		if (stored !== undefined && isAuthenticatorFingerprint(stored.fingerprint)) {
+			identified.push({
+				source: 'vault',
+				steamId64,
+				record: stored,
+				guidance: stored.guidance,
+				token: operationRecordToken('vault', { steamId64, ...stored })
+			});
 		}
-
-		// The vault's own record first: the guidance a real failure produced always
-		// beats the note's generic wording.
-		if (applies(stored)) {
-			return { account, held: stored, stale: false };
+		for (const note of journal.readAll(steamId64)) {
+			if (!isAuthenticatorFingerprint(note.fingerprint)) {
+				throw new Error('the saved Steam operation record has an invalid authenticator identity');
+			}
+			identified.push({
+				source: 'journal',
+				steamId64,
+				record: note,
+				guidance: journalGuidance(note),
+				token: operationRecordToken('journal', note)
+			});
 		}
-		if (applies(noted)) {
-			return { account, held: noted, stale: false };
-		}
+		return {
+			account,
+			identified,
+			...(stored !== undefined && !isAuthenticatorFingerprint(stored.fingerprint)
+				? { unidentified: { kind: stored.kind, guidance: stored.guidance } }
+				: {})
+		};
+	}
 
-		// Neither applies. `stale` says there is something to clear, which is what
-		// lets the resolve handler give the account back rather than refuse forever.
-		return { account, held: undefined, stale: stored !== undefined || note !== undefined };
+	function operationIdOf(operation: LocatedOperation): string | undefined {
+		const value =
+			operation.source === 'vault'
+				? operation.record.operationId
+				: operation.record.identity.source === 'v2'
+					? operation.record.identity.recordId
+					: undefined;
+		return isOperationId(value) ? value : undefined;
+	}
+
+	function sameOperation(left: LocatedOperation, right: LocatedOperation): boolean {
+		const operationId = operationIdOf(left);
+		return (
+			left.source !== right.source &&
+			operationId !== undefined &&
+			operationId === operationIdOf(right) &&
+			left.steamId64 === right.steamId64 &&
+			left.record.kind === right.record.kind &&
+			left.record.fingerprint === right.record.fingerprint &&
+			left.record.at === right.record.at
+		);
+	}
+
+	function companionIdentity(operation: LocatedOperation): OperationCompanionIdentity | undefined {
+		const operationId = operationIdOf(operation);
+		const fingerprint = operation.record.fingerprint;
+		return operationId === undefined || !isAuthenticatorFingerprint(fingerprint)
+			? undefined
+			: {
+					operationId,
+					kind: operation.record.kind,
+					fingerprint,
+					at: operation.record.at
+				};
+	}
+
+	function exactCompanion(
+		operation: LocatedOperation,
+		all: LocatedOperation[]
+	): LocatedOperation | undefined {
+		return all.find((candidate) => candidate !== operation && sameOperation(operation, candidate));
+	}
+
+	async function clearVaultEvidence(operation: LocatedOperation): Promise<void> {
+		if (operation.source !== 'vault') return;
+		let recoveryChanged = false;
+		await vault.mutate((draft) => {
+			const account = draft.accounts.find((entry) => entry.steamId64 === operation.steamId64);
+			const record = account?.unresolvedOperation;
+			if (
+				account === undefined ||
+				record === undefined ||
+				operationRecordToken('vault', { steamId64: operation.steamId64, ...record }) !==
+					operation.token
+			) {
+				throw new EnrollmentError(MOVED_ON);
+			}
+			delete account.unresolvedOperation;
+			markRecoveryBackupNeeded(account, account.recoveryBackup, new Date().toISOString());
+			recoveryChanged = true;
+		});
+		if (recoveryChanged) {
+			await tryRefreshRecoveryBackup(operation.steamId64);
+		}
+	}
+
+	function clearJournalEvidence(
+		operation: LocatedOperation,
+		companion: LocatedOperation | undefined
+	): void {
+		for (const entry of [operation, companion]) {
+			if (entry?.source === 'journal') journal.clear(entry.record);
+		}
+	}
+
+	async function clearEvidence(
+		operation: LocatedOperation,
+		companion: LocatedOperation | undefined
+	): Promise<void> {
+		// Clear the vault first. If the journal clear fails, its durable refusal
+		// remains; the reverse order could lose the last surviving evidence.
+		for (const entry of [operation, companion]) {
+			if (entry?.source === 'vault') await clearVaultEvidence(entry);
+		}
+		clearJournalEvidence(operation, companion);
+	}
+
+	function recordFor(
+		steamId64: string,
+		preferredKind?: 'activate' | 'deactivate'
+	): {
+		account: Account | undefined;
+		held?: LocatedOperation;
+		companion?: LocatedOperation;
+		stale?: LocatedOperation;
+		unidentified?: { kind: 'activate' | 'deactivate'; guidance: string };
+	} {
+		const { account, identified, unidentified } = locatedRecords(steamId64);
+		if (account === undefined) return { account };
+		const current = authenticatorFingerprint(account);
+		const applies = (entry: LocatedOperation): boolean => entry.record.fingerprint === current;
+		const applicable = identified.filter(applies);
+		const held =
+			applicable.find((entry) => entry.source === 'vault' && entry.record.kind === preferredKind) ??
+			applicable.find((entry) => entry.source === 'vault') ??
+			applicable.find((entry) => entry.record.kind === preferredKind) ??
+			applicable[0];
+		if (held !== undefined) {
+			const companion = exactCompanion(held, identified);
+			return { account, held, ...(companion === undefined ? {} : { companion }) };
+		}
+		if (unidentified !== undefined) return { account, unidentified };
+		const staleCandidates = identified.filter((entry) => !applies(entry));
+		const stale =
+			staleCandidates.find(
+				(entry) => entry.source === 'vault' && entry.record.kind === preferredKind
+			) ??
+			staleCandidates.find((entry) => entry.source === 'vault') ??
+			staleCandidates.find((entry) => entry.record.kind === preferredKind) ??
+			staleCandidates[0];
+		return { account, ...(stale === undefined ? {} : { stale }) };
 	}
 
 	function heldBack(
-		steamId64: string
-	): { state: 'uncertain'; guidance: string; certain?: boolean; persisted?: boolean } | undefined {
-		const { held } = recordFor(steamId64);
-		if (held === undefined) {
-			return undefined;
+		steamId64: string,
+		preferredKind: 'activate' | 'deactivate'
+	):
+		| {
+				state: 'uncertain' | 'staleOperation' | 'unidentifiedOperation';
+				kind: 'activate' | 'deactivate';
+				guidance: string;
+				certain?: boolean;
+				persisted?: boolean;
+				staleToken?: string;
+				operationToken?: string;
+		  }
+		| undefined {
+		let held: LocatedOperation | undefined;
+		let companion: LocatedOperation | undefined;
+		let stale: LocatedOperation | undefined;
+		let unidentified: { kind: 'activate' | 'deactivate'; guidance: string } | undefined;
+		try {
+			({ held, companion, stale, unidentified } = recordFor(steamId64, preferredKind));
+		} catch {
+			throw new EnrollmentError(
+				'The saved Steam operation safety records cannot be read, so no request was sent. ' +
+					'Repair the application data folder or update the app, then try again.',
+				false
+			);
 		}
-		// Read back out of the vault, so it is durable by construction.
-		return held.certain === true
-			? { state: 'uncertain', guidance: held.guidance, certain: true, persisted: true }
-			: { state: 'uncertain', guidance: held.guidance, persisted: true };
+		if (held === undefined) {
+			if (unidentified !== undefined) {
+				return {
+					state: 'unidentifiedOperation',
+					kind: unidentified.kind,
+					guidance:
+						`${unidentified.guidance} This safety record does not identify which authenticator it describes, ` +
+						'so this app cannot safely clear it, apply it to the current secrets, or contact Steam. Keep your backup and contact support before changing Steam Guard.',
+					persisted: true
+				};
+			}
+			return stale === undefined
+				? undefined
+				: {
+						state: 'staleOperation',
+						kind: stale.record.kind,
+						guidance:
+							'An old safety record belongs to an authenticator that is no longer stored here. ' +
+							'No new request was sent. Clear only that old record before trying again.',
+						persisted: true,
+						staleToken: stale.token
+					};
+		}
+		// Either exact companion can carry the durable one-way fact. Prefer the
+		// guidance from the evidence that actually knows Steam accepted the request,
+		// so the heading, copy, and resolution choices all tell the same story.
+		const accepted = [held, companion].find((entry) => entry?.record.certain === true);
+		return accepted !== undefined
+			? {
+					state: 'uncertain',
+					kind: held.record.kind,
+					guidance: accepted.guidance,
+					certain: true,
+					persisted: true,
+					operationToken: held.token
+				}
+			: {
+					state: 'uncertain',
+					kind: held.record.kind,
+					guidance: held.guidance,
+					persisted: true,
+					operationToken: held.token
+				};
 	}
 
 	registerHandler(CHANNELS.enrollActivate, async ({ steamId64, code }) => {
 		requireUnlocked();
-		const blocked = heldBack(steamId64);
-		if (blocked !== undefined) {
-			return blocked;
-		}
-		// Sampled before the request goes, so a row replaced while Steam is failing
-		// to answer cannot be what the record ends up describing.
-		const ran = operatedOn(steamId64);
-
-		// **Written down before the request goes.** `latch` below runs after Steam
-		// answers, so a lock on the idle timer, a crash or a power cut in between
-		// left no trace at all — and the account then looked ordinary, with the same
-		// irreversible button on it.
-		journal.record({
-			steamId64,
-			kind: 'activate',
-			fingerprint: ran,
-			at: new Date().toISOString()
-		});
-
+		let releaseProtectedOperation: () => void;
 		try {
-			const state = await enrollment.activate(steamId64, code);
-			// The outcome is known, so the note has done its job.
-			journal.clear(steamId64, 'activate');
-			return { state };
+			releaseProtectedOperation = keyCoordinator.beginActivation(steamId64);
 		} catch (err) {
-			let outcome: { state: 'uncertain'; guidance: string; certain?: boolean };
+			throw new EnrollmentError(
+				err instanceof Error ? err.message : 'Another protected operation is in progress.',
+				false
+			);
+		}
+		try {
+			const blocked = heldBack(steamId64, 'activate');
+			if (blocked !== undefined) {
+				return blocked;
+			}
+			if (accountMutationBlocked(steamId64)) {
+				throw new EnrollmentError(
+					'Finish or resolve this account’s saved authenticator workflow before asking Steam to activate it.',
+					false
+				);
+			}
+			// Sampled before the request goes, so a row replaced while Steam is failing
+			// to answer cannot be what the record ends up describing.
+			const ran = operatedOn(steamId64);
+
+			// **Written down before the request goes.** `latch` below runs after Steam
+			// answers, so a lock on the idle timer, a crash or a power cut in between
+			// left no trace at all — and the account then looked ordinary, with the same
+			// irreversible button on it.
+			const note = journal.record({
+				steamId64,
+				kind: 'activate',
+				fingerprint: ran,
+				at: new Date().toISOString()
+			});
+
+			let knownState:
+				| Awaited<ReturnType<EnrollmentService['activateWithRecoveryStatus']>>
+				| 'activated'
+				| 'wantMore';
 			try {
-				outcome = uncertainOrRethrow(err);
-			} catch (known) {
+				knownState =
+					typeof enrollment.activateWithRecoveryStatus !== 'function'
+						? await enrollment.activate(steamId64, code)
+						: await enrollment.activateWithRecoveryStatus(steamId64, code);
+			} catch (err) {
+				let outcome: { state: 'uncertain'; guidance: string; certain?: boolean };
+				try {
+					outcome = uncertainOrRethrow(err);
+				} catch (known) {
+					/*
+					 * **A refusal Steam gave us is not an uncertainty.** A mistyped code or
+					 * a rejected password says plainly that nothing happened, and leaving
+					 * the note behind would turn every ordinary typo into an account that
+					 * reports an unfinished operation for ever, with a warning telling the
+					 * user to go and check Steam over nothing at all.
+					 */
+					try {
+						journal.clear(note);
+					} catch {
+						throw new EnrollmentError(
+							`The activation did not change Steam (${known instanceof Error ? known.message : 'the request was refused'}), ` +
+								'but its safety record could not be cleared. The action remains blocked; repair the application data folder and resolve the saved record.',
+							false
+						);
+					}
+					throw known;
+				}
 				/*
-				 * **A refusal Steam gave us is not an uncertainty.** A mistyped code or
-				 * a rejected password says plainly that nothing happened, and leaving
-				 * the note behind would turn every ordinary typo into an account that
-				 * reports an unfinished operation for ever, with a warning telling the
-				 * user to go and check Steam over nothing at all.
+				 * **Whether the refusal survives this window is part of the answer.**
+				 *
+				 * The write can fail — a full disk, a vault that locked while Steam was
+				 * being waited on, a row that is no longer there — and it was caught,
+				 * logged and swallowed, after which the screen went on saying "this
+				 * application will not send the request again". That is a promise about
+				 * a record that does not exist: close the window and the account looks
+				 * ordinary, with the same button offering the same irreversible call.
 				 */
-				journal.clear(steamId64, 'activate');
-				throw known;
+				const { durableNote, persisted } = await persistOperationOutcome(
+					steamId64,
+					'activate',
+					outcome,
+					note
+				);
+				/*
+				 * Keep the independent pre-send note even when the richer vault latch
+				 * lands. That save puts the pre-latch vault into `.bak`; clearing the note
+				 * here let Restore from backup erase the only refusal and offer the same
+				 * irreversible request again. A known outcome or explicit resolution
+				 * clears both records together.
+				 */
+				// The promise the screen makes — that this will not be sent again — is now
+				// backed by the note whenever the vault write is the thing that failed.
+				return {
+					...outcome,
+					kind: 'activate' as const,
+					persisted: persisted !== undefined || journal.inspect(durableNote) === 'pending',
+					operationToken:
+						persisted === undefined
+							? operationRecordToken('journal', durableNote)
+							: operationRecordToken('vault', { steamId64, ...persisted })
+				};
 			}
-			/*
-			 * **Whether the refusal survives this window is part of the answer.**
-			 *
-			 * The write can fail — a full disk, a vault that locked while Steam was
-			 * being waited on, a row that is no longer there — and it was caught,
-			 * logged and swallowed, after which the screen went on saying "this
-			 * application will not send the request again". That is a promise about
-			 * a record that does not exist: close the window and the account looks
-			 * ordinary, with the same button offering the same irreversible call.
-			 */
-			const persisted = await latch(steamId64, 'activate', outcome, ran);
-			if (persisted) {
-				// The vault now carries the guidance the failure actually produced,
-				// which is better than the note's generic wording.
-				journal.clear(steamId64, 'activate');
+			// Keep a known Steam/vault result out of the uncertainty classifier. If
+			// cleanup fails, the note deliberately remains and blocks repetition.
+			try {
+				journal.clear(note);
+			} catch {
+				throw new EnrollmentError(
+					`Steam answered the activation request (${typeof knownState === 'string' ? knownState : knownState.state}), and the vault was updated, ` +
+						'but its safety record could not be cleared. The action will not be repeated; reopen the account and resolve the saved record.',
+					false
+				);
 			}
-			// The promise the screen makes — that this will not be sent again — is now
-			// backed by the note whenever the vault write is the thing that failed.
-			return { ...outcome, persisted: persisted || journal.read(steamId64) !== undefined };
+			return typeof knownState === 'string' ? { state: knownState } : knownState;
+		} finally {
+			releaseProtectedOperation();
 		}
 	});
 
@@ -810,53 +1378,99 @@ export function registerEnrollmentHandlers(
 			if (!matchesDeactivateAck(acknowledgement)) {
 				throw new Error(`type "${DEACTIVATE_ACK}" to remove this authenticator from Steam`);
 			}
-
-			const blocked = heldBack(steamId64);
-			if (blocked !== undefined) {
-				return blocked;
-			}
-
-			// Before the request goes. See `latch`.
-			const ran = operatedOn(steamId64);
-
-			// Before the request goes, for the reason given on the activation path.
-			journal.record({
-				steamId64,
-				kind: 'deactivate',
-				fingerprint: ran,
-				at: new Date().toISOString()
-			});
-
+			let releaseProtectedOperation: () => void;
 			try {
-				await enrollment.deactivate(steamId64, passphrase);
-				journal.clear(steamId64, 'deactivate');
+				releaseProtectedOperation = keyCoordinator.beginDeactivation(steamId64);
 			} catch (err) {
-				let outcome: { state: 'uncertain'; guidance: string; certain?: boolean };
-				try {
-					outcome = uncertainOrRethrow(err);
-				} catch (known) {
-					// A refusal, not an uncertainty. See the activation path.
-					journal.clear(steamId64, 'deactivate');
-					throw known;
-				}
-				/*
-				 * The account is still in the vault — a removal whose outcome is
-				 * unknown does not get to delete the secrets that might still be the
-				 * live ones — so there is a row to write this on. Whether the write
-				 * landed travels with the outcome; see the activation path above.
-				 */
-				const persisted = await latch(steamId64, 'deactivate', outcome, ran);
-				if (persisted) {
-					journal.clear(steamId64, 'deactivate');
-				}
-				return { ...outcome, persisted: persisted || journal.read(steamId64) !== undefined };
+				throw new EnrollmentError(
+					err instanceof Error ? err.message : 'Another protected operation is in progress.',
+					false
+				);
 			}
+			try {
+				const blocked = heldBack(steamId64, 'deactivate');
+				if (blocked !== undefined) {
+					return blocked;
+				}
+				if (accountMutationBlocked(steamId64)) {
+					throw new EnrollmentError(
+						'Finish or resolve this account’s saved authenticator workflow before asking Steam to remove it.',
+						false
+					);
+				}
 
-			// The same cleanup a local removal does: cookie jar, cached session,
-			// pending list. An account whose authenticator is gone must not still have
-			// a live session sitting in memory.
-			onRemoved(steamId64);
-			return { ok: true as const };
+				// Before the request goes. See `latch`.
+				const ran = operatedOn(steamId64);
+
+				// Before the request goes, for the reason given on the activation path.
+				const note = journal.record({
+					steamId64,
+					kind: 'deactivate',
+					fingerprint: ran,
+					at: new Date().toISOString()
+				});
+
+				try {
+					await enrollment.deactivate(steamId64, passphrase);
+				} catch (err) {
+					let outcome: { state: 'uncertain'; guidance: string; certain?: boolean };
+					try {
+						outcome = uncertainOrRethrow(err);
+					} catch (known) {
+						// A refusal, not an uncertainty. See the activation path.
+						try {
+							journal.clear(note);
+						} catch {
+							throw new EnrollmentError(
+								`The removal did not change Steam (${known instanceof Error ? known.message : 'the request was refused'}), ` +
+									'but its safety record could not be cleared. The action remains blocked; repair the application data folder and resolve the saved record.',
+								false
+							);
+						}
+						throw known;
+					}
+					/*
+					 * The account is still in the vault — a removal whose outcome is
+					 * unknown does not get to delete the secrets that might still be the
+					 * live ones — so there is a row to write this on. Whether the write
+					 * landed travels with the outcome; see the activation path above.
+					 */
+					const { durableNote, persisted } = await persistOperationOutcome(
+						steamId64,
+						'deactivate',
+						outcome,
+						note
+					);
+					// The pre-send note stays beside the vault latch until a known outcome
+					// or explicit resolution. See the activation path: `.bak` predates this
+					// latch and must not be able to erase the only refusal.
+					return {
+						...outcome,
+						kind: 'deactivate' as const,
+						persisted: persisted !== undefined || journal.inspect(durableNote) === 'pending',
+						operationToken:
+							persisted === undefined
+								? operationRecordToken('journal', durableNote)
+								: operationRecordToken('vault', { steamId64, ...persisted })
+					};
+				}
+
+				// The same cleanup a local removal does: cookie jar, cached session,
+				// pending list. An account whose authenticator is gone must not still have
+				// a live session sitting in memory.
+				onRemoved(steamId64, true);
+				try {
+					journal.clear(note);
+				} catch {
+					throw new EnrollmentError(
+						'Steam removed the authenticator and the account was removed from this vault, but the safety record could not be cleared. Nothing will be sent again; repair the application data folder.',
+						false
+					);
+				}
+				return { ok: true as const };
+			} finally {
+				releaseProtectedOperation();
+			}
 		}
 	);
 
@@ -907,16 +1521,30 @@ export function registerEnrollmentHandlers(
 			);
 		}
 
-		const already = vault.read().accounts.some((entry) => entry.steamId64 === identity);
-		if (already) {
-			// Not an error. Somebody recovering a file they did not need should be
-			// told that plainly rather than shown a failure.
-			return { state: 'alreadyPresent' as const, accountName: recovered.accountName };
-		}
+		const releaseAccountMutation = keyCoordinator.beginAccountMutation(identity);
+		try {
+			// The reservation closes the interval between this read and the write. An
+			// irreversible submission cannot create a journal in that interval, and a
+			// concurrent import/remove cannot change which account this decision saw.
+			requireUnlocked();
+			const already = vault.read().accounts.some((entry) => entry.steamId64 === identity);
+			if (already) {
+				// Not an error. Somebody recovering a file they did not need should be
+				// told that plainly rather than shown a failure.
+				return { state: 'alreadyPresent' as const, accountName: recovered.accountName };
+			}
+			if (accountMutationBlocked(identity)) {
+				throw new RecoveryError(
+					'finish or resolve this account’s unfinished authenticator operation before restoring an older recovery file.'
+				);
+			}
 
-		await vault.mutate((draft) => {
-			draft.accounts.push(recovered.account);
-		});
+			await vault.mutate((draft) => {
+				draft.accounts.push(recovered.account);
+			});
+		} finally {
+			releaseAccountMutation();
+		}
 
 		return {
 			state: 'restored' as const,
@@ -947,412 +1575,232 @@ export function registerEnrollmentHandlers(
 			// the vault has locked — the one moment the application has been told nobody
 			// is present.
 			requireUnlocked();
-
-			// And re-read, for the same reason. The copy taken before the dialog
-			// outlives anything that happened during it — writing it out for an
-			// account since removed would put secrets the user just chose to be rid of
-			// into a fresh plaintext file.
-			const current = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
-			if (!current) {
-				throw new Error('that account is no longer in this vault, so nothing was exported.');
-			}
-
-			// `mode: 0o600` — owner-only. This file contains the same secrets as the
-			// vault and none of its encryption, so the one protection available is that
-			// other users on the machine cannot read it. The user is told as much on
-			// the screen that offers this.
-			//
-			// **Temp beside the destination, then rename — never truncate in place.**
-			// Writing straight to the chosen path opens it for truncation first, so a
-			// write that then failed — disk full, a drive unplugged mid-copy — had
-			// already emptied the previous maFile at that name. Re-exporting over an
-			// existing backup is the ordinary case, and a failed export must leave the
-			// old file exactly as it was; the vault and recovery writers have always
-			// worked this way.
-			//
-			// Wrapped because a failed write throws with the absolute path in its
-			// message, and the rule at the top of this module is that no path crosses
-			// IPC in either direction.
-			// A unique name, and `wx`. A fixed `.tmp` suffix truncated whatever already
-			// sat at that name — a sibling file that was never ours — and two exports
-			// to the same destination shared one temp, so either's failure path could
-			// delete the other's work. The random name makes collisions impossible and
-			// `wx` makes this write constitutionally unable to empty an existing file.
-			const temp = `${destination}.${randomUUID()}.tmp`;
-
-			/*
-			 * What this file is about to contain, captured before the write.
-			 *
-			 * Re-read and compared after it, beside the lock check — see there. The
-			 * revocation code is included because replacing it alone makes an exported
-			 * copy wrong in the way that matters most: it is the one secret whose loss
-			 * cannot be undone, and a backup holding the previous one is worse than no
-			 * backup, because somebody will believe it.
-			 */
-			const exported = fingerprint(current);
-
-			/*
-			 * Cleanup and refusal in one place, so both failure paths below can keep a
-			 * **bare** `catch`.
-			 *
-			 * That is not style. `preserve-caught-error` wants a `cause` on anything
-			 * rethrown from a bound error — and the whole rule of this module is that
-			 * no filesystem path crosses IPC. A failed write throws with the absolute
-			 * destination in its message, so attaching it as a cause would hand the
-			 * renderer the user's folder layout through the back door, to satisfy a
-			 * lint rule about diagnostics.
-			 */
-			const giveUp = async (alsoLeft: readonly string[] = []): Promise<never> => {
-				// Verified, not merely attempted. The staged file holds the same plaintext
-				// the destination would have, so a removal that failed and was swallowed
-				// left a maFile in the user's folder under a message telling them the
-				// export had not been written at all.
-				const staged = (await removed(temp)) ? [] : [basename(temp)];
-				// Concatenated rather than interpolated so the sentence the user is given
-				// for a failed write stays one literal in this file: `transfer-screen-wiring`
-				// reads it from the source to prove the refusal names the file that was
-				// asked for and never the path the OS dialog chose.
-				throw new Error(
-					`${suggested} could not be written to that location.` +
-						stillOnDisk([...alsoLeft, ...staged])
-				);
-			};
-
-			/*
-			 * Kept beyond the write: it is what makes the file at the destination
-			 * this export's own, and the rollback below has no other way to tell.
-			 */
-			const contents = toMaFile(current);
-
+			const releaseAccountSnapshot = keyCoordinator.beginAccountSnapshot(steamId64);
 			try {
-				await writeFile(temp, contents, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-			} catch {
-				await giveUp();
-			}
-
-			{
-				/*
-				 * **Checked once more, between writing and publishing.**
-				 *
-				 * The check before this covers the save dialog, which is the long wait —
-				 * but the write is a wait too, and a slow one on the drives people
-				 * actually export to: a USB stick, a network share, an SD card. Lock the
-				 * vault during it — manually, by idling, by shutting the lid — and the
-				 * rename still completed and put a plaintext maFile at the destination,
-				 * carrying the same secrets as the vault and none of its encryption,
-				 * after the application had been told nobody is present.
-				 *
-				 * The rename is the moment the file becomes real, so this is the last
-				 * place the answer can still be no. The temp goes with it: it holds the
-				 * same plaintext, and it exists only because the destination is not
-				 * safe to write directly.
-				 */
-				// A lock is not a disk problem, and telling somebody their drive would
-				// not take the file when what actually happened is that their vault
-				// locked sends them to fix the wrong thing — so this is thrown from
-				// outside the write's own catch, where it cannot be mistaken for one.
-				if (!vault.isUnlocked()) {
-					// And if the staged plaintext cannot be taken back, the lock is not the
-					// only thing the user needs to hear about.
-					const staged = (await removed(temp)) ? [] : [basename(temp)];
-					throw staged.length === 0
-						? new VaultLockedError()
-						: new VaultLockedError(`the vault is locked.${stillOnDisk(staged)}`);
+				// And re-read, for the same reason. The copy taken before the dialog
+				// outlives anything that happened during it — writing it out for an
+				// account since removed would put secrets the user just chose to be rid of
+				// into a fresh plaintext file.
+				const current = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+				if (!current) {
+					throw new Error('that account is no longer in this vault, so nothing was exported.');
 				}
 
+				// Stage the plaintext beside the destination under an owner-only, unique
+				// name. The final name is claimed separately with a no-clobber operation;
+				// an occupied destination is always refused and never replaced.
+				const temp = `${destination}.${randomUUID()}.tmp`;
+
 				/*
-				 * **And that it is still the same account.**
-				 *
-				 * The lock is re-checked here and the account's identity was not, so
-				 * only half the race was closed. The write is the wait — slow on the
-				 * drives people export to — and an account can be removed, or have its
-				 * authenticator replaced, while it runs. The rename then published a
-				 * plaintext maFile holding secrets the vault no longer has, and told the
-				 * user it had saved their account.
-				 *
-				 * Removed is the worse half: it puts the secrets somebody just chose to
-				 * be rid of into a fresh unencrypted file at a path of their choosing.
-				 * Replaced is quieter and lasts longer — a backup that silently holds
-				 * the previous authenticator, which Steam has already stopped accepting,
-				 * discovered at the one moment it is ever used.
-				 *
-				 * Compared on the secrets themselves rather than on presence, because
-				 * "still in the vault" is true of a re-enrolled account that shares
-				 * nothing with the one this file describes.
+				 * What this file is about to contain, captured byte for byte before the
+				 * write. The same projection is made from the live account at both commit
+				 * boundaries below. Comparing the serialized maFile rather than a hand-picked
+				 * fingerprint means `fully_enrolled`, device metadata and any future exported
+				 * field cannot change unnoticed, while routing and automatic-confirmation
+				 * settings — which the maFile does not contain — do not create false races.
 				 */
-				const stillThere = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
-				if (!stillThere || fingerprint(stillThere) !== exported) {
+				const contents = toMaFile(current);
+
+				/*
+				 * Cleanup and refusal in one place, so both failure paths below can keep a
+				 * **bare** `catch`.
+				 *
+				 * That is not style. `preserve-caught-error` wants a `cause` on anything
+				 * rethrown from a bound error — and the whole rule of this module is that
+				 * no filesystem path crosses IPC. A failed write throws with the absolute
+				 * destination in its message, so attaching it as a cause would hand the
+				 * renderer the user's folder layout through the back door, to satisfy a
+				 * lint rule about diagnostics.
+				 */
+				const giveUp = async (
+					alsoLeft: readonly string[] = [],
+					possiblyLeft: readonly string[] = []
+				): Promise<never> => {
+					// Verified, not merely attempted. The staged file holds the same plaintext
+					// the destination would have, so a removal that failed and was swallowed
+					// left a maFile in the user's folder under a message telling them the
+					// export had not been written at all.
 					const staged = (await removed(temp)) ? [] : [basename(temp)];
-					throw raceLost(!stillThere, staged);
-				}
-			}
-
-			/*
-			 * Whether the destination was already there, read before the rename.
-			 *
-			 * It decides what a lock *during* the rename is allowed to do about it —
-			 * see below. `access` rather than a stat: only existence matters, and this
-			 * is a question about the path, not about its contents.
-			 */
-			/*
-			 * **The previous file is set aside, not merely noted.**
-			 *
-			 * An earlier version recorded whether the destination existed and, if it
-			 * did, left the replacement in place when a lock landed during the rename —
-			 * on the reasoning that deleting would destroy a backup the user had before
-			 * they pressed anything.
-			 *
-			 * That reasoning had a hole, and it produced the worst available outcome:
-			 * the old backup was gone, freshly exported plaintext was sitting at that
-			 * path, and the user was told the export had failed because the vault
-			 * locked. Every part of that is wrong at once — a destroyed file, a new
-			 * exposure, and a message saying neither happened.
-			 *
-			 * Moving it aside first makes the rename undoable, so the lock can be
-			 * honoured exactly: the new file goes, the old one comes back, and
-			 * "nothing was replaced" is true. The same set-aside-then-restore the vault
-			 * writer has always used, for the same reason.
-			 */
-			const kept = `${destination}.${randomUUID()}.prev`;
-			const replacing = await rename(destination, kept)
-				.then(() => true)
-				.catch(() => false);
-
-			/**
-			 * What this export left at the destination, so the rollback can tell
-			 * whether the file it is about to delete is still that one.
-			 *
-			 * The mutex above stops another *export* getting in, and cannot stop
-			 * anything else: a sync client, a backup tool, the user saving over it.
-			 * The rollback deletes the destination outright, so without this it is one
-			 * unlucky moment from removing a file this export never created, under a
-			 * message saying nothing was written.
-			 *
-			 * Size and modification time rather than an inode, because Windows reports
-			 * `ino` as 0 and a check that is inert on the platform most of these
-			 * installs run on is not a check.
-			 */
-			/**
-			 * **What this export wrote, byte for byte.**
-			 *
-			 * Ownership was size plus modification time, and neither carries any
-			 * identity worth the name: every maFile this application writes is within
-			 * a few bytes of every other, and two files created in the same
-			 * millisecond share an mtime. A foreign file of the same size written in
-			 * the same tick was classified as ours and deleted.
-			 *
-			 * The content is what makes a file this export's own, it is already in
-			 * memory, and a maFile is a few hundred bytes — so it is compared
-			 * directly. There is no cheaper check that means anything.
-			 */
-			const written = contents;
-
-			try {
-				await rename(temp, destination);
-			} catch {
-				// Put back whatever was there before saying the export failed — and when
-				// it cannot go back, name it. It is the user's own previous export,
-				// stranded under a random suffix they never chose, while the message about
-				// to be thrown talks only about the file that was not written.
-				const stranded = replacing
-					? await rename(kept, destination).then(
-							() => [],
-							() => [basename(kept)]
-						)
-					: [];
-				await giveUp(stranded);
-			}
-
-			/*
-			 * **The rename is the commit, and it is not instant.**
-			 *
-			 * The check above covers everything up to it. The rename itself is a
-			 * filesystem round trip — on the removable and network drives people
-			 * actually export to, a slow one — and a lock landing inside it still
-			 * published the plaintext maFile, then answered `saved`.
-			 *
-			 * There is no way to make a rename part of the same transaction as a lock,
-			 * so this undoes it instead, and only where undoing is honest:
-			 *
-			 *  - **Nothing was there before.** This export created the file, so
-			 *    removing it restores the directory exactly as it was, and the lock
-			 *    means nobody is present to have wanted it.
-			 *  - **Something was there.** The rename has already replaced it, and
-			 *    deleting now would destroy a backup the user had before they pressed
-			 *    anything — a worse outcome than a plaintext file for the same account
-			 *    that already existed at that path a second ago, which is no new
-			 *    exposure at all. It stays, and the refusal still says the vault
-			 *    locked.
-			 */
-			/*
-			 * **And the account is checked again, not only the lock.**
-			 *
-			 * The fingerprint was taken before this sequence and never re-read, so the
-			 * post-rename check asked one question — is the vault still open — and let
-			 * everything else through. Removing the account during the awaited renames
-			 * therefore answered `{ state: 'saved' }` with the plaintext maFile sitting
-			 * at the destination: secrets published for an authenticator the vault no
-			 * longer holds, by an export the user had already superseded.
-			 *
-			 * The same fingerprint, for the same reason it exists at all — an account
-			 * removed and re-enrolled keeps its SteamID and shares nothing else, so a
-			 * file written from the old secrets is a backup of something Steam has
-			 * already stopped accepting.
-			 */
-			const stillOurs = vault.isUnlocked()
-				? vault.read().accounts.find((entry) => entry.steamId64 === steamId64)
-				: undefined;
-			if (!vault.isUnlocked() || !stillOurs || fingerprint(stillOurs) !== exported) {
-				/*
-				 * **Undone completely — and where it cannot be undone, said out loud.**
-				 *
-				 * Both halves of this rollback used to be fired and forgotten:
-				 * `rm(destination).catch(() => undefined)` and
-				 * `rename(kept, destination).catch(() => undefined)`, followed by a refusal
-				 * saying nothing was written no matter which of them had actually worked.
-				 * Hold the destination open — a scanner, a network share dropping, a
-				 * removable drive pulled — and the freshly published maFile stayed exactly
-				 * where it was, `shared_secret` and `identity_secret` in the clear, under a
-				 * message that told the user to stop looking. A silent exposure is worse
-				 * than a loud one, because only the loud one gets deleted.
-				 *
-				 * So each half is verified on its own, and what survives is named.
-				 */
-				/*
-				 * Only if it is still the file this export wrote. If something replaced
-				 * it in the meantime, deleting is not a rollback — it destroys a file
-				 * this export never created, under a message saying nothing was
-				 * written. Unknown counts as not ours: `written` is undefined only when
-				 * the stat failed, and guessing from there is what this avoids.
-				 */
-				/**
-				 * Three answers, not two: it is ours, it is not ours, or nothing here
-				 * can tell.
-				 *
-				 * A read that fails with anything but "no such file" is the third. It
-				 * was folded into the second — `undefined` meant both "absent" and
-				 * "could not look" — so an `EACCES` on the destination read as an empty
-				 * path and the restore below renamed straight over whatever was there.
-				 * Unknown has to behave like foreign, because that is the assumption
-				 * that cannot destroy anything.
-				 */
-				/*
-				 * **Sized before it is read.** The comparison is against a maFile a few
-				 * hundred bytes long, and the destination is whatever path a save
-				 * dialog returned. Reading it whole to find out it is not ours meant an
-				 * arbitrarily large file — or a device that never ends — loaded into the
-				 * Electron main process, which is the one that must not stop.
-				 *
-				 * A file of a different length cannot be this export's own, so the stat
-				 * answers most of it for nothing. Only an exact-length match is worth
-				 * reading, and then it is bounded by construction.
-				 */
-				const atDestination: 'ours' | 'foreign' | 'absent' | 'unknown' = await stat(destination)
-					.then(async (info) => {
-						if (!info.isFile() || info.size !== Buffer.byteLength(written, 'utf8')) {
-							return 'foreign' as const;
-						}
-						return (await readFile(destination, 'utf8')) === written
-							? ('ours' as const)
-							: ('foreign' as const);
-					})
-					.catch((err: NodeJS.ErrnoException) =>
-						err.code === 'ENOENT' ? ('absent' as const) : ('unknown' as const)
+					// Concatenated rather than interpolated so the sentence the user is given
+					// for a failed write stays one literal in this file: `transfer-screen-wiring`
+					// reads it from the source to prove the refusal names the file that was
+					// asked for and never the path the OS dialog chose.
+					throw new Error(
+						`${suggested} could not be written to that location.` +
+							stillOnDisk([...alsoLeft, ...staged]) +
+							possiblyStillOnDisk(possiblyLeft)
 					);
-				const stillOurFile = atDestination === 'ours';
+				};
 
-				const tookItBack = stillOurFile ? await removed(destination) : false;
-				/*
-				 * Attempted even when the removal failed, because the restore lands *on
-				 * top* of the published file: a rename that succeeds replaces the fresh
-				 * plaintext with the copy that was there before, which is this rollback's
-				 * goal reached by the other door. Only when neither worked is the export
-				 * still sitting at the destination.
-				 *
-				 * **But not on top of a file this export did not write.** The ownership
-				 * check above stops the *removal* from deleting a stranger's file and
-				 * this half went on overwriting one, which is the same loss by the other
-				 * door — a rename replaces silently. So the restore is skipped when
-				 * something is at the destination and it is not ours, and the set-aside
-				 * copy is then named as stranded, which is exactly what it is.
-				 */
-				// `absent` is the only state the restore may write into besides `ours`.
-				const foreignAtDestination = atDestination === 'foreign' || atDestination === 'unknown';
-				const putBack =
-					replacing && !foreignAtDestination
-						? await rename(kept, destination).then(
-								() => true,
-								() => false
-							)
-						: false;
-
-				const left: string[] = [];
-				// Only when what is sitting there is this export's own plaintext. A
-				// file somebody else wrote is not something to warn this user about,
-				// and naming it would send them to delete it.
-				if (!tookItBack && !putBack && !foreignAtDestination) {
-					left.push(basename(destination));
-				}
-				if (replacing && !putBack) {
-					// The set-aside copy could not go home. It is the user's own earlier
-					// export — the same secrets, no encryption — now sitting under a random
-					// suffix in a folder where they have been told nothing happened.
-					left.push(basename(kept));
+				try {
+					await writeFile(temp, contents, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+					await flushFile(temp);
+					if ((await readFile(temp, 'utf8')) !== contents) {
+						throw new Error('the staged export did not read back exactly');
+					}
+				} catch {
+					await giveUp();
 				}
 
-				if (!vault.isUnlocked()) {
-					throw left.length === 0
-						? new VaultLockedError()
-						: new VaultLockedError(`the vault is locked.${stillOnDisk(left)}`);
+				{
+					/*
+					 * **Checked once more, between writing and publishing.**
+					 *
+					 * The check before this covers the save dialog, which is the long wait —
+					 * but the write is a wait too, and a slow one on the drives people
+					 * actually export to: a USB stick, a network share, an SD card. Lock the
+					 * vault during it — manually, by idling, by shutting the lid — and the
+					 * publication still completed and put a plaintext maFile at the destination,
+					 * carrying the same secrets as the vault and none of its encryption,
+					 * after the application had been told nobody is present.
+					 *
+					 * Publication is the moment the file becomes real, so this is the last
+					 * place the answer can still be no. The temp goes with it: it holds the
+					 * same plaintext, and it exists only because the destination is not
+					 * safe to write directly.
+					 */
+					// A lock is not a disk problem, and telling somebody their drive would
+					// not take the file when what actually happened is that their vault
+					// locked sends them to fix the wrong thing — so this is thrown from
+					// outside the write's own catch, where it cannot be mistaken for one.
+					if (!vault.isUnlocked()) {
+						// And if the staged plaintext cannot be taken back, the lock is not the
+						// only thing the user needs to hear about.
+						const staged = (await removed(temp)) ? [] : [basename(temp)];
+						throw staged.length === 0
+							? new VaultLockedError()
+							: new VaultLockedError(`the vault is locked.${stillOnDisk(staged)}`);
+					}
+
+					/*
+					 * **And that it is still the same account.**
+					 *
+					 * The lock is re-checked here and the account's identity was not, so
+					 * only half the race was closed. The write is the wait — slow on the
+					 * drives people export to — and an account can be removed, or have its
+					 * authenticator replaced, while it runs. Publication then exposed a
+					 * plaintext maFile holding secrets the vault no longer has, and told the
+					 * user it had saved their account.
+					 *
+					 * Removed is the worse half: it puts the secrets somebody just chose to
+					 * be rid of into a fresh unencrypted file at a path of their choosing.
+					 * Replaced is quieter and lasts longer — a backup that silently holds
+					 * the previous authenticator, which Steam has already stopped accepting,
+					 * discovered at the one moment it is ever used.
+					 *
+					 * Compared as the complete export projection rather than on presence,
+					 * because "still in the vault" is true of a re-enrolled account and a
+					 * status transition can change `fully_enrolled` without changing a secret.
+					 */
+					const stillThere = vault.read().accounts.find((entry) => entry.steamId64 === steamId64);
+					if (!stillThere || toMaFile(stillThere) !== contents) {
+						const staged = (await removed(temp)) ? [] : [basename(temp)];
+						throw raceLost(!stillThere, staged);
+					}
 				}
-				// The same sentences the pre-rename check gives, so the two read alike —
-				// and so a user who hits the later one is not told something different
-				// about the same situation.
-				throw raceLost(!stillOurs, left);
-			}
 
-			/*
-			 * The export stands, so the copy it replaced is no longer needed. Removed
-			 * rather than left beside it: a stray `.prev` full of the same secrets is
-			 * a second plaintext file nobody asked for.
-			 *
-			 * **And when it cannot be removed, the caller is told.** A swallowed
-			 * failure here answered `saved` while a second plaintext file sat in the
-			 * user's folder — the previous authenticator's secrets, at a path only the
-			 * OS dialog knows, with nothing anywhere mentioning it. A scanner holding
-			 * the file, a network share dropping, a removable drive pulled: all
-			 * ordinary, all silent.
-			 */
-			let staleCopy = false;
-			if (replacing) {
-				staleCopy = !(await removed(kept));
-			}
-			// **`mode` alone was not enough.** POSIX applies it only when the file is
-			// created, so exporting over a file that already existed — a second export to
-			// the same name, which is the ordinary case — kept whatever permissions it
-			// had, commonly `0644`, while replacing its contents with an unencrypted
-			// shared_secret and identity_secret.
-			//
-			// Best effort: Windows has no POSIX mode, and failing an export that has
-			// already written its bytes would leave the user worse off than a permission
-			// bit that could not be set.
-			try {
-				await chmod(destination, 0o600);
-			} catch {
-				/* not supported here; the directory's own permissions still apply */
-			}
+				// Node has no portable conditional replacement for an occupied path. Refuse
+				// every occupied name, then use an atomic no-clobber claim for the absent
+				// path so a competing writer at the publication boundary is preserved.
+				const destinationState = await stat(destination).then(
+					() => 'occupied' as const,
+					(err: NodeJS.ErrnoException) =>
+						err.code === 'ENOENT' ? ('absent' as const) : ('unknown' as const)
+				);
+				if (destinationState === 'occupied') {
+					const staged = (await removed(temp)) ? [] : [basename(temp)];
+					throw new Error(
+						`${suggested} was not saved because that name is already in use. Choose an unused file name; the existing file was left unchanged.` +
+							stillOnDisk(staged)
+					);
+				}
+				if (destinationState === 'unknown') {
+					await giveUp();
+				}
+				const publishAccount = vault.isUnlocked()
+					? vault.read().accounts.find((entry) => entry.steamId64 === steamId64)
+					: undefined;
+				if (!vault.isUnlocked() || !publishAccount || toMaFile(publishAccount) !== contents) {
+					const left: string[] = [];
+					const staged = (await removed(temp)) ? [] : [basename(temp)];
+					if (!vault.isUnlocked()) {
+						throw left.length + staged.length === 0
+							? new VaultLockedError()
+							: new VaultLockedError(`the vault is locked.${stillOnDisk([...left, ...staged])}`);
+					}
+					throw raceLost(!publishAccount, [...left, ...staged]);
+				}
 
-			return {
-				state: 'saved' as const,
-				/*
-				 * The name on disk, not the one this application proposed. The save
-				 * dialog lets somebody type whatever they like, and reporting
-				 * `suggested` told a user who had renamed it to look for a file that is
-				 * not there.
-				 */
-				fileName: basename(destination),
-				...(staleCopy ? { staleCopy } : {})
-			};
+				const abandonPublication = async (destinationClaimed: boolean): Promise<never> => {
+					const atDestination = await identifies(destination, contents);
+					const stranded: string[] = [];
+					const possible: string[] = [];
+					if (atDestination === 'exact') {
+						if (!(await removed(destination))) {
+							stranded.push(basename(destination));
+						}
+					} else if (destinationClaimed && atDestination !== 'absent') {
+						// A fallback write can fail after creating only a prefix. It is not safe
+						// to delete a non-exact file because another process may have replaced it.
+						possible.push(basename(destination));
+					}
+					return giveUp(stranded, possible);
+				};
+
+				const publication = await publishAbsent(temp, destination, contents);
+				if (!publication.published) {
+					await abandonPublication(publication.destinationClaimed);
+				}
+				try {
+					await flushDirectory(dirname(destination));
+				} catch {
+					await abandonPublication(true);
+				}
+				if ((await identifies(destination, contents)) !== 'exact') {
+					await abandonPublication(true);
+				}
+
+				// Publication is a filesystem wait. Re-check both lock state and the exact
+				// serialized account afterwards, then remove only bytes proven to be ours.
+				const stillOurs = vault.isUnlocked()
+					? vault.read().accounts.find((entry) => entry.steamId64 === steamId64)
+					: undefined;
+				if (!vault.isUnlocked() || !stillOurs || toMaFile(stillOurs) !== contents) {
+					const atDestination = await identifies(destination, contents);
+					const left: string[] = [];
+					if (atDestination === 'exact' && !(await removed(destination))) {
+						left.push(basename(destination));
+					}
+
+					if (!vault.isUnlocked()) {
+						throw left.length === 0
+							? new VaultLockedError()
+							: new VaultLockedError(`the vault is locked.${stillOnDisk(left)}`);
+					}
+					throw raceLost(!stillOurs, left);
+				}
+
+				// Best effort after the durable write: Windows has no POSIX mode, while
+				// POSIX destinations must remain owner-only.
+				try {
+					await chmod(destination, 0o600);
+				} catch {
+					/* not supported here; the directory's own permissions still apply */
+				}
+
+				return {
+					state: 'saved' as const,
+					/*
+					 * The name on disk, not the one this application proposed. The save
+					 * dialog lets somebody type whatever they like, and reporting
+					 * `suggested` told a user who had renamed it to look for a file that is
+					 * not there.
+					 */
+					fileName: basename(destination)
+				};
+			} finally {
+				releaseAccountSnapshot();
+			}
 		});
 	});
 }

@@ -101,10 +101,19 @@ export interface BrowserWindowOptions {
 	title: string;
 	partition: string;
 	userAgent: string;
+	/** False while the first landing is being judged. Defaults to visible for direct host users. */
+	show?: boolean;
 }
 
 export interface BrowserWindowHandle {
-	loadURL(url: string): Promise<void>;
+	/**
+	 * Load one exact tab and return where that tab landed after redirects.
+	 *
+	 * The active tab is a different, mutable fact: a page can ask for a popup
+	 * while this promise is settling. A security decision about this load must
+	 * use the returned URL, never `currentUrl()`.
+	 */
+	loadURL(url: string): Promise<string>;
 	/**
 	 * Stop WebRTC offering the real address around the proxy.
 	 *
@@ -136,6 +145,8 @@ export interface BrowserWindowHandle {
 	setTitle(title: string): void;
 	/** Bring this window to the user, restoring it if it was minimised. */
 	focus(): void;
+	/** Make a window created hidden visible once its first landing has been accepted. */
+	show(): void;
 	/**
 	 * Where the main frame actually is, after every redirect Steam performed.
 	 *
@@ -147,27 +158,135 @@ export interface BrowserWindowHandle {
 	isDestroyed(): boolean;
 	on(event: 'closed', listener: () => void): void;
 	/**
-	 * The main frame went somewhere. The URL comes from Electron, not from the
-	 * page — a page that could name its own location could lie about it.
+	 * The active tab went somewhere. The URL comes from Electron, not from the
+	 * page — a page that could name its own location could lie about it. This is
+	 * the chrome/title event; background tabs deliberately do not emit it.
 	 */
 	on(event: 'navigated', listener: (url: string) => void): void;
+	/**
+	 * A tab committed a navigation, whether active or in the background.
+	 *
+	 * This is separate from `navigated` because a security decision must follow
+	 * the tab that moved while the address bar and title must continue to describe
+	 * only the active tab. It is also called with a tab's current committed URL
+	 * immediately before that tab is revealed, so returning `false` wins a
+	 * selection race before visibility or focus without depending on how quickly
+	 * the native close settles.
+	 */
+	on(event: 'tab-navigated', listener: (url: string) => boolean): void;
 	setWindowOpenHandler(handler: (details: { url: string }) => { action: 'allow' | 'deny' }): void;
 }
 
+/** Opaque because Node and browser-compatible timer implementations use different handles. */
+export type InitialNavigationTimerHandle = object | number;
+
 /**
- * A real Chrome User-Agent, and the one place it is stated.
+ * The clock behind the first-page deadline.
  *
- * The opposite decision to `STEAM_USER_AGENT`. That one lies about what this
- * application is, on purpose, so that accounts do not stand out from one
- * another. This one tells the truth, because a browser claiming not to be a
- * browser gets served a page that does not work.
+ * Injected as one object so tests can advance the exact attempt without changing
+ * the process clock, and so the schedule/cancel halves cannot come from different
+ * implementations.
  */
-export const BROWSER_USER_AGENT =
-	'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-	'(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
+export interface InitialNavigationTimer {
+	timeoutMs: number;
+	schedule(callback: () => void, timeoutMs: number): InitialNavigationTimerHandle;
+	cancel(handle: InitialNavigationTimerHandle): void;
+}
+
+/**
+ * Identify the browser as the Chromium it actually embeds, without adding the
+ * Electron product token.
+ *
+ * The old value froze both Windows and one Chrome version into every build.
+ * That made Linux claim the wrong operating system and made every Electron
+ * upgrade leave the browser claiming an older engine than the one sites were
+ * executing. Chromium keeps a compatibility token on macOS; Windows and Linux
+ * expose the architecture their builds actually target.
+ */
+export function browserUserAgent(
+	chromiumVersion: string,
+	platform: NodeJS.Platform,
+	architecture: NodeJS.Architecture
+): string {
+	let platformToken: string;
+	switch (platform) {
+		case 'win32':
+			platformToken =
+				architecture === 'arm64' ? 'Windows NT 10.0; ARM64' : 'Windows NT 10.0; Win64; x64';
+			break;
+		case 'darwin':
+			platformToken = 'Macintosh; Intel Mac OS X 10_15_7';
+			break;
+		case 'linux':
+			platformToken = architecture === 'arm64' ? 'X11; Linux aarch64' : 'X11; Linux x86_64';
+			break;
+		default:
+			// No release target currently reaches this branch. Keeping the real
+			// platform and architecture is still more honest than claiming Windows.
+			platformToken = `${platform}; ${architecture}`;
+	}
+
+	return (
+		`Mozilla/5.0 (${platformToken}) AppleWebKit/537.36 ` +
+		`(KHTML, like Gecko) Chrome/${chromiumVersion} Safari/537.36`
+	);
+}
+
+export const BROWSER_USER_AGENT = browserUserAgent(
+	process.versions.chrome ?? process.versions.node,
+	process.platform,
+	process.arch
+);
 
 /** Where a signed-in browsing session starts. */
 export const START_URL = 'https://steamcommunity.com/my/tradeoffers/';
+
+/** Long enough for a slow routed page, bounded so one stalled response cannot own the UI forever. */
+export const INITIAL_NAVIGATION_TIMEOUT_MS = 30_000;
+
+const DEFAULT_INITIAL_NAVIGATION_TIMER: InitialNavigationTimer = {
+	timeoutMs: INITIAL_NAVIGATION_TIMEOUT_MS,
+	schedule: (callback, timeoutMs) => setTimeout(callback, timeoutMs),
+	cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+};
+
+class InitialNavigationTimeoutError extends Error {}
+
+/**
+ * Load the one hidden landing page under a deadline.
+ *
+ * Exported so the real-Electron smoke can drive this exact boundary against a
+ * loopback response that never finishes. Later user navigations do not use it.
+ */
+export async function loadInitialBrowserPage(
+	window: BrowserWindowHandle,
+	url: string,
+	timer: InitialNavigationTimer = DEFAULT_INITIAL_NAVIGATION_TIMER
+): Promise<string> {
+	if (!Number.isFinite(timer.timeoutMs) || timer.timeoutMs <= 0) {
+		throw new RangeError('initial browser navigation timeout must be positive');
+	}
+
+	let handle: InitialNavigationTimerHandle | undefined;
+	const timedOut = new Promise<never>((_resolve, reject) => {
+		handle = timer.schedule(
+			() => reject(new InitialNavigationTimeoutError('initial browser navigation timed out')),
+			timer.timeoutMs
+		);
+		if (typeof handle === 'object' && 'unref' in handle) {
+			const unref = (handle as { unref?: () => void }).unref;
+			unref?.call(handle);
+		}
+	});
+
+	try {
+		return await Promise.race([window.loadURL(url), timedOut]);
+	} finally {
+		if (handle !== undefined) {
+			timer.cancel(handle);
+		}
+	}
+}
 
 /**
  * A host no list mentions, used to check that a routed window sends the
@@ -271,6 +390,16 @@ export interface OpenBrowserOptions {
 	 */
 	onWipe?: (cleared: boolean) => void;
 	/**
+	 * Close this attempt's window, if it has one, and retire its session.
+	 *
+	 * The manager supplies an ownership-aware implementation. A stale load can
+	 * settle after another attempt has claimed the same deterministic partition;
+	 * its window still belongs to it, but that partition no longer does.
+	 */
+	cleanup?: (window?: BrowserWindowHandle) => Promise<boolean | undefined>;
+	/** Test seam for the bounded first navigation; production uses the 30 second clock. */
+	initialNavigationTimer?: InitialNavigationTimer;
+	/**
 	 * Throw if this attempt has been disowned since it started.
 	 *
 	 * **The caller could only ask afterwards, and afterwards is too late.**
@@ -318,6 +447,17 @@ export async function openAccountBrowser(
 ): Promise<BrowserWindowHandle> {
 	const partition = browserPartitionFor(options.steamId64);
 	const session = host.sessionFromPartition(partition, { cache: false });
+	const cleanup = (window?: BrowserWindowHandle): Promise<boolean | undefined> =>
+		options.cleanup?.(window) ??
+		(window === undefined ? clearSession(session) : abandon(window, session));
+	const reportWipe = (cleared: boolean | undefined): void => {
+		// Undefined is an ownership no-op: a successor now owns the partition, so
+		// the predecessor learned nothing about whether that successor's last wipe
+		// worked. Reporting success here would erase the successor's dirty marker.
+		if (cleared !== undefined) {
+			options.onWipe?.(cleared);
+		}
+	};
 	session.setUserAgent?.(BROWSER_USER_AGENT);
 
 	/*
@@ -488,178 +628,106 @@ export async function openAccountBrowser(
 	 */
 	options.stillWanted?.();
 
-	await signIn(session, options.steamId64, options.accessToken, options.onWipe);
-
 	/*
-	 * **And again, because the cookie is the point of no return.**
-	 *
-	 * `signIn` is two `cookies.set` calls, which is two more awaits. A lock
-	 * during them leaves Steam's session in a partition that the sweep has
-	 * already wiped and will not look at again — so this clears it rather than
-	 * leaving it for a lock that has been and gone.
+	 * From the first cookie write until the accepted page is shown, every failure
+	 * belongs to one rollback boundary. Setup methods are synchronous, but can
+	 * still throw after the cookie and hidden window exist. Keeping them inside
+	 * the same boundary prevents an invisible signed-in window from becoming an
+	 * untracked survivor.
 	 */
+	let window: BrowserWindowHandle | undefined;
+	let retirement: Promise<boolean | undefined> | undefined;
+	const retire = (): Promise<boolean | undefined> => {
+		retirement ??= cleanup(window);
+		return retirement;
+	};
+	let stage: 'sign-in' | 'setup' | 'initial-navigation' | 'landed' = 'sign-in';
+
 	try {
+		await signIn(session, options.steamId64, options.accessToken);
 		options.stillWanted?.();
-	} catch (cause) {
-		options.onWipe?.(await clearSession(session));
-		throw cause;
-	}
 
-	const window = host.createWindow({
-		width: 1280,
-		height: 860,
-		title: `${options.accountName} — browser`,
-		partition,
-		userAgent: BROWSER_USER_AGENT
-	});
+		stage = 'setup';
+		window = host.createWindow({
+			width: 1280,
+			height: 860,
+			title: `${options.accountName} — browser`,
+			partition,
+			userAgent: BROWSER_USER_AGENT,
+			// A rejected landing is commonly a real password form. Judge it hidden.
+			show: false
+		});
+		const browserWindow = window;
 
-	/*
-	 * **Handed over before it is loaded, not after it settles.**
-	 *
-	 * The note below says nothing past this point may leave a window behind, and
-	 * covers every path that *throws*. A load that never settles throws nothing:
-	 * it simply does not return, so the caller's post-await disown never runs and
-	 * the window it would have closed is not in any map. A lock then completes,
-	 * reports success and starts wiping storage while a signed-in `WebContents`
-	 * is still on screen — for as long as the load hangs, which has no bound.
-	 *
-	 * So the manager is told about the physical window the instant it exists.
-	 * From here a sweep can close it synchronously without waiting for anything.
-	 */
-	options.onCreated?.(window);
-
-	/*
-	 * **Once more, now that the window exists and is findable.**
-	 *
-	 * `createWindow` is synchronous, so nothing can have changed since the check
-	 * above — but this is the first instant a sweep could have closed this window
-	 * itself, and the first instant `abandon` has something to close. Asking here
-	 * means a disown that arrived during `signIn` ends with the window shut and
-	 * the partition wiped, rather than a signed-in window nobody is holding.
-	 */
-	try {
+		// Hand the physical window to the manager before any operation that can fail.
+		options.onCreated?.(browserWindow);
 		options.stillWanted?.();
-	} catch (cause) {
-		options.onWipe?.(await abandon(window, session));
-		throw cause;
-	}
 
-	/*
-	 * A proxy carries HTTP; WebRTC opens its own UDP and hands a page the
-	 * machine's real local and public addresses. Turned off whenever this window
-	 * is routed — it is the one leak that survives a correctly applied proxy, and
-	 * Steam needs no peer connections.
-	 */
-	window.setWebRtcPolicy(plan ? 'disable_non_proxied_udp' : 'default');
+		/* A routed web page must not learn the machine's address over WebRTC. */
+		browserWindow.setWebRtcPolicy(plan ? 'disable_non_proxied_udp' : 'default');
+		browserWindow.setProxyCredentials(plan?.credentials);
+		// Popups remain denied until the exact first tab has passed the landing check.
+		browserWindow.setWindowOpenHandler(() => ({ action: 'deny' }));
 
-	/*
-	 * Before the first tab exists, like the WebRTC policy above and for the same
-	 * reason: a tab that loaded before this was set would meet the proxy's 407
-	 * with nothing to say, and Electron cancels an unanswered `login`.
-	 */
-	window.setProxyCredentials(plan?.credentials);
+		let landed = false;
+		browserWindow.on('tab-navigated', (url) => {
+			if (!landed) {
+				return true;
+			}
+			if (isSteamLoginPage(url)) {
+				void retire();
+				return false;
+			}
+			return true;
+		});
+		browserWindow.on('navigated', (url) => {
+			if (landed) {
+				browserWindow.setTitle(titleFor(options.accountName, url));
+			}
+		});
 
-	/*
-	 * Popups stay inside this window's partition rather than opening in the
-	 * user's own browser. Steam's trade and market flows use them, and a popup
-	 * that escaped to the default browser would arrive unrouted and signed out —
-	 * the two things this window exists to provide.
-	 */
-	window.setWindowOpenHandler(() => ({ action: 'allow' }));
-
-	/*
-	 * The title follows the address, so the window always says where it is.
-	 * `page-title-updated` is prevented in the adapter, so this is the only
-	 * thing that writes a title and a page cannot overwrite it.
-	 */
-	/**
-	 * Whether the first load has been judged yet.
-	 *
-	 * **The guard below must not fire during the first load, and armed eagerly it
-	 * did.** Steam answers a dead session with a 302 to its own login form, so
-	 * the login page is not some later surprise — it is precisely what the most
-	 * common failure looks like from *inside* `loadURL`. Firing there closed the
-	 * window before the landing check could reach it, the load then aborted, and
-	 * the user was told "the browser could not reach Steam": a routing-shaped
-	 * error for a sign-in-shaped problem, on the one screen whose whole job is to
-	 * offer the sign-in.
-	 *
-	 * So the first load belongs to the landing check, which reports it properly,
-	 * and this belongs to everything after.
-	 */
-	let landed = false;
-
-	window.on('navigated', (url) => {
-		if (!landed) {
-			// The landing check owns this one. It runs on the URL the load actually
-			// ended on, which is the same question asked once rather than at every
-			// hop through it.
-			return;
+		stage = 'initial-navigation';
+		const landingUrl = await loadInitialBrowserPage(
+			browserWindow,
+			START_URL,
+			options.initialNavigationTimer
+		);
+		if (looksSignedOut(landingUrl)) {
+			throw new BrowserSignInRequired(
+				`Steam did not accept the saved session for ${options.accountName}. ` +
+					'Sign in to that account again.'
+			);
 		}
 
-		/*
-		 * **The landing check, applied for the rest of the window's life.**
-		 *
-		 * It used to run once. A Steam session that expires mid-trade is answered
-		 * with a redirect to Steam's own login form, and that form would then have
-		 * been drawn inside this application's chrome, under the account's name,
-		 * with a correct `steamcommunity.com` in the address bar — a password
-		 * prompt where every signal a careful person checks agrees.
-		 *
-		 * Closed and wiped rather than merely navigated away from: the session is
-		 * over either way, and leaving the window open on some other Steam page
-		 * would only postpone the next redirect back to the same form.
-		 */
-		if (isSteamLoginPage(url)) {
-			void abandon(window, session);
-			return;
-		}
-		window.setTitle(titleFor(options.accountName, url));
-	});
-
-	/*
-	 * **Nothing below here may leave a window behind.**
-	 *
-	 * From this point there is a window on screen holding a signed-in session.
-	 * `AccountBrowsers` knows about it — `onCreated` above handed it over — but
-	 * only as one still being built, so anything that throws from here must still
-	 * close it and wipe the session. Both exits below do.
-	 *
-	 * The hand-over is what covers the exit this list cannot: a load that hangs
-	 * for ever reaches neither branch.
-	 */
-	try {
-		await window.loadURL(START_URL);
+		stage = 'landed';
+		landed = true;
+		browserWindow.setWindowOpenHandler(() => ({ action: 'allow' }));
+		browserWindow.setTitle(titleFor(options.accountName, landingUrl));
+		browserWindow.show();
+		return browserWindow;
 	} catch (cause) {
-		// **Awaited into a variable, never inline into `onWipe?.()`.** Optional
-		// chaining short-circuits the whole call expression *including its
-		// arguments*, so with no listener attached the `abandon` would never run —
-		// the window would stay open and the partition unwiped, on the two paths
-		// whose entire job is to undo a signed-in window.
-		const cleared = await abandon(window, session);
-		options.onWipe?.(cleared);
-		throw new BrowserSessionError('the browser could not reach Steam, so it was closed', {
+		const cleared = await retire();
+		reportWipe(cleared);
+
+		if (cause instanceof BrowserSessionError || cause instanceof BrowserSignInRequired) {
+			throw cause;
+		}
+		if (cause instanceof InitialNavigationTimeoutError) {
+			throw new BrowserSessionError(
+				`Steam did not finish loading within ${INITIAL_NAVIGATION_TIMEOUT_MS / 1_000} seconds. ` +
+					"The browser was closed; check this account's proxy or network and try again.",
+				{ cause }
+			);
+		}
+		if (stage === 'initial-navigation') {
+			throw new BrowserSessionError('the browser could not reach Steam, so it was closed', {
+				cause
+			});
+		}
+		throw new BrowserSessionError('the browser session could not be prepared, so it was closed', {
 			cause
 		});
 	}
-
-	if (looksSignedOut(window.currentUrl())) {
-		const cleared = await abandon(window, session);
-		options.onWipe?.(cleared);
-		throw new BrowserSignInRequired(
-			`Steam did not accept the saved session for ${options.accountName}. ` +
-				'Sign in to that account again.'
-		);
-	}
-
-	// Landed, signed in, on Steam. From here every navigation is the user's, and
-	// the guard above takes over.
-	landed = true;
-	// The title the first load earned, which the guard deliberately did not write
-	// while it was still being judged.
-	window.setTitle(titleFor(options.accountName, window.currentUrl()));
-
-	return window;
 }
 
 /** Steam's own hosts, and the only ones a signed-in landing may be on. */
@@ -876,6 +944,13 @@ interface OpeningAttempt {
 	readonly abandon: (reason: Error) => void;
 }
 
+/** A physical attempt can outlive the logical entry a sweep abandons. */
+interface SettlingAttempt {
+	readonly done: Promise<void>;
+	/** True after proxy and cookie mutation is over and only the page load remains. */
+	readonly mayBeSuperseded: () => boolean;
+}
+
 export class AccountBrowsers {
 	private readonly windows = new Map<string, BrowserWindowHandle>();
 
@@ -912,6 +987,28 @@ export class AccountBrowsers {
 	 * invisible to the lock.
 	 */
 	private readonly opening = new Map<string, OpeningAttempt>();
+
+	/**
+	 * Physical opens which have not finished all of their cleanup.
+	 *
+	 * `opening` is deliberately removed by a sweep so joiners can be released
+	 * even when a hostile load does not settle. That does not make the physical
+	 * attempt inert: Electron can deliver its load result later, and its failure
+	 * path then clears the deterministic account partition. A successor which
+	 * seeded that partition in the meantime had its new cookie erased by the old
+	 * cleanup. Keep the physical lifetime separately. Before it has produced a
+	 * window a successor waits, because proxy and cookie writes may still be in
+	 * flight. After `onCreated`, only the page load remains; a successor may claim
+	 * the partition and the predecessor's eventual cleanup observes that it no
+	 * longer owns the jar. That distinction preserves retry after a hung load.
+	 */
+	private readonly settling = new Map<string, SettlingAttempt>();
+
+	/** The attempt currently allowed to mutate or empty each account partition. */
+	private readonly partitionOwners = new Map<string, object>();
+
+	/** One physical attempt gets one retirement, even when close listeners re-enter it. */
+	private readonly ownerCleanups = new WeakMap<object, Promise<boolean | undefined>>();
 
 	/**
 	 * The route each `open` was *asked* for, from its first line.
@@ -976,7 +1073,7 @@ export class AccountBrowsers {
 	 *
 	 * So an open waits for a wipe that is still going, rather than racing it.
 	 */
-	private readonly clearing = new Map<string, Promise<void>>();
+	private readonly clearing = new Map<string, Promise<boolean>>();
 
 	/**
 	 * Every account whose browser partition has ever been given a Steam cookie.
@@ -989,9 +1086,11 @@ export class AccountBrowsers {
 	 * the ordinary act of closing a window.
 	 *
 	 * A set rather than reusing `windows`, because the question is different.
-	 * "Which windows are on screen" changes constantly; "which partitions hold a
-	 * session that has to die with the vault" only ever grows within an unlock,
-	 * and it includes the ones whose window never finished being built.
+	 * "Which windows are on screen" changes constantly; "which partitions may
+	 * hold a session that has to die with the vault" grows conservatively within
+	 * an unlock. The one early removal is a failed open whose exact-owner cleanup
+	 * has already proved the partition empty. It also includes windows which never
+	 * finished being built.
 	 */
 	private readonly seeded = new Set<string>();
 
@@ -1159,6 +1258,21 @@ export class AccountBrowsers {
 			);
 		}
 
+		/*
+		 * A logical attempt still present in `opening` is handled by the join branch
+		 * below. The special case here is one a sweep has already abandoned: callers
+		 * were released, but its proxy or cookie writes can still settle later. It
+		 * must finish before another attempt writes to the same partition. Once it
+		 * has produced a window, all such mutation is over and ownership can move;
+		 * the old load's cleanup is checked against that ownership instead.
+		 */
+		const predecessor = this.settling.get(options.steamId64);
+		if (predecessor && !this.opening.has(options.steamId64) && !predecessor.mayBeSuperseded()) {
+			await predecessor.done.catch(() => undefined);
+			this.stillWanted(options.steamId64, generation, sinceEpoch);
+			return this.attempt(options, generation, sinceEpoch, wanted);
+		}
+
 		// One window per account **on one route**. A second on the same route would
 		// share the partition and the session, so it adds nothing except a way to
 		// lose track of one.
@@ -1279,6 +1393,15 @@ export class AccountBrowsers {
 		 */
 		this.refuseIfStrictForbids(wanted);
 
+		const owner = {};
+		let createdWindow: BrowserWindowHandle | undefined;
+		/*
+		 * The inner browser boundary reports post-cookie cleanup here. The manager
+		 * also owns the wider boundary (proxy setup and route verification happen
+		 * before a cookie exists), so it needs the inner answer when both paths join
+		 * the same memoized retirement.
+		 */
+		let attemptWipe: boolean | undefined;
 		const attempt = (async () => {
 			/*
 			 * **Synchronously, before anything is built.**
@@ -1305,23 +1428,24 @@ export class AccountBrowsers {
 			 * `clearStorageData` then erased it. A browser that signs itself out a
 			 * second after opening, with nothing on screen able to explain why.
 			 */
-			const wiping = this.clearing.get(options.steamId64);
-			if (wiping) {
+			let wiping = this.clearing.get(options.steamId64);
+			while (wiping) {
 				// Only when there is something to wait for. An unconditional `await`
 				// here would put a microtask between this method being called and its
 				// first real step, for every open, to serve the rare one.
 				await wiping.catch(() => undefined);
 				this.stillWanted(options.steamId64, generation, epoch);
+				wiping = this.clearing.get(options.steamId64);
 			}
 
 			/*
 			 * Recorded *before* the attempt, not after it succeeds.
 			 *
 			 * `openAccountBrowser` sets the Steam cookie and then loads a page, and
-			 * either half can fail. A failure between the two leaves a partition
-			 * holding a live session with no window and no map entry anywhere —
-			 * `abandon` cleans up the paths it knows about, and this is the backstop
-			 * for the ones it does not.
+			 * either half can fail. A failure between the two can leave a partition
+			 * holding a live session with no window. The exact-owner cleanup normally
+			 * removes this conservative marker once it proves the partition empty; if
+			 * that cleanup cannot do so, this remains the lock's backstop.
 			 */
 			/*
 			 * **A partition that could not be emptied is not reused.**
@@ -1336,12 +1460,7 @@ export class AccountBrowsers {
 			 * something the user just asked for.
 			 */
 			if (this.dirty.has(options.steamId64)) {
-				try {
-					await this.sessionFor(options.steamId64).clearStorageData?.();
-					this.mark(options.steamId64, true);
-				} catch {
-					this.mark(options.steamId64, false);
-				}
+				await this.wipe(options.steamId64);
 				this.stillWanted(options.steamId64, generation, epoch);
 				if (this.dirty.has(options.steamId64)) {
 					throw new BrowserSessionError(
@@ -1352,33 +1471,72 @@ export class AccountBrowsers {
 				}
 			}
 
+			// No await between the last tracked wipe and this claim. A predecessor
+			// either registered its cleanup first (and was awaited above), or sees the
+			// new owner and may close only its own stale window.
+			this.partitionOwners.set(options.steamId64, owner);
 			this.seeded.add(options.steamId64);
 			let window: BrowserWindowHandle;
 			try {
-				window = await openAccountBrowser(this.host, {
-					...options,
-					// Recorded while it is still being built, so a lock or a routing
-					// change can close it without waiting for a load that may never
-					// finish.
-					onCreated: (created) => this.building.set(options.steamId64, created),
-					onWipe: (cleared) => this.mark(options.steamId64, cleared),
+				try {
+					window = await openAccountBrowser(this.host, {
+						...options,
+						// Recorded while it is still being built, so a lock or a routing
+						// change can close it without waiting for a load that may never
+						// finish.
+						onCreated: (created) => {
+							createdWindow = created;
+							this.building.set(options.steamId64, created);
+						},
+						onWipe: (cleared) => {
+							attemptWipe = cleared;
+							this.mark(options.steamId64, cleared);
+						},
+						cleanup: (retiring) => this.cleanupOwned(options.steamId64, owner, retiring),
+						/*
+						 * **The same two counters, asked from inside.**
+						 *
+						 * Checking them either side of this call treats the whole open as one
+						 * step, and it is four awaits long. The check below covers a disown
+						 * that arrives while the *page* loads; this covers the ones that
+						 * arrive while the proxy is being applied and while the cookie is
+						 * being written, which is where the window gets created.
+						 */
+						stillWanted: () => this.stillWanted(options.steamId64, generation, epoch)
+					});
+				} catch (cause) {
 					/*
-					 * **The same two counters, asked from inside.**
-					 *
-					 * Checking them either side of this call treats the whole open as one
-					 * step, and it is four awaits long. The check below covers a disown
-					 * that arrives while the *page* loads; this covers the ones that
-					 * arrive while the proxy is being applied and while the cookie is
-					 * being written, which is where the window gets created.
+					 * `openAccountBrowser` owns the boundary beginning at the first cookie.
+					 * This owner was claimed earlier, before proxy setup, permission policy
+					 * and route verification. Retire it here as well so every rejection has
+					 * one exact-owner cleanup, including the failures that happened before a
+					 * cookie or window existed. Post-cookie failures simply join the inner
+					 * memoized cleanup.
 					 */
-					stillWanted: () => this.stillWanted(options.steamId64, generation, epoch)
-				});
+					const cleared = await this.cleanupOwned(options.steamId64, owner, createdWindow);
+					if (cleared !== undefined) {
+						attemptWipe = cleared;
+						this.mark(options.steamId64, cleared);
+					}
+					/*
+					 * A successful failed-open cleanup leaves no session for the lock to
+					 * revisit. Delete the conservative marker only if no successor owns the
+					 * partition now; a stale finalizer must never erase the replacement's
+					 * marker.
+					 */
+					if (attemptWipe === true && this.partitionOwners.get(options.steamId64) === undefined) {
+						this.seeded.delete(options.steamId64);
+					}
+					throw cause;
+				}
 			} finally {
 				// **In a `finally`, because the throwing paths matter as much.**
 				// `openAccountBrowser` closes the window itself before rethrowing;
 				// leaving the entry behind would hand a later sweep a destroyed
 				// handle and, worse, make a retry look like it was still building.
-				this.building.delete(options.steamId64);
+				if (createdWindow !== undefined && this.building.get(options.steamId64) === createdWindow) {
+					this.building.delete(options.steamId64);
+				}
 			}
 			if (generation !== this.generation || epoch !== this.epochOf(options.steamId64)) {
 				// The vault locked, or this account's routing changed, while the
@@ -1388,7 +1546,10 @@ export class AccountBrowsers {
 				// partition emptied on the one path that exists to undo a signed-in
 				// window was never marked when it failed — so the next open reused a
 				// jar still holding the session this branch was cancelling.
-				this.mark(options.steamId64, await abandon(window, this.sessionFor(options.steamId64)));
+				const cleared = await this.cleanupOwned(options.steamId64, owner, window);
+				if (cleared !== undefined) {
+					this.mark(options.steamId64, cleared);
+				}
 				throw new BrowserSessionError(
 					generation !== this.generation
 						? 'the vault locked while the browser was opening, so it was closed'
@@ -1424,7 +1585,7 @@ export class AccountBrowsers {
 				 * repeat: `wipe` serialises per account, so a close during a lock
 				 * sweep queues behind it instead of racing it.
 				 */
-				void this.wipe(options.steamId64).catch(() => undefined);
+				void this.cleanupOwned(options.steamId64, owner).catch(() => undefined);
 			});
 		})();
 
@@ -1451,6 +1612,11 @@ export class AccountBrowsers {
 		done.catch(() => undefined);
 
 		const entry: OpeningAttempt = { route: wanted, done, abandon: giveUp };
+		const physical: SettlingAttempt = {
+			done: attempt,
+			mayBeSuperseded: () => createdWindow !== undefined
+		};
+		this.settling.set(options.steamId64, physical);
 		this.opening.set(options.steamId64, entry);
 		try {
 			/*
@@ -1474,6 +1640,9 @@ export class AccountBrowsers {
 		} finally {
 			if (this.opening.get(options.steamId64) === entry) {
 				this.opening.delete(options.steamId64);
+			}
+			if (this.settling.get(options.steamId64) === physical) {
+				this.settling.delete(options.steamId64);
 			}
 		}
 	}
@@ -1570,28 +1739,83 @@ export class AccountBrowsers {
 		}
 	}
 
-	private async wipe(steamId64: string, window?: BrowserWindowHandle): Promise<void> {
+	/**
+	 * Retire one attempt without letting it empty a partition a successor owns.
+	 *
+	 * Closing is always safe because the handle is attempt-specific. Storage is
+	 * account-specific, so it is cleared only while the same owner still holds it.
+	 */
+	private cleanupOwned(
+		steamId64: string,
+		owner: object,
+		window?: BrowserWindowHandle
+	): Promise<boolean | undefined> {
+		const existing = this.ownerCleanups.get(owner);
+		if (existing) {
+			// A settled answer belongs to this ownership epoch. Once superseded it is
+			// neither success nor failure for the replacement partition.
+			return this.partitionOwners.get(steamId64) === owner ? existing : Promise.resolve(undefined);
+		}
+
+		/*
+		 * Defer the body by one microtask so the promise is recorded before close()
+		 * can synchronously emit `closed` and re-enter this method. The owner object
+		 * is attempt-specific; an old timer therefore joins its old cleanup rather
+		 * than touching a successor which owns the same account partition.
+		 */
+		const work = Promise.resolve().then(async () => {
+			if (window) {
+				try {
+					if (!window.isDestroyed()) {
+						window.close();
+					}
+				} catch {
+					// Already gone. Its partition still follows the ownership check below.
+				}
+			}
+			if (this.partitionOwners.get(steamId64) !== owner) {
+				return undefined;
+			}
+			return this.wipe(steamId64);
+		});
+		const retirement = work.finally(() => {
+			// A completed attempt no longer needs a strong account-id → owner entry.
+			// Conditional deletion cannot disown a replacement which claimed it first.
+			if (this.partitionOwners.get(steamId64) === owner) {
+				this.partitionOwners.delete(steamId64);
+			}
+		});
+		this.ownerCleanups.set(owner, retirement);
+		return retirement;
+	}
+
+	private async wipe(steamId64: string, window?: BrowserWindowHandle): Promise<boolean> {
+		let cleared = false;
 		const done = (async () => {
 			// Anything already wiping for this account finishes first, so two
 			// overlapping teardowns cannot interleave with an open between them.
 			await this.clearing.get(steamId64)?.catch(() => undefined);
 			if (window) {
-				this.mark(steamId64, await abandon(window, this.sessionFor(steamId64)));
-				return;
+				cleared = await abandon(window, this.sessionFor(steamId64));
+				this.mark(steamId64, cleared);
+				return cleared;
 			}
 			try {
 				await this.sessionFor(steamId64).clearStorageData?.();
-				this.mark(steamId64, true);
+				cleared = true;
+				this.mark(steamId64, cleared);
 			} catch {
 				// **Remembered, not shrugged at.** The partition name is derived from
 				// the account id, so the next open lands on this same jar — and it
 				// still holds whatever Steam set.
-				this.mark(steamId64, false);
+				cleared = false;
+				this.mark(steamId64, cleared);
 			}
+			return cleared;
 		})();
 		this.clearing.set(steamId64, done);
 		try {
-			await done;
+			return await done;
 		} finally {
 			if (this.clearing.get(steamId64) === done) {
 				this.clearing.delete(steamId64);
@@ -1626,6 +1850,7 @@ export class AccountBrowsers {
 		const window = this.windows.get(steamId64);
 		this.windows.delete(steamId64);
 		this.routes.delete(steamId64);
+		const owner = this.partitionOwners.get(steamId64);
 
 		/*
 		 * **And one still being built.** The epoch bump above disowns an open in
@@ -1635,22 +1860,33 @@ export class AccountBrowsers {
 		 */
 		const halfBuilt = this.building.get(steamId64);
 		this.building.delete(steamId64);
-		if (halfBuilt) {
-			try {
-				if (!halfBuilt.isDestroyed()) {
-					halfBuilt.close();
-				}
-			} catch {
-				// Already gone. Nothing left to close.
-			}
-		}
 		// And the record of it, which the attempt can only clear by settling.
 		this.abandonOpening(
 			steamId64,
 			"this account's routing changed while the browser was opening, so it was closed"
 		);
 
-		await this.wipe(steamId64, window);
+		const retiring = window ?? halfBuilt;
+		if (owner) {
+			const physical = this.settling.get(steamId64);
+			if (physical && !physical.mayBeSuperseded()) {
+				/*
+				 * The physical attempt has not crossed its cookie-writing awaits yet.
+				 * Empty the jar now, but do not spend its terminal owner cleanup: a
+				 * pending `cookies.set` can commit after this wipe. The attempt remains
+				 * the exact owner, so its failure boundary must wipe once more after the
+				 * write settles. A successor waits on `settling` until that boundary is
+				 * complete.
+				 */
+				await this.wipe(steamId64, retiring);
+			} else {
+				// Cookie mutation is over. This wipe can safely retire the owner, and
+				// the exact-owner check keeps a late load from touching a successor.
+				await this.cleanupOwned(steamId64, owner, retiring);
+			}
+		} else {
+			await this.wipe(steamId64, retiring);
+		}
 	}
 
 	/**
@@ -1818,7 +2054,7 @@ export class AccountBrowsers {
 		 * exactly this reason — so their partitions are covered without inventing
 		 * a key that is not an account id.
 		 */
-		const halfBuilt = [...this.building.values()];
+		const halfBuilt = new Map(this.building);
 		this.building.clear();
 
 		/*
@@ -1854,7 +2090,7 @@ export class AccountBrowsers {
 		const partitions = new Set([...closing.keys(), ...this.seeded, ...this.dirty]);
 		this.seeded.clear();
 
-		for (const window of [...closing.values(), ...halfBuilt]) {
+		for (const window of [...closing.values(), ...halfBuilt.values()]) {
 			try {
 				if (!window.isDestroyed()) {
 					window.close();
@@ -1866,7 +2102,21 @@ export class AccountBrowsers {
 
 		// Through the same tracker the routing path uses, so an open that begins
 		// during a lock sweep waits for the wipe rather than racing it.
-		await Promise.all([...partitions].map((steamId64) => this.wipe(steamId64)));
+		/*
+		 * A live or half-built window is still the physical attempt which owns it,
+		 * so the lock joins that attempt's one retirement. A partition with no live
+		 * handle is different: the lock is its independent backstop and deliberately
+		 * retries it, including after an earlier failed clear.
+		 */
+		await Promise.all(
+			[...partitions].map((steamId64) => {
+				const hasPhysicalWindow = closing.has(steamId64) || halfBuilt.has(steamId64);
+				const owner = this.partitionOwners.get(steamId64);
+				return hasPhysicalWindow && owner
+					? this.cleanupOwned(steamId64, owner)
+					: this.wipe(steamId64);
+			})
+		);
 	}
 }
 
@@ -2000,9 +2250,7 @@ export function browserPartitionFor(steamId64: string): string {
 async function signIn(
 	session: BrowserSessionHandle,
 	steamId64: string,
-	accessToken: string,
-	/** Told whether a rollback wipe actually emptied the partition. */
-	onWipe?: (cleared: boolean) => void
+	accessToken: string
 ): Promise<void> {
 	const value = `${steamId64}%7C%7C${accessToken}`;
 	/*
@@ -2015,32 +2263,18 @@ async function signIn(
 	 * vault locked, and any later open on that partition inherited a signed-in
 	 * Steam session established by an attempt that failed.
 	 *
-	 * Cleared here rather than left to the caller, because this is the only place
-	 * that knows a partial seeding happened at all.
+	 * The enclosing open boundary clears the deterministic partition if either
+	 * write fails. Keeping the rollback there also makes it the same idempotent,
+	 * ownership-aware cleanup used by every later setup failure.
 	 */
-	try {
-		for (const url of COOKIE_HOSTS) {
-			await session.cookies.set({
-				url,
-				name: 'steamLoginSecure',
-				value,
-				path: '/',
-				secure: true,
-				httpOnly: true
-			});
-		}
-	} catch (cause) {
-		/*
-		 * **And whether that wipe worked is reported, not discarded.**
-		 *
-		 * When the second cookie write fails *and* the wipe fails too, this used
-		 * to throw with the first cookie still live in the partition and nothing
-		 * anywhere recording it. An immediate retry then reused a partially
-		 * authenticated session that a failed attempt had established — which is
-		 * exactly what the manager's dirty-partition tracking exists to refuse,
-		 * denied the one fact it needed.
-		 */
-		onWipe?.(await clearSession(session));
-		throw cause;
+	for (const url of COOKIE_HOSTS) {
+		await session.cookies.set({
+			url,
+			name: 'steamLoginSecure',
+			value,
+			path: '/',
+			secure: true,
+			httpOnly: true
+		});
 	}
 }

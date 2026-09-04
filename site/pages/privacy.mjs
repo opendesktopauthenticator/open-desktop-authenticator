@@ -89,7 +89,7 @@ export const privacy = {
 					<tr><th>What</th><th>Kept for</th></tr>
 				</thead>
 				<tbody>
-					<tr><td>An upload you never attached to a report</td><td>2 hours</td></tr>
+					<tr><td>An upload you never attached to a report</td><td>Eligible for deletion after 2 hours; normally removed within a few hours</td></tr>
 					<tr><td>An open report, and anything attached to it</td><td>Until it is closed</td></tr>
 					<tr><td>A resolved or declined report</td><td>90 days after it was closed, then deleted with its attachments</td></tr>
 					<tr><td>Web server request logs</td><td>14 days</td></tr>
@@ -99,7 +99,8 @@ export const privacy = {
 			<p class="hint">
 				Deletion runs on a clock inside the service, hourly, whether or not anybody
 				visits. It used to run only when somebody uploaded a file, which meant a quiet
-				week was a week when nothing expired.
+				week was a week when nothing expired. Failed removals are retried until they
+				succeed.
 			</p>
 
 			<h2>Having something removed sooner</h2>

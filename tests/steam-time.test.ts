@@ -319,7 +319,10 @@ describe('a stale offset is measured again', () => {
  * is not drawing attention to its accounts.
  */
 describe('failure cooldown', () => {
-	function failingHarness(now: () => number): {
+	function failingHarness(
+		now: () => number,
+		monotonic: () => number = now
+	): {
 		clock: SteamClock;
 		attempts: () => number;
 	} {
@@ -342,7 +345,7 @@ describe('failure cooldown', () => {
 			forget: vi.fn()
 		} as unknown as SteamTransportFactory;
 		return {
-			clock: new SteamClock({ codes, vault, transports, now }),
+			clock: new SteamClock({ codes, vault, transports, now, monotonic }),
 			attempts: () => attempts
 		};
 	}
@@ -367,6 +370,27 @@ describe('failure cooldown', () => {
 
 		await clock.ensureSynced();
 		at = 61_000;
+		await clock.ensureSynced();
+		expect(attempts()).toBe(2);
+	});
+
+	it('retries by elapsed time when the wall clock moves backward', async () => {
+		let wall = 10_000_000;
+		let elapsed = 0;
+		const { clock, attempts } = failingHarness(
+			() => wall,
+			() => elapsed
+		);
+
+		await clock.ensureSynced();
+		expect(attempts()).toBe(1);
+
+		wall -= 60 * 60_000;
+		elapsed = 59_999;
+		await clock.ensureSynced();
+		expect(attempts()).toBe(1);
+
+		elapsed = 60_001;
 		await clock.ensureSynced();
 		expect(attempts()).toBe(2);
 	});
@@ -415,7 +439,13 @@ describe('route rotation on failure', () => {
 			forget: vi.fn()
 		} as unknown as SteamTransportFactory;
 
-		const clock = new SteamClock({ codes, vault, transports, now: () => at });
+		const clock = new SteamClock({
+			codes,
+			vault,
+			transports,
+			now: () => at,
+			monotonic: () => at
+		});
 
 		await clock.ensureSynced();
 		expect(calls).toEqual(['76561198000000001']);

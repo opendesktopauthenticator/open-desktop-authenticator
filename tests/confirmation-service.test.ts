@@ -1170,14 +1170,34 @@ describe('the route a re-authentication takes', () => {
 		await confirmations.signIn('76561198000000001', 'a-password', 'direct');
 		expect(routes, 'Direct signed in through the proxy it was avoiding').toEqual([undefined]);
 	});
+
+	it('hands the injected system-aware session factory to signIn', async () => {
+		const { transports } = fakeNetwork();
+		const loginSession = () => {
+			throw new Error('the sign-in fake should not construct a session');
+		};
+		let received: unknown;
+		const confirmations = new ConfirmationsService(fakeVault([account()]), transports, {
+			now: () => NOW,
+			loginSession,
+			signIn: (_request, _proxyUrl, factory) => {
+				received = factory;
+				return Promise.resolve({ refreshToken: REFRESH, accessToken: ACCESS });
+			}
+		});
+
+		await confirmations.signIn('76561198000000001', 'a-password', 'direct');
+		expect(received).toBe(loginSession);
+	});
 });
 
 /**
- * **The sign-in is the one Steam path with no transport behind it.**
+ * **System routing is still not an account proxy.**
  *
- * `steam-session` speaks over Node's own HTTP stack, so the refusal that
- * `SteamTransportFactory` performs for every other request never sees this one
- * — and what travels here is a password.
+ * The system-aware login transport correctly follows machine policy when
+ * Direct is allowed. `Require proxies` is stricter: it requires this account to
+ * carry its own proxy, so the service must refuse before constructing either
+ * route — and what would travel here is a password.
  *
  * The IPC handler above it refuses a `route` of `direct`, and that was not
  * enough twice over. The Confirmations screen sends no route at all, so the

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { AppInfo } from '../../shared/ipc';
+import { DynamicError } from '../DynamicError';
 
 /**
  * Who made this, what it is, and how to check both.
@@ -33,10 +34,14 @@ export function About({
 }): React.JSX.Element {
 	const [info, setInfo] = useState<AppInfo | undefined>();
 	const [error, setError] = useState<string | undefined>();
+	// Application metadata is immutable for the life of this process. Capture the
+	// mount's loader as state so unrelated parent renders cannot turn a new
+	// callback identity into another IPC request.
+	const [load] = useState(() => onLoad);
 
 	useEffect(() => {
 		let cancelled = false;
-		onLoad()
+		load()
 			.then((loaded) => {
 				if (!cancelled) setInfo(loaded);
 			})
@@ -46,7 +51,7 @@ export function About({
 		return () => {
 			cancelled = true;
 		};
-	}, [onLoad]);
+	}, [load]);
 
 	return <AboutView info={info} error={error} onClose={onClose} />;
 }
@@ -78,7 +83,7 @@ export function AboutView({
 				</button>
 			</header>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError>{error}</DynamicError>}
 
 			{info === undefined ? (
 				error === undefined ? (

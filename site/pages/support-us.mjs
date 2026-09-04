@@ -193,30 +193,6 @@ ${LIBRARIES.map(
 
 const SPENDS = [
 	{
-		what: 'A code-signing certificate',
-		cost: 'the largest single cost',
-		/*
-		 * The shipped-already sentence has to name the provenance attestation.
-		 *
-		 * When the false "signed checksum list" claim was pulled out of five
-		 * sentences, three of them were rewritten to say "published checksums and
-		 * build provenance" and this one simply lost a clause, leaving the page
-		 * that asks strangers for money crediting the release with less evidence
-		 * than it actually carries. Every attestation named here is genuinely on
-		 * the release and is what /verify step 4 has people check, so listing it
-		 * is not a promise about future work; it is the same honesty as the
-		 * missing-certificate sentence that follows, pointed the other way.
-		 */
-		body: `An unsigned Windows installer shows a blue warning telling people not to run it.
-		That warning is the correct advice for an unsigned binary, and it is also the reason
-		an honest small project looks more suspicious than a well-funded scam that bought a
-		certificate. It is the largest single cost left. Packaging, installers, published
-		checksums and a build provenance attestation tying those bytes to the workflow run
-		that produced them all shipped with 1.0. A certificate for the binaries themselves
-		has not arrived yet, and neither has a reproducible build others can compare against.
-		<a href="/download">The download page tracks where each one stands.</a>`
-	},
-	{
 		what: 'The server this runs on',
 		cost: 'a few pounds a month',
 		body: `A small virtual machine and a domain. It serves static files and one small

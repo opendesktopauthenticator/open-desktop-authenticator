@@ -11,8 +11,11 @@ import {
 	isSteamLoginPage,
 	looksSignedOut,
 	openAccountBrowser,
+	INITIAL_NAVIGATION_TIMEOUT_MS,
 	START_URL,
 	type BrowserHost,
+	type InitialNavigationTimer,
+	type InitialNavigationTimerHandle,
 	type BrowserSessionHandle,
 	type BrowserWindowHandle,
 	type BrowserWindowOptions
@@ -46,12 +49,16 @@ interface Recorded {
 	wiped: string[];
 	/** Times an already-open window was raised instead of a new one being made. */
 	focused: number;
+	/** Times the native window was made visible after its first landing was accepted. */
+	shown: number;
 	/** Every title the window was given, in order. */
 	titles: string[];
 	/** Every WebRTC policy the window was given. */
 	webRtcPolicies: string[];
 	/** Every set of proxy credentials the window was given, `undefined` included. */
 	proxyCredentials: ({ username: string; password: string } | undefined)[];
+	/** Each popup policy installed while the hidden landing is judged and after it passes. */
+	windowOpenPolicies: ((details: { url: string }) => { action: 'allow' | 'deny' })[];
 	/** Times this session was told to refuse permission requests. */
 	permissionsDenied: number;
 	/** Every URL `resolveProxy` was asked about, in order. */
@@ -62,6 +69,10 @@ function harness(
 	overrides: {
 		setProxy?: () => Promise<void>;
 		landsOn?: string;
+		/** The exact tab loaded by `loadURL`, separate from whichever tab is active later. */
+		loadResult?: string;
+		/** A different tab a page made active while its own load was settling. */
+		activeUrl?: string;
 		loadFails?: boolean;
 		/** The load never settles — neither resolves nor rejects. */
 		loadHangs?: boolean;
@@ -94,8 +105,9 @@ function harness(
 	// Per-harness, not module-level: two tests sharing one of these is how a
 	// fake starts reporting the previous test's partition.
 	let partitionName = '';
-	/** Set once the window subscribes; a test calls it to move the window. */
-	let navigate: (url: string) => void = () => undefined;
+	/** Set once the window subscribes; a test calls both halves to move the active tab. */
+	let navigateActive: (url: string) => void = () => undefined;
+	let navigateTab: (url: string) => void = () => undefined;
 	/** Everything subscribed to `closed`, so a test can end the window for real. */
 	const closedListeners: (() => void)[] = [];
 	const recorded: Recorded = {
@@ -108,9 +120,11 @@ function harness(
 		closed: 0,
 		wiped: [],
 		focused: 0,
+		shown: 0,
 		titles: [],
 		webRtcPolicies: [],
 		proxyCredentials: [],
+		windowOpenPolicies: [],
 		permissionsDenied: 0,
 		resolved: []
 	};
@@ -204,6 +218,7 @@ function harness(
 	const failSecondCookie = overrides.failSecondCookie === true;
 	const wipeGates: (() => void)[] = [];
 	let loadFails = overrides.loadFails === true;
+	let loadHangs = overrides.loadHangs === true;
 
 	const window: BrowserWindowHandle = {
 		loadURL: (url) => {
@@ -214,7 +229,10 @@ function harness(
 			const closedBefore = recorded.closed;
 			if (overrides.redirectsToDuringLoad !== undefined) {
 				// Electron reports navigation as the load happens, not after it.
-				navigate(overrides.redirectsToDuringLoad);
+				navigateTab(overrides.redirectsToDuringLoad);
+				if (recorded.closed === closedBefore) {
+					navigateActive(overrides.redirectsToDuringLoad);
+				}
 			}
 			if (loadFails) {
 				return Promise.reject(new Error('ERR_TUNNEL_CONNECTION_FAILED'));
@@ -225,8 +243,8 @@ function harness(
 			 * signed in, and the code that would disown it runs after the await that
 			 * is not coming.
 			 */
-			if (overrides.loadHangs === true) {
-				return new Promise<void>(() => undefined);
+			if (loadHangs) {
+				return new Promise<string>(() => undefined);
 			}
 			/*
 			 * **A load into a window that was closed underneath it does not
@@ -238,17 +256,20 @@ function harness(
 			if (recorded.closed > closedBefore) {
 				return Promise.reject(new Error('ERR_ABORTED'));
 			}
-			return Promise.resolve();
+			return Promise.resolve(overrides.loadResult ?? overrides.landsOn ?? START_URL);
 		},
 		// Deliberately a separate fact from what `loadURL` was handed. A fake that
 		// always echoes the requested URL back can never land anywhere else, which
 		// is the one thing `looksSignedOut` exists to notice.
-		currentUrl: () => overrides.landsOn ?? START_URL,
+		currentUrl: () => overrides.activeUrl ?? overrides.landsOn ?? START_URL,
 		setTitle: (title) => recorded.titles.push(title),
 		setWebRtcPolicy: (policy) => recorded.webRtcPolicies.push(policy),
 		setProxyCredentials: (credentials) => recorded.proxyCredentials.push(credentials),
 		focus: () => {
 			recorded.focused += 1;
+		},
+		show: () => {
+			recorded.shown += 1;
 		},
 		close: () => {
 			recorded.closed += 1;
@@ -256,13 +277,16 @@ function harness(
 		isDestroyed: () => false,
 		on: (event: string, listener: unknown) => {
 			if (event === 'navigated') {
-				navigate = listener as (url: string) => void;
+				navigateActive = listener as (url: string) => void;
+			}
+			if (event === 'tab-navigated') {
+				navigateTab = listener as (url: string) => void;
 			}
 			if (event === 'closed') {
 				closedListeners.push(listener as () => void);
 			}
 		},
-		setWindowOpenHandler: vi.fn()
+		setWindowOpenHandler: (handler) => recorded.windowOpenPolicies.push(handler)
 	};
 
 	const host: BrowserHost = {
@@ -280,7 +304,14 @@ function harness(
 	return {
 		host,
 		recorded,
-		go: (url: string) => navigate(url),
+		go: (url: string) => {
+			const closedBefore = recorded.closed;
+			navigateTab(url);
+			// The real adapter stops after the security callback closes the window.
+			if (recorded.closed === closedBefore) {
+				navigateActive(url);
+			}
+		},
 		/** Let a wipe that was failing start working. */
 		letWipeSucceed: () => {
 			wipeFails = false;
@@ -297,12 +328,72 @@ function harness(
 		letLoadSucceed: () => {
 			loadFails = false;
 		},
+		/** Let a later open load normally after an earlier one timed out. */
+		letLoadFinish: () => {
+			loadHangs = false;
+		},
 		/** Fire the window's own `closed`, as Electron would. */
 		endWindow: () => {
 			for (const listener of [...closedListeners]) {
 				listener();
 			}
 		}
+	};
+}
+
+function controlledNavigationTimer(timeoutMs = INITIAL_NAVIGATION_TIMEOUT_MS) {
+	interface Handle {
+		unref(): void;
+	}
+	const callbacks = new Map<Handle, () => void>();
+	const handles: Handle[] = [];
+	let cancellations = 0;
+	const timer: InitialNavigationTimer = {
+		timeoutMs,
+		schedule: (callback) => {
+			const handle: Handle = { unref: () => undefined };
+			handles.push(handle);
+			callbacks.set(handle, callback);
+			return handle;
+		},
+		cancel: (handle: InitialNavigationTimerHandle) => {
+			cancellations += 1;
+			callbacks.delete(handle as Handle);
+		}
+	};
+	return {
+		timer,
+		handles,
+		fire: (handle: Handle | undefined) => {
+			if (!handle) {
+				throw new Error('no scheduled deadline');
+			}
+			const callback = callbacks.get(handle);
+			callbacks.delete(handle);
+			callback?.();
+		},
+		pending: () => callbacks.size,
+		cancellations: () => cancellations
+	};
+}
+
+/** The lifecycle tables whose agreement is the manager's ownership invariant. */
+function trackedBrowserState(browsers: AccountBrowsers, steamId64: string) {
+	const tracked = browsers as unknown as {
+		partitionOwners: Map<string, object>;
+		building: Map<string, BrowserWindowHandle>;
+		opening: Map<string, unknown>;
+		settling: Map<string, unknown>;
+		seeded: Set<string>;
+		dirty: Set<string>;
+	};
+	return {
+		owner: tracked.partitionOwners.has(steamId64),
+		building: tracked.building.has(steamId64),
+		opening: tracked.opening.has(steamId64),
+		settling: tracked.settling.has(steamId64),
+		seeded: tracked.seeded.has(steamId64),
+		dirty: tracked.dirty.has(steamId64)
 	};
 }
 
@@ -628,6 +719,62 @@ describe('where the window actually ended up', () => {
 		expect(looksSignedOut(url)).toBe(signedOut);
 	});
 
+	it('keeps the native window hidden until a signed-in landing has been accepted', async () => {
+		const { host, recorded } = harness({ loadHangs: true });
+		void openAccountBrowser(host, ACCOUNT).catch(() => undefined);
+
+		// Let proxy setup and both cookie writes reach the held page load.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		expect(recorded.windows).toHaveLength(1);
+		expect(recorded.windows[0]).toMatchObject({ show: false });
+		expect(recorded.shown, 'an unjudged page was visible').toBe(0);
+	});
+
+	it('reveals exactly once, and only after accepting the signed-in landing', async () => {
+		const { host, recorded } = harness();
+
+		await openAccountBrowser(host, ACCOUNT);
+
+		expect(recorded.windows[0]).toMatchObject({ show: false });
+		expect(recorded.shown).toBe(1);
+		expect(recorded.titles.at(-1)).toContain('steamcommunity.com');
+	});
+
+	it('judges the exact first tab even when a popup changed the mutable active tab', async () => {
+		const { host, recorded } = harness({
+			loadResult: 'https://steamcommunity.com/login/home/',
+			activeUrl: START_URL
+		});
+
+		await expect(openAccountBrowser(host, ACCOUNT)).rejects.toBeInstanceOf(BrowserSignInRequired);
+		expect(recorded.shown).toBe(0);
+		expect(recorded.closed).toBe(1);
+	});
+
+	it('refuses popups in both directions until the exact first tab has passed', async () => {
+		const rejected = harness({ landsOn: 'https://steamcommunity.com/login/home/' });
+		await expect(openAccountBrowser(rejected.host, ACCOUNT)).rejects.toBeInstanceOf(
+			BrowserSignInRequired
+		);
+		expect(
+			rejected.recorded.windowOpenPolicies[0]?.({ url: START_URL }),
+			'a safe child could hide the rejected first tab from its check'
+		).toEqual({ action: 'deny' });
+
+		const accepted = harness();
+		await openAccountBrowser(accepted.host, ACCOUNT);
+		expect(
+			accepted.recorded.windowOpenPolicies[0]?.({
+				url: 'https://steamcommunity.com/login/home/'
+			}),
+			'a rejected child could be retained beside an accepted first tab'
+		).toEqual({ action: 'deny' });
+		expect(accepted.recorded.windowOpenPolicies.at(-1)?.({ url: START_URL })).toEqual({
+			action: 'allow'
+		});
+	});
+
 	/*
 	 * The case the whole check exists for.
 	 *
@@ -643,6 +790,7 @@ describe('where the window actually ended up', () => {
 		await expect(openAccountBrowser(host, ACCOUNT)).rejects.toBeInstanceOf(BrowserSignInRequired);
 
 		expect(recorded.closed, 'a login page was left on screen').toBe(1);
+		expect(recorded.shown, 'a rejected password page became visible before it closed').toBe(0);
 		expect(recorded.wiped, 'the declined session was left in place').toEqual([
 			browserPartitionFor(ACCOUNT.steamId64)
 		]);
@@ -879,12 +1027,13 @@ describe('closing every browser when the vault locks', () => {
 			createWindow: () => {
 				let destroyed = false;
 				return {
-					loadURL: () => Promise.resolve(),
+					loadURL: () => Promise.resolve(START_URL),
 					currentUrl: () => START_URL,
 					setTitle: () => undefined,
 					setWebRtcPolicy: () => undefined,
 					setProxyCredentials: () => undefined,
 					focus: () => undefined,
+					show: () => undefined,
 					close: () => {
 						destroyed = true;
 						order.push('close');
@@ -924,12 +1073,13 @@ describe('closing every browser when the vault locks', () => {
 				cookies: { set: () => Promise.resolve() }
 			}),
 			createWindow: () => ({
-				loadURL: () => Promise.resolve(),
+				loadURL: () => Promise.resolve(START_URL),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
 				setWebRtcPolicy: () => undefined,
 				setProxyCredentials: () => undefined,
 				focus: () => undefined,
+				show: () => undefined,
 				close: () => {
 					throw new Error('window already gone');
 				},
@@ -958,12 +1108,13 @@ describe('closing every browser when the vault locks', () => {
 				cookies: { set: () => Promise.resolve() }
 			}),
 			createWindow: () => ({
-				loadURL: () => Promise.resolve(),
+				loadURL: () => Promise.resolve(START_URL),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
 				setWebRtcPolicy: () => undefined,
 				setProxyCredentials: () => undefined,
 				focus: () => undefined,
+				show: () => undefined,
 				close: () => undefined,
 				isDestroyed: () => false,
 				on: () => undefined,
@@ -1017,12 +1168,13 @@ function lockHarness(cleared: string[], closed: string[]): BrowserHost {
 		createWindow: () => {
 			let destroyed = false;
 			return {
-				loadURL: () => Promise.resolve(),
+				loadURL: () => Promise.resolve(START_URL),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
 				setWebRtcPolicy: () => undefined,
 				setProxyCredentials: () => undefined,
 				focus: () => undefined,
+				show: () => undefined,
 				close: () => {
 					destroyed = true;
 					closed.push('closed');
@@ -1118,15 +1270,16 @@ function slowHarness(options: { gateLoad?: boolean; gateResolve?: boolean } = {}
 			return {
 				loadURL: () =>
 					options.gateLoad === true
-						? new Promise<void>((resolve) => {
-								loadGates.push(resolve);
+						? new Promise<string>((resolve) => {
+								loadGates.push(() => resolve(START_URL));
 							})
-						: Promise.resolve(),
+						: Promise.resolve(START_URL),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
 				setWebRtcPolicy: () => undefined,
 				setProxyCredentials: () => undefined,
 				focus: () => undefined,
+				show: () => undefined,
 				close: () => {
 					record.closed = true;
 				},
@@ -1379,12 +1532,13 @@ describe('a browser whose account changed underneath it', () => {
 			createWindow: () => {
 				const mine = listeners.length;
 				return {
-					loadURL: () => Promise.resolve(),
+					loadURL: () => Promise.resolve(START_URL),
 					currentUrl: () => START_URL,
 					setTitle: () => undefined,
 					setWebRtcPolicy: () => undefined,
 					setProxyCredentials: () => undefined,
 					focus: () => undefined,
+					show: () => undefined,
 					close: () => undefined,
 					// Only the first window is gone; the second is live.
 					isDestroyed: () => mine === 0 && destroyed,
@@ -1599,7 +1753,7 @@ function routingHarness() {
 			const record = { closed: false, focused: 0 };
 			windows.push(record);
 			return {
-				loadURL: () => Promise.resolve(),
+				loadURL: () => Promise.resolve(START_URL),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
 				setWebRtcPolicy: () => undefined,
@@ -1607,6 +1761,7 @@ function routingHarness() {
 				focus: () => {
 					record.focused += 1;
 				},
+				show: () => undefined,
 				close: () => {
 					record.closed = true;
 				},
@@ -2097,12 +2252,13 @@ describe('a browser opened while the previous session is still being wiped', () 
 				}
 			}),
 			createWindow: () => ({
-				loadURL: () => Promise.resolve(),
+				loadURL: () => Promise.resolve(START_URL),
 				currentUrl: () => START_URL,
 				setTitle: () => undefined,
 				setWebRtcPolicy: () => undefined,
 				setProxyCredentials: () => undefined,
 				focus: () => undefined,
+				show: () => undefined,
 				close: () => undefined,
 				isDestroyed: () => false,
 				on: () => undefined,
@@ -2146,6 +2302,197 @@ describe('a browser opened while the previous session is still being wiped', () 
 });
 
 /*
+ * A sweep has two jobs for an open in flight: release callers now, and let the
+ * physical attempt finish retiring in the background. Those are deliberately
+ * different lifetimes. Deleting the logical `opening` entry made a retry
+ * possible, but also let it seed the same deterministic partition while the
+ * predecessor could still arrive at its own `abandon` and clear that partition.
+ * Its unconditional `building.delete` then hid the retry from the next lock.
+ */
+describe('a retired browser attempt that settles after its replacement was requested', () => {
+	it('does not start a successor while the predecessor can still mutate proxy state', async () => {
+		const h = slowHarness();
+		const browsers = new AccountBrowsers(h.host);
+		const predecessor = settled(browsers.open(ACCOUNT));
+		await new Promise((resolve) => setTimeout(resolve, 0));
+
+		await browsers.closeAll();
+		const successor = browsers.open(ACCOUNT);
+		for (let i = 0; i < 10; i += 1) {
+			await Promise.resolve();
+		}
+
+		// Only the predecessor's setProxy may be waiting. Seeing two here means
+		// Chromium can apply them in the opposite order from the user's requests.
+		expect(h.release(), 'two same-account proxy mutations ran together').toBe(1);
+		expect(why(await predecessor)).toMatch(/locked/i);
+
+		await vi.waitFor(() => expect(h.release()).toBe(1));
+		await successor;
+	});
+
+	it('finishes the predecessor before seeding the successor and keeps the successor lockable', async () => {
+		let cookiePresent = false;
+		const loads: (() => void)[] = [];
+		const windows: { closed: boolean }[] = [];
+
+		const host: BrowserHost = {
+			sessionFromPartition: () => ({
+				denyPermissions: () => undefined,
+				resolveProxy: () => Promise.resolve('DIRECT'),
+				setProxy: () => Promise.resolve(),
+				setUserAgent: () => undefined,
+				clearStorageData: () => {
+					cookiePresent = false;
+					return Promise.resolve();
+				},
+				cookies: {
+					set: () => {
+						cookiePresent = true;
+						return Promise.resolve();
+					}
+				}
+			}),
+			createWindow: () => {
+				const record = { closed: false };
+				windows.push(record);
+				return {
+					loadURL: () =>
+						new Promise<string>((resolve) => {
+							loads.push(() => resolve(START_URL));
+						}),
+					currentUrl: () => START_URL,
+					setTitle: () => undefined,
+					setWebRtcPolicy: () => undefined,
+					setProxyCredentials: () => undefined,
+					focus: () => undefined,
+					show: () => undefined,
+					close: () => {
+						record.closed = true;
+					},
+					isDestroyed: () => record.closed,
+					on: () => undefined,
+					setWindowOpenHandler: () => undefined
+				};
+			}
+		};
+
+		const browsers = new AccountBrowsers(host);
+		const predecessor = browsers.open(ACCOUNT).catch((error: unknown) => error);
+		await vi.waitFor(() => expect(loads).toHaveLength(1));
+
+		// The first lock closes and wipes the physical window, and releases the
+		// logical attempt even though this deliberately hostile load can settle late.
+		await browsers.closeAll();
+		expect(windows[0]?.closed).toBe(true);
+
+		const successor = browsers.open(ACCOUNT).catch((error: unknown) => error);
+		await vi.waitFor(() => expect(windows).toHaveLength(2));
+		expect(loads, 'the retry stayed joined to a load that may never settle').toHaveLength(2);
+		expect(cookiePresent).toBe(true);
+
+		// Only now does the closed predecessor produce its stale load result.
+		loads[0]?.();
+		await predecessor;
+
+		// The load-only predecessor no longer owns the jar and must not clear it.
+		expect(cookiePresent, 'stale cleanup erased the replacement session').toBe(true);
+
+		// And its `finally` must not have removed the successor's half-built handle.
+		await browsers.closeAll();
+		expect(windows[1]?.closed, 'the later lock could not find the replacement window').toBe(true);
+		expect(cookiePresent).toBe(false);
+
+		loads[1]?.();
+		await successor;
+		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(false);
+	});
+
+	it('does not let a stale no-op erase a successor’s failed-wipe marker', async () => {
+		let cookiePresent = false;
+		let failWipes = false;
+		let holdLoads = true;
+		const loads: (() => void)[] = [];
+		const windows: { closed: boolean }[] = [];
+
+		const host: BrowserHost = {
+			sessionFromPartition: () => ({
+				denyPermissions: () => undefined,
+				resolveProxy: () => Promise.resolve('DIRECT'),
+				setProxy: () => Promise.resolve(),
+				setUserAgent: () => undefined,
+				clearStorageData: () => {
+					if (failWipes) {
+						return Promise.reject(new Error('partition is busy'));
+					}
+					cookiePresent = false;
+					return Promise.resolve();
+				},
+				cookies: {
+					set: () => {
+						cookiePresent = true;
+						return Promise.resolve();
+					}
+				}
+			}),
+			createWindow: () => {
+				const record = { closed: false };
+				windows.push(record);
+				return {
+					loadURL: () =>
+						holdLoads
+							? new Promise<string>((resolve) => {
+									loads.push(() => resolve(START_URL));
+								})
+							: Promise.resolve(START_URL),
+					currentUrl: () => START_URL,
+					setTitle: () => undefined,
+					setWebRtcPolicy: () => undefined,
+					setProxyCredentials: () => undefined,
+					focus: () => undefined,
+					show: () => undefined,
+					close: () => {
+						record.closed = true;
+					},
+					isDestroyed: () => record.closed,
+					on: () => undefined,
+					setWindowOpenHandler: () => undefined
+				};
+			}
+		};
+
+		const browsers = new AccountBrowsers(host);
+		const predecessor = browsers.open(ACCOUNT).catch((error: unknown) => error);
+		await vi.waitFor(() => expect(loads).toHaveLength(1));
+		await browsers.closeAll();
+
+		const successor = browsers.open(ACCOUNT).catch((error: unknown) => error);
+		await vi.waitFor(() => expect(loads).toHaveLength(2));
+
+		// The later lock finds the successor, but its partition cannot be emptied.
+		failWipes = true;
+		await browsers.closeAll();
+		expect(windows[1]?.closed).toBe(true);
+		expect(cookiePresent).toBe(true);
+
+		// A late result from the predecessor is now an ownership no-op. It cannot
+		// report success for the successor's failed clear and erase `dirty`.
+		loads[0]?.();
+		await predecessor;
+		expect(cookiePresent).toBe(true);
+
+		holdLoads = false;
+		await expect(
+			browsers.open(ACCOUNT),
+			'a contaminated successor partition was reused after stale cleanup'
+		).rejects.toBeInstanceOf(BrowserSessionError);
+
+		loads[1]?.();
+		await successor;
+	});
+});
+
+/*
  * **Closing the window was a way to end a session without ending it.**
  *
  * `windows` is a map of what is *open*, and the vault lock swept exactly that.
@@ -2169,12 +2516,21 @@ describe('a browser the user closes themselves', () => {
 			browserPartitionFor(ACCOUNT.steamId64)
 		);
 		expect(browsers.isOpen(ACCOUNT.steamId64)).toBe(false);
+		expect(
+			(
+				browsers as unknown as {
+					partitionOwners: Map<string, object>;
+				}
+			).partitionOwners.has(ACCOUNT.steamId64),
+			'the successfully opened window retained its owner after retirement'
+		).toBe(false);
 	});
 
 	/*
-	 * And the lock is still a backstop for it, because the close handler is an
-	 * event: nothing awaits it, and a partition seeded by an open that failed
-	 * halfway never had a window to close at all.
+	 * And the lock is still a backstop for a user-close cleanup, because the close
+	 * handler is an event and nothing awaits it. A failed open is different: its
+	 * manager boundary awaits the exact-owner cleanup, and the next test proves a
+	 * successful one leaves no stale seed for the lock to repeat.
 	 */
 	it('is wiped again by the lock, not skipped by it', async () => {
 		const { host, recorded, endWindow } = harness();
@@ -2190,15 +2546,15 @@ describe('a browser the user closes themselves', () => {
 		);
 	});
 
-	it('is wiped by the lock even when the open never finished', async () => {
+	it('does not leave a completed failed-open cleanup for the lock to repeat', async () => {
 		const { host, recorded } = harness({ loadFails: true });
 		const browsers = new AccountBrowsers(host);
 		await browsers.open(ACCOUNT).catch(() => undefined);
-		recorded.wiped.length = 0;
+		expect(recorded.wiped).toEqual([browserPartitionFor(ACCOUNT.steamId64)]);
 
 		await browsers.closeAll();
 
-		expect(recorded.wiped).toContain(browserPartitionFor(ACCOUNT.steamId64));
+		expect(recorded.wiped).toHaveLength(1);
 	});
 });
 
@@ -2756,6 +3112,330 @@ describe('a browser whose first load never settles', () => {
 	});
 });
 
+describe('the first Steam page deadline', () => {
+	it('closes and wipes a stalled attempt, then lets a clean retry open', async () => {
+		const h = harness({ loadHangs: true });
+		const clock = controlledNavigationTimer();
+		const browsers = new AccountBrowsers(h.host);
+		const opening = browsers
+			.open({ ...ACCOUNT, initialNavigationTimer: clock.timer })
+			.catch((error: unknown) => error);
+
+		await vi.waitFor(() => expect(clock.handles).toHaveLength(1));
+		const staleDeadline = clock.handles[0];
+		clock.fire(staleDeadline);
+		const outcome = await opening;
+
+		expect(outcome).toBeInstanceOf(BrowserSessionError);
+		expect(String((outcome as Error).message)).toMatch(/30 seconds/i);
+		expect(String((outcome as Error).message)).toMatch(/proxy|network/i);
+		expect(h.recorded.closed).toBe(1);
+		expect(h.recorded.wiped).toEqual([browserPartitionFor(ACCOUNT.steamId64)]);
+		expect(clock.pending()).toBe(0);
+
+		h.letLoadFinish();
+		await expect(
+			browsers.open({ ...ACCOUNT, initialNavigationTimer: clock.timer })
+		).resolves.toBeUndefined();
+		expect(h.recorded.shown).toBe(1);
+
+		const afterRetry = { closed: h.recorded.closed, wiped: h.recorded.wiped.length };
+		clock.fire(staleDeadline);
+		await Promise.resolve();
+		expect(h.recorded.closed).toBe(afterRetry.closed);
+		expect(h.recorded.wiped).toHaveLength(afterRetry.wiped);
+		await browsers.closeAccount(ACCOUNT.steamId64);
+	});
+
+	it('cancels the exact deadline when the landing succeeds just before it fires', async () => {
+		const h = harness();
+		const clock = controlledNavigationTimer();
+		await expect(
+			openAccountBrowser(h.host, { ...ACCOUNT, initialNavigationTimer: clock.timer })
+		).resolves.toBeDefined();
+
+		expect(clock.handles).toHaveLength(1);
+		expect(clock.pending()).toBe(0);
+		expect(clock.cancellations()).toBe(1);
+		clock.fire(clock.handles[0]);
+		await Promise.resolve();
+		expect(h.recorded.closed).toBe(0);
+		expect(h.recorded.wiped).toEqual([]);
+		expect(h.recorded.shown).toBe(1);
+	});
+
+	it('does not retire the same attempt again when a lock wins before its deadline', async () => {
+		const h = harness({ loadHangs: true });
+		const clock = controlledNavigationTimer();
+		const browsers = new AccountBrowsers(h.host);
+		const opening = browsers
+			.open({ ...ACCOUNT, initialNavigationTimer: clock.timer })
+			.catch((error: unknown) => error);
+
+		await vi.waitFor(() => expect(clock.handles).toHaveLength(1));
+		const deadline = clock.handles[0];
+		await browsers.closeAll();
+		const afterLock = { closed: h.recorded.closed, wiped: h.recorded.wiped.length };
+
+		clock.fire(deadline);
+		await opening;
+		await vi.waitFor(() => expect(clock.pending()).toBe(0));
+		expect(h.recorded.closed).toBe(afterLock.closed);
+		expect(h.recorded.wiped).toHaveLength(afterLock.wiped);
+	});
+});
+
+describe('the signed-in browser setup rollback', () => {
+	type WindowFault =
+		'setWebRtcPolicy' | 'setProxyCredentials' | 'setWindowOpenHandler' | 'on' | 'setTitle' | 'show';
+
+	it.each([
+		['createWindow', 1],
+		['setWebRtcPolicy', 1],
+		['setProxyCredentials', 1],
+		['setWindowOpenHandler', 1],
+		['setWindowOpenHandler', 2],
+		['on', 1],
+		['on', 2],
+		['setTitle', 1],
+		['show', 1]
+	] as const)(
+		'retires a signed-in hidden window exactly once when %s call %i throws',
+		async (point, failOnCall) => {
+			const h = harness();
+			let armed = true;
+			let calls = 0;
+			const host: BrowserHost = {
+				...h.host,
+				createWindow: (options) => {
+					if (point === 'createWindow' && armed) {
+						armed = false;
+						throw new Error('injected create failure');
+					}
+					const window = h.host.createWindow(options);
+					if (point !== 'createWindow' && armed) {
+						const mutable = window as unknown as Record<
+							WindowFault,
+							(...args: unknown[]) => unknown
+						>;
+						const original = mutable[point];
+						mutable[point] = (...args: unknown[]) => {
+							calls += 1;
+							if (calls === failOnCall) {
+								mutable[point] = original;
+								armed = false;
+								throw new Error(`injected ${point} failure with ${args.length} arguments`);
+							}
+							return original(...args);
+						};
+					}
+					return window;
+				}
+			};
+			const browsers = new AccountBrowsers(host);
+
+			await expect(browsers.open(ACCOUNT)).rejects.toBeInstanceOf(BrowserSessionError);
+			expect(h.recorded.cookies).toHaveLength(2);
+			expect(h.recorded.shown).toBe(0);
+			expect(h.recorded.closed).toBe(point === 'createWindow' ? 0 : 1);
+			expect(h.recorded.wiped).toEqual([browserPartitionFor(ACCOUNT.steamId64)]);
+			expect(
+				(
+					browsers as unknown as {
+						partitionOwners: Map<string, object>;
+					}
+				).partitionOwners.has(ACCOUNT.steamId64),
+				'a retired attempt kept a strong account-id ownership entry'
+			).toBe(false);
+
+			// The failed attempt left no logical or physical entry which captures retry.
+			await expect(browsers.open(ACCOUNT)).resolves.toBeUndefined();
+			expect(h.recorded.shown).toBe(1);
+			expect(h.recorded.wiped).toHaveLength(1);
+			await browsers.closeAccount(ACCOUNT.steamId64);
+		}
+	);
+});
+
+describe('an owner claimed before the cookie boundary', () => {
+	it.each([
+		[
+			'permission policy',
+			() => {
+				const h = harness();
+				const host: BrowserHost = {
+					...h.host,
+					sessionFromPartition: (partition, options) => ({
+						...h.host.sessionFromPartition(partition, options),
+						denyPermissions: () => {
+							throw new Error('permission setup failed');
+						}
+					})
+				};
+				return { h, host, options: ACCOUNT };
+			}
+		],
+		[
+			'proxy setup',
+			() => {
+				const h = harness({ setProxy: () => Promise.reject(new Error('proxy setup failed')) });
+				return { h, host: h.host, options: ACCOUNT };
+			}
+		],
+		[
+			'route verification',
+			() => {
+				const h = harness({ resolvesTo: 'DIRECT' });
+				return { h, host: h.host, options: PROXIED };
+			}
+		]
+	] as const)('retires the exact owner after %s fails', async (_stage, make) => {
+		const { h, host, options } = make();
+		const browsers = new AccountBrowsers(host);
+
+		await expect(browsers.open(options)).rejects.toThrow();
+		expect(trackedBrowserState(browsers, ACCOUNT.steamId64)).toEqual({
+			owner: false,
+			building: false,
+			opening: false,
+			settling: false,
+			seeded: false,
+			dirty: false
+		});
+		expect(h.recorded.wiped).toEqual([browserPartitionFor(ACCOUNT.steamId64)]);
+
+		// A later lock has no stale owner or conservative seed to rediscover.
+		await browsers.closeAll();
+		expect(trackedBrowserState(browsers, ACCOUNT.steamId64)).toEqual({
+			owner: false,
+			building: false,
+			opening: false,
+			settling: false,
+			seeded: false,
+			dirty: false
+		});
+		expect(h.recorded.wiped).toHaveLength(1);
+	});
+
+	it('keeps the failed-cleanup debt while releasing the failed owner', async () => {
+		const h = harness({
+			setProxy: () => Promise.reject(new Error('proxy setup failed')),
+			wipeFails: true
+		});
+		const browsers = new AccountBrowsers(h.host);
+
+		await expect(browsers.open(ACCOUNT)).rejects.toBeInstanceOf(BrowserSessionError);
+		expect(trackedBrowserState(browsers, ACCOUNT.steamId64)).toEqual({
+			owner: false,
+			building: false,
+			opening: false,
+			settling: false,
+			seeded: true,
+			dirty: true
+		});
+
+		await browsers.closeAll();
+		expect(trackedBrowserState(browsers, ACCOUNT.steamId64)).toEqual({
+			owner: false,
+			building: false,
+			opening: false,
+			settling: false,
+			seeded: false,
+			dirty: true
+		});
+		expect(h.recorded.wiped).toHaveLength(2);
+	});
+
+	it('does not let a delayed old finalizer erase a successor seed', async () => {
+		let releaseFirstWipe = (): void => undefined;
+		const firstWipe = new Promise<void>((resolve) => {
+			releaseFirstWipe = resolve;
+		});
+		let wipes = 0;
+		const windows: {
+			closed: boolean;
+			rejectLoad: (cause: Error) => void;
+		}[] = [];
+		const host: BrowserHost = {
+			sessionFromPartition: () => ({
+				denyPermissions: () => undefined,
+				setProxy: () => Promise.resolve(),
+				resolveProxy: () => Promise.resolve('DIRECT'),
+				clearStorageData: async () => {
+					wipes += 1;
+					if (wipes === 1) {
+						await firstWipe;
+					}
+				},
+				cookies: { set: () => Promise.resolve() }
+			}),
+			createWindow: () => {
+				let rejectLoad = (_cause: Error): void => undefined;
+				const record = { closed: false, rejectLoad };
+				windows.push(record);
+				return {
+					loadURL: () =>
+						new Promise<string>((_resolve, reject) => {
+							rejectLoad = reject;
+							record.rejectLoad = reject;
+						}),
+					currentUrl: () => START_URL,
+					setTitle: () => undefined,
+					setWebRtcPolicy: () => undefined,
+					setProxyCredentials: () => undefined,
+					focus: () => undefined,
+					show: () => undefined,
+					close: () => {
+						if (!record.closed) {
+							record.closed = true;
+							rejectLoad(new Error('window closed'));
+						}
+					},
+					isDestroyed: () => record.closed,
+					on: () => undefined,
+					setWindowOpenHandler: () => undefined
+				};
+			}
+		};
+		const browsers = new AccountBrowsers(host);
+		const predecessor = browsers.open(ACCOUNT).catch((error: unknown) => error);
+		await vi.waitFor(() => expect(windows).toHaveLength(1));
+
+		// Abandon the logical attempt and start its physical retirement, but hold
+		// that wipe open while a successor waits to claim the same partition.
+		const firstLock = browsers.closeAll();
+		await vi.waitFor(() => expect(wipes).toBe(1));
+		const successor = browsers.open(ACCOUNT).catch((error: unknown) => error);
+		releaseFirstWipe();
+		await firstLock;
+		await vi.waitFor(() => expect(windows).toHaveLength(2));
+		await predecessor;
+
+		expect(trackedBrowserState(browsers, ACCOUNT.steamId64)).toMatchObject({
+			owner: true,
+			building: true,
+			opening: true,
+			settling: true,
+			seeded: true
+		});
+
+		// `closeAll` derives the partition list from that successor seed. If the
+		// old finalizer erased it, the hidden replacement is closed but its cookie
+		// jar is never emptied.
+		await browsers.closeAll();
+		await successor;
+		expect(wipes).toBe(2);
+		expect(trackedBrowserState(browsers, ACCOUNT.steamId64)).toMatchObject({
+			owner: false,
+			building: false,
+			opening: false,
+			settling: false,
+			seeded: false,
+			dirty: false
+		});
+	});
+});
+
 /**
  * **An open that ended must leave nothing behind to close again.**
  *
@@ -3119,6 +3799,155 @@ describe('a wipe that failed on a path other than closeAccount', () => {
 });
 
 /**
+ * `closeAccount` can arrive while Chromium is still committing the first Steam
+ * cookie. The invalidation wipe is useful immediately, but it cannot be the
+ * owner's last wipe: the pending write can land after it. These tests keep that
+ * exact write suspended so ordering is deterministic rather than scheduler luck.
+ */
+describe('an account close during cookie handoff', () => {
+	function lateCookieHarness() {
+		let cookiePresent = false;
+		let cookieWrites = 0;
+		let wipes = 0;
+		let releaseLateCookie = (): void => {
+			throw new Error('the late cookie has not started');
+		};
+		const order: string[] = [];
+
+		const session: BrowserSessionHandle = {
+			denyPermissions: () => undefined,
+			resolveProxy: () => Promise.resolve('DIRECT'),
+			setProxy: () => Promise.resolve(),
+			setUserAgent: () => undefined,
+			clearStorageData: () => {
+				wipes += 1;
+				cookiePresent = false;
+				order.push(`wipe-${wipes}`);
+				return Promise.resolve();
+			},
+			cookies: {
+				set: () => {
+					const write = ++cookieWrites;
+					order.push(`cookie-${write}-start`);
+					if (write === 1) {
+						return new Promise<void>((resolve) => {
+							releaseLateCookie = () => {
+								cookiePresent = true;
+								order.push('cookie-1-commit');
+								resolve();
+							};
+						});
+					}
+					cookiePresent = true;
+					order.push(`cookie-${write}-commit`);
+					return Promise.resolve();
+				}
+			}
+		};
+
+		const host: BrowserHost = {
+			sessionFromPartition: () => session,
+			createWindow: () => {
+				let destroyed = false;
+				const closed: (() => void)[] = [];
+				return {
+					loadURL: () => Promise.resolve(START_URL),
+					currentUrl: () => START_URL,
+					setTitle: () => undefined,
+					setWebRtcPolicy: () => undefined,
+					setProxyCredentials: () => undefined,
+					focus: () => undefined,
+					show: () => undefined,
+					close: () => {
+						if (destroyed) return;
+						destroyed = true;
+						for (const listener of closed) listener();
+					},
+					isDestroyed: () => destroyed,
+					on: (event, listener) => {
+						if (event === 'closed') closed.push(listener as () => void);
+					},
+					setWindowOpenHandler: () => undefined
+				};
+			}
+		};
+
+		return {
+			host,
+			order,
+			releaseLateCookie: () => releaseLateCookie(),
+			cookiePresent: () => cookiePresent,
+			cookieWrites: () => cookieWrites,
+			wipes: () => wipes
+		};
+	}
+
+	it('wipes again after a cookie that commits later than closeAccount', async () => {
+		const h = lateCookieHarness();
+		const browsers = new AccountBrowsers(h.host);
+		let predecessorSettled = false;
+		const predecessor = browsers
+			.open(ACCOUNT)
+			.catch((error: unknown) => error)
+			.finally(() => {
+				predecessorSettled = true;
+			});
+		await vi.waitFor(() => expect(h.cookieWrites()).toBe(1));
+
+		await browsers.closeAccount(ACCOUNT.steamId64);
+		expect(h.wipes(), 'closeAccount did not perform its immediate invalidation wipe').toBe(1);
+		expect(h.cookiePresent()).toBe(false);
+		expect(predecessorSettled, 'closeAccount incorrectly waited for the held cookie').toBe(false);
+
+		h.releaseLateCookie();
+		await predecessor;
+
+		expect(h.cookiePresent(), 'the late cookie survived account teardown').toBe(false);
+		expect(h.wipes(), 'the physical attempt never performed its mandatory final wipe').toBe(2);
+		expect(trackedBrowserState(browsers, ACCOUNT.steamId64)).toMatchObject({
+			owner: false,
+			opening: false,
+			settling: false,
+			seeded: false,
+			dirty: false
+		});
+	});
+
+	it('finishes the old owner before a successor writes and never wipes the successor', async () => {
+		const h = lateCookieHarness();
+		const browsers = new AccountBrowsers(h.host);
+		const predecessor = browsers.open(ACCOUNT).catch((error: unknown) => error);
+		await vi.waitFor(() => expect(h.cookieWrites()).toBe(1));
+		await browsers.closeAccount(ACCOUNT.steamId64);
+
+		const successor = browsers.open(ACCOUNT);
+		for (let turn = 0; turn < 10; turn += 1) await Promise.resolve();
+		expect(
+			h.cookieWrites(),
+			'the successor wrote into a partition the old owner could still wipe'
+		).toBe(1);
+
+		h.releaseLateCookie();
+		await predecessor;
+		await successor;
+
+		expect(h.order.indexOf('cookie-1-commit')).toBeLessThan(h.order.indexOf('wipe-2'));
+		expect(h.order.indexOf('wipe-2')).toBeLessThan(h.order.indexOf('cookie-3-commit'));
+		expect(h.cookiePresent(), 'the predecessor terminal cleanup erased its successor').toBe(true);
+		expect(trackedBrowserState(browsers, ACCOUNT.steamId64)).toMatchObject({
+			owner: true,
+			opening: false,
+			settling: false,
+			seeded: true,
+			dirty: false
+		});
+
+		await browsers.closeAccount(ACCOUNT.steamId64);
+		expect(h.cookiePresent()).toBe(false);
+	});
+});
+
+/**
  * **A cookie seeded onto one Steam domain and not the other.**
  *
  * `signIn` loops over Steam's hosts. If the first `cookies.set` succeeded and
@@ -3144,6 +3973,7 @@ describe('a sign-in cookie that only partly landed', () => {
 		const browsers = new AccountBrowsers(h.host);
 
 		await expect(browsers.open(ACCOUNT)).rejects.toBeInstanceOf(Error);
+		expect(h.recorded.wiped).toEqual([browserPartitionFor(ACCOUNT.steamId64)]);
 
 		// The observable: a retry is refused rather than reusing the jar the failed
 		// attempt signed into.
@@ -3167,6 +3997,6 @@ describe('a sign-in cookie that only partly landed', () => {
 			h.recorded.wiped,
 			'a live Steam session was left in the partition by an attempt that failed, for any ' +
 				'later open on that account to inherit'
-		).toContain(browserPartitionFor(ACCOUNT.steamId64));
+		).toEqual([browserPartitionFor(ACCOUNT.steamId64)]);
 	});
 });

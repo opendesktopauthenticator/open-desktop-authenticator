@@ -13,6 +13,9 @@ Environment=TICKETS_DB=/var/lib/tickets/tickets.db
 ExecStart=/usr/bin/node /opt/tickets/server.mjs
 Restart=on-failure
 RestartSec=5s
+# The service starts force-cleanup after 65 seconds. Keep systemd's final kill
+# beyond that so request/file cleanup, rather than SIGKILL, gets the last word.
+TimeoutStopSec=75s
 
 # --- what this process is allowed to be ------------------------------------
 #

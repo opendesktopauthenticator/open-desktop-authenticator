@@ -6,6 +6,21 @@ import type {
 	TransferStatus
 } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
+
+/**
+ * A successful `replaced` resolution has already removed any proven obsolete
+ * vault row. If the follow-up status read itself fails, keep the durable
+ * unreadable record visible without carrying the now-spent deletion proof into
+ * that no-row screen.
+ */
+export function transferRecoveryAfterReplaced(
+	recovery: NonNullable<TransferStatus['recovery']>
+): NonNullable<TransferStatus['recovery']> {
+	const next = { ...recovery, state: 'unreadable' as const };
+	delete next.requiresPassphrase;
+	return next;
+}
 
 /**
  * Moving an authenticator that already lives on the Steam mobile app.
@@ -41,6 +56,7 @@ export function MoveAuthenticator({
 	onComplete,
 	onRetryPersist,
 	onStatus,
+	onResolve,
 	onAcknowledgeBackup,
 	onClose,
 	requireProxies
@@ -66,7 +82,7 @@ export function MoveAuthenticator({
 	/** **Irreversible.** Submits the code and replaces the authenticator. */
 	onComplete: (smsCode: string) => Promise<TransferComplete>;
 	/** Stores a replacement Steam already issued. Steam is not asked again. */
-	onRetryPersist: () => Promise<TransferComplete>;
+	onRetryPersist: (passphrase?: string) => Promise<TransferComplete>;
 	/**
 	 * Asks the main process what, if anything, this transfer is still waiting on.
 	 *
@@ -76,6 +92,14 @@ export function MoveAuthenticator({
 	 * supposed to come back for them.
 	 */
 	onStatus: () => Promise<TransferStatus>;
+	/** Settle the exact durable post-submit record after checking Steam. */
+	onResolve?:
+		| ((
+				attemptId: string,
+				resolution: 'notReplaced' | 'replaced' | 'resolvedOutsideApp',
+				passphrase?: string
+		  ) => Promise<unknown>)
+		| undefined;
 	/**
 	 * Record that the recovery code below was written down.
 	 *
@@ -122,9 +146,35 @@ export function MoveAuthenticator({
 	 * afterwards, which is what lets a rotated-but-unsaved authenticator be
 	 * finished instead of stranded.
 	 */
-	const [awaiting, setAwaiting] = useState<'persist' | 'unanswered' | 'unreadable' | undefined>(
-		undefined
-	);
+	const [awaiting, setAwaiting] = useState<
+		'persist' | 'unreadablePersist' | 'unanswered' | 'unreadable' | 'cleanup' | undefined
+	>(undefined);
+	const [recovery, setRecovery] = useState<TransferStatus['recovery']>();
+	const [statusProblem, setStatusProblem] = useState<string | undefined>();
+	/** Proof of authority for a recovery choice that may delete an old vault row. */
+	const [resolutionPassphrase, setResolutionPassphrase] = useState('');
+	/**
+	 * A renderer-side recovery ownership fence. State paints the disabled controls;
+	 * the ref prevents a second action in the same turn before that paint occurs.
+	 */
+	const recoveryBusyRef = useRef(false);
+	const recoveryBusy = busy || acknowledging;
+	const claimRecovery = (kind: 'work' | 'acknowledge'): boolean => {
+		if (busy || acknowledging || recoveryBusyRef.current) return false;
+		recoveryBusyRef.current = true;
+		if (kind === 'acknowledge') setAcknowledging(true);
+		else setBusy(true);
+		return true;
+	};
+	const releaseRecovery = (kind: 'work' | 'acknowledge'): void => {
+		if (kind === 'acknowledge') setAcknowledging(false);
+		else setBusy(false);
+		recoveryBusyRef.current = false;
+	};
+	const closeRecovery = (): void => {
+		if (recoveryBusyRef.current) return;
+		onClose();
+	};
 
 	/**
 	 * Asked once on mount.
@@ -143,9 +193,12 @@ export function MoveAuthenticator({
 		statusRef
 			.current()
 			.then((status) => {
-				if (cancelled || !status.awaiting) {
+				if (cancelled) {
 					return;
 				}
+				setStatusProblem(status.problem);
+				setRecovery(status.recovery);
+				if (!status.awaiting) return;
 				// Steam has already rotated the authenticator, whatever this document
 				// happens to know. Saying so is the whole point of asking.
 				setAwaiting(status.awaiting);
@@ -240,6 +293,12 @@ export function MoveAuthenticator({
 			// The main process knows the truth: nothing held means nothing happened.
 			try {
 				const status = await statusRef.current();
+				// Refresh the whole authoritative recovery status. A failed submission
+				// can move directly from the code form to a resolution screen in this
+				// same mounted document; carrying only `awaiting` left that screen with
+				// no attempt id, so every resolution control disappeared until reopen.
+				setStatusProblem(status.problem);
+				setRecovery(status.recovery);
 				setAwaiting(status.awaiting);
 				if (!status.awaiting) {
 					setCommitted(false);
@@ -256,23 +315,110 @@ export function MoveAuthenticator({
 	};
 
 	const retrySave = async (): Promise<void> => {
-		if (busy) {
+		if (!claimRecovery('work')) {
 			return;
 		}
-		setBusy(true);
 		setError(undefined);
 		try {
 			// Storage is the only stage that can be retried at all — see `awaiting`.
-			setDone(await onRetryPersist());
+			setDone(await onRetryPersist(resolutionPassphrase || undefined));
 			// Nothing is outstanding any more. Cleared explicitly so the recovery
 			// branch cannot re-assert itself over the success screen.
 			setAwaiting(undefined);
 		} catch (err) {
 			setError(messageOf(err));
+			// A safety-record retry may succeed and intentionally reject ordinary vault
+			// storage because the reply is unusable. Its thrown explanation is not proof
+			// that state stayed on `persist`; re-read the main process so this mounted
+			// screen moves to the durable unreadable resolution instead of offering a
+			// second, now-invalid Save.
+			try {
+				const status = await statusRef.current();
+				setStatusProblem(status.problem);
+				setRecovery(status.recovery);
+				setAwaiting(status.awaiting);
+				if (!status.awaiting) setCommitted(false);
+			} catch {
+				// Keep the conservative pre-retry screen when authoritative status itself
+				// is unavailable. It is safer to repeat a local write than to dismiss bytes.
+			}
 		} finally {
-			setBusy(false);
+			setResolutionPassphrase('');
+			releaseRecovery('work');
 		}
 	};
+
+	const resolveRecovery = async (
+		resolution: 'notReplaced' | 'replaced' | 'resolvedOutsideApp'
+	): Promise<void> => {
+		if (recovery === undefined || onResolve === undefined || !claimRecovery('work')) return;
+		setError(undefined);
+		try {
+			await onResolve(
+				recovery.attemptId,
+				resolution,
+				resolution === 'notReplaced' ? undefined : resolutionPassphrase
+			);
+			let refreshed: TransferStatus | undefined;
+			try {
+				const status = await statusRef.current();
+				setStatusProblem(status.problem);
+				setRecovery(status.recovery);
+				setAwaiting(status.awaiting);
+				setCommitted(status.awaiting !== undefined);
+				refreshed = status;
+			} catch {
+				// The resolution itself succeeded. A local status read must not turn that
+				// into a reported failure or restore a proof which was already spent.
+			}
+			if (resolution === 'replaced') {
+				if (refreshed === undefined) {
+					setAwaiting('unreadable');
+					setRecovery(transferRecoveryAfterReplaced(recovery));
+				}
+			} else if (refreshed === undefined || refreshed.awaiting === undefined) {
+				if (refreshed === undefined) {
+					setAwaiting(undefined);
+					setRecovery(undefined);
+				}
+				onClose();
+			}
+		} catch (err) {
+			setError(messageOf(err));
+			try {
+				// A durable write can commit and then report a directory-flush error.
+				// Re-read after rejection so the renderer never keeps offering actions
+				// for the state that existed before that write.
+				const status = await statusRef.current();
+				setStatusProblem(status.problem);
+				setRecovery(status.recovery);
+				setAwaiting(status.awaiting);
+				setCommitted(status.awaiting !== undefined);
+			} catch {
+				// Keep the last conservative screen when even local status is unavailable.
+			}
+		} finally {
+			if (resolution !== 'notReplaced') setResolutionPassphrase('');
+			releaseRecovery('work');
+		}
+	};
+
+	if (statusProblem !== undefined) {
+		return (
+			<main className="shell">
+				<h1>Transfer recovery needs attention</h1>
+				<DynamicError>{statusProblem}</DynamicError>
+				<p className="hint">
+					No new transfer will be started while this saved safety record cannot be read.
+				</p>
+				<div className="controls">
+					<button type="button" className="secondary" onClick={onClose}>
+						Close
+					</button>
+				</div>
+			</main>
+		);
+	}
 
 	/*
 	 * The recovery-code ceremony.
@@ -303,24 +449,124 @@ export function MoveAuthenticator({
 					sent back.
 				</p>
 				<div className="notice">
-					<strong>The account still has Steam Guard, and nothing here holds it.</strong>
-					<p className="hint">
-						There is nothing to retry: the reply was already read as carefully as this version knows
-						how, and reading it again would do exactly the same thing. Steam Support is the route
-						back into the account.
-					</p>
+					{recovery?.retained ? (
+						<>
+							<strong>The exact reply is retained in an encrypted safety record.</strong>
+							<p className="hint">
+								This version cannot turn it into a working authenticator, so there is no storage
+								retry to run. Keep the application data and contact Steam Support to recover access.
+							</p>
+						</>
+					) : (
+						<>
+							<strong>No usable replacement secrets could be retained here.</strong>
+							<p className="hint">
+								There is nothing to retry: Steam Support is the route back into the account.
+							</p>
+						</>
+					)}
 				</div>
-				{error ? <p className="error">{error}</p> : undefined}
+				{error ? <DynamicError>{error}</DynamicError> : undefined}
+				{recovery?.requiresPassphrase ? (
+					<>
+						<label>
+							Vault passphrase
+							<input
+								type="password"
+								autoComplete="current-password"
+								value={resolutionPassphrase}
+								disabled={recoveryBusy}
+								onChange={(event) => setResolutionPassphrase(event.target.value)}
+							/>
+						</label>
+						<p className="hint">
+							A backup restored this account&rsquo;s older authenticator. This confirmation removes
+							that obsolete local copy, so your passphrase is required before anything is deleted.
+						</p>
+					</>
+				) : undefined}
 				<div className="controls">
+					{recovery !== undefined && onResolve !== undefined ? (
+						<button
+							type="button"
+							disabled={
+								recoveryBusy ||
+								(recovery.requiresPassphrase === true && resolutionPassphrase.length === 0)
+							}
+							onClick={() => void resolveRecovery('resolvedOutsideApp')}
+						>
+							I resolved or removed it through Steam Support
+						</button>
+					) : undefined}
 					<button
 						type="button"
 						className="secondary"
-						onClick={() => {
-							void onCancel().catch(() => undefined);
-							onClose();
-						}}
+						onClick={closeRecovery}
+						disabled={recoveryBusy}
 					>
 						Close
+					</button>
+				</div>
+			</main>
+		);
+	}
+
+	if (awaiting === 'cleanup' && !done) {
+		return (
+			<main className="shell">
+				<h1>Steam did not replace this authenticator</h1>
+				<p className="lede">
+					The request was safely refused, but this app could not clear its local safety record.
+				</p>
+				<p className="hint">
+					Clear that exact record here before starting another transfer. This does not contact
+					Steam.
+				</p>
+				{error ? <DynamicError>{error}</DynamicError> : undefined}
+				<div className="controls">
+					{recovery !== undefined && onResolve !== undefined ? (
+						<button
+							type="button"
+							disabled={recoveryBusy}
+							onClick={() => void resolveRecovery('notReplaced')}
+						>
+							Clear the safety record
+						</button>
+					) : undefined}
+					<button
+						type="button"
+						className="secondary"
+						onClick={closeRecovery}
+						disabled={recoveryBusy}
+					>
+						Close
+					</button>
+				</div>
+			</main>
+		);
+	}
+
+	if (awaiting === 'unreadablePersist' && !done) {
+		return (
+			<main className="shell">
+				<h1>Save this transfer&rsquo;s safety record</h1>
+				<p className="lede">
+					Steam replaced the authenticator, but this version cannot turn its reply into a working
+					authenticator.
+				</p>
+				<div className="notice">
+					<strong>
+						The reply is encrypted in memory, but its safety record is not on disk yet.
+					</strong>
+					<p className="hint">
+						Saving this record is for diagnosis and recovery support. It will not add a usable
+						authenticator to the vault; Steam Support is still required.
+					</p>
+				</div>
+				{error ? <DynamicError>{error}</DynamicError> : undefined}
+				<div className="controls">
+					<button type="button" disabled={recoveryBusy} onClick={() => void retrySave()}>
+						{recoveryBusy ? 'Working…' : 'Save safety record now'}
 					</button>
 				</div>
 			</main>
@@ -340,8 +586,9 @@ export function MoveAuthenticator({
 			<main className="shell">
 				<h1>This transfer was not answered</h1>
 				<p className="lede">
-					The code was submitted and the connection failed before Steam replied. This application
-					cannot tell whether the authenticator was replaced.
+					{recovery?.state === 'sending'
+						? 'The app stopped after recording its intent, but the saved state does not prove whether the request left this machine.'
+						: 'The code was submitted and the connection failed before Steam replied. This application cannot tell whether the authenticator was replaced.'}
 				</p>
 				<div className="notice">
 					<strong>Do not assume it went through, and do not assume it did not.</strong>
@@ -352,20 +599,54 @@ export function MoveAuthenticator({
 						route back in.
 					</p>
 				</div>
-				{error ? <p className="error">{error}</p> : undefined}
+				{error ? <DynamicError>{error}</DynamicError> : undefined}
+				{recovery?.requiresPassphrase ? (
+					<>
+						<label>
+							Vault passphrase
+							<input
+								type="password"
+								autoComplete="current-password"
+								value={resolutionPassphrase}
+								disabled={recoveryBusy}
+								onChange={(event) => setResolutionPassphrase(event.target.value)}
+							/>
+						</label>
+						<p className="hint">
+							A backup restored this account&rsquo;s older authenticator. Confirming replacement
+							removes that obsolete copy, so your passphrase is required before it is deleted.
+						</p>
+					</>
+				) : undefined}
 				<div className="controls">
-					{/* No retry, and no second submission. The code is spent either way,
-					    and sending another would be a second irreversible request made on
-					    a guess about the first. Closing is the only honest control. */}
+					{recovery !== undefined && onResolve !== undefined ? (
+						<>
+							<button
+								type="button"
+								disabled={recoveryBusy}
+								onClick={() => void resolveRecovery('notReplaced')}
+							>
+								The phone still has Steam Guard — allow another transfer
+							</button>
+							<button
+								type="button"
+								disabled={
+									recoveryBusy ||
+									(recovery.requiresPassphrase === true && resolutionPassphrase.length === 0)
+								}
+								onClick={() => void resolveRecovery('replaced')}
+							>
+								The phone no longer has it
+							</button>
+						</>
+					) : undefined}
 					<button
 						type="button"
 						className="secondary"
-						onClick={() => {
-							void onCancel().catch(() => undefined);
-							onClose();
-						}}
+						onClick={closeRecovery}
+						disabled={recoveryBusy}
 					>
-						I have checked the Steam app
+						Close
 					</button>
 				</div>
 			</main>
@@ -390,31 +671,71 @@ export function MoveAuthenticator({
 	// an authenticator Steam had *already* rotated. Pressing it could only be
 	// refused, while "Try saving again" — the one button that can succeed — sat
 	// below it as a secondary control and the only copy of the new secrets lived
-	// in memory. `awaiting === 'persist'` is already the precise statement that
-	// Steam is done and the vault is not.
+	// in memory. `awaiting === 'persist'` is the precise statement that Steam is
+	// done and the local replacement or its cleanup still needs verifying.
 	if (awaiting === 'persist' && !done) {
+		const durableRecovery = recovery?.state === 'replacement';
 		return (
 			<main className="shell">
-				<h1>Finish moving this authenticator</h1>
+				<h1>Verify and finish this transfer</h1>
 				<p className="lede">
-					Steam has already replaced the authenticator on this account. The new one has not been
-					saved here yet — it was interrupted, most likely by the vault locking.
+					Steam has already replaced the authenticator on this account. Its saved transfer record
+					must be checked against this vault and cleared before the transfer is complete.
 				</p>
 				<div className="notice">
-					<strong>Do not close this window until it is saved.</strong>
-					<p className="hint">
-						Steam issues these secrets once and will not send them again. They are held in memory
-						and will be lost if this application exits.
-					</p>
+					{durableRecovery ? (
+						<>
+							<strong>
+								The exact replacement is available from this vault or its encrypted safety record.
+							</strong>
+							<p className="hint">
+								Keep this vault and its application data intact, then finish the local verification
+								and cleanup. Steam will not be contacted again.
+							</p>
+						</>
+					) : (
+						<>
+							<strong>Do not close this window or quit the app until it is saved.</strong>
+							<p className="hint">
+								Steam issues these secrets once and will not send them again. The only usable copy
+								is being held in memory; a restart will lose it. Choose “Finish recovery”.
+							</p>
+						</>
+					)}
 				</div>
 				<p className="hint">
-					The new authenticator was read successfully and still needs writing to the vault. Trying
-					again only stores it; Steam is not contacted.
+					This only verifies or saves the exact replacement and clears its safety record. Steam is
+					not contacted.
 				</p>
-				{error ? <p className="error">{error}</p> : undefined}
+				{error ? <DynamicError>{error}</DynamicError> : undefined}
+				{recovery?.requiresPassphrase ? (
+					<>
+						<label>
+							Vault passphrase
+							<input
+								type="password"
+								autoComplete="current-password"
+								value={resolutionPassphrase}
+								disabled={recoveryBusy}
+								onChange={(event) => setResolutionPassphrase(event.target.value)}
+							/>
+						</label>
+						<p className="hint">
+							A backup restored the older authenticator. Your passphrase authorizes replacing only
+							that proven obsolete row with the encrypted replacement shown above.
+						</p>
+					</>
+				) : undefined}
 				<div className="controls">
-					<button type="button" disabled={busy} onClick={() => void retrySave()}>
-						{busy ? 'Working…' : 'Save it now'}
+					<button
+						type="button"
+						disabled={
+							recoveryBusy ||
+							(recovery?.requiresPassphrase === true && resolutionPassphrase.length === 0)
+						}
+						onClick={() => void retrySave()}
+					>
+						{recoveryBusy ? 'Working…' : 'Finish recovery'}
 					</button>
 				</div>
 			</main>
@@ -439,6 +760,17 @@ export function MoveAuthenticator({
 					The authenticator is now held here. The one on your phone is no longer the account&rsquo;s
 					authenticator.
 				</p>
+				{done.recoveryWarning !== undefined && (
+					<div className="notice" role="alert">
+						<p>{done.recoveryWarning}</p>
+						<div className="controls">
+							<button type="button" disabled={recoveryBusy} onClick={() => void retrySave()}>
+								{recoveryBusy ? 'Saving…' : 'Finish recovery backup'}
+							</button>
+						</div>
+					</div>
+				)}
+				{error ? <DynamicError>{error}</DynamicError> : undefined}
 
 				<div className="notice">
 					<strong>Write this recovery code down before you close this window.</strong>
@@ -465,6 +797,7 @@ export function MoveAuthenticator({
 					<input
 						type="checkbox"
 						checked={savedCode}
+						disabled={recoveryBusy}
 						onChange={(event) => setSavedCode(event.target.checked)}
 					/>
 					I have written the recovery code down somewhere other than this computer
@@ -480,28 +813,29 @@ export function MoveAuthenticator({
 				    still on screen at this point, which is the one moment retrying
 				    costs nothing. */}
 				{acknowledgeError !== undefined && (
-					<p className="error" role="alert">
+					<DynamicError>
 						{acknowledgeError} The recovery code above is still the one to keep — press Done to try
 						again, or close this and use “Back up recovery code” on the account.
-					</p>
+					</DynamicError>
 				)}
 
 				<div className="controls">
 					<button
 						type="button"
-						disabled={!savedCode || acknowledging}
+						disabled={!savedCode || recoveryBusy}
 						onClick={() => {
-							setAcknowledging(true);
+							if (!claimRecovery('acknowledge')) return;
 							setAcknowledgeError(undefined);
-							void onAcknowledgeBackup(done.steamId64).then(
-								() => onClose(),
-								(err: unknown) => {
-									// Stays open, and says so. Closing from a `finally` was the
-									// bug: it treated failure exactly like success.
-									setAcknowledging(false);
-									setAcknowledgeError(messageOf(err));
-								}
-							);
+							void onAcknowledgeBackup(done.steamId64)
+								.then(
+									() => onClose(),
+									(err: unknown) => {
+										// Stays open, and says so. Closing from a `finally` was the
+										// bug: it treated failure exactly like success.
+										setAcknowledgeError(messageOf(err));
+									}
+								)
+								.finally(() => releaseRecovery('acknowledge'));
 						}}
 					>
 						{acknowledging ? 'Saving…' : 'Done'}
@@ -510,7 +844,12 @@ export function MoveAuthenticator({
 					    mid-press cannot record anything from here, and holding them on
 					    this screen would be its own trap. */}
 					{acknowledgeError !== undefined && (
-						<button type="button" className="secondary" onClick={onClose}>
+						<button
+							type="button"
+							className="secondary"
+							onClick={closeRecovery}
+							disabled={recoveryBusy}
+						>
 							Close without recording it
 						</button>
 					)}
@@ -563,7 +902,7 @@ export function MoveAuthenticator({
 					</p>
 				</div>
 
-				{error ? <p className="error">{error}</p> : undefined}
+				{error ? <DynamicError>{error}</DynamicError> : undefined}
 
 				{challenge ? (
 					<div className="notice">
@@ -611,7 +950,7 @@ export function MoveAuthenticator({
 							autoComplete="off"
 							spellCheck={false}
 							maxLength={16}
-							disabled={committed && !error}
+							disabled={busy || (committed && !error)}
 						/>
 					</>
 				) : undefined}
@@ -701,6 +1040,7 @@ export function MoveAuthenticator({
 					id="move-account"
 					type="text"
 					value={accountName}
+					disabled={busy}
 					onChange={(event) => setAccountName(event.target.value)}
 					autoComplete="off"
 					spellCheck={false}
@@ -711,6 +1051,7 @@ export function MoveAuthenticator({
 					id="move-password"
 					type="password"
 					value={password}
+					disabled={busy}
 					onChange={(event) => setPassword(event.target.value)}
 					autoComplete="off"
 				/>
@@ -723,6 +1064,7 @@ export function MoveAuthenticator({
 					id="move-code"
 					type="text"
 					value={code}
+					disabled={busy}
 					onChange={(event) => setCode(event.target.value)}
 					autoComplete="off"
 					spellCheck={false}
@@ -742,6 +1084,7 @@ export function MoveAuthenticator({
 					id="move-proxy"
 					type="text"
 					value={proxyUrl}
+					disabled={busy}
 					onChange={(event) => setProxyUrl(event.target.value)}
 					autoComplete="off"
 					spellCheck={false}
@@ -763,7 +1106,7 @@ export function MoveAuthenticator({
 						: 'Leave it empty to connect directly.'}
 				</p>
 
-				{error ? <p className="error">{error}</p> : undefined}
+				{error ? <DynamicError>{error}</DynamicError> : undefined}
 
 				<div className="controls">
 					<button

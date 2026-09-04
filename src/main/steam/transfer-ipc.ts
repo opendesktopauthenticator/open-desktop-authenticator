@@ -143,9 +143,9 @@ export function registerTransferHandlers(
 	});
 
 	/** Storage only. Steam is not asked again — it could not be. */
-	registerHandler(CHANNELS.transferRetryPersist, async () => {
+	registerHandler(CHANNELS.transferRetryPersist, async ({ passphrase }) => {
 		requireUnlocked();
-		return revealed(await transfer.retryPersist());
+		return revealed(await transfer.retryPersist(passphrase));
 	});
 
 	registerHandler(CHANNELS.transferStatus, () => {
@@ -160,6 +160,10 @@ export function registerTransferHandlers(
 		if (!vault.isUnlocked()) {
 			return Promise.resolve({});
 		}
+		const problem = transfer.problem?.();
+		if (problem !== undefined) {
+			return Promise.resolve({ problem });
+		}
 		const current = transfer.current();
 		if (!current) {
 			return Promise.resolve({});
@@ -167,7 +171,18 @@ export function registerTransferHandlers(
 		// `live()` never expires a transfer while secrets are held, so whenever
 		// `awaiting` is set there is a `current` to report it against.
 		const awaiting = transfer.awaiting();
-		return Promise.resolve(awaiting ? { transfer: current, awaiting } : { transfer: current });
+		const recovery = transfer.recovery?.();
+		return Promise.resolve({
+			transfer: current,
+			...(awaiting ? { awaiting } : {}),
+			...(recovery ? { recovery } : {})
+		});
+	});
+
+	registerHandler(CHANNELS.transferResolve, async ({ attemptId, resolution, passphrase }) => {
+		requireUnlocked();
+		await transfer.resolve(attemptId, resolution, passphrase);
+		return { ok: true as const };
 	});
 
 	/**

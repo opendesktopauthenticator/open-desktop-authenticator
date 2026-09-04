@@ -185,6 +185,87 @@ describe('what it refuses to do', () => {
 	});
 });
 
+describe('wall-clock corrections', () => {
+	it.each(['automatic confirmation', 'notification-only'] as const)(
+		'keeps the %s schedule on elapsed time when the wall clock moves backward',
+		async (mode) => {
+			let wall = 10_000_000;
+			let elapsed = 0;
+			let polls = 0;
+			const accounts = [
+				mode === 'automatic confirmation'
+					? account({ trades: true })
+					: account({ notify: { enabled: true, detail: 'full' } })
+			];
+			const vault = {
+				isUnlocked: () => true,
+				read: () => ({ accounts }),
+				autoConfirmSchedule: () => scheduleOf(accounts)
+			} as unknown as VaultService;
+			const confirmations = {
+				runAutoConfirm: () => {
+					polls += 1;
+					return Promise.resolve({ approved: [], held: [], unreadable: 0 });
+				},
+				list: () => {
+					polls += 1;
+					return Promise.resolve({ confirmations: [], unreadable: 0 });
+				}
+			} as unknown as ConfirmationsService;
+			const engine = new AutoConfirmEngine({
+				vault,
+				confirmations,
+				now: () => wall,
+				monotonic: () => elapsed
+			});
+
+			await engine.tick();
+			expect(polls).toBe(1);
+
+			wall -= 60 * 60_000;
+			elapsed = 20_000;
+			await engine.tick();
+			expect(polls).toBe(2);
+		}
+	);
+
+	it('serves a failure backoff by elapsed time after a backward wall-clock correction', async () => {
+		let wall = 10_000_000;
+		let elapsed = 0;
+		let polls = 0;
+		const accounts = [account({ trades: true })];
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const confirmations = {
+			runAutoConfirm: () => {
+				polls += 1;
+				return Promise.reject(new Error('offline'));
+			}
+		} as unknown as ConfirmationsService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations,
+			now: () => wall,
+			monotonic: () => elapsed
+		});
+
+		await engine.tick();
+		expect(polls).toBe(1);
+
+		wall -= 60 * 60_000;
+		elapsed = 29_999;
+		await engine.tick();
+		expect(polls).toBe(1);
+
+		elapsed = 30_001;
+		await engine.tick();
+		expect(polls).toBe(2);
+	});
+});
+
 describe('pacing', () => {
 	it('waits out the account interval before asking again', async () => {
 		const { engine, runAutoConfirm, advance } = harness({
@@ -1459,6 +1540,37 @@ describe('Require proxies', () => {
 		const { engine, runAutoConfirm } = h(true, '');
 		await engine.tick();
 		expect(runAutoConfirm).not.toHaveBeenCalled();
+	});
+
+	it('reconsiders a previously excluded account as soon as strict routing is turned off', async () => {
+		let required = true;
+		const accounts = [
+			account({ trades: true }, { proxyUrl: 'http://proxy.example:8080' }),
+			account({ trades: true }, { steamId64: '76561198000000002', accountName: 'unproxied trader' })
+		];
+		const runAutoConfirm = vi.fn(() => Promise.resolve({ approved: [], held: [], unreadable: 0 }));
+		const vault = {
+			isUnlocked: () => true,
+			read: () => ({ accounts }),
+			autoConfirmSchedule: () => scheduleOf(accounts)
+		} as unknown as VaultService;
+		const engine = new AutoConfirmEngine({
+			vault,
+			confirmations: { runAutoConfirm } as unknown as ConfirmationsService,
+			now: () => NOW,
+			requireProxies: () => required,
+			setTimer: () => ({ unref: () => undefined }) as unknown as NodeJS.Timeout,
+			clearTimer: () => undefined
+		});
+
+		await engine.tick();
+		expect(runAutoConfirm).toHaveBeenCalledWith('76561198000000001');
+		expect(runAutoConfirm).not.toHaveBeenCalledWith('76561198000000002');
+
+		required = false;
+		engine.policyChanged();
+		await engine.tick();
+		expect(runAutoConfirm).toHaveBeenCalledWith('76561198000000002');
 	});
 });
 

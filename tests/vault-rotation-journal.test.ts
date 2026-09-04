@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -485,7 +485,10 @@ describe('a stale journal whose backup has gone missing', () => {
 		expect(service().reconcile(), 'a real debt went unpaid because the backup was damaged').toBe(
 			true
 		);
-		expect(existsSync(`${file}.bak.previous`), 'a set-aside copy was left behind').toBe(false);
+		expect(
+			readdirSync(dir).some((name) => name.includes('.bak.previous-')),
+			'a set-aside copy was left behind'
+		).toBe(false);
 	});
 });
 
@@ -540,5 +543,46 @@ describe('a rotation that fails while an earlier debt is still owed', () => {
 		state.refuseVaultBackupCopy = false;
 
 		expect(service().reconcile(), 'the debt survived but can no longer be settled').toBe(true);
+	});
+
+	it('preserves an unreadable earlier journal byte for byte', async () => {
+		const vault = await vaultWithAnAccount();
+		const unreadable = Buffer.from([0x7b, 0x22, 0xff, 0x00, 0x7d]);
+		writeFileSync(`${file}.rotating`, unreadable);
+
+		state.refuseVaultBackupCopy = true;
+		await expect(vault.changePassphrase(OLD, NEW)).rejects.toThrow();
+		state.refuseVaultBackupCopy = false;
+
+		expect(
+			readFileSync(`${file}.rotating`),
+			'the failed second rotation erased or rewrote the unreadable evidence left by the first'
+		).toEqual(unreadable);
+		expect(
+			service().backupAvailable(),
+			'a restart trusted a backup even though the preserved journal says its rotation is unknown'
+		).toBeUndefined();
+	});
+
+	it('also restores an earlier journal when the later backup write fails after the vault write', async () => {
+		const vault = await vaultWithAnAccount();
+		const unreadable = Buffer.from([0x7b, 0x22, 0xfe, 0x00, 0x7d]);
+		writeFileSync(`${file}.rotating`, unreadable);
+
+		/*
+		 * This fault is later than `refuseVaultBackupCopy`: the new main vault has
+		 * landed, the dedicated backup write fails, and the main vault is then put
+		 * back successfully. That rollback still must not erase an older debt which
+		 * occupied the shared journal slot before this attempt.
+		 */
+		state.refuseBackupWrite = true;
+		await expect(vault.changePassphrase(OLD, NEW)).rejects.toThrow(/passphrase was not changed/);
+		state.refuseBackupWrite = false;
+
+		expect(
+			readFileSync(`${file}.rotating`),
+			'the later rotation rolled its vault back but cleared evidence belonging to an earlier one'
+		).toEqual(unreadable);
+		expect(service().backupAvailable()).toBeUndefined();
 	});
 });

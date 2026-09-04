@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { AccountSummary, ActivityList } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * What automatic confirmation did while nobody was watching.
@@ -188,7 +189,7 @@ export function Activity({
 				away&rdquo;, not &ldquo;what did I trade last month&rdquo;. Nothing here is written to disk.
 			</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError>{error}</DynamicError>}
 
 			{urgent.map(({ steamId64, entry }, index) => (
 				<div className="ceremony" key={`${index}-${entry.at}`}>

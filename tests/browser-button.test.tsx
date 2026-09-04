@@ -57,7 +57,8 @@ function render(accounts: AccountSummary[], requireProxies = false): string {
 			onRecover={noop}
 			onEnrol={noop}
 			onFinishActivation={noop}
-			onExport={() => Promise.resolve({ written: false } as never)}
+			onFinishRecoveryBackup={noop}
+			onExport={noop}
 			onSettings={noop}
 			onAbout={noop}
 			onActivity={noop}
@@ -149,6 +150,15 @@ describe('the trade button', () => {
 		expect(directButton(routed)).toMatch(/network settings still apply/i);
 	});
 
+	it('direct and unrouted trade explain how to handle an authenticated system proxy', () => {
+		const routed = render([account({ hasProxy: true, routing: 'verified' })]);
+		const plain = render([account({ hasProxy: false })]);
+		expect(directButton(routed)).toMatch(/asks for a username and password/i);
+		expect(directButton(routed)).toMatch(/Proxy field.*proxied route/i);
+		expect(tradeButton(plain)).toMatch(/asks for a username and password/i);
+		expect(tradeButton(plain)).toMatch(/Proxy field/i);
+	});
+
 	it('is not disabled when nothing is being opened', () => {
 		expect(tradeButton(render([account()]))).not.toMatch(/disabled/);
 	});
@@ -224,7 +234,9 @@ describe('the trade button', () => {
 		expect(tradeButton(render([account({ hasProxy: true, routing: 'verified' })]))).toMatch(
 			/through this account’s proxy/i
 		);
-		expect(tradeButton(render([account({ hasProxy: false })]))).not.toMatch(/proxy/i);
+		expect(tradeButton(render([account({ hasProxy: false })]))).not.toMatch(
+			/through this account’s proxy/i
+		);
 	});
 
 	/*
@@ -322,7 +334,8 @@ describe('the enrolment and transfer forms under Require proxies', () => {
 				onBegin={() => Promise.resolve({ state: 'needsEmailCode' as const })}
 				onEmailCode={() => Promise.resolve({ state: 'needsEmailCode' as const })}
 				onCancel={() => Promise.resolve()}
-				onResolve={() => Promise.resolve()}
+				onResolve={() => Promise.resolve({ ok: true as const })}
+				onClearStale={() => Promise.resolve()}
 				onActivate={() => Promise.resolve({} as never)}
 				onBackup={noop}
 				onClose={noop}

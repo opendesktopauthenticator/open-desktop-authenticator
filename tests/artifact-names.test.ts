@@ -166,10 +166,12 @@ describe('the Microsoft Store identity', () => {
 		// own collection step only ever globs exe/AppImage/deb.
 		expect(workflow).toContain('--win appx --publish never');
 		expect(workflow).toContain('name: store-package');
-		const collect = workflow.slice(
-			workflow.indexOf('Collect artifacts'),
-			workflow.indexOf('Collect the Store package')
-		);
+		const start = workflow.indexOf('- name: Collect artifacts');
+		const end = workflow.indexOf('\n\n', start);
+		expect(start, 'the release-artifact collection step is missing').toBeGreaterThanOrEqual(0);
+		expect(end, 'the collection step has no terminating blank line').toBeGreaterThan(start);
+		const collect = workflow.slice(start, end);
+		expect(collect, 'the collection test inspected an empty block').not.toHaveLength(0);
 		expect(collect).not.toContain('appx');
 
 		/*

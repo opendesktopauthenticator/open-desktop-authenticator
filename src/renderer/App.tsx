@@ -1,13 +1,36 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import type {
 	AccountSummary,
 	BrowserRoute,
 	CodesList,
+	EnrollmentStatus,
+	ExportResult,
 	OpenBrowserResult,
 	RendererApi,
+	ToastClick,
+	TransferStatus,
 	UpdateCheckResult,
 	VaultStatus
 } from '../shared/ipc';
+import {
+	claimConfirmationClick,
+	notificationMayTakeOver,
+	notificationRefreshesOpenAccount,
+	retryConfirmationClickAcknowledgement,
+	settleConfirmationRefreshClick,
+	shouldAcknowledgeConfirmationClick,
+	type ConfirmationClickClaims
+} from '../shared/notification-click';
+export { claimConfirmationClick } from '../shared/notification-click';
+import { recoveryExitView } from '../shared/recovery-view';
+export { recoveryExitView } from '../shared/recovery-view';
+import {
+	claimRecoveryForeground,
+	deliverRecoveryAttention,
+	supersedeRecoveryForeground,
+	type ForegroundRevision
+} from './recovery-navigation';
+import { DynamicError } from './DynamicError';
 import { CreateVault } from './screens/CreateVault';
 import { AccountRouting } from './screens/AccountRouting';
 import { Activity } from './screens/Activity';
@@ -21,9 +44,11 @@ import { RecoverAccount } from './screens/RecoverAccount';
 import { AddAuthenticator } from './screens/AddAuthenticator';
 import { MoveAuthenticator } from './screens/MoveAuthenticator';
 import { RevocationBackup } from './screens/RevocationBackup';
+import { BrowserOpenRetry } from './screens/BrowserOpenRetry';
 import { SteamSignIn } from './screens/SteamSignIn';
 import { UnlockVault } from './screens/UnlockVault';
-import { VaultHome } from './screens/VaultHome';
+import { noted, VaultHome } from './screens/VaultHome';
+import { messageOf } from './ipc-message';
 
 declare global {
 	interface Window {
@@ -42,6 +67,207 @@ declare global {
 const STATUS_POLL_MS = 1000;
 /** Activity is reported at most this often; a ping per keystroke is pointless. */
 const TOUCH_THROTTLE_MS = 15_000;
+
+type AppView =
+	'accounts' | 'import' | 'settings' | 'activity' | 'enroll' | 'move' | 'recover' | 'about';
+
+type RecoveryDestination = 'enroll' | 'move';
+
+interface DeferredRecovery {
+	destination: RecoveryDestination;
+	queuedMove: boolean;
+}
+
+/**
+ * A completed plaintext export that remains owned by `App`, not by the account
+ * list that happened to start it.
+ *
+ * The account list is routinely unmounted for Settings, Activity and every
+ * account overlay. Keeping this here means those deliberate navigations cannot
+ * erase the only report that a save failed or left an older `.prev` file behind.
+ */
+export interface ExportNotice {
+	id: string;
+	steamId64: string;
+	accountName: string;
+	status: string | undefined;
+	error: string | undefined;
+}
+
+export type ExportNoticeAction =
+	{ type: 'record'; notice: ExportNotice } | { type: 'dismiss'; id: string };
+
+/**
+ * Append outcomes instead of giving each account one replaceable slot. Starting
+ * another export is not acknowledgement of the result already on screen; only
+ * the notice's Dismiss button removes it.
+ */
+export function exportNoticeReducer(
+	state: readonly ExportNotice[],
+	action: ExportNoticeAction
+): readonly ExportNotice[] {
+	if (action.type === 'dismiss') {
+		return state.filter((notice) => notice.id !== action.id);
+	}
+	return [...state, action.notice];
+}
+
+/** Translate the typed main-process answer without losing its plaintext warning. */
+export function exportNoticeFor(
+	account: Pick<AccountSummary, 'steamId64' | 'accountName'>,
+	attempt: number,
+	result: ExportResult
+): ExportNotice {
+	return {
+		id: `${account.steamId64}:${attempt}`,
+		steamId64: account.steamId64,
+		accountName: account.accountName,
+		status:
+			result.state === 'saved'
+				? `Saved as ${result.fileName}. Treat that file as a key to this account.`
+				: 'Nothing was saved.',
+		error:
+			result.state === 'saved' && result.staleCopy
+				? 'The previous export could not be deleted — a file ending “.prev” is still beside it, holding the older secrets. Delete it when you can.'
+				: undefined
+	};
+}
+
+/** The rejection counterpart to `exportNoticeFor`, kept path-safe by `messageOf`. */
+export function exportFailureNoticeFor(
+	account: Pick<AccountSummary, 'steamId64' | 'accountName'>,
+	attempt: number,
+	err: unknown
+): ExportNotice {
+	return {
+		id: `${account.steamId64}:${attempt}`,
+		steamId64: account.steamId64,
+		accountName: account.accountName,
+		status: undefined,
+		error: `It could not be saved: ${messageOf(err)}`
+	};
+}
+
+/**
+ * Settle one export into its app-level owner. `current` preserves the existing
+ * per-account stale-attempt rule while `record` keeps React out of the behavior
+ * test: navigation may replace any child screen during the await and this owner
+ * still receives the result.
+ */
+export async function settleAccountExport(
+	account: Pick<AccountSummary, 'steamId64' | 'accountName'>,
+	attempt: number,
+	request: Promise<ExportResult>,
+	current: () => boolean,
+	record: (notice: ExportNotice) => void
+): Promise<void> {
+	try {
+		const result = await request;
+		if (current()) {
+			record(exportNoticeFor(account, attempt, result));
+		}
+	} catch (err) {
+		if (current()) {
+			record(exportFailureNoticeFor(account, attempt, err));
+		}
+	}
+}
+
+/**
+ * Finish the durable action before refreshing its presentation.
+ *
+ * The refresh is useful but it is not part of publishing the backup. If it
+ * fails after publication, rejecting this promise tells the row that the
+ * backup failed and invites a retry of work that already succeeded. Surface
+ * that transient read failure through the app's poll banner instead.
+ */
+export async function finishRecoveryBackupWithRefresh(
+	finish: () => Promise<{ ok: true }>,
+	refresh: () => Promise<void>,
+	onRefreshError: (message: string) => void
+): Promise<{ ok: true }> {
+	const result = await finish();
+	try {
+		await refresh();
+	} catch (err) {
+		onRefreshError(messageOf(err));
+	}
+	return result;
+}
+
+/**
+ * One app-owned recovery-backup attempt.
+ *
+ * The Set is updated before any IPC can settle, so a notification delivered in
+ * the same turn sees the navigation lock. Its callbacks keep the result above
+ * `VaultHome`, where an unrelated navigation cannot destroy it.
+ */
+export async function runRecoveryBackupAttempt(options: {
+	steamId64: string;
+	inFlight: Set<string>;
+	finish: () => Promise<{ ok: true }>;
+	refresh: () => Promise<void>;
+	onRefreshError: (message: string) => void;
+	onBusy: (accounts: ReadonlySet<string>) => void;
+	onError: (steamId64: string, message: string | undefined) => void;
+	onStart: () => void;
+}): Promise<boolean> {
+	if (options.inFlight.has(options.steamId64)) return false;
+	options.inFlight.add(options.steamId64);
+	options.onBusy(new Set(options.inFlight));
+	try {
+		options.onError(options.steamId64, undefined);
+		options.onStart();
+		await finishRecoveryBackupWithRefresh(options.finish, options.refresh, options.onRefreshError);
+		return true;
+	} catch (err) {
+		options.onError(options.steamId64, messageOf(err));
+		return false;
+	} finally {
+		options.inFlight.delete(options.steamId64);
+		options.onBusy(new Set(options.inFlight));
+	}
+}
+
+/** Parent navigation must not replace an account-list operation still in flight. */
+export function accountListOperationBusy(
+	exportingAccountCount: number,
+	finishingRecoveryAccountCount: number
+): boolean {
+	return exportingAccountCount > 0 || finishingRecoveryAccountCount > 0;
+}
+
+/**
+ * Rendered above `screen()`, so changing the current screen cannot hide or
+ * destroy a completed result. Only the explicit button acknowledges one.
+ */
+export function ExportNotices({
+	notices,
+	onDismiss
+}: {
+	notices: readonly ExportNotice[];
+	onDismiss: (id: string) => void;
+}): React.JSX.Element | null {
+	if (notices.length === 0) {
+		return null;
+	}
+	return (
+		<>
+			{notices.map((notice) => (
+				<section className="banner notice" key={notice.id} aria-labelledby={`export-${notice.id}`}>
+					<strong id={`export-${notice.id}`}>Export for {notice.accountName}</strong>
+					{notice.status && <p role="status">{notice.status}</p>}
+					{notice.error && <DynamicError>{notice.error}</DynamicError>}
+					<div className="controls">
+						<button type="button" className="secondary" onClick={() => onDismiss(notice.id)}>
+							Dismiss
+						</button>
+					</div>
+				</section>
+			))}
+		</>
+	);
+}
 
 /**
  * May this update-check answer reach the screen?
@@ -85,11 +311,75 @@ export function confirmationsTargetFor(
 	return accounts.find((entry) => entry.steamId64 === steamId64);
 }
 
+/**
+ * A stable identity for the set of accounts a notification may navigate to.
+ *
+ * Status polling replaces `accounts` with a fresh array every second, so the
+ * array itself is too noisy for an effect dependency. Its length is too weak:
+ * replacing account A with account B keeps the same length and can leave a
+ * retained click for B asleep forever. Steam IDs are decimal-only, which makes
+ * a sorted comma-separated membership unambiguous and insensitive to ordering.
+ */
+export function confirmationAccountMembership(accounts: readonly AccountSummary[]): string {
+	return accounts
+		.map((account) => account.steamId64)
+		.sort()
+		.join(',');
+}
+
+/** Start one exact, idempotent acknowledgement without duplicating navigation. */
+function beginConfirmationClickAcknowledgement(
+	api: RendererApi,
+	claims: ConfirmationClickClaims,
+	inProgress: Set<number>,
+	click: ToastClick
+): void {
+	if (inProgress.has(click.token)) return;
+	inProgress.add(click.token);
+	void retryConfirmationClickAcknowledgement(claims, click.token, () =>
+		api.takePendingConfirmations({ acknowledged: click })
+	).finally(() => inProgress.delete(click.token));
+}
+
 /** The account and route a sign-in screen is asking about. */
 export interface BrowserSignInPrompt {
 	account: AccountSummary;
 	route: BrowserRoute;
 	reason?: string;
+}
+
+/** The password-free continuation after Steam has accepted a sign-in. */
+export interface BrowserOpenContinuation {
+	account: AccountSummary;
+	route: BrowserRoute;
+	busy: boolean;
+	error?: string;
+}
+
+export type BrowserOpenAfterSignInResult = { opened: true } | { opened: false; reason: string };
+
+/**
+ * Retry only the browser operation after authentication has succeeded.
+ *
+ * A thrown window/session error and a browser that still rejects the stored
+ * session are both browser failures. Turning either one back into a
+ * `SignInResult` asks for a password that Steam already accepted.
+ */
+export async function openBrowserAfterSignIn(
+	open: () => Promise<OpenBrowserResult>
+): Promise<BrowserOpenAfterSignInResult> {
+	try {
+		const result = await open();
+		if (result.signInRequired) {
+			return {
+				opened: false,
+				reason: result.reason ?? 'Steam accepted the sign-in but would not open a browsing session.'
+			};
+		}
+		return { opened: true };
+	} catch (err) {
+		return { opened: false, reason: messageOf(err) };
+	}
 }
 
 /**
@@ -147,6 +437,30 @@ export function abandonPendingSignIns(): void {
 	uiGeneration += 1;
 }
 
+/** Claim the same foreground generation for the password-free browser stage. */
+export function claimBrowserOpenContinuation(): () => boolean {
+	const mine = (uiGeneration += 1);
+	return () => uiGeneration === mine;
+}
+
+/**
+ * Make an account-list overlay the newest owner of the screen.
+ *
+ * Three writes belong in one synchronous operation. Advancing the generation
+ * rejects browser opens that are still in flight; raising the ref closes the
+ * gap before React runs its effects; clearing state removes a prompt that had
+ * already arrived. Leaving any one of the three for later is how Back from a
+ * notification made an obsolete password form reappear.
+ */
+export function supersedeBrowserSignInForOverlay(
+	overlayOpen: { current: boolean },
+	clearPrompt: () => void
+): void {
+	abandonPendingSignIns();
+	overlayOpen.current = true;
+	clearPrompt();
+}
+
 /**
  * Whether a sign-in prompt may take the window, given where the user is.
  *
@@ -167,9 +481,10 @@ export function abandonPendingSignIns(): void {
  */
 export function mayShowSignInPrompt(
 	prompt: BrowserSignInPrompt | undefined,
-	view: string
+	view: string,
+	overlayOpen = false
 ): prompt is BrowserSignInPrompt {
-	return prompt !== undefined && view === 'accounts';
+	return prompt !== undefined && view === 'accounts' && !overlayOpen;
 }
 
 export function claimSignInScreen(): (
@@ -206,9 +521,46 @@ export function App(): React.JSX.Element {
 	 * reloads this window whenever the vault locks, so an unlock always lands back
 	 * on the account list rather than resuming a half-finished import.
 	 */
-	const [view, setView] = useState<
-		'accounts' | 'import' | 'settings' | 'activity' | 'enroll' | 'move' | 'recover' | 'about'
-	>('accounts');
+	const [view, setView] = useState<AppView>('accounts');
+	/**
+	 * Ownership of the foreground while the unlock recovery query is in flight.
+	 *
+	 * This is deliberately a ref: an account-row click must revoke the query's
+	 * claim in the same call stack, before React renders the destination. A state
+	 * value would leave a microtask-sized window in which the late query could
+	 * still replace the screen and erase what the user had begun entering.
+	 */
+	const foregroundRevision = useRef<ForegroundRevision>({ current: 0 });
+	const accountHomeOwnsForeground = useRef(true);
+	const leaveAccountHome = useCallback((): void => {
+		accountHomeOwnsForeground.current = false;
+		supersedeRecoveryForeground(foregroundRevision.current);
+	}, []);
+	const returnToAccountHome = useCallback((): void => {
+		accountHomeOwnsForeground.current = true;
+		supersedeRecoveryForeground(foregroundRevision.current);
+		setView('accounts');
+	}, []);
+	const navigateFromAccountHome = useCallback(
+		(next: Exclude<AppView, 'accounts'>): void => {
+			leaveAccountHome();
+			setView(next);
+		},
+		[leaveAccountHome]
+	);
+	const [deferredRecovery, setDeferredRecovery] = useState<DeferredRecovery | undefined>();
+	/** A second legacy workflow that must be shown after the first is handled. */
+	const [queuedRecoveryView, setQueuedRecoveryView] = useState<'move' | undefined>();
+	const leaveEnrollmentRecovery = (): void => {
+		const next = recoveryExitView(queuedRecoveryView);
+		setQueuedRecoveryView(undefined);
+		if (next === 'accounts') {
+			returnToAccountHome();
+		} else {
+			leaveAccountHome();
+			setView(next);
+		}
+	};
 	/*
 	 * **Leaving the screen abandons what it started.**
 	 *
@@ -244,6 +596,91 @@ export function App(): React.JSX.Element {
 	const [routingFor, setRoutingFor] = useState<AccountSummary | undefined>();
 	/** The account whose confirmations are open, if any. */
 	const [confirmingFor, setConfirmingFor] = useState<AccountSummary | undefined>();
+	const confirmingForRef = useRef<AccountSummary | undefined>(undefined);
+	useEffect(() => {
+		confirmingForRef.current = confirmingFor;
+	}, [confirmingFor]);
+	/** A new toast for the account already shown waits for a successful re-list. */
+	const confirmationRefreshClick = useRef<ToastClick | undefined>(undefined);
+	const [confirmationRefreshToken, setConfirmationRefreshToken] = useState<number | undefined>();
+	/**
+	 * Native export dialogs and disk writes outlive `VaultHome`. Both ownership and
+	 * outcomes therefore live here: every ordinary navigation unmounts the account
+	 * list, but none of them unmounts `App`.
+	 */
+	const exportingAccounts = useRef(new Set<string>());
+	const [exportingAccountIds, setExportingAccountIds] = useState<ReadonlySet<string>>(
+		() => new Set()
+	);
+	const exportingAccountCount = exportingAccountIds.size;
+	const noteExportBusy = useCallback((steamId64: string, busy: boolean): void => {
+		const wasBusy = exportingAccounts.current.has(steamId64);
+		if (busy) {
+			exportingAccounts.current.add(steamId64);
+		} else {
+			exportingAccounts.current.delete(steamId64);
+		}
+		if (wasBusy !== busy) {
+			setExportingAccountIds(new Set(exportingAccounts.current));
+		}
+	}, []);
+	const exportAttempt = useRef(new Map<string, number>());
+	const [exportNotices, updateExportNotices] = useReducer(exportNoticeReducer, []);
+	/**
+	 * Recovery-backup publication outlives `VaultHome` for the same reason an
+	 * export does: a native notification or deliberate navigation can unmount the
+	 * account list while the disk write is settling. Keep both ownership and its
+	 * per-account failure here.
+	 */
+	const recoveryBackupAccounts = useRef(new Set<string>());
+	const [finishingRecoveryAccountIds, setFinishingRecoveryAccountIds] = useState<
+		ReadonlySet<string>
+	>(() => new Set());
+	const finishingRecoveryAccountCount = finishingRecoveryAccountIds.size;
+	const [recoveryBackupErrors, setRecoveryBackupErrors] = useState<ReadonlyMap<string, string>>(
+		() => new Map()
+	);
+	const startAccountExport = useCallback(
+		(account: AccountSummary): void => {
+			if (!api || exportingAccounts.current.has(account.steamId64)) {
+				return;
+			}
+
+			const mine = (exportAttempt.current.get(account.steamId64) ?? 0) + 1;
+			exportAttempt.current.set(account.steamId64, mine);
+			const current = (): boolean => exportAttempt.current.get(account.steamId64) === mine;
+
+			// Before the IPC opens its native dialog. A recovery answer settling in
+			// this same turn must already know the account list no longer owns the
+			// foreground, and notification takeover must already see the busy set.
+			leaveAccountHome();
+			noteExportBusy(account.steamId64, true);
+
+			let request: Promise<ExportResult>;
+			try {
+				request = api.exportAccount(account.steamId64);
+			} catch (err) {
+				updateExportNotices({
+					type: 'record',
+					notice: exportFailureNoticeFor(account, mine, err)
+				});
+				noteExportBusy(account.steamId64, false);
+				return;
+			}
+
+			void settleAccountExport(account, mine, request, current, (notice) =>
+				updateExportNotices({ type: 'record', notice })
+			).finally(() => {
+				// A superseded attempt cannot release its replacement. The UI prevents
+				// that overlap, but this ownership check keeps the invariant true at
+				// the callback boundary too.
+				if (current()) {
+					noteExportBusy(account.steamId64, false);
+				}
+			});
+		},
+		[api, leaveAccountHome, noteExportBusy]
+	);
 	/** The account being removed, if any. */
 	const [removingFor, setRemovingFor] = useState<AccountSummary | undefined>();
 	/** The account whose automatic-confirmation settings are open, if any. */
@@ -257,6 +694,10 @@ export function App(): React.JSX.Element {
 	 * the same thing for the same reason.
 	 */
 	const [browserSignIn, setBrowserSignIn] = useState<BrowserSignInPrompt | undefined>();
+	/** A successful sign-in whose browser window still needs to open. */
+	const [browserOpenContinuation, setBrowserOpenContinuation] = useState<
+		BrowserOpenContinuation | undefined
+	>();
 
 	useEffect(() => {
 		abandonPendingSignIns();
@@ -286,6 +727,8 @@ export function App(): React.JSX.Element {
 	if (signInBelongsTo !== view) {
 		setSignInBelongsTo(view);
 		setBrowserSignIn(undefined);
+		setBrowserOpenContinuation(undefined);
+		abandonPendingSignIns();
 	}
 
 	/**
@@ -323,6 +766,22 @@ export function App(): React.JSX.Element {
 	useEffect(() => {
 		overlayOpenRef.current = overlayOpen;
 	}, [overlayOpen]);
+	const openAccountOverlay = useCallback(
+		(open: () => void): void => {
+			leaveAccountHome();
+			/*
+			 * Own the browser settlement boundary in this call stack. Waiting for
+			 * `overlayOpen`'s effect leaves one render in which an older Trade open
+			 * can install a sign-in prompt behind the overlay and reappear on Back.
+			 */
+			supersedeBrowserSignInForOverlay(overlayOpenRef, () => {
+				setBrowserSignIn(undefined);
+				setBrowserOpenContinuation(undefined);
+			});
+			open();
+		},
+		[leaveAccountHome]
+	);
 	/**
 	 * Unrecoverable, and only ever one thing: the bridge to the main process does
 	 * not exist, so no screen in this app can function.
@@ -440,6 +899,50 @@ export function App(): React.JSX.Element {
 		[api]
 	);
 
+	const startRecoveryBackup = useCallback(
+		(account: AccountSummary): void => {
+			if (!api) return;
+			void runRecoveryBackupAttempt({
+				steamId64: account.steamId64,
+				inFlight: recoveryBackupAccounts.current,
+				finish: () => api.finishRecoveryBackup(account.steamId64),
+				refresh: () => refresh({ includeCodes: false }),
+				onRefreshError: setPollError,
+				onBusy: setFinishingRecoveryAccountIds,
+				onError: (steamId64, message) => setRecoveryBackupErrors(noted(steamId64, message)),
+				onStart: leaveAccountHome
+			});
+		},
+		[api, leaveAccountHome, refresh]
+	);
+
+	const beginBrowserOpenAfterSignIn = useCallback(
+		(prompt: Pick<BrowserSignInPrompt, 'account' | 'route'>): void => {
+			if (!api) return;
+			const current = claimBrowserOpenContinuation();
+			const opening: BrowserOpenContinuation = {
+				account: prompt.account,
+				route: prompt.route,
+				busy: true
+			};
+			setBrowserSignIn(undefined);
+			setBrowserOpenContinuation(opening);
+
+			void openBrowserAfterSignIn(() =>
+				api.openAccountBrowser(prompt.account.steamId64, prompt.route)
+			).then((result) => {
+				if (!current()) return;
+				if (result.opened) {
+					setBrowserOpenContinuation(undefined);
+					void refresh();
+					return;
+				}
+				setBrowserOpenContinuation({ ...opening, busy: false, error: result.reason });
+			});
+		},
+		[api, refresh]
+	);
+
 	/**
 	 * Navigate to one account's confirmations, from a clicked notification.
 	 *
@@ -452,12 +955,38 @@ export function App(): React.JSX.Element {
 	 * tested *above* `confirmingFor`, so setting the target while either is open
 	 * navigates nowhere and the click looks broken.
 	 */
+	const notificationTakeoverReady = notificationMayTakeOver({
+		view,
+		overlayOpen,
+		signInOpen: browserSignIn !== undefined || browserOpenContinuation !== undefined,
+		accountListBusy: accountListOperationBusy(exportingAccountCount, finishingRecoveryAccountCount)
+	});
+	const confirmationAccounts = confirmationAccountMembership(accounts);
 	const openConfirmationsFor = useCallback(
 		(steamId64: string): boolean => {
+			// A parent-level navigation may not bypass a child screen's disabled Back
+			// button. This includes an already-open Confirmations screen: acknowledging
+			// a same-account click without reloading would discard the only signal that
+			// its current list is stale. The retained click is retried after the user
+			// leaves the screen, which remounts it with a fresh list.
+			if (
+				!notificationTakeoverReady ||
+				exportingAccounts.current.size > 0 ||
+				recoveryBackupAccounts.current.size > 0
+			) {
+				return false;
+			}
 			const account = confirmationsTargetFor(accounts, steamId64);
 			if (!account) {
 				return false;
 			}
+			// A native-notification click is deliberate foreground navigation too.
+			// Revoke an unlock-recovery claim before changing any React state.
+			leaveAccountHome();
+			supersedeBrowserSignInForOverlay(overlayOpenRef, () => {
+				setBrowserSignIn(undefined);
+				setBrowserOpenContinuation(undefined);
+			});
 			setAutoConfirmFor(undefined);
 			setRemovingFor(undefined);
 			setRoutingFor(undefined);
@@ -466,7 +995,7 @@ export function App(): React.JSX.Element {
 			setConfirmingFor(account);
 			return true;
 		},
-		[accounts]
+		[accounts, leaveAccountHome, notificationTakeoverReady]
 	);
 
 	/**
@@ -488,6 +1017,84 @@ export function App(): React.JSX.Element {
 	 * cannot do that.
 	 */
 	const openConfirmationsRef = useRef(openConfirmationsFor);
+	/**
+	 * The push and recovery IPC calls are two deliveries of one click. Whichever
+	 * delivery reaches this renderer first owns the token; the other is ignored.
+	 * This is deliberately a token check, not an account check: two clicks for
+	 * the same SteamID are distinct user actions.
+	 */
+	const confirmationClickClaims = useRef<ConfirmationClickClaims>({
+		newestObserved: undefined,
+		handled: undefined,
+		acknowledged: undefined
+	});
+	const acknowledgingConfirmationClicks = useRef(new Set<number>());
+
+	/**
+	 * Process either delivery path for one click. A new click for the account
+	 * already displayed is observed but deliberately not handled until that
+	 * component has completed a new list request.
+	 */
+	const processConfirmationClick = useCallback(
+		(click: ToastClick): void => {
+			if (!api) return;
+			const claims = confirmationClickClaims.current;
+			if (
+				notificationRefreshesOpenAccount(confirmingForRef.current?.steamId64, click, claims.handled)
+			) {
+				claimConfirmationClick(claims, click.token, () => false);
+				if (
+					claims.newestObserved === click.token &&
+					(claims.handled === undefined || click.token > claims.handled)
+				) {
+					confirmationRefreshClick.current = click;
+					setConfirmationRefreshToken(click.token);
+				}
+				return;
+			}
+
+			const navigated = claimConfirmationClick(claims, click.token, () =>
+				openConfirmationsRef.current(click.steamId64)
+			);
+			if (navigated || shouldAcknowledgeConfirmationClick(claims, click.token)) {
+				beginConfirmationClickAcknowledgement(
+					api,
+					claims,
+					acknowledgingConfirmationClicks.current,
+					click
+				);
+			}
+		},
+		[api]
+	);
+	const processConfirmationClickRef = useRef(processConfirmationClick);
+	useEffect(() => {
+		processConfirmationClickRef.current = processConfirmationClick;
+	}, [processConfirmationClick]);
+
+	const completeNotificationRefresh = useCallback(
+		(token: number): void => {
+			if (!api) return;
+			const claims = confirmationClickClaims.current;
+			const settlement = settleConfirmationRefreshClick(
+				claims,
+				confirmationRefreshClick.current,
+				token
+			);
+			if (!settlement) return;
+			if (settlement.acknowledge) {
+				beginConfirmationClickAcknowledgement(
+					api,
+					claims,
+					acknowledgingConfirmationClicks.current,
+					settlement.click
+				);
+			}
+			confirmationRefreshClick.current = undefined;
+			setConfirmationRefreshToken(undefined);
+		},
+		[api]
+	);
 	// In an effect, not during render: writing a ref while rendering is a
 	// side-effect in a function React may call speculatively, and `react-hooks/refs`
 	// refuses it. This one runs whenever the callback changes and does nothing but
@@ -503,9 +1110,9 @@ export function App(): React.JSX.Element {
 		}
 		// Depends on `api` alone, so this is established once and torn down once —
 		// which is what the preload's comment always claimed and could not deliver.
-		return api.onOpenConfirmations((steamId64) => {
+		return api.onOpenConfirmations((click: ToastClick) => {
 			/*
-			 * **A navigation that worked consumes the remembered copy.**
+			 * **Navigation and acknowledgement are separate.**
 			 *
 			 * `activate` retains *and* pushes, always — deliberately, because a
 			 * lock reloads this window and the retained copy is the only thing
@@ -518,15 +1125,16 @@ export function App(): React.JSX.Element {
 			 * toast — closing the screen, opening Settings, starting a removal —
 			 * is undone by `setView('accounts')` and the four clears above.
 			 *
-			 * **The boolean is load-bearing.** `openConfirmationsFor` returns false
+			 * A successful navigation starts an exact-token acknowledgement. If that
+			 * local IPC call fails, bounded retries acknowledge the same token without
+			 * navigating again. **The boolean is load-bearing.**
+			 * `openConfirmationsFor` returns false
 			 * when the id is not in the account list yet, and that is exactly the
 			 * case the slow path exists for — a click landing after unlock but
 			 * before `listAccounts` has answered. Clearing there would delete the
 			 * intent rather than double-use it.
 			 */
-			if (openConfirmationsRef.current(steamId64)) {
-				void api.takePendingConfirmations({ acknowledged: steamId64 }).catch(() => undefined);
-			}
+			processConfirmationClickRef.current(click);
 		});
 	}, [api]);
 
@@ -535,15 +1143,16 @@ export function App(): React.JSX.Element {
 	 *
 	 * A lock **reloads** this window, so a click that arrived while the vault was
 	 * locked — or in the instant before the reload landed — reached a document
-	 * that no longer exists. Main kept the intent; this collects it once there is
-	 * an account list to navigate within, and collecting clears it.
+	 * that no longer exists. Main kept the intent; this peeks once there is an
+	 * account list to navigate within, and acknowledges the exact token only after
+	 * navigation succeeds.
 	 *
 	 * Gated on the list being non-empty rather than only on `unlocked`, because
-	 * navigating needs an account to navigate *to*: asking a beat too early would
-	 * take the intent, fail the lookup, and throw it away.
+	 * navigating needs an account to navigate *to*. Peeking earlier is safe now,
+	 * but can only fail the lookup and add a needless IPC round trip.
 	 */
 	useEffect(() => {
-		if (!api || !status?.unlocked || accounts.length === 0) {
+		if (!api || !status?.unlocked || confirmationAccounts.length === 0) {
 			return;
 		}
 		let cancelled = false;
@@ -551,21 +1160,22 @@ export function App(): React.JSX.Element {
 			.takePendingConfirmations()
 			.then((pending) => {
 				const target = pending.steamId64;
-				if (cancelled || target === undefined) {
+				const token = pending.token;
+				if (cancelled || target === undefined || token === undefined) {
 					return;
 				}
 				/*
-				 * **Cleared only once the navigation actually happened.**
+				 * **Cleared only once exact acknowledgement succeeds.**
 				 *
 				 * Reading used to clear it in main, and this threw away the boolean
 				 * saying whether it had worked. `openConfirmationsFor` returns false
 				 * when the account is not in the list yet — the exact case this path
 				 * exists for — so a security notification opened the application, went
-				 * nowhere, and left nothing behind to try again with.
+				 * nowhere, and left nothing behind to try again with. A successful
+				 * navigation starts bounded acknowledgement retries; later collections
+				 * can retry acknowledgement without repeating the navigation.
 				 */
-				if (openConfirmationsRef.current(target)) {
-					void api.takePendingConfirmations({ acknowledged: target }).catch(() => undefined);
-				}
+				processConfirmationClickRef.current({ steamId64: target, token });
 			})
 			.catch(() => {
 				// A click that cannot be collected is not worth an error path; the
@@ -575,22 +1185,22 @@ export function App(): React.JSX.Element {
 			cancelled = true;
 		};
 		/*
-		 * **`accounts.length`, and not `openConfirmationsFor`.**
+		 * **Account membership, and not `openConfirmationsFor`.**
 		 *
 		 * That callback closes over `accounts`, which `listAccounts` replaces with
 		 * a fresh array every second — so this effect tore down and re-ran once a
 		 * second for the life of an unlocked session, asking main for a pending
 		 * click each time.
 		 *
-		 * The churn lost clicks. `takePendingConfirmations` is read-and-clear, so
-		 * a call whose round trip straddled a poll tick had already emptied the
-		 * slot in main when its cleanup set `cancelled` — and the result was then
-		 * dropped here, with nothing anywhere reporting it. The click was gone.
+		 * Peeking is non-destructive now, so the churn cannot lose a click. It can
+		 * still start and cancel a needless IPC round trip every second, delaying
+		 * the useful delivery and doing work for no state change.
 		 *
-		 * A count is a number: it changes when the account list actually changes,
-		 * which is the only thing this effect is waiting for.
+		 * A sorted Steam-ID signature stays stable for those refreshes but changes
+		 * when account A is replaced by account B even if the list length stays one.
+		 * That replacement is exactly when a retained click for B must be retried.
 		 */
-	}, [api, status?.unlocked, accounts.length]);
+	}, [api, status?.unlocked, confirmationAccounts, view, notificationTakeoverReady]);
 
 	// The window title comes from branding, never from HTML — one source of truth
 	// while Q1 is unresolved. It doubles as the end-to-end IPC signal: if the
@@ -707,12 +1317,59 @@ export function App(): React.JSX.Element {
 			return;
 		}
 		let cancelled = false;
-		void api
-			.getTransferStatus()
-			.then((transfer) => {
-				if (!cancelled && transfer.awaiting) {
-					setView('move');
+		const foregroundClaim = claimRecoveryForeground(foregroundRevision.current);
+		void Promise.allSettled([api.getEnrollmentStatus(), api.getTransferStatus()])
+			.then(([enrollmentResult, transferResult]) => {
+				if (cancelled) return;
+				const enrollment: EnrollmentStatus =
+					enrollmentResult.status === 'fulfilled'
+						? enrollmentResult.value
+						: {
+								problem:
+									enrollmentResult.reason instanceof Error
+										? enrollmentResult.reason.message
+										: String(enrollmentResult.reason)
+							};
+				const transfer: TransferStatus =
+					transferResult.status === 'fulfilled'
+						? transferResult.value
+						: {
+								problem:
+									transferResult.reason instanceof Error
+										? transferResult.reason.message
+										: String(transferResult.reason)
+							};
+				const enrollmentNeedsAttention =
+					enrollment.pending !== undefined || enrollment.problem !== undefined;
+				const transferNeedsAttention =
+					transfer.awaiting !== undefined ||
+					transfer.recovery !== undefined ||
+					transfer.problem !== undefined;
+				if (!enrollmentNeedsAttention && !transferNeedsAttention) {
+					return;
 				}
+				const attention: DeferredRecovery = {
+					destination: enrollmentNeedsAttention ? 'enroll' : 'move',
+					queuedMove: enrollmentNeedsAttention && transferNeedsAttention
+				};
+				// Enrollment first, deterministically: its AddAuthenticator reply may be
+				// process-only. New code prevents both workflows coexisting. If legacy
+				// records do, queue Move so closing or finishing this screen cannot hide it.
+				deliverRecoveryAttention(
+					foregroundRevision.current,
+					foregroundClaim,
+					accountHomeOwnsForeground.current,
+					() => {
+						accountHomeOwnsForeground.current = false;
+						setDeferredRecovery(undefined);
+						setQueuedRecoveryView(attention.queuedMove ? 'move' : undefined);
+						if (attention.destination === 'enroll') {
+							setResumeEnrollment(undefined);
+						}
+						setView(attention.destination);
+					},
+					() => setDeferredRecovery(attention)
+				);
 			})
 			.catch(() => undefined);
 		return () => {
@@ -801,23 +1458,62 @@ export function App(): React.JSX.Element {
 		 */
 	}, [api, status?.unlocked, settingsRevision]);
 
+	const openDeferredRecovery = (): void => {
+		const attention = deferredRecovery;
+		if (!attention) return;
+		leaveAccountHome();
+		setDeferredRecovery(undefined);
+		setQueuedRecoveryView(attention.queuedMove ? 'move' : undefined);
+		if (attention.destination === 'enroll') {
+			setResumeEnrollment(undefined);
+		}
+		setView(attention.destination);
+	};
+	const deferredRecoveryCanOpen =
+		view === 'accounts' &&
+		!overlayOpen &&
+		browserSignIn === undefined &&
+		browserOpenContinuation === undefined &&
+		!accountListOperationBusy(exportingAccountCount, finishingRecoveryAccountCount);
+
 	if (fatal || !api) {
 		return (
 			<main className="shell">
 				<h1>Something is wrong</h1>
-				<p className="error">{fatal}</p>
+				<DynamicError>{fatal}</DynamicError>
 			</main>
 		);
 	}
 
 	return (
 		<>
-			{/* Over the live UI, not instead of it. The next successful tick clears it. */}
-			{pollError && (
-				<p className="banner error" role="status">
-					{pollError}
-				</p>
+			<ExportNotices
+				notices={exportNotices}
+				onDismiss={(id) => updateExportNotices({ type: 'dismiss', id })}
+			/>
+			{deferredRecovery && (
+				<section className="banner notice" role="status" aria-labelledby="recovery-waiting-title">
+					<strong id="recovery-waiting-title">
+						{deferredRecovery.queuedMove
+							? 'Two interrupted authenticator operations need attention.'
+							: deferredRecovery.destination === 'enroll'
+								? 'An interrupted authenticator setup needs attention.'
+								: 'An interrupted authenticator move needs attention.'}
+					</strong>{' '}
+					It was not opened automatically because you had already moved to another screen.
+					{deferredRecoveryCanOpen ? (
+						<div className="controls">
+							<button type="button" onClick={openDeferredRecovery}>
+								Open recovery
+							</button>
+						</div>
+					) : (
+						<span> Finish or leave the current screen, then open it from the account list.</span>
+					)}
+				</section>
 			)}
+			{/* Over the live UI, not instead of it. The next successful tick clears it. */}
+			{pollError && <DynamicError className="banner error">{pollError}</DynamicError>}
 			{/* Only when there is genuinely something newer. "Up to date" and "could
 			    not check" are both answers nobody needs a banner about — and a
 			    permanent green tick is exactly the reassurance that stops being
@@ -865,8 +1561,8 @@ export function App(): React.JSX.Element {
 						await api.restoreVaultBackup(passphrase);
 						await refresh({ includeCodes: false });
 					}}
-					onAdopt={async () => {
-						const result = await api.adoptVaultFile();
+					onAdopt={async (passphrase) => {
+						const result = await api.adoptVaultFile(passphrase);
 						// Adopting makes a vault exist, which swaps this screen for the
 						// unlock one. Nothing here can unlock it — the passphrase is the
 						// user's and the next screen is where it belongs.
@@ -910,6 +1606,7 @@ export function App(): React.JSX.Element {
 					onSave={(settings) => api.setAccountAutoConfirm(current.steamId64, settings)}
 					onClose={() => {
 						setAutoConfirmFor(undefined);
+						returnToAccountHome();
 						void refresh();
 					}}
 				/>
@@ -926,11 +1623,21 @@ export function App(): React.JSX.Element {
 					onDeactivate={(passphrase, acknowledgement) =>
 						api.deactivateAuthenticator(removingFor.steamId64, passphrase, acknowledgement)
 					}
-					onResolve={(steamActed, passphrase) =>
-						api.resolveAccountOperation(removingFor.steamId64, 'deactivate', steamActed, passphrase)
+					onResolve={(kind, operationToken, steamActed, passphrase) =>
+						api.resolveAccountOperation(
+							removingFor.steamId64,
+							kind,
+							operationToken,
+							steamActed,
+							passphrase
+						)
+					}
+					onClearStale={(kind, staleToken) =>
+						api.clearStaleAccountOperation(removingFor.steamId64, kind, staleToken)
 					}
 					onClose={() => {
 						setRemovingFor(undefined);
+						returnToAccountHome();
 						void refresh();
 					}}
 				/>
@@ -961,7 +1668,12 @@ export function App(): React.JSX.Element {
 					onList={() => api.listConfirmations(confirmingFor.steamId64)}
 					onAct={(action, ids) => api.actOnConfirmations(confirmingFor.steamId64, action, ids)}
 					onSignIn={(password) => api.signInToSteam(confirmingFor.steamId64, password)}
-					onClose={() => setConfirmingFor(undefined)}
+					notificationRefreshToken={confirmationRefreshToken}
+					onNotificationRefresh={completeNotificationRefresh}
+					onClose={() => {
+						setConfirmingFor(undefined);
+						returnToAccountHome();
+					}}
 				/>
 			);
 		}
@@ -979,6 +1691,7 @@ export function App(): React.JSX.Element {
 					onSave={(proxyUrl) => api.setAccountProxy(current.steamId64, proxyUrl)}
 					onClose={() => {
 						setRoutingFor(undefined);
+						returnToAccountHome();
 						void refresh();
 					}}
 				/>
@@ -994,6 +1707,11 @@ export function App(): React.JSX.Element {
 					onConfirm={() => api.confirmRevocationBackup(backupFor.steamId64)}
 					onClose={() => {
 						setBackupFor(undefined);
+						// A durable transfer can be queued behind enrollment recovery. Going
+						// through the encouraged revocation-code ceremony is still leaving
+						// enrollment; closing it must drain that queue rather than strand Move
+						// behind the account list until another lock/unlock.
+						leaveEnrollmentRecovery();
 						void refresh();
 					}}
 				/>
@@ -1016,16 +1734,18 @@ export function App(): React.JSX.Element {
 						void api.acknowledgeActivity(seq).then((result) => setActivityUrgent(result.urgent));
 					}}
 					onOpenAccount={(openFor) => {
-						setView('accounts');
-						setConfirmingFor(openFor);
+						openAccountOverlay(() => {
+							setView('accounts');
+							setConfirmingFor(openFor);
+						});
 					}}
-					onClose={() => setView('accounts')}
+					onClose={returnToAccountHome}
 				/>
 			);
 		}
 
 		if (view === 'about') {
-			return <About onLoad={() => api.getAppInfo()} onClose={() => setView('accounts')} />;
+			return <About onLoad={() => api.getAppInfo()} onClose={returnToAccountHome} />;
 		}
 
 		if (view === 'settings') {
@@ -1067,7 +1787,7 @@ export function App(): React.JSX.Element {
 						void refresh({ includeCodes: false });
 						return result;
 					}}
-					onClose={() => setView('accounts')}
+					onClose={returnToAccountHome}
 				/>
 			);
 		}
@@ -1081,24 +1801,36 @@ export function App(): React.JSX.Element {
 					}
 					onStartChallenge={() => api.startTransferChallenge()}
 					onComplete={(smsCode) => api.completeTransfer(smsCode)}
-					onRetryPersist={() => api.retryTransferPersist()}
+					onRetryPersist={(passphrase) => api.retryTransferPersist(passphrase)}
 					onStatus={() => api.getTransferStatus()}
+					onResolve={(attemptId, resolution, passphrase) =>
+						api.resolveTransfer(attemptId, resolution, passphrase)
+					}
 					onCancel={() => api.cancelTransfer()}
 					// The same channel the standalone back-up ceremony uses. It is
 					// accepted here because the transfer handler recorded the reveal
 					// when it handed this screen the code — the confirm still refuses
 					// for an account whose code nobody has seen.
 					onAcknowledgeBackup={(steamId64) => api.confirmRevocationBackup(steamId64)}
-					onClose={() => setView('accounts')}
+					onClose={returnToAccountHome}
 				/>
 			);
 		}
 
 		if (view === 'enroll') {
+			const closeEnrollment = (): void => {
+				setResumeEnrollment(undefined);
+				leaveEnrollmentRecovery();
+			};
 			return (
 				<AddAuthenticator
 					requireProxies={status.requireProxies}
-					onMove={() => setView('move')}
+					recoveryQueued={queuedRecoveryView === 'move'}
+					onMove={() => {
+						setQueuedRecoveryView(undefined);
+						leaveAccountHome();
+						setView('move');
+					}}
 					{...(resumeEnrollment
 						? {
 								resume: {
@@ -1117,8 +1849,18 @@ export function App(): React.JSX.Element {
 							? { unresolved: resumeEnrollment.unresolvedOperation }
 							: {})
 					}
-					onResolve={(steamId64, steamActed) =>
-						api.resolveAccountOperation(steamId64, 'activate', steamActed)
+					onResolve={(steamId64, operationToken, steamActed) =>
+						api.resolveAccountOperation(steamId64, 'activate', operationToken, steamActed)
+					}
+					onClearStale={(steamId64, kind, staleToken) =>
+						api.clearStaleAccountOperation(steamId64, kind, staleToken)
+					}
+					onEnrollmentStatus={() => api.getEnrollmentStatus()}
+					onRetryEnrollment={(attemptId, steamId64) =>
+						api.retryEnrollmentPersist(attemptId, steamId64)
+					}
+					onResolveEnrollment={(attemptId, steamId64, resolution) =>
+						api.resolveEnrollment(attemptId, steamId64, resolution)
 					}
 					onBegin={(accountName, password, proxyUrl) =>
 						api.beginEnrollment(accountName, password, proxyUrl)
@@ -1137,13 +1879,12 @@ export function App(): React.JSX.Element {
 						// nothing at all: no navigation, no error, at the exact moment the
 						// screen is telling the user this is the one step not to skip. The
 						// enrollment screen already knows both values, so it passes them.
-						setView('accounts');
-						setBackupFor({ steamId64, accountName });
+						openAccountOverlay(() => {
+							setView('accounts');
+							setBackupFor({ steamId64, accountName });
+						});
 					}}
-					onClose={() => {
-						setResumeEnrollment(undefined);
-						setView('accounts');
-					}}
+					onClose={closeEnrollment}
 				/>
 			);
 		}
@@ -1153,7 +1894,7 @@ export function App(): React.JSX.Element {
 				<RecoverAccount
 					onRecover={(passphrase) => api.recoverAccount(passphrase)}
 					onClose={() => {
-						setView('accounts');
+						returnToAccountHome();
 						// A restored account has to appear without waiting on the poll —
 						// the whole point of the screen is seeing it come back.
 						void refresh();
@@ -1170,7 +1911,7 @@ export function App(): React.JSX.Element {
 					onCommit={(selections) => api.commitImport(selections)}
 					onDiscard={() => api.discardImport()}
 					onClose={() => {
-						setView('accounts');
+						returnToAccountHome();
 						// Imported accounts appear without waiting on the poll, the same way
 						// a recovered one does. A second of the list not showing what the
 						// previous screen just said it imported reads as a failure.
@@ -1194,7 +1935,24 @@ export function App(): React.JSX.Element {
 		 * overlays to check: every screen above returns before reaching here, so a
 		 * new one takes precedence by existing. A list is a thing to forget.
 		 */
-		if (mayShowSignInPrompt(browserSignIn, view)) {
+		if (browserOpenContinuation !== undefined && view === 'accounts' && !overlayOpen) {
+			return (
+				<BrowserOpenRetry
+					accountName={browserOpenContinuation.account.accountName}
+					busy={browserOpenContinuation.busy}
+					{...(browserOpenContinuation.error === undefined
+						? {}
+						: { error: browserOpenContinuation.error })}
+					onRetry={() => beginBrowserOpenAfterSignIn(browserOpenContinuation)}
+					onCancel={() => {
+						abandonPendingSignIns();
+						setBrowserOpenContinuation(undefined);
+					}}
+				/>
+			);
+		}
+
+		if (mayShowSignInPrompt(browserSignIn, view, overlayOpen)) {
 			return (
 				<SteamSignIn
 					// Holds a typed password. Same reasoning as `Confirmations`: a
@@ -1202,52 +1960,17 @@ export function App(): React.JSX.Element {
 					key={browserSignIn.account.steamId64}
 					accountName={browserSignIn.account.accountName}
 					{...(browserSignIn.reason === undefined ? {} : { reason: browserSignIn.reason })}
-					onSignIn={async (password) => {
-						const result = await api.signInToSteam(
+					onSignIn={(password) =>
+						api.signInToSteam(
 							browserSignIn.account.steamId64,
 							password,
 							// The same route the window will use. Signing in through a proxy
 							// the user chose Direct to get past is the failure this whole
 							// screen exists downstream of.
 							browserSignIn.route
-						);
-						// **Only on success**, for the reason `Confirmations` records: a
-						// failure comes back rather than throwing, so advancing here would
-						// clear the form as though the sign-in had worked.
-						if (!result.ok) {
-							return result;
-						}
-
-						// Straight into the browser the user actually pressed for, rather
-						// than back to a list they would have to press again.
-						const opened = await api.openAccountBrowser(
-							browserSignIn.account.steamId64,
-							// The retry keeps the choice the user made when they pressed.
-							browserSignIn.route
-						);
-						if (opened.signInRequired) {
-							/*
-							 * A fresh sign-in that Steam still will not accept for browsing.
-							 *
-							 * `retryable: false` on purpose: another password cannot fix
-							 * this, and a form that keeps asking for one is how a person ends
-							 * up typing their Steam password over and over into a window an
-							 * application drew. The form withdraws and says so.
-							 */
-							return {
-								ok: false as const,
-								retryable: false,
-								reason:
-									opened.reason ??
-									'Steam accepted the sign-in but would not open a browsing session.'
-							};
-						}
-
-						setBrowserSignIn(undefined);
-						// The account now has a session, which the list shows.
-						void refresh();
-						return result;
-					}}
+						)
+					}
+					onSignedIn={() => beginBrowserOpenAfterSignIn(browserSignIn)}
 					onCancel={() => setBrowserSignIn(undefined)}
 				/>
 			);
@@ -1259,9 +1982,9 @@ export function App(): React.JSX.Element {
 				codes={codes}
 				msUntilAutoLock={status.msUntilAutoLock}
 				onCopyCode={(steamId64) => api.copyCode(steamId64)}
-				onBackUpRevocationCode={setBackupFor}
-				onChangeRouting={setRoutingFor}
-				onShowConfirmations={setConfirmingFor}
+				onBackUpRevocationCode={(account) => openAccountOverlay(() => setBackupFor(account))}
+				onChangeRouting={(account) => openAccountOverlay(() => setRoutingFor(account))}
+				onShowConfirmations={(account) => openAccountOverlay(() => setConfirmingFor(account))}
 				requireProxies={status.requireProxies}
 				onOpenBrowser={async (account, route) => {
 					/*
@@ -1273,6 +1996,7 @@ export function App(): React.JSX.Element {
 					 * generation there is — including one that has been overtaken while it
 					 * was in the air — which is the defect itself, spelled differently.
 					 */
+					leaveAccountHome();
 					const settle = claimSignInScreen();
 					const result = await api.openAccountBrowser(account.steamId64, route);
 					// Taking over the screen here rather than in `VaultHome`: the row has
@@ -1301,23 +2025,37 @@ export function App(): React.JSX.Element {
 					}
 					return result;
 				}}
-				onRemoveAccount={setRemovingFor}
-				onChangeAutoConfirm={setAutoConfirmFor}
-				onImport={() => setView('import')}
-				onRecover={() => setView('recover')}
+				onRemoveAccount={(account) => openAccountOverlay(() => setRemovingFor(account))}
+				onChangeAutoConfirm={(account) => openAccountOverlay(() => setAutoConfirmFor(account))}
+				onImport={() => navigateFromAccountHome('import')}
+				onRecover={() => navigateFromAccountHome('recover')}
 				onEnrol={() => {
 					setResumeEnrollment(undefined);
-					setView('enroll');
+					navigateFromAccountHome('enroll');
 				}}
-				onMove={() => setView('move')}
+				onMove={() => navigateFromAccountHome('move')}
 				onFinishActivation={(account) => {
+					/*
+					 * An unresolved operation owns this account before its row status does.
+					 * In particular, a durable deactivation can coexist with the legacy
+					 * `pendingActivation` status. Passing the complete summary into the
+					 * operation surface preserves its exact kind and opaque token.
+					 */
+					if (account.unresolvedOperation !== undefined) {
+						openAccountOverlay(() => setRemovingFor(account));
+						return;
+					}
 					setResumeEnrollment(account);
-					setView('enroll');
+					navigateFromAccountHome('enroll');
 				}}
-				onExport={(account) => api.exportAccount(account.steamId64)}
-				onSettings={() => setView('settings')}
-				onAbout={() => setView('about')}
-				onActivity={() => setView('activity')}
+				onFinishRecoveryBackup={startRecoveryBackup}
+				finishingRecovery={finishingRecoveryAccountIds}
+				recoveryErrors={recoveryBackupErrors}
+				onExport={startAccountExport}
+				exporting={exportingAccountIds}
+				onSettings={() => navigateFromAccountHome('settings')}
+				onAbout={() => navigateFromAccountHome('about')}
+				onActivity={() => navigateFromAccountHome('activity')}
 				activityUrgent={activityUrgent}
 				onLock={() => {
 					// The main process reloads this window on lock, so there is nothing to

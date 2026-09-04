@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import ts from 'typescript';
 import { PUSH_CHANNELS } from '../src/shared/channels';
+import type { ToastClick } from '../src/shared/ipc';
 
 /**
  * **A subscription that says "subscribed once" has to be able to be.**
@@ -55,7 +56,7 @@ vi.mock('electron', () => ({
 import '../src/preload/index';
 
 interface PushApi {
-	onOpenConfirmations(listener: (steamId64: string) => void): () => void;
+	onOpenConfirmations(listener: (click: ToastClick) => void): () => void;
 }
 
 function api(): PushApi {
@@ -65,11 +66,14 @@ function api(): PushApi {
 }
 
 /** Fire the push, exactly as main does. */
-function emit(steamId64: string): void {
+function emit(click: ToastClick): void {
 	for (const handler of [...(listeners.get(PUSH_CHANNELS.openConfirmations) ?? [])]) {
-		handler({}, steamId64);
+		handler({}, click);
 	}
 }
+
+const FIRST: ToastClick = { steamId64: '76561198000000001', token: 1 };
+const SECOND: ToastClick = { steamId64: '76561198000000002', token: 2 };
 
 function count(): number {
 	return (listeners.get(PUSH_CHANNELS.openConfirmations) ?? []).length;
@@ -81,18 +85,16 @@ beforeEach(() => {
 
 describe('subscribing to notification clicks', () => {
 	it('hands back something that unsubscribes', () => {
-		const seen: string[] = [];
-		const off = api().onOpenConfirmations((steamId64) => seen.push(steamId64));
+		const seen: ToastClick[] = [];
+		const off = api().onOpenConfirmations((click) => seen.push(click));
 		expect(typeof off, 'there is no way to unsubscribe, so nothing can clean up').toBe('function');
 
-		emit('76561198000000001');
-		expect(seen).toEqual(['76561198000000001']);
+		emit(FIRST);
+		expect(seen).toEqual([FIRST]);
 
 		off();
-		emit('76561198000000002');
-		expect(seen, 'the listener kept firing after it was unsubscribed').toEqual([
-			'76561198000000001'
-		]);
+		emit(SECOND);
+		expect(seen, 'the listener kept firing after it was unsubscribed').toEqual([FIRST]);
 	});
 
 	/*
@@ -116,7 +118,7 @@ describe('subscribing to notification clicks', () => {
 		api().onOpenConfirmations(() => seen.push('second'));
 
 		first();
-		emit('76561198000000001');
+		emit(FIRST);
 		expect(seen, 'unsubscribing one removed another').toEqual(['second']);
 	});
 });
@@ -206,6 +208,7 @@ describe('the effect that subscribes', () => {
 		);
 
 		let listener: ts.Node | undefined;
+		let processor: ts.Node | undefined;
 		const visit = (node: ts.Node): void => {
 			if (
 				ts.isCallExpression(node) &&
@@ -214,6 +217,13 @@ describe('the effect that subscribes', () => {
 			) {
 				listener = node.arguments[0];
 			}
+			if (
+				ts.isVariableDeclaration(node) &&
+				ts.isIdentifier(node.name) &&
+				node.name.text === 'processConfirmationClick'
+			) {
+				processor = node.initializer;
+			}
 			ts.forEachChild(node, visit);
 		};
 		visit(file);
@@ -221,24 +231,28 @@ describe('the effect that subscribes', () => {
 
 		const guards: string[] = [];
 		const findIf = (node: ts.Node): void => {
-			if (ts.isIfStatement(node) && node.thenStatement.getText().includes('takePending')) {
+			if (
+				ts.isIfStatement(node) &&
+				node.thenStatement.getText().includes('beginConfirmationClickAcknowledgement')
+			) {
 				guards.push(node.expression.getText());
 			}
 			ts.forEachChild(node, findIf);
 		};
-		findIf(listener as ts.Node);
+		findIf(processor as ts.Node);
 
 		expect(
-			(listener as ts.Node).getText(),
+			(processor as unknown as ts.Node).getText(),
 			'a push that navigated never consumes the remembered intent, so the slow path ' +
 				'navigates a second time about a second later and rolls back whatever the user did'
-		).toContain('takePendingConfirmations');
+		).toContain('beginConfirmationClickAcknowledgement');
+		expect((listener as ts.Node).getText()).toContain('processConfirmationClickRef.current(click)');
 		expect(
 			guards,
 			'the intent is consumed unconditionally — including when the navigation failed because ' +
 				'the account list had not arrived, which deletes the click the slow path exists to collect'
 		).toHaveLength(1);
-		expect(guards[0], 'the guard is not the navigation result').toContain('openConfirmations');
+		expect(guards[0], 'the guard is not the navigation result').toContain('navigated');
 	});
 
 	it('returns the unsubscribe to React', () => {

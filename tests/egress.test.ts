@@ -134,6 +134,8 @@ function fakeElectron(
 		status?: number;
 		body?: string;
 		error?: Error;
+		/** Emits after a response exists, where even a proxy-looking code is uncertain. */
+		responseError?: Error;
 		requireProxyAuth?: boolean;
 		/** A `login` challenge that is not the proxy — the destination asking for HTTP auth. */
 		challengeAsOrigin?: boolean;
@@ -141,6 +143,8 @@ function fakeElectron(
 		resolvesTo?: string;
 		/** Leaves the request hanging, so a lock has something in flight to cancel. */
 		neverSettles?: boolean;
+		/** Emits `error` synchronously from the first body write. */
+		errorOnWrite?: Error;
 		/** Delivers the body in these exact pieces instead of one string chunk. */
 		bodyChunks?: Buffer[];
 		/**
@@ -361,6 +365,11 @@ function fakeElectron(
 				},
 				write(chunk) {
 					entry.body += chunk;
+					if (reply.errorOnWrite !== undefined) {
+						listeners.error?.forEach((fn) =>
+							(fn as (error: Error) => void)(reply.errorOnWrite as Error)
+						);
+					}
 				},
 				end() {
 					if (reply.neverSettles === true) {
@@ -409,6 +418,12 @@ function fakeElectron(
 						};
 						listeners.response?.forEach((fn) => (fn as (r: NetResponseHandle) => void)(response));
 						queueMicrotask(() => {
+							if (reply.responseError) {
+								responseListeners.error?.forEach((fn) =>
+									(fn as (e: Error) => void)(reply.responseError as Error)
+								);
+								return;
+							}
 							const pieces: (string | Buffer)[] = reply.bodyChunks ?? [
 								reply.body ?? '{"success":true}'
 							];
@@ -2760,6 +2775,28 @@ describe('whether a failed request had already gone', () => {
 		}
 	});
 
+	it('says a body may have gone when write emits an error synchronously', async () => {
+		const { electron } = fakeElectron({ errorOnWrite: new Error('socket failed during write') });
+		const factory = new SteamTransportFactory(electron);
+		const transport = await factory.forAccount(direct);
+
+		const thrown = (await transport({
+			url: STEAM_URL,
+			method: 'POST',
+			cookie: '',
+			body: new URLSearchParams({ code: '12345' })
+		}).then(
+			() => undefined,
+			(error: unknown) => error
+		)) as EgressError;
+
+		expect(thrown).toBeInstanceOf(EgressError);
+		expect(
+			thrown.sent,
+			'write began the irreversible body handoff but the failure was labelled definitely pre-send'
+		).toBe(true);
+	});
+
 	it('says it had not, when the endpoint was refused before anything was built', async () => {
 		const { electron, requests } = fakeElectron({});
 		const factory = new SteamTransportFactory(electron);
@@ -2798,6 +2835,57 @@ describe('whether a failed request had already gone', () => {
 		expect(thrown).toBeInstanceOf(EgressError);
 		expect(requests).toEqual([]);
 		expect(thrown.sent).toBe(false);
+	});
+
+	it('keeps a post-end proxy failure uncertain because Chromium may have retried internally', async () => {
+		const { electron, requests } = fakeElectron({
+			error: new Error('net::ERR_PROXY_CONNECTION_FAILED')
+		});
+		const transport = await new SteamTransportFactory(electron).forAccount(direct);
+
+		const thrown = (await transport({
+			url: STEAM_URL,
+			method: 'POST',
+			cookie: '',
+			body: new URLSearchParams({ x: '1' })
+		}).then(
+			() => undefined,
+			(error: unknown) => error
+		)) as EgressError;
+
+		expect(thrown).toBeInstanceOf(EgressError);
+		expect(requests[0]?.body, 'the POST body was not handed to Chromium').toBe('x=1');
+		expect(
+			thrown.sent,
+			'Chromium accepted the POST body before surfacing a later proxy retry failure'
+		).toBe(true);
+	});
+
+	it('keeps a post-end system-proxy tunnel failure uncertain too', async () => {
+		const { electron } = fakeElectron({ error: new Error('net::ERR_TUNNEL_CONNECTION_FAILED') });
+		const transport = await new SteamTransportFactory(electron).forAccount(direct);
+
+		const thrown = (await transport({ url: STEAM_URL, method: 'GET', cookie: '' }).then(
+			() => undefined,
+			(error: unknown) => error
+		)) as EgressError;
+
+		expect(thrown.sent).toBe(true);
+	});
+
+	it('keeps a failure after a response uncertain even when its text names a proxy code', async () => {
+		const { electron } = fakeElectron({
+			responseError: new Error('net::ERR_PROXY_CONNECTION_FAILED')
+		});
+		const transport = await new SteamTransportFactory(electron).forAccount(direct);
+
+		const thrown = (await transport({ url: STEAM_URL, method: 'GET', cookie: '' }).then(
+			() => undefined,
+			(error: unknown) => error
+		)) as EgressError;
+
+		expect(thrown).toBeInstanceOf(EgressError);
+		expect(thrown.sent).toBe(true);
 	});
 });
 

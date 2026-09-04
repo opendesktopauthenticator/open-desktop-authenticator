@@ -904,6 +904,119 @@ describe('an account holding back more confirmations than the log can keep', () 
 });
 
 /**
+ * An eviction is not a resolution.
+ *
+ * The bounded log can eventually contain a hundred later urgent events. When
+ * that happens even the oldest urgent entry has to make room, but a live Steam
+ * confirmation must become eligible to be recorded again. Keeping its id in
+ * `reported.held` after its only row is gone makes the loss permanent.
+ */
+describe('a live critical hold that is evicted by later urgent history', () => {
+	const ID = '76561198000000001';
+	const holding = [{ confirmation: recovery, reason: 'account recovery' }];
+
+	it('records the still-pending hold again on the next poll', () => {
+		const activity = log();
+		activity.recordPass(ID, [], holding);
+
+		// Urgent history is retained ahead of ordinary entries, but the cap still
+		// applies. A long-running account can reach this across repeated incidents.
+		for (let i = 0; i < 100; i += 1) {
+			activity.recordFailure(ID, `halted run ${i}`, true);
+		}
+
+		expect(
+			activity
+				.for(ID)
+				.some((entry) => entry.kind === 'held' && entry.confirmation.id === recovery.id),
+			'the premise did not evict the original row'
+		).toBe(false);
+		activity.acknowledge(activity.watermark());
+		expect(activity.hasUrgent()).toBe(false);
+
+		activity.recordPass(ID, [], holding);
+
+		expect(
+			activity
+				.for(ID)
+				.filter((entry) => entry.kind === 'held' && entry.confirmation.id === recovery.id)
+		).toHaveLength(1);
+		expect(activity.hasUrgent(), 'the live recovery confirmation stayed permanently hidden').toBe(
+			true
+		);
+		expect(activity.for(ID)).toHaveLength(100);
+	});
+
+	it('does not re-add an evicted hold inside the same batch', () => {
+		const activity = log();
+		const critical = Array.from({ length: 101 }, (_, i) => ({
+			confirmation: confirmation({ id: `recovery-${i}`, securityCritical: true }),
+			reason: 'account recovery'
+		}));
+
+		activity.recordPass(ID, [], critical);
+
+		expect(activity.for(ID)).toHaveLength(100);
+		expect(
+			activity.watermark(),
+			'releasing ids synchronously made the first batch rewrite itself while it was still iterating'
+		).toBe(101);
+	});
+
+	it('does not confuse an evicted historical row with the live row for the same id', () => {
+		const activity = log();
+		activity.recordPass(ID, [], holding);
+		activity.recordPass(ID, [], []);
+		activity.recordPass(ID, [], holding);
+
+		// Evict the first occurrence while the newer occurrence remains in the log.
+		for (let i = 0; i < 99; i += 1) {
+			activity.recordFailure(ID, `later urgent event ${i}`, true);
+		}
+		expect(
+			activity
+				.for(ID)
+				.filter((entry) => entry.kind === 'held' && entry.confirmation.id === recovery.id)
+		).toHaveLength(1);
+
+		activity.acknowledge(activity.watermark());
+		const before = activity.watermark();
+		activity.recordPass(ID, [], holding);
+
+		expect(activity.watermark()).toBe(before);
+		expect(activity.hasUrgent(), 'an unchanged live row was mistaken for a new warning').toBe(
+			false
+		);
+	});
+});
+
+/** An unreadable entry is just as current as a held id: eviction is not resolution. */
+describe('a live unreadable condition that is evicted by later urgent history', () => {
+	const ID = '76561198000000001';
+
+	it('records the unchanged unreadable condition again on the next poll', () => {
+		const activity = log();
+		activity.recordPass(ID, [], [], 1);
+
+		for (let i = 0; i < 100; i += 1) {
+			activity.recordFailure(ID, `later urgent event ${i}`, true);
+		}
+		expect(
+			activity.for(ID).some((entry) => entry.kind === 'unreadable'),
+			'the premise did not evict the unreadable row'
+		).toBe(false);
+
+		activity.acknowledge(activity.watermark());
+		expect(activity.hasUrgent()).toBe(false);
+		activity.recordPass(ID, [], [], 1);
+
+		expect(activity.for(ID).filter((entry) => entry.kind === 'unreadable')).toHaveLength(1);
+		expect(activity.hasUrgent(), 'the unreadable condition stayed permanently hidden').toBe(true);
+		expect(activity.for(ID)).toHaveLength(100);
+	});
+});
+
+/**
  * **An urgent entry arriving into a full log must not be deleted on arrival.**
  *
  * The first version of the trim dropped "anything that is not a hold" before any

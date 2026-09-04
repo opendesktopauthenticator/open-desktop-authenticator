@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	reconcileRecoveryFiles,
 	recoveryDirectory,
@@ -10,24 +10,12 @@ import {
 } from '../src/main/vault/recovery';
 
 /**
- * **The recovery file caught between claiming its name and filling it.**
+ * **A complete recovery document staged but not yet published.**
  *
- * On a filesystem with no hard links, `durably` publishes by claiming the
- * destination with `wx` — the only atomic way to refuse to overwrite there — and
- * then renaming the completed staging file over it. That closed a race where a
- * second enrollment could overwrite a previous authenticator's backup, and it
- * opened a window of two adjacent syscalls: a hard stop between them leaves a
- * nought-byte file at exactly the name a restore reads, and the whole, fsynced
- * document beside it under a name nothing looks at.
- *
- * The bytes are not lost. They are unreachable, and for a file whose entire
- * purpose is to be found later that is close enough to the same thing — and the
- * window sits after Steam may have attached the authenticator and before the
- * vault has stored it, which is the one stretch this module exists for.
- *
- * These build that on-disk state directly rather than trying to kill a process
- * mid-write, because the state is the thing the fix has to handle and a test
- * that cannot produce it reliably proves nothing.
+ * Reconciliation may publish a complete, fsynced staging file only while its
+ * final name is still absent. Any existing final path — even a zero-byte one —
+ * may belong to another writer, so startup must preserve both files rather than
+ * infer ownership and overwrite one of them.
  */
 
 const STEAM_ID = '76561199000000001';
@@ -60,11 +48,14 @@ afterEach(() => {
 	rmSync(dir, { recursive: true, force: true });
 });
 
-/** The exact shape a stop between the claim and the rename leaves behind. */
-function interruptedPublish(body = envelope): { primary: string; staged: string } {
+/** The exact shape a stop before atomic publication leaves behind. */
+function interruptedPublish(
+	body = envelope,
+	claimTarget = false
+): { primary: string; staged: string } {
 	const primary = recoveryPathFor(dir, STEAM_ID);
 	const staged = `${primary}.4f0a1c22-0000-4000-8000-000000000000.tmp`;
-	writeFileSync(primary, '');
+	if (claimTarget) writeFileSync(primary, '');
 	writeFileSync(staged, body);
 	return { primary, staged };
 }
@@ -96,6 +87,39 @@ describe('a recovery file whose publication was interrupted', () => {
 		expect(reconcileRecoveryFiles(dir)).toEqual([]);
 	});
 
+	it('preserves every candidate when two valid stages name one absent destination', () => {
+		const primary = recoveryPathFor(dir, STEAM_ID);
+		const first = `${primary}.4f0a1c22-0000-4000-8000-000000000001.tmp`;
+		const second = `${primary}.4f0a1c22-0000-4000-8000-000000000002.tmp`;
+		const otherEnvelope = JSON.stringify(
+			{ ...JSON.parse(envelope), ciphertext: 'b'.repeat(200) },
+			null,
+			2
+		);
+		// Write in the opposite order to the UUIDs: directory enumeration must not
+		// choose whichever complete candidate happens to appear first.
+		writeFileSync(second, otherEnvelope);
+		writeFileSync(first, envelope);
+		const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+		expect(reconcileRecoveryFiles(dir)).toEqual([]);
+
+		expect(statSync(primary, { throwIfNoEntry: false })).toBeUndefined();
+		expect(readFileSync(first, 'utf8')).toBe(envelope);
+		expect(readFileSync(second, 'utf8')).toBe(otherEnvelope);
+		expect(warned).toHaveBeenCalledOnce();
+		warned.mockRestore();
+	});
+
+	it('removes a staged duplicate after recognizing the already-published bytes', () => {
+		const { primary, staged } = interruptedPublish();
+		writeFileSync(primary, envelope);
+
+		expect(reconcileRecoveryFiles(dir)).toEqual([primary]);
+		expect(readFileSync(primary, 'utf8')).toBe(envelope);
+		expect(statSync(staged, { throwIfNoEntry: false })).toBeUndefined();
+	});
+
 	/* And a directory with nothing wrong in it is untouched. */
 	it('does nothing to an ordinary recovery file', () => {
 		const primary = recoveryPathFor(dir, STEAM_ID);
@@ -125,7 +149,8 @@ describe('what the reconciliation refuses to touch', () => {
 		const primary = recoveryPathFor(dir, STEAM_ID);
 		const damaged = '{ "v": 1, "kdf": { "type": "scr';
 		writeFileSync(primary, damaged);
-		writeFileSync(`${primary}.4f0a1c22-0000-4000-8000-000000000000.tmp`, envelope);
+		const staged = `${primary}.4f0a1c22-0000-4000-8000-000000000000.tmp`;
+		writeFileSync(staged, envelope);
 
 		expect(reconcileRecoveryFiles(dir)).toEqual([]);
 		expect(
@@ -133,16 +158,37 @@ describe('what the reconciliation refuses to touch', () => {
 			'a damaged recovery file was replaced by a staged one, and a damaged file is still ' +
 				'evidence somebody may need'
 		).toBe(damaged);
+		expect(readFileSync(staged, 'utf8')).toBe(envelope);
+	});
+
+	it('preserves a valid target and a different valid stage byte-for-byte', () => {
+		const { primary, staged } = interruptedPublish();
+		const otherEnvelope = JSON.stringify(
+			{ ...JSON.parse(envelope), ciphertext: 'c'.repeat(200) },
+			null,
+			2
+		);
+		writeFileSync(primary, otherEnvelope);
+
+		expect(reconcileRecoveryFiles(dir)).toEqual([]);
+		expect(readFileSync(primary, 'utf8')).toBe(otherEnvelope);
+		expect(readFileSync(staged, 'utf8')).toBe(envelope);
 	});
 
 	it('does not promote a staging file that is itself incomplete', () => {
-		const { primary } = interruptedPublish('{ "v": 1, "kdf": { "type": "scr');
+		const { primary, staged } = interruptedPublish('{ "v": 1, "kdf": { "type": "scr');
 
 		expect(reconcileRecoveryFiles(dir)).toEqual([]);
-		expect(
-			readFileSync(primary, 'utf8'),
-			'a half-written staging file was published as though it were a recovery file'
-		).toBe('');
+		expect(statSync(primary, { throwIfNoEntry: false })).toBeUndefined();
+		expect(readFileSync(staged, 'utf8')).toBe('{ "v": 1, "kdf": { "type": "scr');
+	});
+
+	it('preserves an occupied empty destination and its staged candidate', () => {
+		const { primary, staged } = interruptedPublish(envelope, true);
+
+		expect(reconcileRecoveryFiles(dir)).toEqual([]);
+		expect(readFileSync(primary, 'utf8')).toBe('');
+		expect(readFileSync(staged, 'utf8')).toBe(envelope);
 	});
 
 	it('does not promote a file that is not an envelope at all', () => {

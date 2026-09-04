@@ -16,7 +16,9 @@ import type {
 	ImportSelection,
 	OpenBrowserResult,
 	RendererApi,
+	ToastClick,
 	EnrollBegin,
+	EnrollmentStatus,
 	ExportResult,
 	AdoptResult,
 	RecoverResult,
@@ -66,7 +68,8 @@ const api: RendererApi = {
 		ipcRenderer.invoke(CHANNELS.vaultUnlock, { passphrase }) as Promise<{ ok: true }>,
 	restoreVaultBackup: (passphrase: string) =>
 		ipcRenderer.invoke(CHANNELS.vaultRestoreBackup, { passphrase }) as Promise<{ ok: true }>,
-	adoptVaultFile: () => ipcRenderer.invoke(CHANNELS.vaultAdopt, {}) as Promise<AdoptResult>,
+	adoptVaultFile: (passphrase: string) =>
+		ipcRenderer.invoke(CHANNELS.vaultAdopt, { passphrase }) as Promise<AdoptResult>,
 	lockVault: () => ipcRenderer.invoke(CHANNELS.vaultLock, {}) as Promise<{ ok: true }>,
 	touchVault: () => ipcRenderer.invoke(CHANNELS.vaultTouch, {}) as Promise<{ ok: true }>,
 	changePassphrase: (current: string, next: string) =>
@@ -100,10 +103,24 @@ const api: RendererApi = {
 		ipcRenderer.invoke(CHANNELS.transferStartChallenge, {}) as Promise<TransferStartChallenge>,
 	completeTransfer: (smsCode: string) =>
 		ipcRenderer.invoke(CHANNELS.transferComplete, { smsCode }) as Promise<TransferComplete>,
-	retryTransferPersist: () =>
-		ipcRenderer.invoke(CHANNELS.transferRetryPersist, {}) as Promise<TransferComplete>,
+	retryTransferPersist: (passphrase?: string) =>
+		ipcRenderer.invoke(CHANNELS.transferRetryPersist, {
+			...(passphrase === undefined || passphrase === '' ? {} : { passphrase })
+		}) as Promise<TransferComplete>,
 	getTransferStatus: () =>
 		ipcRenderer.invoke(CHANNELS.transferStatus, {}) as Promise<TransferStatus>,
+	resolveTransfer: (
+		attemptId: string,
+		resolution: 'notReplaced' | 'replaced' | 'resolvedOutsideApp',
+		passphrase?: string
+	) =>
+		ipcRenderer.invoke(CHANNELS.transferResolve, {
+			attemptId,
+			resolution,
+			...(passphrase === undefined || passphrase === '' ? {} : { passphrase })
+		}) as Promise<{
+			ok: true;
+		}>,
 	cancelTransfer: () => ipcRenderer.invoke(CHANNELS.transferCancel, {}) as Promise<object>,
 
 	// Enrollment. The password travels inbound only, exactly as a vault
@@ -116,10 +133,28 @@ const api: RendererApi = {
 		}) as Promise<EnrollBegin>,
 	submitEnrollmentEmailCode: (code: string) =>
 		ipcRenderer.invoke(CHANNELS.enrollEmailCode, { code }) as Promise<EnrollBegin>,
+	getEnrollmentStatus: () =>
+		ipcRenderer.invoke(CHANNELS.enrollStatus, {}) as Promise<EnrollmentStatus>,
+	retryEnrollmentPersist: (attemptId: string, steamId64: string) =>
+		ipcRenderer.invoke(CHANNELS.enrollRetryPersist, {
+			attemptId,
+			steamId64
+		}) as Promise<EnrollBegin>,
+	resolveEnrollment: (
+		attemptId: string,
+		steamId64: string,
+		resolution: 'notAttached' | 'storedHere' | 'resolvedOutsideApp'
+	) =>
+		ipcRenderer.invoke(CHANNELS.enrollResolve, {
+			attemptId,
+			steamId64,
+			resolution
+		}) as Promise<{ ok: true }>,
 	cancelEnrollment: () => ipcRenderer.invoke(CHANNELS.enrollCancel, {}) as Promise<{ ok: true }>,
 	resolveAccountOperation: (
 		steamId64: string,
 		kind: 'activate' | 'deactivate',
+		operationToken: string,
 		steamActed: boolean,
 		passphrase?: string
 	) =>
@@ -128,21 +163,41 @@ const api: RendererApi = {
 			// Which operation the screen asked about. The handler refuses a record of
 			// a different kind rather than reinterpreting the answer.
 			kind,
+			operationToken,
 			steamActed,
 			...(passphrase !== undefined ? { passphrase } : {})
+		}) as Promise<{ ok: true; recoveryWarning?: string }>,
+	clearStaleAccountOperation: (
+		steamId64: string,
+		kind: 'activate' | 'deactivate',
+		staleToken: string
+	) =>
+		ipcRenderer.invoke(CHANNELS.accountResolveOperation, {
+			steamId64,
+			kind,
+			discardStale: true,
+			staleToken
 		}) as Promise<{ ok: true }>,
 	activateAuthenticator: (steamId64: string, code: string) =>
 		ipcRenderer.invoke(CHANNELS.enrollActivate, { steamId64, code }) as Promise<{
-			state: 'activated' | 'wantMore' | 'uncertain';
+			state: 'activated' | 'wantMore' | 'uncertain' | 'staleOperation' | 'unidentifiedOperation';
+			kind?: 'activate' | 'deactivate';
+			staleToken?: string;
+			operationToken?: string;
 			guidance?: string;
 			certain?: boolean;
 			persisted?: boolean;
+			recoveryWarning?: string;
 		}>,
 
 	// Takes no path and returns none: the OS dialog is the only thing that names
 	// a location, and the main process is the only thing that writes one.
 	exportAccount: (steamId64: string) =>
 		ipcRenderer.invoke(CHANNELS.accountExport, { steamId64 }) as Promise<ExportResult>,
+	finishRecoveryBackup: (steamId64: string) =>
+		ipcRenderer.invoke(CHANNELS.accountFinishRecoveryBackup, { steamId64 }) as Promise<{
+			ok: true;
+		}>,
 	recoverAccount: (passphrase: string) =>
 		ipcRenderer.invoke(CHANNELS.accountRecover, { passphrase }) as Promise<RecoverResult>,
 	deactivateAuthenticator: (steamId64: string, passphrase: string, acknowledgement: string) =>
@@ -153,7 +208,10 @@ const api: RendererApi = {
 			acknowledgement
 		}) as Promise<{
 			ok?: true;
-			state?: 'uncertain';
+			state?: 'uncertain' | 'staleOperation' | 'unidentifiedOperation';
+			kind?: 'activate' | 'deactivate';
+			staleToken?: string;
+			operationToken?: string;
 			guidance?: string;
 			certain?: boolean;
 			persisted?: boolean;
@@ -194,23 +252,25 @@ const api: RendererApi = {
 	 * each retaining its own `accounts` snapshot, past `MaxListenersExceededWarning`
 	 * inside the first ten seconds.
 	 */
-	onOpenConfirmations: (listener: (steamId64: string) => void): (() => void) => {
-		const handler = (_event: unknown, steamId64: string): void => listener(steamId64);
+	onOpenConfirmations: (listener: (click: ToastClick) => void): (() => void) => {
+		const handler = (_event: unknown, click: ToastClick): void => listener(click);
 		ipcRenderer.on(PUSH_CHANNELS.openConfirmations, handler);
 		return () => {
 			ipcRenderer.removeListener(PUSH_CHANNELS.openConfirmations, handler);
 		};
 	},
 	/**
-	 * Collect a click the renderer was not there to receive, and clear it.
+	 * Collect a click the renderer was not there to receive. The renderer
+	 * acknowledges the exact token after navigation succeeds.
 	 *
 	 * The push above is the fast path; this is what makes the locked and
 	 * reloaded cases work, because a lock replaces the document that was
 	 * listening.
 	 */
-	takePendingConfirmations: (request?: { acknowledged?: string }) =>
+	takePendingConfirmations: (request?: { acknowledged?: ToastClick }) =>
 		ipcRenderer.invoke(CHANNELS.takePendingConfirmations, request ?? {}) as Promise<{
 			steamId64?: string;
+			token?: number;
 		}>,
 	setAccountProxy: (steamId64: string, proxyUrl: string | null) =>
 		ipcRenderer.invoke(CHANNELS.accountSetProxy, { steamId64, proxyUrl }) as Promise<{

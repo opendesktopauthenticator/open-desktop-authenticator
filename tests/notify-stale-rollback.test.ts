@@ -168,6 +168,138 @@ describe('a notification failure that arrives after later polls have run', () =>
 	});
 });
 
+describe('overlapping unreadable-count deliveries', () => {
+	const seed = (notifier: ConfirmationNotifier): void => notifier.pending(ID, NAME, [], 0, 'full');
+
+	it.each([
+		['older then newer', 0, 1],
+		['newer then older', 1, 0]
+	] as const)(
+		'retries the current count when both attempts fail (%s)',
+		async (_name, first, second) => {
+			const h = harness();
+			seed(h.notifier);
+			h.notifier.pending(ID, NAME, [], 2, 'full');
+			h.notifier.pending(ID, NAME, [], 5, 'full');
+			expect(h.toasts).toHaveLength(2);
+
+			await h.settle(first, false);
+			await h.settle(second, false);
+			h.notifier.pending(ID, NAME, [], 5, 'full');
+
+			expect(
+				h.toasts,
+				'one failed attempt restored a count that another failed attempt had only observed, so neither failure remained retryable'
+			).toHaveLength(3);
+			expect(h.toasts[2]?.body).toContain('5 confirmations could not be read');
+		}
+	);
+
+	it('does not let an older success swallow a newer failed rise', async () => {
+		const h = harness();
+		seed(h.notifier);
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+		h.notifier.pending(ID, NAME, [], 5, 'full');
+
+		await h.settle(1, false);
+		await h.settle(0, true);
+		h.notifier.pending(ID, NAME, [], 5, 'full');
+
+		expect(h.toasts).toHaveLength(3);
+	});
+
+	it('lets a newer success cover the current count despite an older late failure', async () => {
+		const h = harness();
+		seed(h.notifier);
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+		h.notifier.pending(ID, NAME, [], 5, 'full');
+
+		await h.settle(1, true);
+		await h.settle(0, false);
+		h.notifier.pending(ID, NAME, [], 5, 'full');
+
+		expect(h.toasts).toHaveLength(2);
+	});
+
+	it('does not duplicate an unchanged count while its delivery is still pending', async () => {
+		const h = harness();
+		seed(h.notifier);
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+		expect(h.toasts).toHaveLength(1);
+
+		await h.settle(0, false);
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+		expect(h.toasts).toHaveLength(2);
+	});
+
+	it('does not repeat a count an older overlapping toast already delivered', async () => {
+		const h = harness();
+		seed(h.notifier);
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+		h.notifier.pending(ID, NAME, [], 5, 'full');
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+		expect(h.toasts.map((toast) => toast.body)).toEqual([
+			'2 confirmations could not be read',
+			'5 confirmations could not be read'
+		]);
+
+		await h.settle(1, false);
+		await h.settle(0, true);
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+
+		expect(
+			h.toasts,
+			'the user had already seen the current count, but a failed superseding rise made it ' +
+				'look new again'
+		).toHaveLength(2);
+	});
+
+	it('does not let a delivery from before zero cover a later reappearance', async () => {
+		const h = harness();
+		seed(h.notifier);
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+		h.notifier.pending(ID, NAME, [], 0, 'full');
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+
+		await h.settle(0, true);
+		await h.settle(1, false);
+		h.notifier.pending(ID, NAME, [], 2, 'full');
+
+		expect(
+			h.toasts,
+			'a stale success from the resolved episode suppressed a new unreadable event with the same count'
+		).toHaveLength(3);
+	});
+
+	it.each([
+		['the larger alert settles before the drop', true],
+		['the larger alert settles after the drop', false]
+	] as const)(
+		'announces a genuine rise below an earlier delivered high (%s)',
+		async (_name, settleFirst) => {
+			const h = harness();
+			seed(h.notifier);
+			h.notifier.pending(ID, NAME, [], 5, 'full');
+			if (settleFirst) {
+				await h.settle(0, true);
+			}
+
+			h.notifier.pending(ID, NAME, [], 2, 'full');
+			if (!settleFirst) {
+				await h.settle(0, true);
+			}
+			h.notifier.pending(ID, NAME, [], 4, 'full');
+
+			expect(h.toasts.map((toast) => toast.body)).toEqual([
+				'5 confirmations could not be read',
+				'4 confirmations could not be read'
+			]);
+		}
+	);
+});
+
 /**
  * **The attempt number itself, and why it is global.**
  *

@@ -16,6 +16,10 @@ export default defineConfig({
 	// imports, and every case fails with "React is not defined".
 	esbuild: { jsx: 'automatic' },
 	test: {
+		// Real shell, scrypt and loopback-socket fixtures share this suite. Keep
+		// their concurrency bounded instead of scaling subprocess/KDF pressure to
+		// every logical core on a large local or hosted runner.
+		maxWorkers: 4,
 		// `.tsx` as well as `.ts`: a screen test has to contain JSX, and the
 		// narrower pattern did not fail loudly — vitest reported "no test files
 		// found" for that one path and the full run simply never included it,

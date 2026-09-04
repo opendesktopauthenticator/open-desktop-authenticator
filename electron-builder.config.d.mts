@@ -11,6 +11,17 @@
  */
 declare const config: {
 	files?: unknown[];
+	productName?: string;
+	win?: {
+		signAndEditExecutable?: boolean;
+		signExecutable?: boolean;
+		[key: string]: unknown;
+	};
+	appx?: {
+		customManifestPath?: string;
+		customExtensionsPath?: string;
+		[key: string]: unknown;
+	};
 	[key: string]: unknown;
 };
 export default config;

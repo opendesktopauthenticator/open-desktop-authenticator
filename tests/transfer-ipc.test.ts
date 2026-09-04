@@ -36,7 +36,13 @@ function harness(
 		requireProxies?: boolean;
 		authenticate?: unknown;
 		/** What the service says it is still waiting on, if anything. */
-		awaiting?: 'persist' | 'unanswered' | 'unreadable';
+		awaiting?: 'persist' | 'unanswered' | 'unreadable' | 'cleanup';
+		recovery?: {
+			attemptId: string;
+			state: 'sending' | 'unanswered' | 'unreadable' | 'not-replaced' | 'replacement';
+			at: string;
+			retained: boolean;
+		};
 		/** Whether the user approves the proxy destination when asked. */
 		approveProxy?: boolean;
 	} = {}
@@ -45,6 +51,8 @@ function harness(
 		cancel: ReturnType<typeof vi.fn>;
 		authenticate: ReturnType<typeof vi.fn>;
 		awaiting: ReturnType<typeof vi.fn>;
+		resolve: ReturnType<typeof vi.fn>;
+		retryPersist: ReturnType<typeof vi.fn>;
 	};
 	touched: () => number;
 	/** Every destination the gate put to the user, in order. */
@@ -59,8 +67,18 @@ function harness(
 	const transfer = {
 		authenticate,
 		cancel: vi.fn(),
+		resolve: vi.fn(() => Promise.resolve()),
+		retryPersist: vi.fn(() =>
+			Promise.resolve({
+				steamId64: STEAM_ID,
+				accountName: 'someone',
+				revocationCode: 'R12345',
+				timeOffsetSeconds: 0
+			})
+		),
 		current: vi.fn(() => ({ steamId64: STEAM_ID, accountName: 'someone' })),
-		awaiting: vi.fn(() => options.awaiting)
+		awaiting: vi.fn(() => options.awaiting),
+		recovery: vi.fn(() => options.recovery)
 	};
 	const vault = {
 		isUnlocked: () => options.unlocked !== false,
@@ -173,6 +191,27 @@ describe('signing in for a transfer over IPC', () => {
 });
 
 describe('status and cancellation', () => {
+	it('forwards the recovery passphrase only to the service that decides whether a row is deleted', async () => {
+		const { transfer } = harness();
+		const attemptId = '11111111-1111-4111-8111-111111111111';
+
+		await call(CHANNELS.transferResolve, {
+			attemptId,
+			resolution: 'replaced',
+			passphrase: 'vault proof'
+		});
+
+		expect(transfer.resolve).toHaveBeenCalledWith(attemptId, 'replaced', 'vault proof');
+	});
+
+	it('forwards the optional proof when Finish recovery may replace a backup-era row', async () => {
+		const { transfer } = harness();
+
+		await call(CHANNELS.transferRetryPersist, { passphrase: 'vault proof' });
+
+		expect(transfer.retryPersist).toHaveBeenCalledWith('vault proof');
+	});
+
 	it('reports the transfer in progress', async () => {
 		harness();
 		await expect(call(CHANNELS.transferStatus)).resolves.toEqual({
@@ -219,6 +258,22 @@ describe('reporting an outstanding retry', () => {
 		harness({ awaiting: 'unreadable' });
 		await expect(call(CHANNELS.transferStatus, {})).resolves.toMatchObject({
 			awaiting: 'unreadable'
+		});
+	});
+
+	it('reports whether an unreadable reply has encrypted replacement ciphertext', async () => {
+		harness({
+			awaiting: 'unreadable',
+			recovery: {
+				attemptId: 'ea6f7e55-00ad-42b8-b34e-31e69ce0a6ca',
+				state: 'unreadable',
+				at: '2026-09-02T00:00:00.000Z',
+				retained: true
+			}
+		});
+		await expect(call(CHANNELS.transferStatus, {})).resolves.toMatchObject({
+			awaiting: 'unreadable',
+			recovery: { state: 'unreadable', retained: true }
 		});
 	});
 

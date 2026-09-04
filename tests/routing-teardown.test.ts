@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -142,6 +142,71 @@ describe('the shared routing teardown', () => {
 			calls.filter((args) => args.includes('true')),
 			'exactly one call site may claim the account was removed'
 		).toHaveLength(1);
+	});
+
+	it('executes the production removal teardown against every account-local owner', () => {
+		/*
+		 * The transfer regression test proves the committed deletion invokes
+		 * `dropAccountRouting(id, true)`, while the source assertions above prove
+		 * that production is the callback wired to it. Execute that exact production
+		 * function body here as the missing final link: this is deliberately not a
+		 * second hand-written teardown which could agree with its own mistake.
+		 */
+		const start = source.indexOf(
+			'const dropAccountRouting = (steamId64: string, gone = false): void => {'
+		);
+		const end = source.indexOf('\n\t};', start);
+		const implementation = stripComments(source.slice(start, end + '\n\t};'.length)).replace(
+			'(steamId64: string, gone = false): void',
+			'(steamId64, gone = false)'
+		);
+		// eslint-disable-next-line @typescript-eslint/no-implied-eval
+		const build = Function(
+			'transports',
+			'directTransports',
+			'confirmations',
+			'notifier',
+			'autoConfirm',
+			'enrollment',
+			'activity',
+			'toastClicks',
+			'browsers',
+			`${implementation}; return dropAccountRouting;`
+		) as (...dependencies: unknown[]) => (steamId64: string, gone?: boolean) => void;
+		const forget = (): { forget: ReturnType<typeof vi.fn> } => ({ forget: vi.fn() });
+		const transports = forget();
+		const directTransports = forget();
+		const confirmations = { forgetAccount: vi.fn() };
+		const notifier = { forgetAccount: vi.fn() };
+		const autoConfirm = { forgetAccount: vi.fn() };
+		const enrollment = { forgetAccount: vi.fn() };
+		const activity = { forgetAccount: vi.fn(), forgetRuns: vi.fn() };
+		const toastClicks = { forgetAccount: vi.fn() };
+		const browsers = { closeAccount: vi.fn(() => Promise.resolve()) };
+		const invoke = build(
+			transports,
+			directTransports,
+			confirmations,
+			notifier,
+			autoConfirm,
+			enrollment,
+			activity,
+			toastClicks,
+			browsers
+		);
+
+		invoke('76561198000000001', true);
+
+		expect(transports.forget).toHaveBeenCalledWith('76561198000000001');
+		expect(directTransports.forget).toHaveBeenCalledWith('76561198000000001');
+		expect(confirmations.forgetAccount).toHaveBeenCalledWith('76561198000000001');
+		expect(notifier.forgetAccount).toHaveBeenCalledWith('76561198000000001');
+		expect(autoConfirm.forgetAccount).toHaveBeenCalledWith('76561198000000001');
+		expect(enrollment.forgetAccount).toHaveBeenCalledWith('76561198000000001');
+		expect(activity.forgetAccount).toHaveBeenCalledWith('76561198000000001');
+		expect(activity.forgetRuns).not.toHaveBeenCalled();
+		expect(toastClicks.forgetAccount).toHaveBeenCalledWith('76561198000000001');
+		expect(browsers.closeAccount).toHaveBeenCalledWith('76561198000000001');
 	});
 });
 

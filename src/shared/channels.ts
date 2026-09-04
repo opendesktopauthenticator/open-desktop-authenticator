@@ -247,10 +247,17 @@ export const CHANNELS = {
 	/** Finish storing a replacement Steam already issued. Safe to repeat. */
 	transferRetryPersist: 'transfer:retryPersist',
 	transferStatus: 'transfer:status',
+	/** Resolve a durable post-submit transfer record after checking Steam. */
+	transferResolve: 'transfer:resolve',
 	transferCancel: 'transfer:cancel',
 	enrollBegin: 'enroll:begin',
 	enrollEmailCode: 'enroll:emailCode',
 	enrollActivate: 'enroll:activate',
+	/** Read/resolve AddAuthenticator attempts that have no vault account row. */
+	enrollStatus: 'enroll:status',
+	/** Persist a ciphertext-backed AddAuthenticator reply without contacting Steam. */
+	enrollRetryPersist: 'enroll:retryPersist',
+	enrollResolve: 'enroll:resolve',
 	/**
 	 * Abandon a sign-in that has not attached anything yet.
 	 *
@@ -268,6 +275,14 @@ export const CHANNELS = {
 	 * IPC in either direction — the same rule import follows.
 	 */
 	accountExport: 'account:export',
+
+	/**
+	 * Finish the separate encrypted recovery backup for one stored account.
+	 *
+	 * This is local file repair only: the main process identifies the owned file
+	 * from durable vault state, and no path or secret crosses IPC.
+	 */
+	accountFinishRecoveryBackup: 'account:finishRecoveryBackup',
 
 	/**
 	 * Detach an authenticator from Steam entirely (F-09, Q15).
@@ -298,8 +313,9 @@ export const CHANNELS = {
 	 * The push above is the fast path and nothing depends on it landing. A lock
 	 * **reloads** the window, so a click can arrive at a document that is about
 	 * to be replaced, or at the unlock screen — in both cases the listener is
-	 * gone. Main remembers the intent; the renderer collects it once it has an
-	 * account list to navigate within, and collecting clears it.
+	 * gone. Main remembers the intent; the renderer peeks once it has an account
+	 * list to navigate within, and an exact token acknowledgement clears it only
+	 * after navigation succeeds.
 	 */
 	takePendingConfirmations: 'app:takePendingConfirmations'
 } as const;

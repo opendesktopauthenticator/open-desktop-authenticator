@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { deriveKey, open, seal, VaultCryptoError, wipe } from '../src/main/vault/crypto';
+import {
+	deriveKey,
+	open,
+	openBytesWithKey,
+	seal,
+	VaultCryptoError,
+	wipe
+} from '../src/main/vault/crypto';
 import {
 	isAcceptableKdf,
 	MINIMUM_SCRYPT,
@@ -113,6 +120,20 @@ describe('rejects the wrong passphrase', () => {
 });
 
 describe('detects tampering — every field is authenticated', () => {
+	it('rejects a bad tag when opening a wrapped byte key', async () => {
+		const sealed = await seal('workflow-content-key', PASS, FAST);
+		const key = await deriveKey(PASS, Buffer.from(sealed.kdf.salt, 'base64'), sealed.kdf);
+		try {
+			const tampered = clone(sealed);
+			const tag = Buffer.from(tampered.cipher.tag, 'base64');
+			tag[0] = tag[0]! ^ 0x01;
+			tampered.cipher.tag = tag.toString('base64');
+			expect(() => openBytesWithKey(tampered, key, sealed.kdf)).toThrow(VaultCryptoError);
+		} finally {
+			wipe(key);
+		}
+	});
+
 	it('rejects a flipped ciphertext bit', async () => {
 		const sealed = await seal('secret data', PASS, FAST);
 		const t = clone(sealed);

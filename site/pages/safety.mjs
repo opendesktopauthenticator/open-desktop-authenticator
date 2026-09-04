@@ -1,4 +1,5 @@
 import { reviewAsk } from '../markup.mjs';
+import { browserFeatureCopy } from '../publication.mjs';
 
 /** The three pages that exist to stop somebody being robbed. */
 
@@ -167,10 +168,11 @@ export const scamClones = {
 					check only ever tells you a version exists and links you to it.
 				</li>
 				<li>
-					An installer that writes only where it says it will. Our portable build goes
-					further and writes nothing outside its own folder; the ordinary installed
-					build does use the normal application-data directory, because that is where
-					your vault has to live.
+					An installer that writes only where it says it will. Our portable build keeps
+					vaults, settings and recovery data beside its executable; its single-file
+					launcher extracts Electron and Chromium runtime files to Windows Temp while
+					it runs and normally removes them on exit. The ordinary installed build uses
+					the normal application-data directory, because that is where its vault lives.
 				</li>
 			</ul>
 			<p><a href="/verify">Step-by-step instructions for checking all of that</a>.</p>
@@ -248,7 +250,13 @@ export const verify = {
 
 			<div class="callout">
 				<p>
-					<strong>These commands apply to 1.0, which is out now.</strong> Run them
+					<strong>${
+						s.publication.github.current
+							? `These commands apply to ${s.version}, which is published on GitHub.`
+							: s.publication.store.current
+								? `${s.version} is published in the Microsoft Store, but its GitHub release is still pending. These commands apply to GitHub's published ${s.publication.github.latestVersion}.`
+								: `${s.version} is the upcoming source version. These commands apply to GitHub's published ${s.publication.github.latestVersion}.`
+					}</strong> Run them
 					against what you actually downloaded rather than reading them and moving on
 					— a verification step you have never performed is not a habit, and the
 					moment you need it is the worst moment to learn it.
@@ -293,9 +301,9 @@ export const verify = {
 
 			<h2>2. Compute the hash of what you downloaded</h2>
 			<h3>Windows (PowerShell)</h3>
-			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-${s.version}-x64-setup.exe</code></pre>
+			<pre><code>Get-FileHash -Algorithm SHA256 .\\open-desktop-authenticator-${s.publication.github.latestVersion}-x64-setup.exe</code></pre>
 			<h3>Linux</h3>
-			<pre><code>sha256sum open-desktop-authenticator-${s.version}-x86_64.AppImage</code></pre>
+			<pre><code>sha256sum open-desktop-authenticator-${s.publication.github.latestVersion}-x86_64.AppImage</code></pre>
 			<h3>macOS</h3>
 			<p>
 				macOS ships <code>shasum</code> rather than <code>sha256sum</code>, so the Linux
@@ -303,7 +311,7 @@ export const verify = {
 				macOS build of this application — this is here for someone checking a download
 				on a Mac before moving it to the machine that will run it.
 			</p>
-			<pre><code>shasum -a 256 open-desktop-authenticator-${s.version}-x86_64.AppImage</code></pre>
+			<pre><code>shasum -a 256 open-desktop-authenticator-${s.publication.github.latestVersion}-x86_64.AppImage</code></pre>
 			<p>Or check everything you downloaded at once, from that folder (Linux):</p>
 			<pre><code>sha256sum --check --ignore-missing SHA256SUMS.txt</code></pre>
 			<p>On macOS, the same thing:</p>
@@ -462,13 +470,13 @@ export const security = {
 	updated: '2026-08-25',
 	navTitle: 'Security',
 	title: 'Security model: how your Steam secrets are stored',
-	description:
+	description: (s) =>
 		// The old wording stopped at "no network beyond Steam and an optional update
 		// check", which was written before the in-app browser existed and quietly
 		// became the site's largest understatement: that window loads whatever the
 		// user navigates to. A description is the one sentence a search result
 		// shows, so the exception is named in it rather than left to the body.
-		'How Steam secrets are stored: scrypt, AES-256-GCM, an isolated renderer, and no network beyond Steam, an update check and the browser you open.',
+		browserFeatureCopy(s).description,
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
@@ -584,17 +592,7 @@ export const security = {
 					and nowhere for it to send.
 				</li>
 				<li>
-					<strong>The in-app browser is the exception to that, deliberately, and it
-					is the widest surface here.</strong> It exists so a trade can be finished
-					without copying a signed-in session into a browser that is not routed, and
-					that means it is a browser: it loads pages nobody here wrote and goes
-					wherever you point it, because one that could reach a single page could not
-					finish a trade. So the line above is drawn around it instead. It gets no
-					preload, no message bridge and no route to the vault; it runs in a session
-					of its own rather than the one the application uses for Steam; it leaves
-					over whatever network route that account is configured to use, and if that
-					route cannot be applied the window does not open at all. Locking the vault
-					closes it and wipes its storage.
+					<strong>${browserFeatureCopy(s).security}</strong>
 				</li>
 				<li>
 					<strong>Developer tools are disabled in release builds</strong>, together with

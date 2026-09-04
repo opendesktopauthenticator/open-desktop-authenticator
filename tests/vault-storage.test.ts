@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seal } from '../src/main/vault/crypto';
 import {
 	readBackupEnvelope,
@@ -17,6 +17,7 @@ import {
 	vaultExists,
 	vaultPaths,
 	VaultStorageError,
+	setAside,
 	writeEnvelope
 } from '../src/main/vault/storage';
 import { MINIMUM_SCRYPT, type Envelope } from '../src/shared/vault-format';
@@ -196,6 +197,29 @@ describe('backup recovery', () => {
 		writeEnvelope(file, await envelope('{"seq":2}'));
 		writeFileSync(vaultPaths(file).backup, 'garbage');
 		expect(readBackupEnvelope(file)).toBeUndefined();
+	});
+});
+
+describe('setting a vault aside', () => {
+	it('never replaces an older rescue whose timestamp collides', () => {
+		const now = new Date('2026-09-03T01:02:03.004Z');
+		vi.useFakeTimers();
+		vi.setSystemTime(now);
+		try {
+			writeFileSync(file, 'current vault');
+			const older = `${file}.superseded-2026-09-03T01-02-03-004Z`;
+			writeFileSync(older, 'older rescue vault');
+
+			const moved = setAside(file);
+
+			expect(readFileSync(older, 'utf8')).toBe('older rescue vault');
+			expect(moved).toBeDefined();
+			expect(moved).not.toBe(older);
+			expect(readFileSync(moved as string, 'utf8')).toBe('current vault');
+			expect(existsSync(file)).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

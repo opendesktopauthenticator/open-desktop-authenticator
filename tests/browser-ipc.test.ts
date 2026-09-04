@@ -3,7 +3,11 @@ import { join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CHANNELS, type BrowserRoute } from '../src/shared/ipc';
 import { __resetRouterForTests, setTrustedSender } from '../src/main/ipc/router';
-import { registerBrowserHandlers, type BrowserAccount } from '../src/main/browser/ipc';
+import {
+	DIRECT_REFUSED,
+	registerBrowserHandlers,
+	type BrowserAccount
+} from '../src/main/browser/ipc';
 import { BrowserSignInRequired, type AccountBrowsers } from '../src/main/browser/window';
 import { AccessTokenError } from '../src/main/steam/access-token';
 
@@ -498,6 +502,45 @@ describe('a vault that requires proxies', () => {
 	});
 
 	/*
+	 * A missing refresh token is normally an actionable "sign in" state. It is
+	 * not one when the route itself is forbidden: signing in cannot turn Direct
+	 * or Steam-only into a fully routed window, so the policy answer has to win
+	 * before the renderer offers a password form.
+	 */
+	it.each([['direct' as const], ['steam-only' as const]])(
+		'refuses %s before offering sign-in when the saved session is missing',
+		async (route) => {
+			const { harness, run } = ask(route, {
+				account: () => ({ accountName: 'demo', proxyUrl: ACCOUNT.proxyUrl })
+			});
+
+			await expect(run()).rejects.toThrow(/require proxies/i);
+			expect(harness.minted).toEqual([]);
+			expect(harness.opened).toEqual([]);
+		}
+	);
+
+	it('refuses an unproxied account before offering sign-in on its only visible route', async () => {
+		const { harness, run } = ask('proxy', {
+			account: () => ({ accountName: 'demo' })
+		});
+
+		await expect(run()).rejects.toThrow(/require proxies/i);
+		expect(harness.minted).toEqual([]);
+		expect(harness.opened).toEqual([]);
+	});
+
+	it('still offers sign-in when the fully routed choice can satisfy the policy', async () => {
+		const { harness, run } = ask('proxy', {
+			account: () => ({ accountName: 'demo', proxyUrl: ACCOUNT.proxyUrl })
+		});
+
+		await expect(run()).resolves.toMatchObject({ signInRequired: true });
+		expect(harness.minted).toEqual([]);
+		expect(harness.opened).toEqual([]);
+	});
+
+	/*
 	 * An account with no proxy has no route at all under this setting. Opening
 	 * it "as best we can" is the quiet fallback the setting rules out, so it is
 	 * refused — and the message names both ways out, because a dead end on the
@@ -522,6 +565,13 @@ describe('a vault that requires proxies', () => {
 		await expect(run()).rejects.toThrow(/Settings/);
 		// Names the button that does work, rather than only what does not.
 		await expect(run()).rejects.toThrow(/routed button/i);
+	});
+
+	it('describes Direct as machine-routed rather than promising a bare connection', () => {
+		expect(DIRECT_REFUSED).toMatch(/does not use this account.s proxy/i);
+		expect(DIRECT_REFUSED).toMatch(/machine.s network settings/i);
+		expect(DIRECT_REFUSED).toMatch(/system or company proxy/i);
+		expect(DIRECT_REFUSED).not.toMatch(/Direct sends everything/i);
 	});
 
 	/**

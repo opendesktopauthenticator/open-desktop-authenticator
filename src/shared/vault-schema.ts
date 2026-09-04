@@ -248,6 +248,8 @@ export const accountSchema = z
 				 * existed have none, and those are refused rather than guessed at.
 				 */
 				fingerprint: z.string().optional(),
+				/** Shared identity of the pre-send note and post-answer latch. */
+				operationId: z.string().optional(),
 				at: z.string()
 			})
 			/*
@@ -260,6 +262,44 @@ export const accountSchema = z
 			 * merely opening the vault.
 			 */
 			.passthrough()
+			.optional(),
+		/**
+		 * Ownership and durable retry state for this authenticator's separate
+		 * encrypted recovery file.
+		 *
+		 * Kept inside the encrypted vault so import, enrollment and transfer can
+		 * commit the account and the obligation to publish its backup in one
+		 * write. `fileName` is a basename allocated by the application, never a
+		 * caller-controlled path. It becomes authoritative only after publication
+		 * succeeds; `pending` deliberately carries none.
+		 */
+		recoveryBackup: z
+			.object({
+				version: z.literal(1),
+				/** Generation guard: an older asynchronous completion cannot clear a newer debt. */
+				id: z.string().uuid(),
+				/** Identifies the authenticator without storing another secret. */
+				authenticatorFingerprint: z.string().regex(/^[0-9a-f]{16}$/),
+				state: z.enum(['pending', 'current', 'stale']),
+				/** Exact application-owned basename; required once a file is owned. */
+				fileName: z.string().min(1).max(255).optional(),
+				changedAt: z.string()
+			})
+			.passthrough()
+			.superRefine((backup, context) => {
+				if (backup.state !== 'pending' && backup.fileName === undefined) {
+					context.addIssue({
+						code: z.ZodIssueCode.custom,
+						message: 'a published recovery backup needs its exact filename'
+					});
+				}
+				if (backup.state === 'pending' && backup.fileName !== undefined) {
+					context.addIssue({
+						code: z.ZodIssueCode.custom,
+						message: 'a pending recovery backup cannot claim a filename'
+					});
+				}
+			})
 			.optional()
 	})
 	// Preserve fields written by a newer build rather than dropping them on the

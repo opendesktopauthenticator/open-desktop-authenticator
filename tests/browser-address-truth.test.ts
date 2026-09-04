@@ -42,6 +42,7 @@ import { CHROME_HTML } from '../src/main/browser/chrome-html';
  */
 
 class FakeElement {
+	private readonly attributes = new Map<string, string>();
 	value = '';
 	className = '';
 	title = '';
@@ -51,6 +52,12 @@ class FakeElement {
 	onfocus?: () => void;
 	onblur?: () => void;
 	onkeydown?: (event: { key: string }) => void;
+	setAttribute(name: string, value: string): void {
+		this.attributes.set(name, value);
+	}
+	getAttribute(name: string): string | null {
+		return this.attributes.get(name) ?? null;
+	}
 	appendChild(): void {}
 	select(): void {}
 	focus(): void {

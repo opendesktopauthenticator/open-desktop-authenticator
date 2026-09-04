@@ -24,8 +24,11 @@ import {
  *             anyone who wants to verify the download themselves against a
  *             published hash. This is the channel /verify describes.
  *
- *   portable  No installer, no writes outside its own directory. For locked-down
- *             machines and for people who want to try it without installing.
+ *   portable  No installer; vaults, settings and recovery data stay beside the
+ *             executable. The single-file launcher extracts Electron/Chromium
+ *             runtime files to Windows Temp while it runs and normally removes
+ *             them on exit. For locked-down machines and for people who want to
+ *             try it without installing.
  *             Labelled manual-update everywhere it appears: the update check
  *             still runs and still tells it a new version exists, but nothing
  *             fetches or installs one, so the user does the swap by hand.
@@ -46,6 +49,18 @@ import {
 
 const store = {
 	...storeIdentity,
+	/*
+	 * A Store package cannot rely on the Start-menu registration Electron makes
+	 * for an unpackaged installer. Windows launches an AppX toast activator from
+	 * the signed package manifest, so the manifest and the running process must
+	 * name the same stable CLSID. The custom manifest is the builder template with
+	 * the COM namespace added; the fragment supplies the two package declarations
+	 * Windows requires. Keep both paths together: either one without the other
+	 * produces a package whose notifications can be shown but cannot cold-start
+	 * the application when clicked from Action Center.
+	 */
+	customManifestPath: 'signing/appx-manifest.xml',
+	customExtensionsPath: 'signing/appx-extensions.xml',
 	// Tiles inherit the icon; a name burned into the tile art would have to be
 	// regenerated for every rename and would disagree with `branding` in between.
 	showNameOnTiles: false,
@@ -186,6 +201,9 @@ export default {
 		'out/preload/**/*',
 		'out/renderer/**/*',
 		'package.json',
+		// This project's own MIT grant and copyright. Dependency notices below do
+		// not satisfy the first-party licence's requirement to accompany copies.
+		'LICENSE',
 		/*
 		 * **The notices every shipped dependency's licence requires.**
 		 *
@@ -244,11 +262,12 @@ export default {
 
 	win: {
 		icon: 'build/icon.ico',
-		// Signing is not configured. The Store target does not need it — Microsoft
-		// re-signs — and the direct-download targets ship unsigned, with no
-		// certificate planned. Stated rather than omitted, so
-		// nobody reads the absence as an oversight.
+		// Despite its name, this switch also applies the icon, version and publisher
+		// resources. Keep that half on; `signExecutable` below is the switch that
+		// explicitly disables only signing. The Store target is re-signed by
+		// Microsoft, and the direct downloads intentionally remain unsigned.
 		signAndEditExecutable: true,
+		signExecutable: false,
 		target: [
 			{ target: 'nsis', arch: ['x64', 'arm64'] },
 			{ target: 'portable', arch: ['x64'] }

@@ -11,6 +11,7 @@ import {
 	recoveryDirectory,
 	recoveryFilesFor,
 	recoveryPathFor,
+	recoveryPathForAuthenticator,
 	updateRecoveryFile,
 	writeRecoveryFile
 } from '../src/main/vault/recovery';
@@ -189,9 +190,9 @@ describe('correcting a recovery file after a restart', () => {
 		hooks().writeRecovery(account({ status: 'pendingActivation' }));
 
 		// Restart. Nothing is remembered.
-		hooks().updateRecovery(account({ status: 'pendingRevocationBackup' }));
+		expect(hooks().updateRecovery(account({ status: 'pendingRevocationBackup' }))).toBe('updated');
 
-		const path = recoveryPathFor(dir, '76561199999999999');
+		const path = recoveryPathForAuthenticator(dir, account());
 		const recovered = await readRecoveryFile(readFileSync(path, 'utf8'), PASS);
 		expect(recovered.account.status).toBe('pendingRevocationBackup');
 	});
@@ -201,29 +202,30 @@ describe('correcting a recovery file after a restart', () => {
 		// addition to the remembered path, not instead of it.
 		const live = hooks();
 		live.writeRecovery(account({ status: 'pendingActivation' }));
-		live.updateRecovery(account({ status: 'active' }));
+		expect(live.updateRecovery(account({ status: 'active' }))).toBe('updated');
 
-		const path = recoveryPathFor(dir, '76561199999999999');
+		const path = recoveryPathForAuthenticator(dir, account());
 		const recovered = await readRecoveryFile(readFileSync(path, 'utf8'), PASS);
 		expect(recovered.account.status).toBe('active');
 	});
 
-	it('leaves both alone when an earlier enrollment left a file behind', async () => {
-		// Two files for one SteamID: nothing can say which belongs to the account
-		// being activated, and rewriting the wrong one destroys a backup for an
-		// authenticator that account no longer has.
-		hooks().writeRecovery(account({ status: 'pendingActivation' }));
-		hooks().writeRecovery(account({ status: 'pendingActivation' }));
+	it('updates only the deterministic legacy file when an unowned sibling also exists', async () => {
+		// Pre-marker accounts have one safe compatibility identity: the deterministic
+		// filename includes this authenticator's fingerprint. A timestamped sibling
+		// is never inferred from enumeration and remains byte-for-byte independent.
+		const primary = hooks().writeRecovery(account({ status: 'pendingActivation' }));
+		const sibling = hooks().writeRecovery(account({ status: 'pendingActivation' }));
+		const siblingBefore = readFileSync(sibling, 'utf8');
 
-		hooks().updateRecovery(account({ status: 'active' }));
+		expect(hooks().updateRecovery(account({ status: 'active' }))).toBe('updated');
 
-		const path = recoveryPathFor(dir, '76561199999999999');
-		const primary = await readRecoveryFile(readFileSync(path, 'utf8'), PASS);
-		expect(primary.account.status).toBe('pendingActivation');
+		const updated = await readRecoveryFile(readFileSync(primary, 'utf8'), PASS);
+		expect(updated.account.status).toBe('active');
+		expect(readFileSync(sibling, 'utf8')).toBe(siblingBefore);
 	});
 
 	it('does nothing when no file was ever written', () => {
-		expect(() => hooks().updateRecovery(account())).not.toThrow();
+		expect(hooks().updateRecovery(account())).toBe('missing');
 		expect(recoveryFilesFor(dir, '76561199999999999')).toHaveLength(0);
 	});
 });

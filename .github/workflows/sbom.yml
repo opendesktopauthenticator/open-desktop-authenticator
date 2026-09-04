@@ -88,9 +88,9 @@ jobs:
       # A green check is worth nothing until it has been seen to go red for the
       # right reason, and the step above is green whether it is comparing
       # carefully or comparing nothing — that is exactly how the check this one
-      # replaced survived three separate ways through it. So the two failures
+      # replaced survived three separate ways through it. So the three failures
       # that matter are produced from the real scanner output and fed back in.
-      # Both must be rejected, and neither may leave a receipt behind, because
+      # All must be rejected, and none may leave a receipt behind, because
       # the receipt is what the release's checksum step trusts.
       - name: Check the guard still fails on an SBOM it should reject
         run: |
@@ -140,10 +140,12 @@ jobs:
           fs.writeFileSync('selftest-no-electron.spdx.json', JSON.stringify(withoutElectron));
           MUTATE
 
-          # And the two checks added since. A guard is worth nothing until it has
-          # been seen to go red for the right reason, and neither of these had
-          # been: the duplicate rule and the electron category shipped with
-          # nothing anywhere exercising them.
+          expect_red 'an SBOM containing development dependencies' selftest-dev-closure.spdx.json
+          expect_red 'an SBOM missing the Electron runtime' selftest-no-electron.spdx.json
+
+          # And the duplicate check added since. A guard is worth nothing until
+          # it has been seen to go red for the right reason, and this rule had
+          # shipped with nothing anywhere exercising it.
           node - <<'MUTATE2'
           const fs = require('node:fs');
           const sbom = JSON.parse(fs.readFileSync('sbom.spdx.json', 'utf8'));

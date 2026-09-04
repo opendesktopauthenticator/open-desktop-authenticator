@@ -14,10 +14,11 @@
  * "there are a lot of errors" should be a thing this prints rather than a thing
  * somebody has to read a terminal for.
  */
-import { app, webContents } from 'electron';
+import { app, BaseWindow, webContents } from 'electron';
 import { createServer } from 'node:http';
 
 import { electronBrowserHost } from '../src/main/browser/electron-host.ts';
+import { loadInitialBrowserPage } from '../src/main/browser/window.ts';
 import { DIRECT_CONTENT_DOMAINS, planProxy, steamOnlyBypass } from '../src/main/net/egress.ts';
 
 const results = [];
@@ -31,6 +32,16 @@ process.on('uncaughtException', (err) => problems.push(`uncaught: ${err.message}
 process.on('unhandledRejection', (err) => problems.push(`unhandled rejection: ${String(err)}`));
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Poll a real Chromium transition without treating one machine's DNS latency as failure. */
+const waitFor = async (predicate, timeoutMs = 8000) => {
+	const end = Date.now() + timeoutMs;
+	while (Date.now() < end) {
+		if (predicate()) return true;
+		await wait(50);
+	}
+	return predicate();
+};
 
 const deadline = setTimeout(() => {
 	// Print what was collected: a hang usually means something threw into the
@@ -78,6 +89,145 @@ const main = async () => {
 	const resolved = await session.resolveProxy('https://steamcommunity.com/');
 	check('the session answers resolveProxy', typeof resolved === 'string', resolved);
 
+	/*
+	 * The account opener uses this mode while it judges Steam's first landing.
+	 * A dead session lands on a real password form, so it is not enough to close
+	 * the window after the load: that page must never have become visible.
+	 */
+	const beforeHidden = new Set(BaseWindow.getAllWindows().map((candidate) => candidate.id));
+	const beforeHiddenContents = new Set(
+		webContents.getAllWebContents().map((candidate) => candidate.id)
+	);
+	const hiddenLanding = createServer((request, response) => {
+		response.setHeader('content-type', 'text/html');
+		if (request.url === '/partial') {
+			// Headers and useful-looking body bytes arrive, but the response never
+			// finishes. This is the real Chromium case in which loadURL stayed pending.
+			response.writeHead(200, { 'content-length': '1000000' });
+			response.write('<title>Partial Steam-shaped page</title><h1>still loading');
+			return;
+		}
+		if (request.url === '/popup') {
+			response.end('<title>Accepted-looking popup</title><h1>popup</h1>');
+			return;
+		}
+		response.end(
+			'<title>Sign in</title><input type="password"><script>window.open("/popup")</script>'
+		);
+	});
+	await new Promise((resolve) => hiddenLanding.listen(0, '127.0.0.1', resolve));
+	const hiddenAddress = hiddenLanding.address();
+	const passwordPage = `http://127.0.0.1:${hiddenAddress.port}/landing`;
+	const hidden = electronBrowserHost.createWindow({
+		width: 700,
+		height: 500,
+		title: 'unjudged landing',
+		partition: 'browser-smoke-hidden',
+		userAgent: 'SmokeTest/1',
+		show: false
+	});
+	hidden.setWindowOpenHandler(() => ({ action: 'deny' }));
+	const hiddenNative = BaseWindow.getAllWindows().find(
+		(candidate) => !beforeHidden.has(candidate.id)
+	);
+	check(
+		'a first landing can be created without exposing a native window',
+		hiddenNative !== undefined && !hiddenNative.isVisible()
+	);
+	const exactLanding = await hidden.loadURL(passwordPage);
+	await wait(300);
+	check(
+		'a parsed password page remains hidden until the caller accepts the landing',
+		hidden.currentUrl() === passwordPage && hiddenNative !== undefined && !hiddenNative.isVisible()
+	);
+	check(
+		'the first-load result names that exact tab, not a mutable active tab',
+		exactLanding === passwordPage,
+		String(exactLanding)
+	);
+	check(
+		'a popup cannot replace or survive beside an unjudged first landing',
+		!webContents
+			.getAllWebContents()
+			.filter((candidate) => !beforeHiddenContents.has(candidate.id))
+			.some((candidate) => candidate.getURL().endsWith('/popup'))
+	);
+	hidden.show();
+	check('an accepted landing can then be revealed', hiddenNative?.isVisible() === true);
+
+	/*
+	 * A response can be alive enough to deliver headers and a body prefix while
+	 * never completing. Drive the production deadline helper against that exact
+	 * socket state, then prove a new real Electron window can load immediately.
+	 */
+	const beforeStallContents = new Set(
+		webContents.getAllWebContents().map((candidate) => candidate.id)
+	);
+	const stalled = electronBrowserHost.createWindow({
+		width: 700,
+		height: 500,
+		title: 'bounded partial landing',
+		partition: 'browser-smoke-partial',
+		userAgent: 'SmokeTest/1',
+		show: false
+	});
+	const partialOutcome = await loadInitialBrowserPage(
+		stalled,
+		`http://127.0.0.1:${hiddenAddress.port}/partial`,
+		{
+			timeoutMs: 300,
+			schedule: (callback, timeoutMs) => setTimeout(callback, timeoutMs),
+			cancel: (handle) => clearTimeout(handle)
+		}
+	).then(
+		() => 'resolved',
+		(error) => `rejected: ${error instanceof Error ? error.message : String(error)}`
+	);
+	check(
+		'a partial response which never ends reaches the first-page deadline',
+		partialOutcome.includes('timed out'),
+		partialOutcome
+	);
+	stalled.close();
+	await electronBrowserHost
+		.sessionFromPartition('browser-smoke-partial', { cache: false })
+		.clearStorageData?.();
+	const retiredStall = await waitFor(
+		() =>
+			stalled.isDestroyed() &&
+			!webContents
+				.getAllWebContents()
+				.filter((candidate) => !beforeStallContents.has(candidate.id))
+				.some((candidate) => !candidate.isDestroyed())
+	);
+	check('the timed-out hidden window leaves no live WebContents behind', retiredStall);
+
+	const retry = electronBrowserHost.createWindow({
+		width: 700,
+		height: 500,
+		title: 'retry after partial landing',
+		partition: 'browser-smoke-partial',
+		userAgent: 'SmokeTest/1',
+		show: false
+	});
+	const retryLanding = await loadInitialBrowserPage(
+		retry,
+		`http://127.0.0.1:${hiddenAddress.port}/popup`,
+		{
+			timeoutMs: 2_000,
+			schedule: (callback, timeoutMs) => setTimeout(callback, timeoutMs),
+			cancel: (handle) => clearTimeout(handle)
+		}
+	);
+	check(
+		'a fresh real Electron window loads after the timed-out attempt',
+		retryLanding.endsWith('/popup')
+	);
+	retry.close();
+	await electronBrowserHost
+		.sessionFromPartition('browser-smoke-partial', { cache: false })
+		.clearStorageData?.();
+
 	const titles = [];
 	const window = electronBrowserHost.createWindow({
 		width: 1100,
@@ -86,6 +236,12 @@ const main = async () => {
 		partition,
 		userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) SmokeTest/1'
 	});
+	// Keep one native window alive before retiring the probe: Electron exits when
+	// its last window closes, which would turn the rest of this run into a false
+	// successful no-op.
+	hidden.close();
+	hiddenLanding.close();
+	await wait(200);
 	window.on('navigated', (url) => titles.push(url));
 	window.setWebRtcPolicy('default');
 	check('the window is created without throwing', !window.isDestroyed());
@@ -175,7 +331,7 @@ const main = async () => {
 		a.value = ${JSON.stringify('example.com')};
 		a.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
 	})()`);
-	await wait(600);
+	await waitFor(() => window.currentUrl().startsWith('https://example.com'));
 	check(
 		'typing a bare host navigates the active tab',
 		window.currentUrl().startsWith('https://example.com'),
@@ -195,8 +351,93 @@ const main = async () => {
 		window.currentUrl().startsWith('data:text/html'),
 		window.currentUrl()
 	);
+	check(
+		'pointer tab selection gives native focus to the selected page',
+		!chrome.isFocused(),
+		`chrome focused = ${chrome.isFocused()}`
+	);
 
-	// Closing a tab, and closing the last one closing the window.
+	/*
+	 * Delete crosses both focus systems in the real window. The isolated chrome
+	 * smoke can prove DOM focus, but not that Chromium still sends keys to that
+	 * WebContents after the host focuses the replacement page.
+	 */
+	await run('document.getElementById("newtab").click()');
+	await wait(300);
+	check(
+		'a third tab is available for keyboard focus traversal',
+		(await run('document.querySelectorAll("[role=tab]").length')) === 3
+	);
+	// Make the first tab active again; deleting it exercises `show(neighbour)`,
+	// the path that temporarily gives native focus to the page.
+	await run(
+		'document.querySelectorAll("[role=tab]")[0].dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }))'
+	);
+	await wait(300);
+	chrome.focus();
+	await run(`(() => {
+		const tab = document.querySelectorAll('[role=tab]')[0];
+		tab.focus();
+		tab.dispatchEvent(new KeyboardEvent('keydown', {
+			key: 'Delete', bubbles: true, cancelable: true
+		}));
+	})()`);
+	await wait(400);
+	check(
+		'Delete closes the active tab in the real browser window',
+		(await run('document.querySelectorAll("[role=tab]").length')) === 2
+	);
+	check(
+		'Delete returns native focus to the tab strip',
+		chrome.isFocused(),
+		`chrome focused = ${chrome.isFocused()}`
+	);
+	const focusedAfterDelete = await run(`JSON.stringify({
+		role: document.activeElement?.getAttribute('role'),
+		id: document.activeElement?.getAttribute('data-tab-id')
+	})`);
+	check(
+		'Delete gives DOM focus to the neighbouring tab',
+		JSON.parse(focusedAfterDelete).role === 'tab',
+		focusedAfterDelete
+	);
+	const beforeArrow = JSON.parse(focusedAfterDelete).id;
+	await run(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {
+		key: 'ArrowRight', bubbles: true, cancelable: true
+	}))`);
+	const afterArrow = await run("document.activeElement?.getAttribute('data-tab-id')");
+	check(
+		'the next keyboard command still reaches the tab strip',
+		typeof afterArrow === 'string' && afterArrow !== beforeArrow,
+		`${beforeArrow} -> ${afterArrow}`
+	);
+	await run(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {
+		key: 'Enter', bubbles: true, cancelable: true
+	}))`);
+	await wait(300);
+	const focusedAfterEnter = await run("document.activeElement?.getAttribute('role')");
+	check(
+		'Enter activates the keyboard-focused tab without leaving the strip',
+		window.currentUrl() === 'about:blank' && chrome.isFocused() && focusedAfterEnter === 'tab',
+		`url = ${JSON.stringify(window.currentUrl())}; chrome focused = ${chrome.isFocused()}; DOM role = ${String(focusedAfterEnter)}`
+	);
+	await run(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {
+		key: 'ArrowLeft', bubbles: true, cancelable: true
+	}))`);
+	await run(`document.activeElement.dispatchEvent(new KeyboardEvent('keydown', {
+		key: ' ', bubbles: true, cancelable: true
+	}))`);
+	await wait(300);
+	const focusedAfterSpace = await run("document.activeElement?.getAttribute('role')");
+	check(
+		'Space activates another tab without leaving the strip',
+		window.currentUrl().startsWith('https://example.com') &&
+			chrome.isFocused() &&
+			focusedAfterSpace === 'tab',
+		`url = ${JSON.stringify(window.currentUrl())}; chrome focused = ${chrome.isFocused()}; DOM role = ${String(focusedAfterSpace)}`
+	);
+
+	// A pointer close still works after the keyboard path.
 	await run(
 		'document.querySelectorAll(".tab .x")[1].dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true }))'
 	);

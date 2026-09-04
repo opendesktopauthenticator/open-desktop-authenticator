@@ -109,6 +109,29 @@ describe('what gets copied to the server', () => {
 	});
 });
 
+describe('ticket-service shutdown coordination', () => {
+	const ticketServer = readFileSync(join(__dirname, '../tickets/server.mjs'), 'utf8');
+	const ticketUnit = readFileSync(join(INFRA, 'systemd', 'tickets.service'), 'utf8');
+
+	it('gives application cleanup time before systemd may force-kill it', () => {
+		const applicationDeadline = /SHUTDOWN_DEADLINE_MS\s*=\s*([\d_]+)/.exec(ticketServer)?.[1];
+		const systemdDeadline = /^TimeoutStopSec=(\d+)s$/m.exec(ticketUnit)?.[1];
+		expect(applicationDeadline, 'the service has no bounded cleanup deadline').toBeDefined();
+		expect(systemdDeadline, 'systemd can kill the service on its implicit default').toBeDefined();
+		expect(ticketServer).toMatch(
+			/function shutdownTicketServer\(\{ forceAfterMs = SHUTDOWN_DEADLINE_MS \} = \{\}\)/
+		);
+
+		const applicationMs = Number(applicationDeadline?.replaceAll('_', ''));
+		const systemdMs = Number(systemdDeadline) * 1000;
+		expect(applicationMs).toBeGreaterThan(0);
+		expect(
+			systemdMs,
+			'systemd kills the service before its own cleanup can finish'
+		).toBeGreaterThan(applicationMs);
+	});
+});
+
 /*
  * The scheduled jobs have to survive the states a real box is actually in.
  */
@@ -116,16 +139,14 @@ describe('the backup job', () => {
 	const backup = readFileSync(join(__dirname, '../infra/oda-backup.sh'), 'utf8');
 
 	it('does not hand tar a directory that may not exist', () => {
-		// The service creates `attachments/` lazily on the first upload, so a
-		// fresh or text-only deployment has a database and no directory — and tar
-		// exits 1 on a path it cannot visit. Under `set -e` that killed the job
-		// before retention, chmod, snapshot cleanup and the success log, so
-		// systemd reported a failed backup every single day.
-		expect(backup).toContain('if [ -d /var/lib/tickets/attachments ]; then');
-		// And the fallback still archives the database itself.
-		expect(backup).toMatch(
-			/else\s*\n\s*tar -czf "\$tickets" -C "\$snapshot" tickets\.db\s*\n\s*fi/
-		);
+		// The service creates `attachments/` lazily on the first upload. The
+		// consistency design now turns either state into a manifest and gives tar
+		// only the exact file list, so an absent directory is an ordinary empty
+		// list rather than a missing tar operand.
+		expect(backup).toContain('if [ -d "$attachments_dir" ]; then');
+		expect(backup).toContain(': > "$snapshot/attachments.manifest"');
+		expect(backup).toContain('--files-from="$snapshot/archive-files.list"');
+		expect(backup).not.toMatch(/-C \/var\/lib\/tickets attachments/);
 	});
 
 	it('no longer hides tar failures on the reports archive', () => {

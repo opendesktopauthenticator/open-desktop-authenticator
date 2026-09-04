@@ -1,4 +1,5 @@
 import { CHANNELS } from '../../shared/channels';
+import type { ToastClick } from '../../shared/ipc';
 import { registerHandler } from '../ipc/router';
 
 /**
@@ -34,10 +35,14 @@ import { registerHandler } from '../ipc/router';
  */
 const CLICK_LIFETIME_MS = 5 * 60 * 1000;
 
+export type { ToastClick } from '../../shared/ipc';
+
 export class ToastClickRouter {
 	private readonly reveal: () => void;
-	private readonly push: (steamId64: string) => void;
+	private readonly push: (click: ToastClick) => void;
 	private readonly now: () => number;
+	/** Monotonic process-local identity. A second click is never the first click. */
+	private sequence = 0;
 
 	/**
 	 * The account a click asked for, until a renderer takes it.
@@ -46,14 +51,14 @@ export class ToastClickRouter {
 	 * the person wants the second one; a backlog of navigations nobody asked for
 	 * is worse than forgetting the first.
 	 */
-	private pending: string | undefined;
+	private pending: ToastClick | undefined;
 
 	/** When the click that set `pending` happened. */
 	private pendingAt = 0;
 
 	constructor(options: {
 		reveal: () => void;
-		push: (steamId64: string) => void;
+		push: (click: ToastClick) => void;
 		/**
 		 * **Monotonic, not wall-clock.**
 		 *
@@ -83,10 +88,14 @@ export class ToastClickRouter {
 	 * reloaded by a lock, so the two paths have to be able to run together.
 	 */
 	activate(steamId64: string): void {
-		this.pending = steamId64;
+		if (this.sequence >= Number.MAX_SAFE_INTEGER) {
+			throw new Error('notification click sequence exhausted');
+		}
+		const click: ToastClick = { steamId64, token: ++this.sequence };
+		this.pending = click;
 		this.pendingAt = this.now();
 		this.reveal();
-		this.push(steamId64);
+		this.push(click);
 	}
 
 	/**
@@ -103,14 +112,14 @@ export class ToastClickRouter {
 	 * The push path had this right from the start — it gates its clear on that
 	 * same boolean — and the path that exists for the harder case did not.
 	 */
-	peek(): { steamId64?: string } {
+	peek(): Record<string, never> | ToastClick {
 		if (this.pending !== undefined && this.now() - this.pendingAt >= CLICK_LIFETIME_MS) {
 			// Dropped on the way out rather than left to be re-read: an expired
 			// intent that stays in the slot is answered again by every later peek.
 			this.pending = undefined;
 			return {};
 		}
-		return this.pending === undefined ? {} : { steamId64: this.pending };
+		return this.pending === undefined ? {} : { ...this.pending };
 	}
 
 	/**
@@ -120,8 +129,8 @@ export class ToastClickRouter {
 	 * second click arriving between the peek and the acknowledgement is a newer
 	 * intention, and it must not be swallowed by an acknowledgement of the first.
 	 */
-	acknowledge(steamId64: string): void {
-		if (this.pending === steamId64) {
+	acknowledge(click: ToastClick): void {
+		if (this.pending?.token === click.token && this.pending.steamId64 === click.steamId64) {
 			this.pending = undefined;
 		}
 	}
@@ -149,10 +158,49 @@ export class ToastClickRouter {
 	 * confirmation list for a reason that no longer exists.
 	 */
 	forgetAccount(steamId64: string): void {
-		if (this.pending === steamId64) {
+		if (this.pending?.steamId64 === steamId64) {
 			this.pending = undefined;
 		}
 	}
+}
+
+/**
+ * Refuse an acknowledgement from a renderer that is being replaced by lock.
+ * Exported so the lock/reload ordering is exercised without mocking Electron's
+ * global IPC registry.
+ */
+export function acknowledgeToastClickWhileUnlocked(
+	router: ToastClickRouter,
+	isUnlocked: () => boolean,
+	click: ToastClick
+): boolean {
+	if (!isUnlocked()) {
+		return false;
+	}
+	router.acknowledge(click);
+	return true;
+}
+
+/**
+ * Route a native activation without trusting a renderer's possibly stale
+ * account snapshot. `undefined` means the vault is locked (or locked during the
+ * read), in which case the intent is retained for the next unlocked document.
+ */
+export function activateToastForKnownAccount(
+	router: ToastClickRouter,
+	steamId64: string,
+	accountExists: () => boolean | undefined,
+	touch: () => void
+): boolean {
+	const exists = accountExists();
+	if (exists === false) {
+		return false;
+	}
+	if (exists) {
+		touch();
+	}
+	router.activate(steamId64);
+	return true;
 }
 
 /**
@@ -160,10 +208,19 @@ export class ToastClickRouter {
  * it. A channel in the contract with nothing answering it fails at runtime, in
  * a packaged build, on a screen somebody is looking at.
  */
-export function registerToastClickHandlers(router: ToastClickRouter): void {
+export function registerToastClickHandlers(
+	router: ToastClickRouter,
+	isUnlocked: () => boolean = () => true
+): void {
 	registerHandler(CHANNELS.takePendingConfirmations, ({ acknowledged }) => {
 		if (acknowledged !== undefined) {
-			router.acknowledge(acknowledged);
+			/*
+			 * Lock reloads the renderer. An acknowledgement sent by the document
+			 * being torn down must not consume a click that arrived after the lock:
+			 * that state update dies with the old document, while this retained copy
+			 * is the only route the new one has to the user's intention.
+			 */
+			acknowledgeToastClickWhileUnlocked(router, isUnlocked, acknowledged);
 			return {};
 		}
 		return router.peek();

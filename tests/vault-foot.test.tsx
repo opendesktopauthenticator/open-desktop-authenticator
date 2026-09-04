@@ -61,7 +61,8 @@ const render = (accounts: AccountSummary[]) =>
 			onRecover={noop}
 			onEnrol={noop}
 			onFinishActivation={noop}
-			onExport={() => Promise.resolve({ written: false } as never)}
+			onFinishRecoveryBackup={noop}
+			onExport={noop}
 			onSettings={noop}
 			onAbout={noop}
 			onActivity={noop}

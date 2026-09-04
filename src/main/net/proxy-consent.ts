@@ -204,12 +204,14 @@ export class ProxyConsent {
 		 */
 		if (asked !== this.generation) {
 			throw new EgressError(
-				`the vault locked while ${plan.endpoint} was waiting to be approved, so it was not used`
+				`the vault locked while ${plan.endpoint} was waiting to be approved, so it was not used`,
+				false
 			);
 		}
 		if (!allowed) {
 			throw new EgressError(
-				`sending this account's traffic through ${plan.endpoint} was not approved`
+				`sending this account's traffic through ${plan.endpoint} was not approved`,
+				false
 			);
 		}
 		this.approved.add(key);

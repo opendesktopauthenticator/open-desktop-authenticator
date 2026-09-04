@@ -224,24 +224,37 @@ describe('closed reports do not live for ever', () => {
 });
 
 describe('the privacy page describes the code', () => {
-	it('publishes the same retention periods the service implements', () => {
+	it('distinguishes eligibility from the hourly deletion attempt', () => {
 		// A privacy policy describing what the code used to do is worse than none.
-		// These are the two durations the page states in words.
+		// Eligibility is not an upper bound: an upload just missing one sweep first
+		// becomes eligible at two hours and is removed by the following hourly run.
 		const source = readFileSync('tickets/server.mjs', 'utf8');
 
-		const unclaimedHours = /UNCLAIMED_LIFETIME_MS = (\d+) \* 60 \* 60 \* 1000/.exec(source)?.[1];
-		expect(unclaimedHours, 'the unclaimed-upload window must be findable').toBeDefined();
+		const eligibleHours = Number(
+			/UNCLAIMED_LIFETIME_MS = (\d+) \* 60 \* 60 \* 1000/.exec(source)?.[1]
+		);
+		const sweepMinutes = Number(/setInterval\(sweepAll, (\d+) \* 60 \* 1000\)/.exec(source)?.[1]);
+		expect(eligibleHours, 'the unclaimed-upload eligibility age must be findable').toBe(2);
+		expect(sweepMinutes, 'the sweep cadence must be findable').toBe(60);
+		expect(eligibleHours + sweepMinutes / 60).toBe(3);
 
 		const closedDays = /CLOSED_RETENTION_MS = (\d+) \* 24 \* 60 \* 60 \* 1000/.exec(source)?.[1];
 		expect(closedDays, 'the closed-report window must be findable').toBeDefined();
 
 		const page = readFileSync('site/pages/privacy.mjs', 'utf8');
-		expect(page, `page must state the ${unclaimedHours}-hour unclaimed window`).toContain(
-			`${unclaimedHours} hours`
-		);
+		expect(page).toContain('Eligible for deletion after 2 hours');
+		expect(page).toMatch(/normally removed within a few hours/i);
+		expect(page).toMatch(/failed removals are retried until they\s+succeed/i);
+		expect(page).not.toContain('<td>2 hours</td>');
 		expect(page, `page must state the ${closedDays}-day closed window`).toContain(
 			`${closedDays} days`
 		);
+
+		const guide = readFileSync('site/pages/guides.mjs', 'utf8');
+		expect(guide).toMatch(/eligible\s+for deletion after two hours/i);
+		expect(guide).toMatch(/normally removed within a few hours/i);
+		expect(guide).toMatch(/failed removal is retried/i);
+		expect(guide).not.toContain('deleted within two hours');
 	});
 });
 

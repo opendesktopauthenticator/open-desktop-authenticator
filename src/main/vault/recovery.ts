@@ -3,6 +3,7 @@ import {
 	chmodSync,
 	closeSync,
 	existsSync,
+	fstatSync,
 	linkSync,
 	fsyncSync,
 	mkdirSync,
@@ -10,10 +11,9 @@ import {
 	readdirSync,
 	readFileSync,
 	renameSync,
-	statSync,
 	rmSync,
+	statSync,
 	unlinkSync,
-	writeFileSync,
 	writeSync
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -21,6 +21,7 @@ import { z } from 'zod';
 import { open } from './crypto';
 import { accountSchema, type Account } from '../../shared/vault-schema';
 import { envelopeSchema } from '../../shared/vault-format';
+import { authenticatorFingerprint } from '../steam/authenticator-secrets';
 
 /**
  * A per-account recovery file, written the moment an authenticator is created.
@@ -34,9 +35,10 @@ import { envelopeSchema } from '../../shared/vault-format';
  * *whole* vault and is overwritten by the next save, so two saves after a
  * removal it is gone too.
  *
- * So this is written **once, at enrollment**, and never touched again. Removal
- * does not delete it. That is deliberate: a safety net that the accident also
- * destroys is not a safety net.
+ * It is first written at enrollment, before activation can complete, and its
+ * status is corrected after Steam confirms activation. Removal does not delete
+ * it. That is deliberate: a safety net that the accident also destroys is not
+ * a safety net.
  *
  * ## Why not SDA's encrypted format
  *
@@ -94,6 +96,11 @@ export function recoveryPathFor(userDataPath: string, steamId64: string): string
 export function recoveryContents(account: Account, nowIso: string): string {
 	const copy: Account = { ...account };
 	delete copy.refreshToken;
+	// This names a file in this installation's private data directory. Carrying
+	// it inside the portable recovery document would make a restored account
+	// claim ownership of a pathname that may not exist on this machine — or may
+	// belong to a different installation entirely.
+	delete copy.recoveryBackup;
 
 	const file: RecoveryFile = {
 		kind: 'oda-account-recovery',
@@ -147,16 +154,61 @@ function writeAll(fd: number, text: string): void {
 	}
 }
 
+const LINK_UNSUPPORTED = new Set(['EACCES', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV']);
+
+/**
+ * Whether a pathname still names the file represented by an open descriptor.
+ *
+ * Reading the pathname back is not ownership proof: another writer can replace
+ * it with the same bytes. `dev` + `ino` is the identity the kernel gives the
+ * open file and its current directory entry. Keeping the descriptor open until
+ * immediately after this check makes a replacement visible on filesystems that
+ * expose that identity (including the filesystems supported by Node on our
+ * release platforms).
+ */
+function pathStillNames(fd: number, path: string): boolean {
+	try {
+		const held = fstatSync(fd, { bigint: true });
+		const named = statSync(path, { bigint: true });
+		return held.dev === named.dev && held.ino === named.ino;
+	} catch {
+		return false;
+	}
+}
+
+function unlinkStillOwned(path: string, fd: number): void {
+	if (!pathStillNames(fd, path)) {
+		throw new Error(`refusing to remove a recovery staging pathname no longer owned: ${path}`);
+	}
+	unlinkSync(path);
+}
+
+function closeWithoutMasking(fd: number | undefined): void {
+	if (fd === undefined) return;
+	try {
+		closeSync(fd);
+	} catch {
+		// A publication error carries the useful diagnosis; closing is best effort.
+	}
+}
+
 function durably(path: string, body: string): void {
 	const temp = `${path}.${randomUUID()}.tmp`;
+	let staged: number | undefined;
+	let stageIsComplete = false;
 	try {
-		const fd = openSync(temp, 'wx', 0o600);
-		try {
-			writeAll(fd, body);
-			fsyncSync(fd);
-		} finally {
-			closeSync(fd);
-		}
+		staged = openSync(temp, 'wx+', 0o600);
+		writeAll(staged, body);
+		fsyncSync(staged);
+		stageIsComplete = true;
+
+		/*
+		 * The stage is the durable witness that creation of the recovery directory
+		 * still needs its parent flushed. Do this on every attempt rather than
+		 * inferring durability from `existsSync(directory)`: if this sync fails, the
+		 * complete stage remains and reconciliation repeats the barrier next time.
+		 */
+		syncDirectory(dirname(dirname(path)));
 		/*
 		 * **`link`, not `rename`, and that distinction is the whole point.**
 		 *
@@ -183,6 +235,11 @@ function durably(path: string, body: string): void {
 			linkSync(temp, path);
 		} catch (err) {
 			if ((err as NodeJS.ErrnoException | undefined)?.code === 'EEXIST') {
+				unlinkStillOwned(temp, staged);
+				stageIsComplete = false;
+				throw err;
+			}
+			if (!LINK_UNSUPPORTED.has((err as NodeJS.ErrnoException | undefined)?.code ?? '')) {
 				throw err;
 			}
 			/*
@@ -197,73 +254,101 @@ function durably(path: string, body: string): void {
 			 * recovery file - the one file here whose whole purpose is to still be
 			 * there later.
 			 *
-			 * So the name is claimed with the same exclusion, on the destination
-			 * itself: `wx` creates it or fails EEXIST, atomically, on every
-			 * filesystem. One syscall, not a check and then an action. The rename that
-			 * follows overwrites nothing but the empty file this call just made, and
-			 * anyone racing for the name has already lost it.
-			 *
-			 * A crash between the two leaves an empty file rather than a wrong one,
-			 * which is the right way for this to fail: it costs a later enrolment for
-			 * the same account an EEXIST it can report, and it cannot destroy a
-			 * recovery file that was already there, because such a file would have
-			 * taken the name first and failed this open.
+			 * So the name is claimed with `wx` and the document is written through that
+			 * still-open descriptor. Closing an empty placeholder and renaming over its
+			 * pathname was not ownership: another writer could unlink it and put a
+			 * recovery file there before the rename, and the rename then destroyed that
+			 * file. Keeping the descriptor open, and verifying the pathname afterwards,
+			 * makes that replacement observable without ever overwriting it.
 			 */
-			closeSync(openSync(path, 'wx', 0o600));
+			let claimed: number | undefined;
+			let destinationFlushed = false;
 			try {
-				renameSync(temp, path);
-			} catch (renameFailed) {
-				/*
-				 * Leaving the empty placeholder behind would deny the name to every
-				 * later attempt, for a write that never happened.
-				 */
-				try {
-					unlinkSync(path);
-				} catch {
-					/* best effort */
+				claimed = openSync(path, 'wx+', 0o600);
+				writeAll(claimed, body);
+				fsyncSync(claimed);
+				destinationFlushed = true;
+				if (!pathStillNames(claimed, path) || readFileSync(path, 'utf8') !== body) {
+					throw new Error('the published recovery file was replaced while it was being written', {
+						cause: err
+					});
 				}
-				throw renameFailed;
+				/* Keep the staged witness until the new destination entry is durable. */
+				syncDirectory(dirname(path));
+				unlinkStillOwned(temp, staged);
+				stageIsComplete = false;
+			} catch (writeFailed) {
+				if (!destinationFlushed && claimed !== undefined && pathStillNames(claimed, path)) {
+					try {
+						unlinkSync(path);
+					} catch {
+						// The complete stage remains the recoverable copy.
+					}
+				}
+				throw writeFailed;
+			} finally {
+				closeWithoutMasking(claimed);
 			}
-			// The rename consumed it; there is nothing left to unlink.
-			syncDirectory(dirname(path));
 			return;
 		}
 
 		/*
-		 * The link succeeded, so the same bytes are now reachable under two names.
-		 * Dropping the temp leaves one file — and it has to happen here rather than
-		 * in the catch, which only runs when something went wrong.
+		 * The link succeeded, so both names must still identify the descriptor we
+		 * wrote. Flush the target entry before dropping the only independently named
+		 * staged witness. A failed sync therefore leaves both names for restart.
 		 */
-		unlinkSync(temp);
+		if (!pathStillNames(staged, path)) {
+			throw new Error('the published recovery file no longer names the staged document');
+		}
 		syncDirectory(dirname(path));
+		if (!pathStillNames(staged, path)) {
+			throw new Error('the published recovery file changed after its directory sync');
+		}
+		unlinkStillOwned(temp, staged);
+		stageIsComplete = false;
 	} catch (err) {
-		try {
-			if (existsSync(temp)) {
-				unlinkSync(temp);
+		/*
+		 * A complete stage is deliberately retained: it is the retry evidence for
+		 * parent/target directory sync failures and for an interrupted fallback.
+		 * An incomplete stage has no recovery value and may be removed, but only
+		 * while its still-open descriptor proves the pathname is ours.
+		 */
+		if (!stageIsComplete && staged !== undefined) {
+			try {
+				if (pathStillNames(staged, temp)) unlinkSync(temp);
+			} catch {
+				/* preserve the original failure */
 			}
-		} catch {
-			/* best effort: a stray temp is not what the caller is told about */
 		}
 		throw err;
+	} finally {
+		closeWithoutMasking(staged);
 	}
 }
 
 /**
  * Flush the directory entry, so a rename survives a power cut.
  *
- * Best effort: Windows has no equivalent and rejects the open, and a recovery
- * file that is written but not durably indexed is still better than none.
+ * Windows has no equivalent and rejects the open. Only those platform-specific
+ * unsupported errors are ignored; an I/O or full-disk error on a platform that
+ * supports directory sync means publication is not known durable.
  */
 function syncDirectory(dir: string): void {
+	let fd: number | undefined;
 	try {
-		const fd = openSync(dir, 'r');
-		try {
-			fsyncSync(fd);
-		} finally {
-			closeSync(fd);
+		fd = openSync(dir, 'r');
+		fsyncSync(fd);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (
+			process.platform === 'win32' &&
+			(code === 'EPERM' || code === 'EACCES' || code === 'EINVAL' || code === 'EBADF')
+		) {
+			return;
 		}
-	} catch {
-		/* not supported here */
+		throw err;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
 	}
 }
 
@@ -275,7 +360,22 @@ function syncDirectory(dir: string): void {
  * be able to copy it and attack the passphrase offline at their leisure.
  */
 export function writeRecoveryFile(path: string, envelope: unknown): string {
-	mkdirSync(dirname(path), { recursive: true });
+	const directory = dirname(path);
+	mkdirSync(directory, { recursive: true });
+
+	/*
+	 * A previous call may have failed only at a directory durability barrier. Its
+	 * complete staged witness belongs to this exact deterministic destination, so
+	 * finish that attempt before creating another encrypted copy. Ambiguity is a
+	 * refusal, not permission to let enumeration order choose a winner.
+	 */
+	const resumed = reconcileRecoveryDirectory(directory, path);
+	if (resumed.ambiguous.includes(path)) {
+		throw new Error(`more than one recovery publication is staged for ${path}`);
+	}
+	if (resumed.finished.includes(path)) {
+		return path;
+	}
 	const body = `${JSON.stringify(envelope, null, 2)}\n`;
 
 	// `wx` — fail if it is already there.
@@ -317,8 +417,9 @@ export function writeRecoveryFile(path: string, envelope: unknown): string {
  *
  * Separate from `writeRecoveryFile`, and deliberately so: that one must never
  * overwrite, because what it would replace may be the only copy of a different
- * authenticator's secrets. This one overwrites on purpose, and callers must only
- * ever hand it a path returned by `writeRecoveryFile` during this same run.
+ * authenticator's secrets. This one overwrites on purpose, and callers must hand
+ * it only an exact path whose application ownership survived in the encrypted
+ * vault marker (or the deterministic exact-fingerprint legacy path).
  *
  * ## Why an update is needed at all
  *
@@ -343,18 +444,23 @@ export function updateRecoveryFile(path: string, envelope: unknown): void {
 	// truncated whatever already sat there — a leftover from a crashed update, or
 	// any sibling — and then renamed it into place as the recovery file.
 	const temp = `${path}.${randomUUID()}.tmp`;
+	const body = `${JSON.stringify(envelope, null, 2)}\n`;
 	try {
-		writeFileSync(
-			temp,
-			`${JSON.stringify(envelope, null, 2)}
-`,
-			{
-				encoding: 'utf8',
-				mode: 0o600,
-				flag: 'wx'
-			}
-		);
+		const fd = openSync(temp, 'wx', 0o600);
+		try {
+			writeAll(fd, body);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		if (readFileSync(temp, 'utf8') !== body) {
+			throw new Error('the staged recovery update did not read back exactly');
+		}
 		renameSync(temp, path);
+		syncDirectory(dirname(path));
+		if (readFileSync(path, 'utf8') !== body) {
+			throw new Error('the published recovery update did not read back exactly');
+		}
 	} catch (err) {
 		try {
 			rmSync(temp, { force: true });
@@ -390,8 +496,45 @@ export function updateRecoveryFile(path: string, envelope: unknown): void {
  * reproduce one by doing the same.
  */
 export interface RecoveryHooks {
-	writeRecovery: (account: Account) => void;
-	updateRecovery: (account: Account) => void;
+	writeRecovery: (account: Account) => string;
+	updateRecovery: (account: Account) => RecoveryUpdateResult;
+}
+
+export type RecoveryUpdateResult = 'updated' | 'missing' | 'ambiguous';
+
+/** Stable path identity for one authenticator, not merely one Steam account. */
+export function recoveryPathForAuthenticator(userDataPath: string, account: Account): string {
+	return join(
+		recoveryDirectory(userDataPath),
+		`${account.steamId64}.${authenticatorFingerprint(account)}${RECOVERY_EXTENSION}`
+	);
+}
+
+/**
+ * Whether a persisted basename could only have been allocated by this module
+ * for this exact authenticator.
+ *
+ * The deterministic name is used for the first copy. If that name is occupied,
+ * `supersededPath` adds an ISO timestamp and an eight-hex UUID fragment. Both
+ * forms are basenames only: separators are refused explicitly so a marker
+ * written on Windows cannot become a path on POSIX (or the other way round).
+ */
+export function isRecoveryFileNameForAuthenticator(account: Account, fileName: string): boolean {
+	if (
+		fileName.length === 0 ||
+		fileName.length > 255 ||
+		fileName.includes('/') ||
+		fileName.includes('\\')
+	) {
+		return false;
+	}
+	const identity = `${account.steamId64}.${authenticatorFingerprint(account)}`;
+	if (fileName === `${identity}${RECOVERY_EXTENSION}`) return true;
+	if (!fileName.startsWith(`${identity}.`) || !fileName.endsWith(RECOVERY_EXTENSION)) {
+		return false;
+	}
+	const allocation = fileName.slice(identity.length + 1, -RECOVERY_EXTENSION.length);
+	return /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.[0-9a-f]{8}$/i.test(allocation);
 }
 
 export function createRecoveryHooks(options: {
@@ -403,125 +546,258 @@ export function createRecoveryHooks(options: {
 }): RecoveryHooks {
 	const now = options.now ?? ((): number => Date.now());
 
-	/**
-	 * Where this run wrote each account's file.
-	 *
-	 * Not always the path asked for: a pre-existing backup for the same SteamID
-	 * sends the write to a sibling, and correcting the primary in that case would
-	 * overwrite an older enrollment's only copy.
-	 */
-	const written = new Map<string, string>();
-
 	const sealed = (account: Account): unknown =>
 		options.seal(recoveryContents(account, new Date(now()).toISOString()));
 
 	return {
 		writeRecovery: (account) => {
-			written.set(
-				account.steamId64,
-				writeRecoveryFile(
-					recoveryPathFor(options.userDataPath(), account.steamId64),
-					sealed(account)
-				)
+			return writeRecoveryFile(
+				recoveryPathForAuthenticator(options.userDataPath(), account),
+				sealed(account)
 			);
 		},
 
 		updateRecovery: (account) => {
-			// The map is empty after a restart, which is the common case rather than
-			// the exotic one. Falling back to the filesystem is safe only when the
-			// answer is unambiguous: exactly one file for this SteamID means one
-			// enrollment, and it is this one. Two means an earlier enrollment left a
-			// file behind and nothing here can say which belongs to this account, so
-			// neither is touched.
-			const found = recoveryFilesFor(options.userDataPath(), account.steamId64);
-			const path = written.get(account.steamId64) ?? (found.length === 1 ? found[0] : undefined);
-			if (path === undefined) {
-				return;
+			/*
+			 * The vault marker is the durable ownership proof. A process-local map made
+			 * the exact sibling discoverable only until restart, after which the old
+			 * implementation guessed from the number of files for a SteamID. One file
+			 * is not identity proof: it may be an older authenticator's only backup.
+			 *
+			 * Accounts written before the marker existed get one narrow compatibility
+			 * path: the deterministic filename for their exact authenticator
+			 * fingerprint. No enumeration and no singleton inference are involved.
+			 */
+			const marker = account.recoveryBackup;
+			if (
+				marker !== undefined &&
+				marker.authenticatorFingerprint !== authenticatorFingerprint(account)
+			) {
+				return 'missing';
 			}
+			const ownedName = marker?.fileName;
+			const path =
+				ownedName === undefined
+					? recoveryPathForAuthenticator(options.userDataPath(), account)
+					: isRecoveryFileNameForAuthenticator(account, ownedName)
+						? join(recoveryDirectory(options.userDataPath()), ownedName)
+						: undefined;
+			if (path === undefined || !existsSync(path)) return 'missing';
 			updateRecoveryFile(path, sealed(account));
+			return 'updated';
 		}
 	};
 }
 
-/**
- * Every recovery file on disk for one account, primary and siblings alike.
- *
- * Used to correct a file written by an **earlier run**. Activation records the
- * path it wrote so it can rewrite the same one, but that record is process-local
- * — and the case the recovery file exists for is precisely a crash between
- * enrolling and activating, which means the correction usually happens in a
- * later run with nothing remembered.
- *
- * The caller may only act when this returns exactly one path. Two means a
- * previous enrollment for the same SteamID left a file behind, and nothing here
- * can tell which of them the current account owns.
- */
-/** The staging suffix, so the reconciliation below can recognise its own work. */
-const STAGING = '.tmp';
+/** A staging name contains the exact destination plus an application UUID. */
+const STAGING_ID =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/i;
+
+interface OpenRecoveryStage {
+	path: string;
+	target: string;
+	fd: number;
+	body: string;
+}
+
+interface RecoveryReconciliation {
+	finished: string[];
+	ambiguous: string[];
+}
+
+function targetForStageName(directory: string, name: string): string | undefined {
+	const marker = `${RECOVERY_EXTENSION}.`;
+	const at = name.lastIndexOf(marker);
+	if (at < 0 || !STAGING_ID.test(name.slice(at + marker.length))) return undefined;
+	return join(directory, name.slice(0, at + RECOVERY_EXTENSION.length));
+}
+
+/** Open and validate through one descriptor, so parsing cannot race a replacement. */
+function openRecoveryStage(path: string, target: string): OpenRecoveryStage | undefined {
+	let fd: number | undefined;
+	try {
+		fd = openSync(path, 'r');
+		const body = readFileSync(fd, 'utf8');
+		if (!pathStillNames(fd, path)) return undefined;
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(body);
+		} catch {
+			return undefined;
+		}
+		if (!envelopeSchema.safeParse(parsed).success) return undefined;
+		const opened = { path, target, fd, body };
+		fd = undefined;
+		return opened;
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return undefined;
+		throw err;
+	} finally {
+		closeWithoutMasking(fd);
+	}
+}
+
+/** Publish one complete stage while keeping it as evidence until the entry syncs. */
+function publishRecoveryStage(stage: OpenRecoveryStage, directory: string): boolean {
+	if (!pathStillNames(stage.fd, stage.path)) return false;
+	try {
+		linkSync(stage.path, stage.target);
+	} catch (err) {
+		const code = (err as NodeJS.ErrnoException | undefined)?.code;
+		if (code === 'EEXIST') return false;
+		if (!LINK_UNSUPPORTED.has(code ?? '')) throw err;
+
+		let targetFd: number | undefined;
+		let targetFlushed = false;
+		try {
+			targetFd = openSync(stage.target, 'wx+', 0o600);
+			writeAll(targetFd, stage.body);
+			fsyncSync(targetFd);
+			targetFlushed = true;
+			if (
+				!pathStillNames(targetFd, stage.target) ||
+				readFileSync(stage.target, 'utf8') !== stage.body ||
+				!pathStillNames(targetFd, stage.target)
+			) {
+				throw new Error('the reconciled recovery file was replaced during publication', {
+					cause: err
+				});
+			}
+			syncDirectory(directory);
+			if (!pathStillNames(targetFd, stage.target)) {
+				throw new Error('the reconciled recovery destination changed after its directory sync', {
+					cause: err
+				});
+			}
+			unlinkStillOwned(stage.path, stage.fd);
+			return true;
+		} catch (writeFailed) {
+			if (!targetFlushed && targetFd !== undefined && pathStillNames(targetFd, stage.target)) {
+				try {
+					unlinkSync(stage.target);
+				} catch {
+					// The complete stage remains available to retry on the next start.
+				}
+			}
+			throw writeFailed;
+		} finally {
+			closeWithoutMasking(targetFd);
+		}
+	}
+
+	if (!pathStillNames(stage.fd, stage.target)) {
+		throw new Error('the reconciled recovery destination is not the staged document');
+	}
+	syncDirectory(directory);
+	if (!pathStillNames(stage.fd, stage.target)) {
+		throw new Error('the reconciled recovery destination changed after its directory sync');
+	}
+	unlinkStillOwned(stage.path, stage.fd);
+	return true;
+}
 
 /**
- * **Finish a recovery write that was interrupted between claiming the name and
- * filling it.**
- *
- * On a filesystem with no hard links, `durably` claims the destination with `wx`
- * - which is the only atomic way to refuse to overwrite there - and then renames
- * the completed staging file over it. A hard stop between those two syscalls
- * leaves a nought-byte file at the name a restore reads and the whole, fsynced
- * document beside it under a name nothing looks at. The bytes are not lost; they
- * are unreachable, which for a file whose entire purpose is to be found later is
- * close enough to the same thing.
- *
- * It is the same shape as the vault's rotation journal and it gets the same
- * treatment: on the next start, look for the work that was left half done and
- * finish it.
- *
- * **Deliberately narrow.** A staging file is only ever promoted over a
- * destination that is missing or empty, and only when what it holds parses as a
- * sealed envelope. An unreadable-but-non-empty destination is left exactly
- * where it is: this must never be able to overwrite a recovery file that is
- * merely damaged, because that file may be the only copy of a different
- * enrollment's secrets.
+ * If a crash happened after publication but before stage cleanup, exact bytes
+ * under both names prove that the target is already the staged document. The
+ * directory is flushed first; different bytes always preserve both files.
  */
-export function reconcileRecoveryFiles(userDataPath: string): string[] {
-	const directory = recoveryDirectory(userDataPath);
+function cleanPublishedStages(
+	target: string,
+	stages: OpenRecoveryStage[],
+	directory: string
+): 'missing' | 'unchanged' | 'finished' {
+	let targetFd: number | undefined;
+	try {
+		targetFd = openSync(target, 'r');
+		const targetBody = readFileSync(targetFd, 'utf8');
+		if (!pathStillNames(targetFd, target)) return 'unchanged';
+		const matching = stages.filter((stage) => stage.body === targetBody);
+		if (matching.length === 0) return 'unchanged';
+
+		syncDirectory(directory);
+		for (const stage of matching) {
+			if (!pathStillNames(targetFd, target)) {
+				throw new Error('the recovery destination changed before staged cleanup');
+			}
+			unlinkStillOwned(stage.path, stage.fd);
+		}
+		return 'finished';
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return 'missing';
+		throw err;
+	} finally {
+		closeWithoutMasking(targetFd);
+	}
+}
+
+function reconcileRecoveryDirectory(
+	directory: string,
+	onlyTarget?: string
+): RecoveryReconciliation {
 	let names: string[];
 	try {
 		names = readdirSync(directory);
-	} catch {
-		return [];
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+			return { finished: [], ambiguous: [] };
+		}
+		throw err;
 	}
+
+	const grouped = new Map<string, string[]>();
+	for (const name of names) {
+		const target = targetForStageName(directory, name);
+		if (target === undefined || (onlyTarget !== undefined && target !== onlyTarget)) continue;
+		const group = grouped.get(target) ?? [];
+		group.push(join(directory, name));
+		grouped.set(target, group);
+	}
+	if (grouped.size === 0) return { finished: [], ambiguous: [] };
+
+	/* A staged witness means creation of this directory may still need durability. */
+	syncDirectory(dirname(directory));
 
 	const finished: string[] = [];
-	for (const name of names) {
-		if (!name.endsWith(STAGING) || !name.includes(RECOVERY_EXTENSION)) {
-			continue;
-		}
-		// `<id>.oda-recovery.<uuid>.tmp` was staged for `<id>.oda-recovery`.
-		const target = join(
-			directory,
-			name.slice(0, name.indexOf(RECOVERY_EXTENSION) + RECOVERY_EXTENSION.length)
-		);
-		const staged = join(directory, name);
-
+	const ambiguous: string[] = [];
+	for (const [target, paths] of grouped) {
+		const stages: OpenRecoveryStage[] = [];
 		try {
-			if (existsSync(target) && statSync(target).size > 0) {
+			for (const path of paths) {
+				const stage = openRecoveryStage(path, target);
+				if (stage !== undefined) stages.push(stage);
+			}
+			if (stages.length === 0) continue;
+
+			const occupied = cleanPublishedStages(target, stages, directory);
+			if (occupied === 'finished') {
+				finished.push(target);
 				continue;
 			}
-			// Whole and well formed, or it is not a recovery file and promoting it
-			// would put a broken one where a restore expects to find the real thing.
-			envelopeSchema.parse(JSON.parse(readFileSync(staged, 'utf8')));
-			renameSync(staged, target);
-			syncDirectory(directory);
-			finished.push(target);
-		} catch {
-			/*
-			 * A staging file from a write still in flight, a partial one, or a
-			 * destination this process cannot read. Left alone: nothing here is worth
-			 * failing a start over, and the next start looks again.
-			 */
+			if (occupied === 'unchanged') continue;
+
+			if (stages.length > 1) {
+				ambiguous.push(target);
+				continue;
+			}
+			const only = stages[0];
+			if (only !== undefined && publishRecoveryStage(only, directory)) finished.push(target);
+		} finally {
+			for (const stage of stages) closeWithoutMasking(stage.fd);
 		}
 	}
-	return finished;
+	return { finished, ambiguous };
+}
+
+/**
+ * Finish only unambiguous, verified recovery publications left by this module.
+ * Ambiguity is made visible in the log and every candidate is preserved.
+ */
+export function reconcileRecoveryFiles(userDataPath: string): string[] {
+	const result = reconcileRecoveryDirectory(recoveryDirectory(userDataPath));
+	for (const target of result.ambiguous) {
+		console.warn(`recovery publication is ambiguous; preserved every staged file for ${target}`);
+	}
+	return result.finished;
 }
 
 export function recoveryFilesFor(userDataPath: string, steamId64: string): string[] {

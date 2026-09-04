@@ -73,11 +73,16 @@ describe('per-account busy flags', () => {
 	 */
 	it('are a set, not one account at a time', () => {
 		const home = readFileSync(join(__dirname, '../src/renderer/screens/VaultHome.tsx'), 'utf8');
+		const app = readFileSync(join(__dirname, '../src/renderer/App.tsx'), 'utf8');
 		expect(home).toMatch(/const \[copying, setCopying\] = useState<ReadonlySet<string>>/);
-		expect(home).toMatch(/const \[exporting, setExporting\] = useState<ReadonlySet<string>>/);
+		expect(app).toMatch(
+			/const \[exportingAccountIds, setExportingAccountIds\] = useState<ReadonlySet<string>>/
+		);
+		expect(app).toMatch(/const exportingAccounts = useRef\(new Set<string>\(\)\)/);
+		expect(home).toMatch(/exporting\?: ReadonlySet<string>/);
 		// The single-name shape, in either direction.
 		expect(home).not.toMatch(/setCopying\(account\.steamId64\)/);
-		expect(home).not.toMatch(/setExporting\(account\.steamId64\)/);
+		expect(app).not.toMatch(/setExportingAccountIds\(account\.steamId64\)/);
 		expect(home).not.toMatch(/copying === account\.steamId64/);
 		expect(home).not.toMatch(/exporting === account\.steamId64/);
 	});
@@ -164,9 +169,10 @@ describe('the create screen and an in-flight restore', () => {
 describe('the portable build', () => {
 	it('does not write the Windows identity keys', () => {
 		const main = readFileSync(join(__dirname, '../src/main/index.ts'), 'utf8');
-		// "No installer, no writes outside its own directory" is the whole point
-		// of that target; this writes two values under HKCU, one of them a path
-		// pointing back at the copy the user was only trying out.
+		// The portable target keeps application data beside the executable and does
+		// not install itself; this writes two values under HKCU, one of them a path
+		// pointing back at the copy the user was only trying out. Windows Temp
+		// runtime extraction is unrelated to this persistent identity record.
 		expect(main).toMatch(/if \(portableDir === undefined\) \{\s*void registerWindowsIdentity\(/);
 	});
 });
@@ -260,6 +266,7 @@ describe('the update-check toggle', () => {
 describe('per-account status on the account list', () => {
 	it('is only written by the newest attempt', () => {
 		const source = readFileSync(join(__dirname, '../src/renderer/screens/VaultHome.tsx'), 'utf8');
+		const app = readFileSync(join(__dirname, '../src/renderer/App.tsx'), 'utf8');
 		/*
 		 * **One counter per status slot, and there are three slots.**
 		 *
@@ -277,18 +284,24 @@ describe('per-account status on the account list', () => {
 		 * The test did not miss that; it wrote it down as intended.
 		 */
 		expect(source).toMatch(/const copyAttempt = useRef\(0\);/);
-		expect(source).toMatch(/const exportAttempt = useRef\(new Map<string, number>\(\)\);/);
+		expect(app).toMatch(/const exportAttempt = useRef\(new Map<string, number>\(\)\);/);
 
-		// One writer each for copy and export, and one for the browser — whose
-		// three buttons share a helper rather than repeating the claim.
+		// One writer for copy and one for the browser — whose three buttons share
+		// a helper rather than repeating the claim. Export is now owned by App so a
+		// navigation cannot unmount its attempt or its eventual result.
 		expect(source.match(/const mine = \(copyAttempt\.current \+= 1\);/g) ?? []).toHaveLength(1);
 		// Export's counter is a map too, for the same reason the browser's is: its
 		// result carries the warning that a plaintext copy is still on disk, and a
 		// second account's export used to discard it as stale.
-		expect(source.match(/const newest = claimExport\(account\.steamId64\);/g) ?? []).toHaveLength(
-			1
+		expect(
+			app.match(
+				/const mine = \(exportAttempt\.current\.get\(account\.steamId64\) \?\? 0\) \+ 1;/g
+			) ?? []
+		).toHaveLength(1);
+		expect(app).toMatch(
+			/const current = \(\): boolean => exportAttempt\.current\.get\(account\.steamId64\) === mine;/
 		);
-		expect(source).not.toMatch(/exportAttempt\.current \+= 1/);
+		expect(app).not.toMatch(/exportAttempt\.current \+= 1/);
 		/*
 		 * The browser's counter is a **map**, not a number. A single number made
 		 * account B's press "newer" than account A's, so A's failure was discarded
@@ -351,24 +364,24 @@ describe('per-account status on the account list', () => {
 		expect(source).not.toMatch(/browserError\?\.steamId64 === account\.steamId64/);
 
 		/*
-		 * And so is the export result, which carries the warning that a plaintext
-		 * copy of the previous export is still on disk — the last message here
-		 * that another account's button should be able to dismiss.
+		 * Export results are app-owned and append-only until their own Dismiss is
+		 * pressed. This both keeps the plaintext warning per attempt and lets it
+		 * survive the account list being unmounted by any navigation.
 		 */
-		expect(source).toMatch(
-			/const \[exported, setExported\] = useState<ReadonlyMap<string, string>>/
+		expect(app).toMatch(
+			/const \[exportNotices, updateExportNotices\] = useReducer\(exportNoticeReducer, \[\]\)/
 		);
-		expect(source).toMatch(/const exportAttempt = useRef\(new Map<string, number>\(\)\)/);
-		expect(source).not.toMatch(/exported\?\.steamId64 === account\.steamId64/);
+		expect(app).toMatch(/return \[\.\.\.state, action\.notice\];/);
+		expect(source).not.toMatch(/setExported|setExportError/);
 
 		// No counter is read by anything but the attempt that owns it: a bare
 		// `attempt` would be the shared one coming back.
 		expect(source).not.toMatch(/[^a-zA-Z]attempt\.current/);
 
-		// Every asynchronous writer to a status slot, guarded: two for copy, two
-		// for export, and one for the browser — whose three buttons write only a
-		// failure, and write it through the one helper asserted above.
-		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(5);
+		// Every asynchronous row-local writer is guarded: two for copy and one for
+		// the browser. Export's resolve/reject pair is behavior-tested through its
+		// shared `current()` gate in export-navigation-survival.test.tsx.
+		expect(source.match(/if \(!newest\(\)\) \{/g) ?? []).toHaveLength(3);
 	});
 });
 

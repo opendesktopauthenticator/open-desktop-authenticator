@@ -37,6 +37,7 @@ jobs:
   # actually being shipped.
   # ---------------------------------------------------------------------------
   verify:
+    needs: version
     name: verify (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -64,6 +65,7 @@ jobs:
       - run: npm test
       - run: node site/build.mjs
       - run: node site/verify.mjs
+      - run: node site/selftest.mjs
 
       # Production dependencies are what ships. A release is exactly the moment
       # a known-vulnerable transitive dependency must not go out quietly.
@@ -111,6 +113,22 @@ jobs:
     name: tag matches package.json
     runs-on: ubuntu-latest
     steps:
+      - name: Validate the release ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          node -e "
+          const dispatched = process.env.EVENT_NAME === 'workflow_dispatch';
+          const exactTag = process.env.REF_TYPE === 'tag' && process.env.REF_NAME === process.env.TAG_INPUT;
+          if (dispatched && !exactTag) {
+            console.error('A manual release must be dispatched from that exact tag.');
+            process.exit(1);
+          }
+          "
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.tag || github.ref }}
@@ -214,6 +232,38 @@ jobs:
           node-version-file: '.nvmrc'
           cache: npm
 
+      # One deliberate switch controls both signing and publication. Secrets may
+      # be populated before the account is ready; that must not quietly change
+      # the release. Conversely, saying it is ready while one credential is
+      # absent must fail before a long package build produces an unusable DMG.
+      - name: Validate macOS signing readiness
+        if: runner.os == 'macOS'
+        env:
+          MACOS_SIGNING_READY: ${{ vars.MACOS_SIGNING_READY }}
+          MACOS_CERTIFICATE_P12: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_P12 || '' }}
+          MACOS_CERTIFICATE_PASSWORD:
+            ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
+          APPLE_API_KEY_P8: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_KEY_P8 || '' }}
+          APPLE_API_KEY_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_ISSUER || '' }}
+          APPLE_TEAM_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_TEAM_ID || '' }}
+        run: |
+          node -e "
+          if (process.env.MACOS_SIGNING_READY !== 'true') process.exit(0);
+          const required = ['MACOS_CERTIFICATE_P12', 'MACOS_CERTIFICATE_PASSWORD', 'APPLE_API_KEY_P8', 'APPLE_API_KEY_ID', 'APPLE_API_ISSUER', 'APPLE_TEAM_ID'];
+          const missing = required.filter((name) => !(process.env[name] || '').trim());
+          if (missing.length) {
+            console.error('MACOS_SIGNING_READY is true but these credentials are empty: ' + missing.join(', '));
+            process.exit(1);
+          }
+          "
+
       - run: npm ci
 
       # `--publish never`. This workflow uploads deliberately, in one place,
@@ -237,7 +287,8 @@ jobs:
         if: runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true'
         shell: bash
         env:
-          KEY_BASE64: ${{ secrets.APPLE_API_KEY_P8 }}
+          KEY_BASE64: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_KEY_P8 || '' }}
         run: |
           if [ -z "$KEY_BASE64" ]; then
             echo "::error::MACOS_SIGNING_READY is true but APPLE_API_KEY_P8 is empty."
@@ -258,15 +309,33 @@ jobs:
       # which Gatekeeper blocks everywhere except the machine that built it.
       - name: Package
         env:
-          CSC_LINK: ${{ runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_P12 || '' }}
-          CSC_KEY_PASSWORD: ${{ runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
+          CSC_LINK: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_P12 || '' }}
+          CSC_KEY_PASSWORD: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
           # The path written above, not the key itself. See that step.
           APPLE_API_KEY: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
             format('{0}/apple-api-key.p8', runner.temp) || '' }}
-          APPLE_API_KEY_ID: ${{ runner.os == 'macOS' && secrets.APPLE_API_KEY_ID || '' }}
-          APPLE_API_ISSUER: ${{ runner.os == 'macOS' && secrets.APPLE_API_ISSUER || '' }}
-          APPLE_TEAM_ID: ${{ runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_API_KEY_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_ISSUER || '' }}
+          APPLE_TEAM_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_TEAM_ID || '' }}
         run: npm run build && npx electron-builder --config electron-builder.config.mjs ${{ matrix.targets }} --publish never
+
+      - name: Verify the packaged portable runtime contract
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $portable = @(Get-ChildItem -LiteralPath release -File -Filter '*-portable.exe')
+          if ($portable.Count -ne 1) {
+            throw "Expected exactly one packaged portable executable, found $($portable.Count)."
+          }
+          ./.github/scripts/verify-portable-runtime.ps1 -PortablePath $portable[0].FullName
+
+      - name: Verify the first-party licence in every packaged application archive
+        run: node .github/scripts/verify-packaged-license.mjs --tree release
 
       # The private key does not outlive the step that needed it. `RUNNER_TEMP`
       # is discarded with the runner, so this is belt and braces — but a signing
@@ -290,12 +359,31 @@ jobs:
       # `continue-on-error`, because the direct-download channel must not stop
       # shipping over a Store tool. The step's own conclusion still shows.
       - name: Package for the Store
+        id: store_package
         if: runner.os == 'Windows'
         continue-on-error: true
         run: npx electron-builder --config electron-builder.config.mjs --win appx --publish never
 
+      # A toast can be displayed without either activation declaration, so a
+      # successful AppX build alone does not prove that clicking its Action
+      # Center history can launch the application. Inspect the manifest that is
+      # actually inside the package, including the executable and fixed CLSID.
+      - name: Verify Store notification activation
+        id: store_manifest
+        if: runner.os == 'Windows' && steps.store_package.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: ./.github/scripts/verify-appx-toast-manifest.ps1
+
+      - name: Verify the first-party licence in the Store package
+        id: store_license
+        if: runner.os == 'Windows' && steps.store_manifest.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: ./.github/scripts/verify-appx-license.ps1
+
       - name: Collect the Store package
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.store_license.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
@@ -304,7 +392,7 @@ jobs:
           ls -l dist-store || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.store_license.outcome == 'success'
         continue-on-error: true
         with:
           name: store-package
@@ -666,6 +754,36 @@ jobs:
             staging/*.deb
             staging/*.dmg
 
+      # The direct Windows/Linux channel is deliberately unsigned. A macOS DMG
+      # is published only when the readiness gate made it signed and notarised,
+      # so one blanket sentence about "the files" becomes false at that point.
+      # Generate the copy from the same switch that names the macOS artifact.
+      - name: Generate draft release notes
+        env:
+          MACOS_SIGNING_READY: ${{ vars.MACOS_SIGNING_READY }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        shell: bash
+        run: |
+          node -e "
+          const mac = process.env.MACOS_SIGNING_READY === 'true'
+            ? '**The published macOS DMGs are Developer ID-signed and notarized by Apple.** Gatekeeper can verify their Developer ID and notarization ticket.'
+            : '**No macOS DMG is included in this release.** The continuously tested unsigned macOS build stays inside CI until signing and notarization are ready.';
+          const identity = 'https://github.com/' + process.env.GITHUB_REPOSITORY + '/.github/workflows/release.yml@refs/tags/' + process.env.TAG;
+          const fence = String.fromCharCode(96).repeat(3);
+          const slash = String.fromCharCode(92);
+          const code = (language, command) => '\n\n' + fence + language + '\n' + command + '\n' + fence;
+          process.stdout.write([
+            'Draft. Release notes are written by hand before publishing — see docs/RELEASE_CHECKLIST.md.',
+            '**On Windows, most people want the Microsoft Store instead.** Microsoft re-signs that package, so it never trips SmartScreen and there is nothing to check by hand.',
+            '**Windows and Linux direct downloads are unsigned.** They carry no code-signing certificate and none is planned, so Windows warns on first run. Check them against SHA256SUMS.txt and the provenance attestation on this release.',
+            mac,
+            'Verify on Linux:' + code('shell', 'sha256sum --check --ignore-missing SHA256SUMS.txt'),
+            'Verify on macOS:' + code('shell', 'shasum -a 256 --check --ignore-missing SHA256SUMS.txt'),
+            'Verify on Windows PowerShell:' + code('powershell', 'Get-FileHash .' + slash + '<file> -Algorithm SHA256'),
+            'The checksum list itself is signed. Verify it with cosign:' + code('shell', 'cosign verify-blob SHA256SUMS.txt --signature SHA256SUMS.txt.sig --certificate SHA256SUMS.txt.pem --certificate-identity ' + identity + ' --certificate-oidc-issuer https://token.actions.githubusercontent.com')
+          ].join('\n\n') + '\n');
+          " > "$RUNNER_TEMP/release-notes.md"
+
       # A draft, always. The checklist requires a human to read the notes and
       # the asset list before anything is public, and "published automatically
       # by CI" is the one thing a release of this application must not be.
@@ -679,33 +797,6 @@ jobs:
             --verify-tag \
             --draft \
             --title "$TAG" \
-            --notes "Draft. Release notes are written by hand before publishing — see docs/RELEASE_CHECKLIST.md.
-
-          **On Windows, most people want [the Microsoft Store](https://apps.microsoft.com/detail/9NMM2XJ6HZ1D) instead.** Microsoft re-signs that package, so it never trips SmartScreen and there is nothing to check by hand.
-
-          **The files below are unsigned.** They carry no code-signing certificate and none is planned, so Windows warns on first run — that warning is about a missing certificate, not a bad file. Take these if you are on Linux, if your Windows image has no Store, if you want the portable build, or if you would rather verify a download than be told it is fine. Check them against \`SHA256SUMS.txt\` below and the provenance attestation on this release.
-
-          Verify on Linux:
-          \`\`\`
-          sha256sum --check --ignore-missing SHA256SUMS.txt
-          \`\`\`
-          Verify on macOS — a stock Mac ships \`shasum\`, not \`sha256sum\`:
-          \`\`\`
-          shasum -a 256 --check --ignore-missing SHA256SUMS.txt
-          \`\`\`
-          Verify on Windows PowerShell:
-          \`\`\`
-          Get-FileHash .\\<file> -Algorithm SHA256
-          \`\`\`
-
-          The checksum list itself is signed, so you can check the list came from this workflow rather than only that your file matches it:
-          \`\`\`
-          cosign verify-blob SHA256SUMS.txt \\
-            --signature SHA256SUMS.txt.sig \\
-            --certificate SHA256SUMS.txt.pem \\
-            --certificate-identity 'https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/$TAG' \\
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
-          \`\`\`
-          That identity is exact on purpose. An earlier version of this command checked only that the signer was somewhere under our GitHub organisation, which would have accepted a signature minted by any workflow in any repository we own, run from any branch. It names this repository, this workflow file, and this tag." \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
             staging/*
           echo "Draft created. Nothing is public until a human publishes it."

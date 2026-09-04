@@ -1,14 +1,27 @@
 import { existsSync, statSync } from 'node:fs';
-import { randomBytes } from 'node:crypto';
-import { deriveKey, sealWithKey, unseal, VaultCryptoError, wipe } from './crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { basename } from 'node:path';
+import {
+	deriveKey,
+	openBytesWithKey,
+	sealBytesWithKey,
+	sealWithKey,
+	unseal,
+	VaultCryptoError,
+	wipe
+} from './crypto';
 import {
 	clearRotationJournal,
+	cleanupBackupRescues,
+	inspectBackupRescues,
 	putBack,
 	readBackupEnvelope,
 	readRotationJournal,
 	readEnvelope,
+	restoreRotationJournalSnapshot,
 	restoreEnvelopeInPlace,
 	setAside,
+	snapshotRotationJournal,
 	vaultExists,
 	VaultStorageError,
 	writeBackupEnvelope,
@@ -80,6 +93,12 @@ export interface VaultServiceOptions {
 	/** Called whenever the vault locks, so the UI and pollers can react. */
 	onLock?: (reason: LockReason) => void;
 	/**
+	 * Synchronous last check before a validated mutation replaces the live vault.
+	 * Nothing is awaited between this callback and the file write, so callers can
+	 * reserve an account snapshot without a check/use gap.
+	 */
+	beforeMutationCommit?: (current: VaultContents, next: VaultContents) => void;
+	/**
 	 * Called whenever the vault becomes unlocked, for the same reason.
 	 *
 	 * The asymmetry was the bug. A lock was announced and an unlock was not, so
@@ -109,6 +128,7 @@ export class VaultService {
 	private readonly monotonic: () => number;
 	private readonly onLock: (reason: LockReason) => void;
 	private readonly onUnlock: () => void;
+	private readonly beforeMutationCommit: (current: VaultContents, next: VaultContents) => void;
 	private state: UnlockedState | undefined;
 
 	/**
@@ -180,6 +200,7 @@ export class VaultService {
 		this.monotonic = options.monotonic ?? (() => performance.now());
 		this.onLock = options.onLock ?? (() => undefined);
 		this.onUnlock = options.onUnlock ?? (() => undefined);
+		this.beforeMutationCommit = options.beforeMutationCommit ?? (() => undefined);
 	}
 
 	/**
@@ -195,6 +216,20 @@ export class VaultService {
 		}
 		wipe(key);
 		return false;
+	}
+
+	/**
+	 * Finish one reconciliation answer without ever forgetting rescue evidence.
+	 *
+	 * A rotation journal describes one attempt. App-owned `.previous-UUID`
+	 * siblings can describe a different, later attempt, so no journal branch may
+	 * make the backup available until the directory independently proves that no
+	 * rescue remains. Inspection failure is evidence too: absence was not proved.
+	 */
+	private finishReconcile(reconciled: boolean, journalSuspect: boolean): boolean {
+		const rescues = inspectBackupRescues(this.file);
+		this.backupSuspect = journalSuspect || !rescues.complete;
+		return reconciled;
 	}
 
 	/**
@@ -229,12 +264,19 @@ export class VaultService {
 		 * this drops is retrying that was never going to help.
 		 */
 		if (this.reconcileFailed) {
-			return false;
+			return this.finishReconcile(false, true);
 		}
 		const journal = readRotationJournal(this.file);
 		if (journal.state === 'none') {
-			this.backupSuspect = false;
-			return false;
+			/*
+			 * The rescue filename is itself durable evidence. A backup replacement
+			 * can land, fail its destination read-back, fail to restore the previous
+			 * backup, and then have the main vault rollback successfully. That rollback
+			 * correctly removes this rotation's journal, but it cannot make `.bak`
+			 * trustworthy again. The surviving app-owned `.previous-UUID` copy is the
+			 * fact that must cross the restart boundary.
+			 */
+			return this.finishReconcile(false, false);
 		}
 		if (journal.state === 'unreadable') {
 			/*
@@ -242,8 +284,7 @@ export class VaultService {
 			 * backup on disk may still open with the retired passphrase and nothing
 			 * here can put that right. It is not offered — see `backupSuspect`.
 			 */
-			this.backupSuspect = true;
-			return false;
+			return this.finishReconcile(false, true);
 		}
 
 		/**
@@ -263,16 +304,14 @@ export class VaultService {
 		try {
 			vaultEnvelope = readEnvelope(this.file);
 		} catch {
-			this.backupSuspect = true;
-			return false;
+			return this.finishReconcile(false, true);
 		}
 		const vaultKdf = vaultEnvelope.kdf;
 		if (vaultKdf.salt !== journal.backup.kdf.salt) {
 			// The rotation never reached the vault. Nothing is owed, and the backup
 			// beside it is the one that belongs to the key still in use.
 			clearRotationJournal(this.file);
-			this.backupSuspect = false;
-			return false;
+			return this.finishReconcile(false, false);
 		}
 
 		/*
@@ -305,16 +344,50 @@ export class VaultService {
 		 * over one those saves had moved on.
 		 */
 		if (journal.vaultNonce !== undefined && vaultEnvelope.cipher.nonce !== journal.vaultNonce) {
+			/*
+			 * A later save proves this journal is stale. It says nothing about an
+			 * app-owned rescue, because that sibling may have been created by a later
+			 * failed rotation after this journal survived its unlink. Deleting anonymous
+			 * rescues here can therefore delete the only verified old-key copy.
+			 *
+			 * Clear only this stale record. Rescue filenames are independent durable
+			 * evidence, and `finishReconcile` keeps the backup unavailable until a fresh
+			 * `writeBackupEnvelope` publishes and verifies a replacement before cleanup.
+			 */
 			clearRotationJournal(this.file);
-			this.backupSuspect = false;
-			return false;
+			return this.finishReconcile(false, false);
 		}
 
 		const backupOnDisk = readBackupEnvelope(this.file);
-		if (backupOnDisk !== undefined && backupOnDisk.kdf.salt === vaultKdf.salt) {
+		const backupExactlyPaysDebt =
+			backupOnDisk !== undefined && JSON.stringify(backupOnDisk) === JSON.stringify(journal.backup);
+		if (
+			backupOnDisk !== undefined &&
+			backupOnDisk.kdf.salt === vaultKdf.salt &&
+			(journal.vaultNonce === undefined || backupExactlyPaysDebt)
+		) {
+			/*
+			 * The replacement itself landed, but the journal also stands for cleanup
+			 * of any old-key rescue created while publishing it. The rotation is not
+			 * fully reconciled until those exact app-owned siblings are gone. Only a
+			 * nonce-bearing journal can have been written by the rescue-cleanup design;
+			 * legacy records retain their old same-key rule without claiming ownership
+			 * of siblings they never created.
+			 */
+			const cleanup =
+				journal.vaultNonce === undefined
+					? { complete: true, remaining: [] }
+					: cleanupBackupRescues(this.file);
+			if (!cleanup.complete) {
+				this.reconcileFailed = true;
+				console.error(
+					'an interrupted passphrase rotation still has encrypted backup cleanup debt',
+					cleanup.remaining
+				);
+				return this.finishReconcile(false, true);
+			}
 			clearRotationJournal(this.file);
-			this.backupSuspect = false;
-			return false;
+			return this.finishReconcile(true, false);
 		}
 
 		/*
@@ -328,26 +401,31 @@ export class VaultService {
 		 * place would be a worse kind of nothing.
 		 */
 		if (backupOnDisk === undefined && journal.vaultNonce === undefined) {
-			this.backupSuspect = existsSync(`${this.file}.bak`);
-			return false;
+			return this.finishReconcile(false, existsSync(`${this.file}.bak`));
 		}
 
 		try {
-			writeBackupEnvelope(this.file, journal.backup);
+			const result = writeBackupEnvelope(this.file, journal.backup);
+			if (!result.cleanup.complete) {
+				this.reconcileFailed = true;
+				console.error(
+					'an interrupted passphrase rotation rewrote its backup but could not remove an encrypted rescue',
+					result.cleanup.remaining
+				);
+				return this.finishReconcile(false, true);
+			}
 		} catch (err) {
-			this.backupSuspect = true;
 			this.reconcileFailed = true;
 			// Left on disk deliberately: the backup is still readable with the
 			// retired passphrase and the next start must try again rather than
 			// forget. Nothing here is in a position to tell the user, and the vault
 			// itself is fine.
 			console.error('an interrupted passphrase rotation could not be finished', err);
-			return false;
+			return this.finishReconcile(false, true);
 		}
 		clearRotationJournal(this.file);
 		this.backupCache = undefined;
-		this.backupSuspect = false;
-		return true;
+		return this.finishReconcile(true, false);
 	}
 
 	/**
@@ -716,6 +794,7 @@ export class VaultService {
 		draft.updatedAt = new Date(this.now()).toISOString();
 
 		const validated = vaultContentsSchema.parse(draft);
+		this.beforeMutationCommit(state.contents, validated);
 		// **Bumped by every write, not only by locks.** `unlockOnce` snapshots the
 		// generation before its scrypt and installs `this.state` afterwards if the
 		// value still matches. Only `lock` and `restoreFromBackup` moved it, so an
@@ -724,7 +803,24 @@ export class VaultService {
 		// writing the stale copy back over the file. A save is exactly as much a
 		// reason to disown an older open as a lock is.
 		this.generation += 1;
-		writeEnvelope(this.file, sealWithKey(JSON.stringify(validated), state.key, state.kdf));
+		try {
+			writeEnvelope(this.file, sealWithKey(JSON.stringify(validated), state.key, state.kdf));
+		} catch (err) {
+			if (err instanceof VaultStorageError && !err.unchanged) {
+				/*
+				 * Publication may have succeeded even though verification or rollback did
+				 * not. The in-memory snapshot is no longer an authority in that state: a
+				 * later save from it could overwrite the version that actually reached
+				 * disk. Disown file races and wipe the live key before returning.
+				 */
+				this.fileGeneration += 1;
+				this.lock('manual');
+				throw new VaultServiceError(
+					'the save may have reached disk, but the previous vault could not be restored, so the vault has been locked. Unlock it again before making another change.'
+				);
+			}
+			throw err;
+		}
 		// See `fileGeneration`: a save replaces the file, and a restore in flight
 		// has to notice that as surely as it notices an adoption.
 		this.fileGeneration += 1;
@@ -873,7 +969,7 @@ export class VaultService {
 		this.reconcileFailed = false;
 
 		/*
-		 * **What the journal already held, read before it is replaced.**
+		 * **What the journal already held, captured before it is replaced.**
 		 *
 		 * `writeRotationJournal` overwrites unconditionally, so a debt an earlier
 		 * interrupted rotation left — one `reconcile` has not managed to pay,
@@ -881,9 +977,16 @@ export class VaultService {
 		 * rotation starts. That is fine while this rotation goes on to succeed and
 		 * pay its own debt. It is not fine on the path below that decides nothing
 		 * was written and clears the journal: true of this rotation, false of the
-		 * one it just overwrote.
+		 * one it just overwrote. The raw bytes matter: an unreadable journal is
+		 * still evidence of an unfinished rotation even though it cannot be parsed.
 		 */
-		const previouslyOwed = readRotationJournal(this.file);
+		let previousJournal: ReturnType<typeof snapshotRotationJournal>;
+		try {
+			previousJournal = snapshotRotationJournal(this.file);
+		} catch (err) {
+			wipe(newKey);
+			throw err;
+		}
 
 		try {
 			// The nonce of the vault this rotation is about to write. Fresh for every
@@ -946,16 +1049,16 @@ export class VaultService {
 			 * rotation had been reconciled, and `reconcile` would then stop suspecting
 			 * a `.bak` that still opens with a passphrase two changes old.
 			 *
-			 * `unreadable` is left to clear. Nothing parseable is lost, and
-			 * `reconcile` re-derives its suspicion from the files themselves rather
-			 * than from anything remembered here.
+			 * Restoring the exact bytes, rather than reconstructing only a parseable
+			 * debt, preserves the suspicion carried by an unreadable earlier journal.
+			 * Without it the next start offers a backup that may still open under a
+			 * retired passphrase.
 			 */
-			if (previouslyOwed.state === 'owed') {
-				writeRotationJournal(this.file, previouslyOwed.backup, previouslyOwed.vaultNonce);
-			} else {
-				clearRotationJournal(this.file);
+			try {
+				restoreRotationJournalSnapshot(this.file, previousJournal);
+			} finally {
+				wipe(newKey);
 			}
-			wipe(newKey);
 			throw err;
 		}
 
@@ -978,8 +1081,9 @@ export class VaultService {
 		 * shape this whole method exists to avoid, and "we changed it but could not
 		 * finish" is not something a user can act on.
 		 */
+		let backupCleanup;
 		try {
-			writeBackupEnvelope(this.file, rotatedBackup);
+			backupCleanup = writeBackupEnvelope(this.file, rotatedBackup).cleanup;
 		} catch (err) {
 			try {
 				restoreEnvelopeInPlace(this.file, priorEnvelope);
@@ -1023,16 +1127,64 @@ export class VaultService {
 				);
 			}
 			this.fileGeneration += 1;
-			// The rotation was undone, so there is no backup owed.
-			clearRotationJournal(this.file);
-			wipe(newKey);
+			const backupRescue = inspectBackupRescues(this.file);
+			const rescueBasename = err instanceof VaultStorageError ? err.rescueBasename : undefined;
+			this.backupSuspect = !backupRescue.complete;
+			/*
+			 * This rotation was undone, but it may have replaced a journal which
+			 * belonged to an earlier one. Put that exact evidence back instead of
+			 * clearing the shared slot. The raw snapshot also preserves a record this
+			 * build cannot parse, which must remain suspicious rather than silently
+			 * becoming "no interrupted rotation".
+			 */
+			try {
+				restoreRotationJournalSnapshot(this.file, previousJournal);
+			} finally {
+				wipe(newKey);
+			}
 			// Logged rather than folded into the message: the user needs the plain
 			// sentence, and an EPERM from a backup file is for whoever reads the log.
 			console.error('the vault backup could not be rewritten during a rotation', err);
+			if (!backupRescue.complete) {
+				if (rescueBasename !== undefined) {
+					throw new VaultServiceError(
+						'the passphrase change was rolled back for the main vault, but the backup changed ' +
+							`and could not be put back. The backup is unavailable. "${rescueBasename}" is ` +
+							'the valid old-passphrase rescue copy; do not delete it.'
+					);
+				}
+				throw new VaultServiceError(
+					'the passphrase was not changed and the main vault was restored, but the previous backup could not be put back. The backup is unavailable until you retry the passphrase change successfully; an encrypted rescue copy has been kept on disk.'
+				);
+			}
 			throw new VaultServiceError(
 				'the passphrase was not changed: the backup could not be rewritten, and leaving it ' +
 					'readable with the old passphrase would have defeated the change. Nothing was ' +
 					'altered — try again.'
+			);
+		}
+
+		if (!backupCleanup.complete) {
+			/*
+			 * Both committed files use the new key. Only deletion of an older rescue
+			 * failed, so rolling the rotation back would turn a truthful success into a
+			 * second key transition. Adopt what is on disk, keep the journal as durable
+			 * cleanup debt, and report the partial completion precisely.
+			 */
+			this.backupSuspect = true;
+			console.error(
+				'the passphrase changed but an encrypted backup rescue could not be removed',
+				backupCleanup.remaining
+			);
+			this.generation += 1;
+			wipe(state.key);
+			state.key = newKey;
+			state.kdf = kdf;
+			state.contents = contents;
+			state.lastActivity = this.now();
+			state.lastActivityMono = this.monotonic();
+			throw new VaultServiceError(
+				'the passphrase was changed, but an older encrypted rescue copy could not be removed. Your vault now opens with the NEW passphrase; keep the old passphrase until cleanup succeeds, and restart the app after closing anything that may be holding its files open.'
 			);
 		}
 
@@ -1097,6 +1249,37 @@ export class VaultService {
 	}
 
 	/**
+	 * Identify this account in the compatible backup without exposing its secret.
+	 *
+	 * Transfer recovery uses this before Steam is contacted. If that exact older
+	 * row is later resurrected by restoring the backup, the durable workflow can
+	 * distinguish it from a newer authenticator that must never be overwritten.
+	 * A missing, differently keyed, damaged, or invalid backup yields no identity.
+	 * Recovery remains possible when that was only a transient read failure, but it
+	 * then needs an explicit Finish recovery and fresh passphrase proof rather than
+	 * treating the absent hint as permission to overwrite anything.
+	 */
+	backupAuthenticatorFingerprint(steamId64: string): string | undefined {
+		const state = this.state;
+		if (!state) throw new VaultLockedError();
+		const envelope = readBackupEnvelope(this.file);
+		if (envelope === undefined) return undefined;
+
+		let plaintext: Buffer | undefined;
+		try {
+			plaintext = openBytesWithKey(envelope, state.key, state.kdf);
+			const contents = vaultContentsSchema.parse(JSON.parse(plaintext.toString('utf8')));
+			const account = contents.accounts.find((entry) => entry.steamId64 === steamId64);
+			if (account === undefined) return undefined;
+			return createHash('sha256').update(account.sharedSecret).digest('hex').slice(0, 16);
+		} catch {
+			return undefined;
+		} finally {
+			if (plaintext !== undefined) wipe(plaintext);
+		}
+	}
+
+	/**
 	 * The backup envelope, for the corruption-recovery path (§12 F1).
 	 *
 	 * Deliberately not automatic: silently loading an older vault would resurrect
@@ -1125,6 +1308,30 @@ export class VaultService {
 		return sealWithKey(plaintext, state.key, state.kdf);
 	}
 
+	/** Wrap one short-lived content key without copying it through a JS string. */
+	sealScopedKey(contentKey: Buffer): Envelope {
+		const state = this.state;
+		if (!state) {
+			throw new VaultLockedError();
+		}
+		return sealBytesWithKey(contentKey, state.key, state.kdf);
+	}
+
+	/**
+	 * Open a short-lived workflow key wrapped by this vault while it was unlocked.
+	 *
+	 * The caller gets plaintext only while the same vault key is live and owns
+	 * wiping any decoded key bytes. This is not a general backup import path: it
+	 * deliberately refuses an envelope from another KDF/key pair.
+	 */
+	openScopedEnvelope(envelope: Envelope): Buffer {
+		const state = this.state;
+		if (!state) {
+			throw new VaultLockedError();
+		}
+		return openBytesWithKey(envelope, state.key, state.kdf);
+	}
+
 	/**
 	 * Adopt a vault file the user has somewhere else (§12 F1).
 	 *
@@ -1139,12 +1346,15 @@ export class VaultService {
 	 * different and far more dangerous request than "I have no vault, here is one".
 	 * Only the second is offered.
 	 *
-	 * The file is parsed before it is written, so a mistaken pick fails without
-	 * touching anything. It is not decrypted: this says nothing about whether the
-	 * passphrase is right, only that the file is a vault. Unlocking answers the
-	 * rest, which is the screen the user lands on next.
+	 * The file is decrypted and its contents validated before it is written. That
+	 * proves both the passphrase and, when a Steam workflow is pending, that the
+	 * candidate's actual key can still open the one-time recovery material.
 	 */
-	adoptFrom(path: string): void {
+	async adoptFrom(
+		path: string,
+		passphrase: string,
+		requireCompatible: (candidate: Envelope, key: Buffer) => void = () => undefined
+	): Promise<void> {
 		// Same reasoning as `create`: with the file gone but the session open, an
 		// adopted vault was silently destroyed by the very next save, which sealed
 		// the in-memory contents with the in-memory key straight over it.
@@ -1180,12 +1390,46 @@ export class VaultService {
 		} catch {
 			throw new VaultServiceError('that file is not a vault this app can read');
 		}
+		const generation = this.generation;
+		const fileGeneration = this.fileGeneration;
+		const { plaintext, key } = await unseal(envelope, passphrase);
+		try {
+			try {
+				vaultContentsSchema.parse(JSON.parse(plaintext));
+			} catch (err) {
+				throw new VaultServiceError(
+					`the chosen vault decrypted but its contents are not valid: ${
+						err instanceof Error ? err.message : String(err)
+					}`
+				);
+			}
 
-		writeEnvelope(this.file, envelope);
+			// Metadata equality is not key identity: two different passphrases can
+			// deliberately reuse the same salt and scrypt parameters. The callback gets
+			// the derived candidate key so it can authenticate each wrapped workflow.
+			requireCompatible(envelope, key);
 
-		// A vault now exists where one did not. Anything that checked for its
-		// absence before an await has to find out. See `fileGeneration`.
-		this.fileGeneration += 1;
+			// Decryption is deliberately slow. Re-check every fact authorising the write
+			// after it, before a byte on disk is touched.
+			if (
+				this.state ||
+				this.exists() ||
+				generation !== this.generation ||
+				fileGeneration !== this.fileGeneration
+			) {
+				throw new VaultServiceError(
+					'another vault operation finished while the chosen file was being verified, so nothing was changed. Check the current vault and try again.'
+				);
+			}
+
+			writeEnvelope(this.file, envelope);
+
+			// A vault now exists where one did not. Anything that checked for its
+			// absence before the derivation has to find out. See `fileGeneration`.
+			this.fileGeneration += 1;
+		} finally {
+			wipe(key);
+		}
 	}
 
 	/**
@@ -1269,7 +1513,10 @@ export class VaultService {
 	 * class does not get to decide that a file holding revocation codes is
 	 * disposable.
 	 */
-	async restoreFromBackup(passphrase: string): Promise<void> {
+	async restoreFromBackup(
+		passphrase: string,
+		requireCompatible: (candidate: Envelope, key: Buffer) => void = () => undefined
+	): Promise<void> {
 		// The same reason as `backupAvailable`: restoring the backup an interrupted
 		// rotation had already replaced would install one the retired passphrase
 		// opens, which is the state the rotation existed to leave behind.
@@ -1285,13 +1532,21 @@ export class VaultService {
 		if (!envelope) {
 			throw new VaultServiceError('there is no backup vault to restore from');
 		}
-
 		// Proves the passphrase and the file before a byte is written.
 		const generation = this.generation;
 		// And which vault file this restore was authorised against. See
 		// `fileGeneration`.
 		const fileGeneration = this.fileGeneration;
 		const { plaintext, key, kdf } = await unseal(envelope, passphrase);
+
+		// Prove the derived key, not just its KDF metadata, can authenticate every
+		// wrapped workflow key before moving either vault file.
+		try {
+			requireCompatible(envelope, key);
+		} catch (err) {
+			wipe(key);
+			throw err;
+		}
 
 		// **Refused while the vault is open** — checked after the derivation, so an
 		// unlock that landed during it is caught too, and before `setAside`, so
@@ -1359,13 +1614,15 @@ export class VaultService {
 			// a failed restore leaves no `vault.json` at all: the app reads that as a
 			// fresh install and offers to create one, and the second save of that new
 			// vault would copy it over the `.bak` that still held everything.
-			if (moved) {
-				putBack(moved, this.file);
-			}
+			const restored = moved === undefined ? !existsSync(this.file) : putBack(moved, this.file);
 			wipe(key);
 			throw new VaultServiceError(
-				'the backup could not be written into place, so nothing was changed. Your vault file ' +
-					'is as it was.'
+				restored
+					? 'the backup could not be written into place, so nothing was changed. Your vault file is as it was.'
+					: 'the backup could not be written into place, and the original vault could not be restored automatically. ' +
+							(moved === undefined
+								? 'The file at the vault location may have changed; do not replace it until you have checked it.'
+								: `Your original vault is still kept beside it as "${basename(moved)}". Do not delete either file until you have checked them.`)
 			);
 		}
 

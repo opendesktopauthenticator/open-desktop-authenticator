@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { CHANNELS } from '../src/shared/channels';
 import { EnrollmentError } from '../src/main/steam/enroll';
+import {
+	authenticatorFingerprint,
+	operationRecordToken
+} from '../src/main/steam/authenticator-secrets';
 
 /**
  * **A promise that lasted exactly as long as a React component.**
@@ -35,6 +39,7 @@ vi.mock('electron', () => ({
 }));
 
 import { registerEnrollmentHandlers } from '../src/main/steam/enrollment-ipc';
+import { memoryOperationJournal, type OperationJournal } from '../src/main/steam/operation-journal';
 import { setTrustedSender, __resetRouterForTests } from '../src/main/ipc/router';
 import type { EnrollmentService } from '../src/main/steam/enrollment';
 import type { VaultService } from '../src/main/vault/service';
@@ -77,10 +82,18 @@ beforeEach(() => {
 	setTrustedSender(() => true);
 });
 
-function register(vault: VaultService, overrides: Partial<EnrollmentService>): void {
-	registerEnrollmentHandlers(overrides as EnrollmentService, vault, {
-		show: () => Promise.resolve(undefined)
-	});
+function register(vault: VaultService, overrides: Partial<EnrollmentService>): OperationJournal {
+	const journal = memoryOperationJournal();
+	registerEnrollmentHandlers(
+		overrides as EnrollmentService,
+		vault,
+		{ show: () => Promise.resolve(undefined) },
+		undefined,
+		undefined,
+		undefined,
+		journal
+	);
+	return journal;
 }
 
 const REMOVE = {
@@ -169,7 +182,7 @@ describe('a row replaced while the Steam call was failing', () => {
 		const replaced = account();
 		replaced.sharedSecret = 'YSBkaWZmZXJlbnQgc2VjcmV0';
 
-		register(vaultHolding(accounts), {
+		const journal = register(vaultHolding(accounts), {
 			deactivate: () => {
 				// The import lands while Steam is failing to answer.
 				accounts[0] = replaced;
@@ -186,10 +199,10 @@ describe('a row replaced while the Steam call was failing', () => {
 			'the record was stamped with the replacement authenticator, so resolving it would act ' +
 				'on one the operation never touched'
 		).toBeUndefined();
-		expect(
-			result.persisted,
-			'and it claimed the refusal had been recorded when the row it was about had gone'
-		).toBe(false);
+		expect(result.persisted).toBe(true);
+		expect(journal.readKind(STEAM_ID, 'deactivate')?.fingerprint).not.toBe(
+			createHash('sha256').update(replaced.sharedSecret).digest('hex').slice(0, 16)
+		);
 	});
 
 	/* The ordinary case still records, against the row it really ran on. */
@@ -232,6 +245,25 @@ describe('an activation whose outcome was never established', () => {
 
 		await handler(EVENT, { steamId64: STEAM_ID, code: '12345' });
 
+		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
+	});
+
+	it('carries a recovery-backup warning across IPC without calling activation failed', async () => {
+		const accounts = [account()];
+		register(vaultHolding(accounts), {
+			activateWithRecoveryStatus: () =>
+				Promise.resolve({
+					state: 'activated' as const,
+					recoveryWarning: 'The encrypted recovery backup could not be updated.'
+				})
+		});
+		const handler = handlers.get(CHANNELS.enrollActivate);
+		if (!handler) throw new Error('enrollActivate was not registered');
+
+		await expect(handler(EVENT, { steamId64: STEAM_ID, code: '12345' })).resolves.toEqual({
+			state: 'activated',
+			recoveryWarning: 'The encrypted recovery backup could not be updated.'
+		});
 		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
 	});
 });
@@ -302,7 +334,19 @@ describe('resolving an unresolved operation', () => {
 		register(vaultHolding(accounts), spy.overrides);
 		const handler = handlers.get(CHANNELS.accountResolveOperation);
 		if (!handler) throw new Error('accountResolveOperation was not registered');
-		return { spy, run: handler(EVENT, { steamId64: STEAM_ID, ...request }) };
+		const record = accounts[0]?.unresolvedOperation;
+		const operationToken =
+			record === undefined
+				? '0'.repeat(64)
+				: operationRecordToken('vault', { steamId64: STEAM_ID, ...record });
+		return {
+			spy,
+			run: handler(EVENT, {
+				steamId64: STEAM_ID,
+				...(!('discardStale' in request) ? { operationToken } : {}),
+				...request
+			})
+		};
 	}
 
 	it('lifts the refusal when Steam did nothing', async () => {
@@ -347,7 +391,12 @@ describe('resolving an unresolved operation', () => {
 	 */
 	it('clears a record about an authenticator that has been replaced', async () => {
 		const accounts = latched('activate', { fingerprint: fingerprint('a different secret') });
-		const { run, spy } = resolve(accounts, { kind: 'activate', steamActed: true });
+		const record = accounts[0]!.unresolvedOperation!;
+		const { run, spy } = resolve(accounts, {
+			kind: 'activate',
+			discardStale: true,
+			staleToken: operationRecordToken('vault', { steamId64: STEAM_ID, ...record })
+		});
 
 		expect(await run).toEqual({ ok: true });
 		expect(
@@ -361,19 +410,137 @@ describe('resolving an unresolved operation', () => {
 	});
 
 	/*
-	 * A record written before fingerprints existed cannot be matched, so it is
-	 * refused rather than assumed to be about whatever is there now.
+	 * A record written before fingerprints existed cannot be matched. Treating a
+	 * missing fingerprint as a mismatch made the destructive clear-old-record
+	 * path available with no evidence that the record belonged to an older
+	 * authenticator.
 	 */
-	/* Written before fingerprints existed: it cannot be matched, so it is cleared
-	 * rather than left blocking the account for ever. */
-	it('clears a record with no fingerprint at all', async () => {
+	it('refuses to clear or reconcile a record with no fingerprint at all', async () => {
 		const accounts = latched('activate', { fingerprint: undefined });
-		const { run, spy } = resolve(accounts, { kind: 'activate', steamActed: true });
+		const record = accounts[0]!.unresolvedOperation!;
+		const spy = serviceSpy();
+		register(vaultHolding(accounts), spy.overrides);
+		const handler = handlers.get(CHANNELS.accountResolveOperation);
+		if (!handler) throw new Error('accountResolveOperation was not registered');
 
-		expect(await run).toEqual({ ok: true });
+		await expect(
+			handler(EVENT, {
+				steamId64: STEAM_ID,
+				kind: 'activate',
+				operationToken: '0'.repeat(64),
+				steamActed: true
+			})
+		).rejects.toThrow(/does not identify/i);
+		await expect(
+			handler(EVENT, {
+				steamId64: STEAM_ID,
+				kind: 'activate',
+				discardStale: true,
+				staleToken: operationRecordToken('vault', { steamId64: STEAM_ID, ...record })
+			})
+		).rejects.toThrow(/does not identify/i);
+
 		expect(spy.activated).toEqual([]);
-		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
+		expect(accounts[0]?.unresolvedOperation).toBe(record);
 	});
+
+	it.each([
+		'',
+		'a'.repeat(15),
+		'a'.repeat(17),
+		'ABCDEF0123456789',
+		'gggggggggggggggg',
+		'a fingerprint from a different authenticator'
+	])(
+		'refuses to display, clear, or reconcile an unverifiable fingerprint (%j)',
+		async (fingerprintValue) => {
+			const accounts = latched('activate', { fingerprint: fingerprintValue });
+			const record = accounts[0]!.unresolvedOperation!;
+			const spy = serviceSpy();
+			register(vaultHolding(accounts), spy.overrides);
+			const operation = handlers.get(CHANNELS.enrollActivate);
+			const resolver = handlers.get(CHANNELS.accountResolveOperation);
+			if (!operation || !resolver) throw new Error('operation handlers were not registered');
+
+			const displayed = (await operation(EVENT, {
+				steamId64: STEAM_ID,
+				code: '12345'
+			})) as { state: string; staleToken?: string };
+			expect(displayed.state).toBe('unidentifiedOperation');
+			expect(displayed.staleToken).toBeUndefined();
+
+			await expect(
+				resolver(EVENT, {
+					steamId64: STEAM_ID,
+					kind: 'activate',
+					operationToken: '0'.repeat(64),
+					steamActed: true
+				})
+			).rejects.toThrow(/does not identify|cannot verify/i);
+			await expect(
+				resolver(EVENT, {
+					steamId64: STEAM_ID,
+					kind: 'activate',
+					discardStale: true,
+					staleToken: '0'.repeat(64)
+				})
+			).rejects.toThrow(/does not identify|cannot verify/i);
+
+			expect(spy.activated).toEqual([]);
+			expect(spy.detached).toEqual([]);
+			expect(accounts[0]?.unresolvedOperation).toBe(record);
+		}
+	);
+
+	it.each(['activate', 'deactivate'] as const)(
+		'uses an applicable %s journal note before an unidentified legacy vault record',
+		async (kind) => {
+			const accounts = latched(kind, { fingerprint: undefined });
+			let steamCalls = 0;
+			const spy = serviceSpy();
+			const journal = register(vaultHolding(accounts), {
+				...spy.overrides,
+				activate: () => {
+					steamCalls += 1;
+					return Promise.resolve('activated' as const);
+				},
+				deactivate: () => {
+					steamCalls += 1;
+					return Promise.resolve();
+				}
+			});
+			journal.record({
+				steamId64: STEAM_ID,
+				kind,
+				fingerprint: fingerprint(accounts[0]!.sharedSecret),
+				at: '2026-01-02T00:00:00.000Z'
+			});
+			const operation = handlers.get(
+				kind === 'activate' ? CHANNELS.enrollActivate : CHANNELS.accountDeactivate
+			);
+			if (!operation) throw new Error(`${kind} was not registered`);
+			const displayed = (await operation(
+				EVENT,
+				kind === 'activate' ? { steamId64: STEAM_ID, code: '12345' } : REMOVE
+			)) as { state: string; kind: string; operationToken: string };
+
+			expect(displayed).toMatchObject({ state: 'uncertain', kind });
+			expect(steamCalls).toBe(0);
+
+			const resolver = handlers.get(CHANNELS.accountResolveOperation);
+			if (!resolver) throw new Error('accountResolveOperation was not registered');
+			expect(
+				await resolver(EVENT, {
+					steamId64: STEAM_ID,
+					kind,
+					operationToken: displayed.operationToken,
+					steamActed: false
+				})
+			).toEqual({ ok: true });
+			expect(journal.readKind(STEAM_ID, kind)).toBeUndefined();
+			expect(accounts[0]?.unresolvedOperation).toBeDefined();
+		}
+	);
 
 	/**
 	 * **A no-op that reported success.** Where the record could not be written,
@@ -421,6 +588,32 @@ describe('resolving an unresolved operation', () => {
 
 		expect(await run).toEqual({ ok: true });
 		expect(spy.activated).toEqual([STEAM_ID]);
+	});
+
+	it('returns the recovery warning from an activation reconciliation', async () => {
+		const accounts = latched('activate');
+		register(vaultHolding(accounts), {
+			reconcileActivatedWithRecoveryStatus: () =>
+				Promise.resolve({
+					applied: true,
+					recoveryWarning: 'The encrypted recovery backup could not be updated.'
+				})
+		});
+		const handler = handlers.get(CHANNELS.accountResolveOperation);
+		if (!handler) throw new Error('accountResolveOperation was not registered');
+		const record = accounts[0]!.unresolvedOperation!;
+
+		await expect(
+			handler(EVENT, {
+				steamId64: STEAM_ID,
+				kind: 'activate',
+				operationToken: operationRecordToken('vault', { steamId64: STEAM_ID, ...record }),
+				steamActed: true
+			})
+		).resolves.toEqual({
+			ok: true,
+			recoveryWarning: 'The encrypted recovery backup could not be updated.'
+		});
 	});
 });
 
@@ -502,12 +695,18 @@ describe('an operation attempted while one is still unresolved', () => {
 
 	/* And once the user has said they checked, the account works normally again. */
 	it('lets the operation through once it has been resolved', async () => {
-		const { calls } = withLatch('activate');
+		const { calls, accounts } = withLatch('activate');
 		const resolve = handlers.get(CHANNELS.accountResolveOperation);
 		const activate = handlers.get(CHANNELS.enrollActivate);
 		if (!resolve || !activate) throw new Error('handlers were not registered');
+		const record = accounts[0]!.unresolvedOperation!;
 
-		await resolve(EVENT, { steamId64: STEAM_ID, kind: 'activate', steamActed: false });
+		await resolve(EVENT, {
+			steamId64: STEAM_ID,
+			kind: 'activate',
+			operationToken: operationRecordToken('vault', { steamId64: STEAM_ID, ...record }),
+			steamActed: false
+		});
 		const result = (await activate(EVENT, { steamId64: STEAM_ID, code: '12345' })) as {
 			state: string;
 		};
@@ -549,7 +748,7 @@ describe('an operation attempted while one is still unresolved', () => {
  * The outcome carries whether it was actually written down, so the sentence can
  * be true either way.
  */
-describe('an outcome whose latch could not be written', () => {
+describe('an outcome whose vault latch could not be written', () => {
 	/** A vault that reads fine and refuses every write. */
 	function unwritable(accounts: Account[]): VaultService {
 		return {
@@ -561,8 +760,8 @@ describe('an outcome whose latch could not be written', () => {
 		} as unknown as VaultService;
 	}
 
-	it('does not claim to have been saved', async () => {
-		register(unwritable([account()]), {
+	it('reports the pre-send journal that still makes the refusal durable', async () => {
+		const journal = register(unwritable([account()]), {
 			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
 		});
 		const handler = handlers.get(CHANNELS.accountDeactivate);
@@ -571,11 +770,8 @@ describe('an outcome whose latch could not be written', () => {
 		const result = (await handler(EVENT, REMOVE)) as { state?: string; persisted?: boolean };
 
 		expect(result.state, 'the guidance has to reach the user either way').toBe('uncertain');
-		expect(
-			result.persisted,
-			'the write failed and the outcome still said the refusal would outlive the window, so ' +
-				'the screen promised something nothing had recorded'
-		).toBe(false);
+		expect(result.persisted).toBe(true);
+		expect(journal.readKind(STEAM_ID, 'deactivate')).toBeDefined();
 	});
 
 	/**
@@ -587,7 +783,7 @@ describe('an outcome whose latch could not be written', () => {
 	 * not about the disk — and it claimed the refusal had been saved when the
 	 * write had just failed, which is the same false promise one level down.
 	 */
-	it('does not claim to have been saved when the write fails after the change', async () => {
+	it('falls back to the pre-send journal when the vault write fails after the change', async () => {
 		const stored = [account()];
 		const vault = {
 			isUnlocked: () => true,
@@ -602,7 +798,7 @@ describe('an outcome whose latch could not be written', () => {
 			}
 		} as unknown as VaultService;
 
-		register(vault, {
+		const journal = register(vault, {
 			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
 		});
 		const handler = handlers.get(CHANNELS.accountDeactivate);
@@ -610,15 +806,12 @@ describe('an outcome whose latch could not be written', () => {
 
 		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
 
-		expect(
-			result.persisted,
-			'the flag was set inside the callback, so a write that failed straight afterwards still ' +
-				'reported the refusal as saved'
-		).toBe(false);
+		expect(result.persisted).toBe(true);
+		expect(journal.readKind(STEAM_ID, 'deactivate')).toBeDefined();
 	});
 
-	it('says so for an activation too', async () => {
-		register(unwritable([account()]), {
+	it('protects an activation through the pre-send journal too', async () => {
+		const journal = register(unwritable([account()]), {
 			activate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
 		});
 		const handler = handlers.get(CHANNELS.enrollActivate);
@@ -628,27 +821,28 @@ describe('an outcome whose latch could not be written', () => {
 			persisted?: boolean;
 		};
 
-		expect(result.persisted).toBe(false);
+		expect(result.persisted).toBe(true);
+		expect(journal.readKind(STEAM_ID, 'activate')).toBeDefined();
 	});
 
 	/*
 	 * A vault write that succeeds but finds no row is the same outcome as one
 	 * that throws: nothing was recorded, and the promise is just as empty.
 	 */
-	it('does not claim to have been saved when the account is not there', async () => {
-		register(vaultHolding([]), {
-			deactivate: () => Promise.reject(new EnrollmentError(GUIDANCE, true, true))
+	it('refuses before Steam when the account row is not there', async () => {
+		let sent = 0;
+		const journal = register(vaultHolding([]), {
+			deactivate: () => {
+				sent += 1;
+				return Promise.reject(new EnrollmentError(GUIDANCE, true, true));
+			}
 		});
 		const handler = handlers.get(CHANNELS.accountDeactivate);
 		if (!handler) throw new Error('accountDeactivate was not registered');
 
-		const result = (await handler(EVENT, REMOVE)) as { persisted?: boolean };
-
-		expect(
-			result.persisted,
-			'the mutate succeeded and wrote nothing, which reads as success unless the write itself ' +
-				'reports what it did'
-		).toBe(false);
+		await expect(handler(EVENT, REMOVE)).rejects.toThrow(/not in this vault/i);
+		expect(sent).toBe(0);
+		expect(journal.readKind(STEAM_ID, 'deactivate')).toBeUndefined();
 	});
 
 	/* And it does say so when it really was written. */
@@ -695,12 +889,12 @@ describe('an outcome whose latch could not be written', () => {
 	 * the replacement unusable — the exact account-bricking the fingerprint was
 	 * added to prevent, arriving through the guard itself.
 	 */
-	it('does not block an authenticator the record was never about', async () => {
+	it('makes an old record explicitly clearable before allowing the replacement operation', async () => {
 		const accounts = [account()];
 		accounts[0]!.unresolvedOperation = {
 			kind: 'deactivate',
 			guidance: GUIDANCE,
-			fingerprint: 'a fingerprint from a different authenticator',
+			fingerprint: authenticatorFingerprint({ sharedSecret: 'a different authenticator' }),
 			at: '2026-01-01T00:00:00.000Z'
 		};
 		let sent = 0;
@@ -713,12 +907,26 @@ describe('an outcome whose latch could not be written', () => {
 		const handler = handlers.get(CHANNELS.accountDeactivate);
 		if (!handler) throw new Error('accountDeactivate was not registered');
 
+		const displayed = (await handler(EVENT, REMOVE)) as {
+			state: string;
+			kind: 'activate' | 'deactivate';
+			staleToken: string;
+		};
+		expect(displayed.state).toBe('staleOperation');
+		expect(sent).toBe(0);
+		const resolve = handlers.get(CHANNELS.accountResolveOperation);
+		if (!resolve) throw new Error('accountResolveOperation was not registered');
+		await resolve(EVENT, {
+			steamId64: STEAM_ID,
+			kind: displayed.kind,
+			discardStale: true,
+			staleToken: displayed.staleToken
+		});
 		await handler(EVENT, REMOVE);
 
 		expect(
 			sent,
-			'a record about an authenticator that is gone refused an operation on the one that ' +
-				'replaced it, and nothing in the application could clear it'
+			'an explicitly cleared record about an older authenticator still blocked its replacement'
 		).toBe(1);
 	});
 });

@@ -381,12 +381,14 @@ export const moveToPc = {
 			<div class="callout">
 				<p>
 					<strong>${
-						s.release.published ? 'Yes — the transfer is built into the application.' : 'Not yet.'
+						s.features.transfer.anyPublic
+							? 'Yes — the transfer is built into the published application.'
+							: 'Not yet.'
 					}</strong>
 					${
-						s.release.published
+						s.features.transfer.anyPublic
 							? 'It uses the flow described above and never substitutes remove-and-add.'
-							: `${s.name} implements this flow, and it has been run successfully against a real account — but there is no public release yet, so there is nothing for you to download. <a href="/download">The download page tracks exactly where that stands.</a>`
+							: `${s.name} implements this flow in the upcoming ${s.version} source, and it has been run successfully against a real account — but the currently published GitHub ${s.publication.github.latestVersion ?? 'build'} and Microsoft Store ${s.publication.store.latestVersion ?? 'build'} builds do not contain it. <a href="/download">The download page tracks exactly where that stands.</a>`
 					}
 				</p>
 				<p>

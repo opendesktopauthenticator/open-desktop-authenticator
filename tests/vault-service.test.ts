@@ -10,6 +10,7 @@ import {
 	type LockReason
 } from '../src/main/vault/service';
 import { readEnvelope } from '../src/main/vault/storage';
+import { openBytesWithKey, wipe } from '../src/main/vault/crypto';
 import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
 
 /**
@@ -466,15 +467,33 @@ describe('adopting a vault file from elsewhere', () => {
 		const origin = new VaultService({ file: source, now });
 		await origin.create(PASS);
 		await origin.mutate((d) => d.accounts.push(account));
+		const workflowKey = Buffer.alloc(32, 77);
+		const wrappedWorkflowKey = origin.sealScopedKey(workflowKey);
 
 		const here = service();
 		expect(here.exists()).toBe(false);
 
-		here.adoptFrom(source);
+		await here.adoptFrom(source, PASS, (candidate, key) => {
+			const opened = openBytesWithKey(wrappedWorkflowKey, key, candidate.kdf);
+			try {
+				expect(opened).toEqual(workflowKey);
+			} finally {
+				wipe(opened);
+			}
+		});
 
 		expect(here.exists()).toBe(true);
 		await here.unlock(PASS);
 		expect(here.read().accounts).toHaveLength(1);
+	});
+
+	it('refuses a wrong passphrase before installing the chosen vault', async () => {
+		const source = join(dir, 'elsewhere', 'vault.json');
+		await new VaultService({ file: source, now }).create(PASS);
+		const here = service();
+
+		await expect(here.adoptFrom(source, 'this is not the vault passphrase')).rejects.toThrow();
+		expect(here.exists()).toBe(false);
 	});
 
 	it('refuses to replace a vault that already exists', async () => {
@@ -491,17 +510,34 @@ describe('adopting a vault file from elsewhere', () => {
 		here.lock('manual');
 		const before = readFileSync(file, 'utf8');
 
-		expect(() => here.adoptFrom(source)).toThrow(/already a vault/);
+		await expect(here.adoptFrom(source, PASS)).rejects.toThrow(/already a vault/);
 		expect(readFileSync(file, 'utf8')).toBe(before);
 	});
 
-	it('refuses a file that is not a vault, without creating one', () => {
+	it('refuses a file that is not a vault, without creating one', async () => {
 		const notAVault = join(dir, 'notes.json');
 		writeFileSync(notAVault, '{"hello":"world"}', 'utf8');
 
 		const here = service();
-		expect(() => here.adoptFrom(notAVault)).toThrow(/not a vault/);
+		await expect(here.adoptFrom(notAVault, PASS)).rejects.toThrow(/not a vault/);
 		expect(here.exists()).toBe(false);
+	});
+
+	it('checks workflow-key compatibility before adopting or writing anything', async () => {
+		const source = join(dir, 'elsewhere', 'vault.json');
+		const origin = new VaultService({ file: source, now });
+		await origin.create(PASS);
+		const here = service();
+		const check = vi.fn(() => {
+			throw new VaultServiceError('that vault belongs to another workflow key');
+		});
+
+		await expect(here.adoptFrom(source, PASS, check)).rejects.toThrow(/another workflow key/i);
+		expect(check).toHaveBeenCalledOnce();
+		expect(
+			here.exists(),
+			'the rejected candidate was installed before compatibility was checked'
+		).toBe(false);
 	});
 });
 
@@ -551,7 +587,7 @@ describe('backup recovery', () => {
 	});
 
 	it('puts the vault back when the restore write fails', async () => {
-		// `setAside` renames the main file away, which makes `writeEnvelope` believe
+		// `setAside` removes the main name after preserving it, which makes `writeEnvelope` believe
 		// there was never one — so its own rollback, which restores from `.bak` only
 		// when a main file existed, does nothing. Left like that a failed restore
 		// leaves no `vault.json` at all: the app reads that as a fresh install and
@@ -595,6 +631,26 @@ describe('backup recovery', () => {
 
 		expect(readFileSync(file, 'utf8')).toBe(before);
 		expect(readdirSync(dir).filter((name) => name.includes('superseded'))).toHaveLength(0);
+	});
+
+	it('checks workflow-key compatibility before moving the current vault during restore', async () => {
+		const v = service();
+		await v.create(PASS);
+		await v.mutate((d) => d.accounts.push(account));
+		v.lock();
+		const before = readFileSync(file, 'utf8');
+		const check = vi.fn(() => {
+			throw new VaultServiceError('that backup cannot open the pending workflow key');
+		});
+
+		await expect(service().restoreFromBackup(PASS, check)).rejects.toThrow(/pending workflow key/i);
+		expect(check).toHaveBeenCalledOnce();
+		expect(readFileSync(file, 'utf8')).toBe(before);
+		expect(readdirSync(dir).filter((name) => name.includes('superseded'))).toHaveLength(0);
+
+		const reopened = service();
+		await reopened.unlock(PASS);
+		expect(reopened.read().accounts).toHaveLength(1);
 	});
 
 	it('says so plainly when there is no backup at all', async () => {
@@ -772,13 +828,13 @@ describe('restore while unlocked', () => {
 });
 
 describe('adopting a vault file', () => {
-	it('refuses to read an enormous pick at all', () => {
+	it('refuses to read an enormous pick at all', async () => {
 		const big = join(dir, 'huge.vault');
 		// Sparse-ish: two megabytes of zeros is enough to trip a one-megabyte cap
 		// without slowing the suite.
 		writeFileSync(big, Buffer.alloc(2 * 1024 * 1024));
 		const v = service();
-		expect(() => v.adoptFrom(big)).toThrow(/too large/);
+		await expect(v.adoptFrom(big, PASS)).rejects.toThrow(/too large/);
 	});
 });
 
@@ -952,7 +1008,7 @@ describe('create and adopt while a session is open', () => {
 		await v.create(PASS);
 		rmSync(file);
 
-		expect(() => v.adoptFrom(source)).toThrow(/vault is open/i);
+		await expect(v.adoptFrom(source, 'another long passphrase')).rejects.toThrow(/vault is open/i);
 	});
 });
 

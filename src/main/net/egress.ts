@@ -13,10 +13,17 @@
  * resolves to `SOCKS5 127.0.0.1:1` and fails with `ERR_PROXY_CONNECTION_FAILED`
  * — it **fails closed**, reaching the internet not at all rather than falling
  * back to a direct connection. That is the property the anonymity promise
- * depends on, and it is why this needs no proxy-agent dependency (Q19).
+ * depends on. Password sign-ins do not use Chromium, so their separately
+ * bounded Node agents are built near the bottom of this module.
  */
 
 import { domainToASCII } from 'node:url';
+import type { Agent as HttpsAgent } from 'node:https';
+import {
+	BoundedHttpsProxyAgent,
+	BoundedSocksProxyAgent,
+	PROXY_CONNECT_TIMEOUT_MS
+} from './bounded-https-proxy-agent';
 
 /** Schemes we accept from a user or a maFile. */
 /**
@@ -222,7 +229,7 @@ export const PROXY_REQUIRED =
 
 export class EgressError extends Error {
 	/**
-	 * Whether any of the request reached the network before this was thrown.
+	 * Whether Steam may have received or acted on the request before this was thrown.
 	 *
 	 * **Most of the refusals in this module happen before a byte leaves the
 	 * machine**, and they are the point: a routing check that finds Chromium
@@ -235,15 +242,19 @@ export class EgressError extends Error {
 	 * nonsense for a proxy that refused to be used. It had no way to know which
 	 * it had, so it assumed the worse one for all of them.
 	 *
-	 * `false` is the default because the refusals in this file are all
-	 * before-the-send; the transport marks the two paths that follow a real
-	 * request. An error that is not an `EgressError` says nothing either way, and
-	 * a caller with no information should assume the request went — that is the
-	 * assumption that cannot lose an authenticator.
+	 * Handing bytes to Chromium is not, by itself, proof that Steam saw them: a
+	 * proxy connection can fail before Chromium has an origin route. Conversely,
+	 * a reset or timeout is never proof that Steam did not act. The transport owns
+	 * that distinction; callers use this flag only to decide whether retrying an
+	 * irreversible operation is known-safe.
+	 *
+	 * There is deliberately no default. Every construction has to say which side
+	 * of the uncertainty boundary it is on; adding a network failure and forgetting
+	 * the argument must be a compile error, not a silent claim that retrying is safe.
 	 */
 	readonly sent: boolean;
 
-	constructor(message: string, sent = false) {
+	constructor(message: string, sent: boolean) {
 		super(message);
 		this.name = 'EgressError';
 		this.sent = sent;
@@ -309,7 +320,7 @@ const NETWORK_ERRORS: Record<string, string> = {
  * `httpProxy`, `socksProxy` and `agent` are mutually exclusive in
  * `steam-session`, so this returns exactly one.
  */
-export type SteamSessionProxy = { httpProxy: string } | { socksProxy: string };
+export type SteamSessionProxy = { agent: HttpsAgent };
 
 /**
  * SOCKS schemes as `socks-proxy-agent` reads them, chosen for remote DNS.
@@ -325,7 +336,10 @@ const NODE_SOCKS_SCHEME: Record<string, string> = {
 	'socks4:': 'socks4'
 };
 
-export function steamSessionProxy(proxyUrl: string): SteamSessionProxy {
+export function steamSessionProxy(
+	proxyUrl: string,
+	proxyConnectTimeoutMs = PROXY_CONNECT_TIMEOUT_MS
+): SteamSessionProxy {
 	const url = new URL(proxyUrl);
 	// Throws `EgressError` for anything `planProxy` would refuse — and its
 	// `endpoint` is the host:port pair with any default already filled in, which
@@ -334,7 +348,24 @@ export function steamSessionProxy(proxyUrl: string): SteamSessionProxy {
 
 	const scheme = CHROMIUM_SCHEME[url.protocol] as string;
 	if (scheme === 'http' || scheme === 'https') {
-		return { httpProxy: proxyUrl };
+		/*
+		 * Give the agent one canonical, validly encoded authority. Its CONNECT
+		 * implementation decodes userinfo exactly once before building Basic auth.
+		 * Rebuilding from `plan.credentials` also covers a literal `%` in a valid
+		 * password: WHATWG URL leaves a stray percent untouched, while the agent's
+		 * `decodeURIComponent` correctly rejects malformed encoding.
+		 */
+		const port = url.port === '' ? (DEFAULT_PORT[url.protocol] as string) : url.port;
+		const credentials =
+			plan.credentials === undefined
+				? ''
+				: `${encodeURIComponent(plan.credentials.username)}:${encodeURIComponent(plan.credentials.password)}@`;
+		return {
+			agent: new BoundedHttpsProxyAgent(
+				`${url.protocol}//${credentials}${url.hostname}:${port}`,
+				proxyConnectTimeoutMs
+			)
+		};
 	}
 
 	// **Normalised to the remote-DNS spelling, which is the opposite direction
@@ -367,7 +398,20 @@ export function steamSessionProxy(proxyUrl: string): SteamSessionProxy {
 		url.username === '' && url.password === ''
 			? ''
 			: `${url.username}${url.password === '' ? '' : `:${url.password}`}@`;
-	return { socksProxy: `${nodeScheme}://${credentials}${plan.endpoint}` };
+	/*
+	 * `socks-proxy-agent@7` was published against Node's older Agent shape.
+	 * It implements the `addRequest` contract steam-session consumes, but its
+	 * declaration predates four bookkeeping methods now present on
+	 * `https.Agent`. Keep the compatibility assertion here at the dependency
+	 * boundary instead of weakening the option type passed through the app.
+	 */
+	const agent = new BoundedSocksProxyAgent(
+		`${nodeScheme}://${credentials}${plan.endpoint}`,
+		proxyConnectTimeoutMs
+	) as unknown as HttpsAgent;
+	return {
+		agent
+	};
 }
 
 /**
@@ -872,22 +916,23 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 	try {
 		url = new URL(address);
 	} catch {
-		throw new EgressError('that is not a usable proxy address');
+		throw new EgressError('that is not a usable proxy address', false);
 	}
 
 	// Named refusals first, so the message can say what to use instead rather
 	// than only what will not work.
 	const refused = REFUSED_SCHEMES.get(url.protocol);
 	if (refused !== undefined) {
-		throw new EgressError(refused);
+		throw new EgressError(refused, false);
 	}
 	if (!SUPPORTED.has(url.protocol)) {
 		throw new EgressError(
-			`${url.protocol.replace(':', '')} proxies are not supported — use http, https or socks5`
+			`${url.protocol.replace(':', '')} proxies are not supported — use http, https or socks5`,
+			false
 		);
 	}
 	if (url.hostname === '') {
-		throw new EgressError('a proxy address needs a host');
+		throw new EgressError('a proxy address needs a host', false);
 	}
 
 	/*
@@ -961,7 +1006,8 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 			'a proxy address cannot contain a space or any other invisible character. Web ' +
 				'addresses have no way to carry one, and inside a username or password it would ' +
 				'survive into error messages that are otherwise stripped of credentials. If the ' +
-				'password really contains a space, write it percent-encoded as %20.'
+				'password really contains a space, write it percent-encoded as %20.',
+			false
 		);
 	}
 
@@ -987,7 +1033,8 @@ export function planProxy(proxyUrl: string): ProxyPlan {
 		throw new EgressError(
 			'a SOCKS proxy that needs a username and password cannot be used: Chromium, which ' +
 				'carries this app’s Steam traffic, cannot authenticate to one. Use an http or https ' +
-				'proxy for credentials, or a SOCKS proxy that allows this machine without them'
+				'proxy for credentials, or a SOCKS proxy that allows this machine without them',
+			false
 		);
 	}
 

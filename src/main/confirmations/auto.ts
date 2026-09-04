@@ -2,6 +2,7 @@ import { redactCredentials } from '../net/egress';
 import { ConfirmationsError } from './service';
 import type { ConfirmationsService, AutoConfirmOutcome } from './service';
 import type { VaultService } from '../vault/service';
+import { performance } from 'node:perf_hooks';
 import type { ConfirmationSummary } from '../../shared/ipc';
 import type { NotifyDetail } from '../../shared/vault-schema';
 
@@ -168,8 +169,10 @@ export interface AutoConfirmEngineOptions {
 	 * which is also what keeps a long-running tray session from drifting.
 	 */
 	ensureClock?: () => Promise<void>;
-	/** Injected for testability. */
+	/** Legacy test injection for the scheduler's elapsed clock. */
 	now?: () => number;
+	/** Preferred elapsed-time source. Wall-clock corrections must not move schedules. */
+	monotonic?: () => number;
 	setTimer?: (callback: () => void, ms: number) => NodeJS.Timeout;
 	clearTimer?: (handle: NodeJS.Timeout) => void;
 }
@@ -186,7 +189,7 @@ interface DueAccount {
 }
 
 interface AccountState {
-	/** Epoch ms of the next permitted attempt. */
+	/** Monotonic milliseconds of the next permitted attempt. */
 	nextDueAt: number;
 	/**
 	 * The wait currently being served after a failure, doubling each consecutive
@@ -232,7 +235,7 @@ export class AutoConfirmEngine {
 	private readonly halted = new Set<string>();
 	private readonly requireProxies: () => boolean;
 	private readonly ensureClock: () => Promise<void>;
-	private readonly now: () => number;
+	private readonly scheduleNow: () => number;
 	private readonly setTimer: (callback: () => void, ms: number) => NodeJS.Timeout;
 	private readonly clearTimer: (handle: NodeJS.Timeout) => void;
 
@@ -350,7 +353,10 @@ export class AutoConfirmEngine {
 		this.onStillHalted = guarded(options.onStillHalted);
 		this.requireProxies = options.requireProxies ?? ((): boolean => false);
 		this.ensureClock = options.ensureClock ?? ((): Promise<void> => Promise.resolve());
-		this.now = options.now ?? ((): number => Date.now());
+		// Scheduling is elapsed time, not a calendar timestamp. `now` remains as a
+		// compatibility injection for the existing deterministic tests; production
+		// always takes the monotonic default.
+		this.scheduleNow = options.monotonic ?? options.now ?? ((): number => performance.now());
 		this.setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
 		this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
 	}
@@ -438,6 +444,19 @@ export class AutoConfirmEngine {
 	}
 
 	/**
+	 * Make the next beat rebuild policy-dependent eligibility from the vault.
+	 *
+	 * Unlike `reset`, this deliberately keeps per-account epochs, failures and
+	 * in-flight work. Relaxing `Require proxies` makes previously excluded
+	 * accounts eligible; it does not invalidate a correctly routed request that
+	 * is already running for another account.
+	 */
+	policyChanged(): void {
+		this.scheduleDirty = true;
+		this.earliestDueAt = 0;
+	}
+
+	/**
 	 * One sweep. Exposed so a test can drive it directly rather than through a
 	 * timer, and so nothing here depends on real time passing.
 	 */
@@ -464,7 +483,7 @@ export class AutoConfirmEngine {
 		}
 
 		// Cheap early-out, before the vault is read. See `earliestDueAt`.
-		if (this.earliestDueAt > this.now()) {
+		if (this.earliestDueAt > this.scheduleNow()) {
 			return;
 		}
 		const generation = this.generation;
@@ -583,7 +602,7 @@ export class AutoConfirmEngine {
 	}
 
 	private dueAccounts(): DueAccount[] {
-		const now = this.now();
+		const now = this.scheduleNow();
 		const due: DueAccount[] = [];
 		/** How many accounts this beat is meeting for the first time. */
 		let seeded = 0;
@@ -778,7 +797,7 @@ export class AutoConfirmEngine {
 				}
 
 				// No `backoffMs` and no `failures`: a success clears both penalties.
-				this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
+				this.state.set(steamId64, { nextDueAt: this.scheduleNow() + interval + jitter });
 				this.rememberEarliest();
 				this.onOutcome(steamId64, outcome);
 
@@ -803,7 +822,7 @@ export class AutoConfirmEngine {
 			if (!current()) {
 				return;
 			}
-			this.state.set(steamId64, { nextDueAt: this.now() + interval + jitter });
+			this.state.set(steamId64, { nextDueAt: this.scheduleNow() + interval + jitter });
 			this.rememberEarliest();
 			this.onPending(steamId64, accountName, listing.confirmations, listing.unreadable, detail);
 		} catch (err) {
@@ -847,7 +866,7 @@ export class AutoConfirmEngine {
 				 */
 				const carried = this.state.get(steamId64);
 				this.state.set(steamId64, {
-					nextDueAt: this.now() + interval + jitter,
+					nextDueAt: this.scheduleNow() + interval + jitter,
 					...(carried?.failures === undefined ? {} : { failures: carried.failures }),
 					...(carried?.backoffMs === undefined ? {} : { backoffMs: carried.backoffMs })
 				});
@@ -898,7 +917,11 @@ export class AutoConfirmEngine {
 				previous?.backoffMs === undefined
 					? BACKOFF_START_MS
 					: Math.min(BACKOFF_MAX_MS, previous.backoffMs * 2);
-			this.state.set(steamId64, { nextDueAt: this.now() + backoffMs, backoffMs, failures });
+			this.state.set(steamId64, {
+				nextDueAt: this.scheduleNow() + backoffMs,
+				backoffMs,
+				failures
+			});
 			this.rememberEarliest();
 
 			this.onFailure(steamId64, reason, false, { accountName, mode });

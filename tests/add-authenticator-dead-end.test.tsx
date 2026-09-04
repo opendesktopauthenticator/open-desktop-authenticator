@@ -33,7 +33,8 @@ function screen(props: Record<string, unknown> = {}): string {
 			onEmailCode={() => Promise.resolve({ state: 'needsEmailCode' as const })}
 			onCancel={() => Promise.resolve()}
 			onActivate={() => Promise.resolve({ state: 'activated' as const })}
-			onResolve={() => Promise.resolve()}
+			onResolve={() => Promise.resolve({ ok: true as const })}
+			onClearStale={() => Promise.resolve()}
 			onBackup={noop}
 			onClose={noop}
 			onMove={noop}
@@ -92,11 +93,24 @@ describe('the screen after an outcome Steam may already have acted on', () => {
 	it('offers the resolution once there is an account to resolve', () => {
 		const withAccount = screen({
 			resume: { steamId64: '76561198000000001', accountName: 'trader' },
-			unresolved: { guidance: 'Steam did not answer, so the outcome is unknown.' }
+			unresolved: {
+				guidance: 'Steam did not answer, so the outcome is unknown.',
+				operationToken: '0'.repeat(64)
+			}
 		});
 
 		expect(withAccount).toContain('Steam Guard is on this account now');
 		expect(hasSubmit(withAccount), 'the activation form was still offered').toBe(false);
+	});
+
+	it('does not offer an answer when the exact saved operation token is absent', () => {
+		const withoutIdentity = screen({
+			resume: { steamId64: '76561198000000001', accountName: 'trader' },
+			unresolved: { guidance: 'Steam did not answer, so the outcome is unknown.' }
+		});
+
+		expect(withoutIdentity).not.toContain('Steam Guard is on this account now');
+		expect(withoutIdentity).not.toContain('Steam Guard is not on it');
 	});
 });
 
@@ -128,6 +142,76 @@ describe('the screen with no outcome outstanding', () => {
 	});
 });
 
+describe('a recovery backup warning after successful activation', () => {
+	it('is retained into the completion screen for both activation and reconciliation', () => {
+		const source = AddAuthenticator.toString();
+		const completion = source.slice(source.indexOf('step === "done"'));
+
+		expect(source.match(/setRecoveryWarning\(result\.recoveryWarning\)/g)).toHaveLength(2);
+		expect(
+			source.indexOf('setUncertain(void 0)', source.indexOf('result.recoveryWarning'))
+		).toBeGreaterThan(source.indexOf('result.recoveryWarning'));
+		expect(completion).toContain('recoveryWarning');
+		expect(completion).toContain('role: "alert"');
+	});
+});
+
+describe('a safety record for an older authenticator', () => {
+	const stale = screen({
+		resume: { steamId64: '76561198000000001', accountName: 'trader' },
+		unresolved: {
+			kind: 'activate',
+			guidance: 'This record belongs to an older authenticator.',
+			stale: true,
+			staleToken: 'a'.repeat(64)
+		}
+	});
+
+	it('offers only the exact-record cleanup, not a Steam outcome answer or activation', () => {
+		expect(stale).toContain('An old safety record needs clearing');
+		expect(stale).toContain('Clear old safety record');
+		expect(stale).not.toContain('Steam Guard is on this account now');
+		expect(stale).not.toContain('Steam Guard is not on it');
+		expect(hasSubmit(stale), 'the irreversible activation form was still live').toBe(false);
+	});
+});
+
+describe('a legacy safety record whose authenticator cannot be identified', () => {
+	const unidentified = screen({
+		resume: { steamId64: '76561198000000001', accountName: 'trader' },
+		unresolved: {
+			kind: 'activate',
+			guidance: 'This record was written before authenticator identities were stored.',
+			unidentified: true
+		}
+	});
+
+	it('fails closed without offering cleanup, a Steam answer, or activation', () => {
+		expect(unidentified).toContain('This safety record cannot be matched');
+		expect(unidentified).toMatch(/contact support/i);
+		expect(unidentified).not.toContain('Clear old safety record');
+		expect(unidentified).not.toContain('Steam Guard is on this account now');
+		expect(unidentified).not.toContain('Steam Guard is not on it');
+		expect(hasSubmit(unidentified), 'the irreversible activation form was still live').toBe(false);
+	});
+});
+
+describe('an unusable enrollment reply held only in memory', () => {
+	it('offers the only action that can make its encrypted safety record durable', () => {
+		const html = screen({
+			onEnrollmentStatus: () => Promise.resolve({ pending: undefined }),
+			onRetryEnrollment: () => Promise.reject(new Error('retained as unreadable'))
+			// Seeded synchronously by a dedicated resume-free status is not possible in
+			// static rendering, so this test pins the rendered branch through the source
+			// contract below; the behavioral persistence path is covered in the service.
+		});
+		expect(html).toContain('Add an authenticator');
+		const source = AddAuthenticator.toString();
+		expect(source).toContain('Save safety record now');
+		expect(source).toContain('enrollmentStatusRef.current');
+	});
+});
+
 /**
  * **What this harness cannot reach, said plainly.**
  *
@@ -146,3 +230,85 @@ describe('the screen with no outcome outstanding', () => {
  * survived the mutation, and a green check that measures nothing is worse than
  * an honest gap.
  */
+
+/**
+ * **A removal recorded against the account is not answerable on this screen.**
+ *
+ * `recordFor` deliberately falls back to any applicable vault record when none
+ * matches the kind asked about, so asking about an activation can legitimately
+ * return a live `deactivate` record. This screen then rendered removal guidance
+ * under two activation buttons, and `App.tsx` sends the literal `'activate'` for
+ * both — so the main process refused the resolve on the kind mismatch and the
+ * account could never be settled from here. Reopening repeated it.
+ *
+ * The fix is not to plumb the kind through: answering "yes, Steam did it" for a
+ * removal deletes the account, which the main process requires the vault
+ * passphrase for, and this screen has no passphrase field. That would trade a
+ * kind refusal for a passphrase refusal. So the record is described and the
+ * reader is sent to the screen that can settle it.
+ */
+describe('a removal record surfaced on the activation screen', () => {
+	const removal = screen({
+		// `resume` is required: `enrolled` initialises from it, and the resolution
+		// controls are gated on `enrolled !== undefined`. Without it neither kind
+		// renders a button and the assertions below would hold for the wrong reason.
+		resume: { steamId64: '76561198000000001', accountName: 'trader' },
+		unresolved: {
+			kind: 'deactivate' as const,
+			guidance: 'Steam did not answer, so the outcome is unknown.',
+			operationToken: 'token-for-a-removal'
+		}
+	});
+
+	it('does not offer to answer it here', () => {
+		expect(
+			removal,
+			'the activation screen offers "Steam Guard is on this account now" for a record that is ' +
+				'a removal — the main process refuses that resolve on the kind mismatch, so the ' +
+				'button can only ever fail and reopening repeats it'
+		).not.toContain('Steam Guard is on this account now');
+	});
+
+	it('does not offer the deny button either', () => {
+		expect(removal).not.toContain('Steam Guard is not on it');
+	});
+
+	it('says where it can be answered', () => {
+		expect(
+			removal,
+			'the screen hides the controls but never tells the reader the record is a removal or ' +
+				'where to settle it, which is a quieter dead end rather than none'
+		).toMatch(/Remove account/);
+	});
+
+	it('still shows the guidance the record carries', () => {
+		expect(removal).toContain('Steam did not answer');
+	});
+});
+
+/*
+ * And the ordinary case is untouched: an activation record is still answerable
+ * here, or the fix would have closed the screen's actual job.
+ */
+describe('an activation record on the activation screen', () => {
+	const activation = screen({
+		resume: { steamId64: '76561198000000001', accountName: 'trader' },
+		unresolved: {
+			kind: 'activate' as const,
+			guidance: 'Steam did not answer, so the outcome is unknown.',
+			operationToken: 'token-for-an-activation'
+		}
+	});
+
+	it('is still answerable here', () => {
+		expect(
+			activation,
+			'the removal gate swallowed the activation case too, so the screen can no longer resolve ' +
+				'the operation it exists for'
+		).toContain('Steam Guard is on this account now');
+	});
+
+	it('does not send the reader elsewhere', () => {
+		expect(activation).not.toMatch(/settled from <strong>Remove account/);
+	});
+});

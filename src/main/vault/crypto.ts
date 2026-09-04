@@ -154,6 +154,16 @@ export async function seal(
  * A new salt IS generated on passphrase change, where re-deriving is the point.
  */
 export function sealWithKey(plaintext: string, key: Buffer, kdf: Kdf): Envelope {
+	const bytes = Buffer.from(plaintext, 'utf8');
+	try {
+		return sealBytesWithKey(bytes, key, kdf);
+	} finally {
+		wipe(bytes);
+	}
+}
+
+/** Encrypt bytes without first copying them through an immutable JavaScript string. */
+export function sealBytesWithKey(plaintext: Buffer, key: Buffer, kdf: Kdf): Envelope {
 	if (key.length !== KEY_BYTES) {
 		throw new VaultCryptoError('the vault key is the wrong length');
 	}
@@ -167,7 +177,7 @@ export function sealWithKey(plaintext: string, key: Buffer, kdf: Kdf): Envelope 
 	const cipher = createCipheriv('aes-256-gcm', key, nonce);
 	cipher.setAAD(additionalData(VAULT_FORMAT_VERSION, kdf, nonceB64));
 
-	const ciphertext = Buffer.concat([cipher.update(Buffer.from(plaintext, 'utf8')), cipher.final()]);
+	const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
 
 	return {
 		version: VAULT_FORMAT_VERSION,
@@ -180,6 +190,58 @@ export function sealWithKey(plaintext: string, key: Buffer, kdf: Kdf): Envelope 
 		ciphertext: ciphertext.toString('base64'),
 		modifiedAt: new Date().toISOString()
 	};
+}
+
+/** Decrypt bytes so short-lived key material can be explicitly wiped by its owner. */
+export function openBytesWithKey(envelope: unknown, key: Buffer, expectedKdf: Kdf): Buffer {
+	const parsed = envelopeSchema.safeParse(envelope);
+	if (!parsed.success) {
+		throw new VaultCryptoError('the encrypted recovery record is not a valid envelope');
+	}
+	const env = parsed.data;
+	if (env.version > VAULT_FORMAT_VERSION) {
+		throw new VaultCryptoError('the encrypted recovery record needs a newer version');
+	}
+	if (key.length !== KEY_BYTES) {
+		throw new VaultCryptoError('the vault key is the wrong length');
+	}
+	// The key and KDF salt are one pair. Accepting an envelope naming another KDF
+	// would at best fail its tag and at worst turn a format mistake into a silent
+	// dependency on unauthenticated caller state.
+	if (JSON.stringify(env.kdf) !== JSON.stringify(expectedKdf)) {
+		throw new VaultCryptoError('the encrypted recovery record belongs to another vault key');
+	}
+
+	const nonce = Buffer.from(env.cipher.nonce, 'base64');
+	const tag = Buffer.from(env.cipher.tag, 'base64');
+	if (nonce.length !== NONCE_BYTES || tag.length !== 16) {
+		throw new VaultCryptoError('the encrypted recovery record has malformed cipher parameters');
+	}
+	let update: Buffer | undefined;
+	let final: Buffer | undefined;
+	try {
+		const decipher = createDecipheriv('aes-256-gcm', key, nonce);
+		decipher.setAAD(additionalData(env.version, env.kdf, env.cipher.nonce));
+		decipher.setAuthTag(tag);
+		/*
+		 * `update` may return unauthenticated plaintext before `final` verifies the
+		 * GCM tag. Keep both intermediates reachable so a bad tag does not leave a
+		 * workflow content key in an abandoned Buffer until garbage collection.
+		 */
+		update = decipher.update(Buffer.from(env.ciphertext, 'base64'));
+		final = decipher.final();
+		const plaintext = Buffer.allocUnsafe(update.length + final.length);
+		update.copy(plaintext, 0);
+		final.copy(plaintext, update.length);
+		return plaintext;
+	} catch {
+		throw new VaultCryptoError(
+			'could not decrypt the recovery record: wrong vault or damaged file'
+		);
+	} finally {
+		if (update !== undefined) wipe(update);
+		if (final !== undefined) wipe(final);
+	}
 }
 
 /**
@@ -252,16 +314,25 @@ export async function unseal(envelope: unknown, passphrase: string): Promise<Uns
 	}
 
 	const key = await deriveKey(passphrase, salt, env.kdf);
+	let update: Buffer | undefined;
+	let final: Buffer | undefined;
+	let plaintext: Buffer | undefined;
 	try {
 		const decipher = createDecipheriv('aes-256-gcm', key, nonce);
 		decipher.setAAD(additionalData(env.version, env.kdf, env.cipher.nonce));
 		decipher.setAuthTag(tag);
 
-		const plaintext = Buffer.concat([
-			decipher.update(Buffer.from(env.ciphertext, 'base64')),
-			// Throws if the tag does not verify — this is the integrity check.
-			decipher.final()
-		]);
+		/*
+		 * GCM does not authenticate the bytes returned by `update`: only `final`
+		 * verifies the tag. Keep that partial plaintext reachable so a damaged tag
+		 * cannot leave the complete vault document in an abandoned Buffer.
+		 */
+		update = decipher.update(Buffer.from(env.ciphertext, 'base64'));
+		// Throws if the tag does not verify — this is the integrity check.
+		final = decipher.final();
+		plaintext = Buffer.allocUnsafe(update.length + final.length);
+		update.copy(plaintext, 0);
+		final.copy(plaintext, update.length);
 		return { plaintext: plaintext.toString('utf8'), key, kdf: env.kdf };
 	} catch (err) {
 		// The key is only wiped on failure. On success the caller owns it.
@@ -271,6 +342,10 @@ export async function unseal(envelope: unknown, passphrase: string): Promise<Uns
 		}
 		// Same message for a wrong passphrase and for tampering, deliberately.
 		throw new VaultCryptoError('could not decrypt the vault: wrong passphrase or damaged file');
+	} finally {
+		if (update !== undefined) wipe(update);
+		if (final !== undefined) wipe(final);
+		if (plaintext !== undefined) wipe(plaintext);
 	}
 }
 

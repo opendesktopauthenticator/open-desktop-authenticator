@@ -6,6 +6,7 @@ import type {
 	ImportSelection
 } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * Importing existing SDA maFiles (§12 F2).
@@ -216,7 +217,7 @@ export function ImportAccounts({
 				well — it holds the settings needed to decrypt them, and they cannot be read without it.
 			</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError>{error}</DynamicError>}
 
 			{outcomes && <ImportResults outcomes={outcomes} />}
 
@@ -252,6 +253,7 @@ export function ImportAccounts({
 										onToggle={() => toggle(candidate.stagingId)}
 										adoptProxy={adopted.has(candidate.stagingId)}
 										onToggleProxy={() => toggleProxy(candidate.stagingId)}
+										busy={busy}
 									/>
 								))}
 							</ul>
@@ -437,20 +439,22 @@ function CandidateRow({
 	checked,
 	onToggle,
 	adoptProxy,
-	onToggleProxy
+	onToggleProxy,
+	busy
 }: {
 	candidate: ImportCandidate;
 	checked: boolean;
 	onToggle: () => void;
 	adoptProxy: boolean;
 	onToggleProxy: () => void;
+	busy: boolean;
 }): React.JSX.Element {
 	const blocked = !candidate.importable || candidate.duplicate === 'selection';
 
 	return (
 		<li>
 			<label className="checkbox">
-				<input type="checkbox" checked={checked} onChange={onToggle} disabled={blocked} />
+				<input type="checkbox" checked={checked} onChange={onToggle} disabled={blocked || busy} />
 				<span>
 					<strong>{candidate.accountName}</strong>{' '}
 					<span className="muted">{candidate.steamId64 ?? 'no SteamID'}</span>
@@ -489,7 +493,7 @@ function CandidateRow({
 			    to be asked, not the last word. */}
 			{candidate.hasProxy && checked && !blocked && (
 				<label className="checkbox nested">
-					<input type="checkbox" checked={adoptProxy} onChange={onToggleProxy} />
+					<input type="checkbox" checked={adoptProxy} onChange={onToggleProxy} disabled={busy} />
 					<span>
 						Also route this account through the proxy saved in the file
 						<p className="hint">
@@ -535,6 +539,11 @@ function ImportResults({ outcomes }: { outcomes: ImportOutcome[] }): React.JSX.E
 							<strong>{outcome.accountName}</strong>
 							<span className="muted"> {outcome.result}</span>
 							{outcome.reason && <p className="hint">{outcome.reason}</p>}
+							{outcome.warning && (
+								<p className="hint bad" role="alert">
+									{outcome.warning}
+								</p>
+							)}
 						</div>
 					</li>
 				))}

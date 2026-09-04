@@ -122,7 +122,7 @@ describe('a save that lands during a rotation key derivation', () => {
 			'the backup preserved a state one save older than the vault it was taken from, so ' +
 				'restoring it silently discards an account the user had already enrolled'
 		).toEqual(['76561199000000001', '76561199000000002']);
-	});
+	}, 15_000);
 
 	/**
 	 * **The one that loses data.**

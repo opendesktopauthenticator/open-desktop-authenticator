@@ -129,8 +129,53 @@ export interface ReplacementToken {
 }
 
 export interface ContinueResult {
-	success: boolean;
+	/**
+	 * Steam's explicit answer. Missing is deliberately different from `false`:
+	 * protobuf optional fields inherit their default from the message prototype,
+	 * so reading the property without checking wire presence turns an empty reply
+	 * into a refusal that Steam never actually sent.
+	 */
+	success?: boolean;
 	replacementToken?: ReplacementToken;
+}
+
+const MAX_ENCODED_SECRET_LENGTH = 512;
+const MAX_REVOCATION_CODE_LENGTH = 256;
+const MAX_URI_LENGTH = 8 * 1024;
+const MAX_ACCOUNT_NAME_LENGTH = 64;
+const MAX_IDENTIFIER_LENGTH = 128;
+const MAX_DECIMAL_LENGTH = 32;
+
+/**
+ * Bound every server-controlled field before it can enter the durable workflow
+ * envelope. Steam's real values are far smaller; values outside these limits
+ * are corrupted or hostile optional metadata and are omitted. This function is
+ * also applied by the service because tests and future adapters can supply a
+ * decoded token without going through this module's protobuf decoder.
+ */
+export function boundedReplacementToken(token: ReplacementToken): ReplacementToken {
+	const out: ReplacementToken = {};
+	const text = <K extends keyof ReplacementToken>(key: K, max: number): void => {
+		const value = token[key];
+		if (typeof value === 'string' && value !== '' && value.length <= max) {
+			(out as Record<string, unknown>)[key] = value;
+		}
+	};
+	text('sharedSecret', MAX_ENCODED_SECRET_LENGTH);
+	text('identitySecret', MAX_ENCODED_SECRET_LENGTH);
+	text('secret1', MAX_ENCODED_SECRET_LENGTH);
+	text('revocationCode', MAX_REVOCATION_CODE_LENGTH);
+	text('uri', MAX_URI_LENGTH);
+	text('accountName', MAX_ACCOUNT_NAME_LENGTH);
+	text('tokenGid', MAX_IDENTIFIER_LENGTH);
+	text('serialNumber', MAX_DECIMAL_LENGTH);
+	text('serverTime', MAX_DECIMAL_LENGTH);
+	text('steamId64', MAX_DECIMAL_LENGTH);
+	if (typeof token.status === 'number' && Number.isFinite(token.status)) out.status = token.status;
+	if (typeof token.steamGuardScheme === 'number' && Number.isFinite(token.steamGuardScheme)) {
+		out.steamGuardScheme = token.steamGuardScheme;
+	}
+	return out;
 }
 
 /**
@@ -205,6 +250,11 @@ function asNumber(value: unknown): number | undefined {
 	return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+/** Protobufjs exposes optional defaults through the prototype; keep wire absence absent. */
+function own(record: Record<string, unknown>, field: string): unknown {
+	return Object.prototype.hasOwnProperty.call(record, field) ? record[field] : undefined;
+}
+
 /**
  * Decode Steam's answer.
  *
@@ -214,11 +264,13 @@ function asNumber(value: unknown): number | undefined {
  */
 export function decodeContinueResponse(body: Buffer): ContinueResult {
 	const decoded = ContinueResponse.decode(body) as unknown as Record<string, unknown>;
-	const success = decoded.success === true;
+	const success = Object.prototype.hasOwnProperty.call(decoded, 'success')
+		? decoded.success === true
+		: undefined;
 	const raw = decoded.replacement_token;
 
 	if (typeof raw !== 'object' || raw === null) {
-		return { success };
+		return success === undefined ? {} : { success };
 	}
 
 	const token = raw as Record<string, unknown>;
@@ -229,18 +281,21 @@ export function decodeContinueResponse(body: Buffer): ContinueResult {
 		}
 	};
 
-	set('sharedSecret', asBase64(token.shared_secret));
-	set('identitySecret', asBase64(token.identity_secret));
-	set('secret1', asBase64(token.secret_1));
-	set('revocationCode', asString(token.revocation_code));
-	set('uri', asString(token.uri));
-	set('accountName', asString(token.account_name));
-	set('tokenGid', asString(token.token_gid));
-	set('serialNumber', asDecimalString(token.serial_number));
-	set('serverTime', asDecimalString(token.server_time));
-	set('steamId64', asDecimalString(token.steamid));
-	set('status', asNumber(token.status));
-	set('steamGuardScheme', asNumber(token.steamguard_scheme));
+	set('sharedSecret', asBase64(own(token, 'shared_secret')));
+	set('identitySecret', asBase64(own(token, 'identity_secret')));
+	set('secret1', asBase64(own(token, 'secret_1')));
+	set('revocationCode', asString(own(token, 'revocation_code')));
+	set('uri', asString(own(token, 'uri')));
+	set('accountName', asString(own(token, 'account_name')));
+	set('tokenGid', asString(own(token, 'token_gid')));
+	set('serialNumber', asDecimalString(own(token, 'serial_number')));
+	set('serverTime', asDecimalString(own(token, 'server_time')));
+	set('steamId64', asDecimalString(own(token, 'steamid')));
+	set('status', asNumber(own(token, 'status')));
+	set('steamGuardScheme', asNumber(own(token, 'steamguard_scheme')));
 
-	return { success, replacementToken: replacement };
+	return {
+		...(success === undefined ? {} : { success }),
+		replacementToken: boundedReplacementToken(replacement)
+	};
 }

@@ -1,10 +1,21 @@
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ImportError, ImportService, type StagedFile } from '../src/main/import/service';
 import { VaultLockedError, VaultService } from '../src/main/vault/service';
+import { VaultKeyOperationCoordinator } from '../src/main/vault/key-operation-coordinator';
+import { accountMutationBlockedByDurableState } from '../src/main/steam/account-mutation-guard';
+import { authenticatorFingerprint } from '../src/main/steam/authenticator-secrets';
+import { memoryOperationJournal } from '../src/main/steam/operation-journal';
+import { memoryWorkflowJournal } from '../src/main/steam/workflow-journal';
 import { newAutoConfirm, type Account } from '../src/shared/vault-schema';
+import {
+	createRecoveryHooks,
+	readRecoveryFile,
+	recoveryFilesFor
+} from '../src/main/vault/recovery';
+import { successfulRecoveryPath } from './recovery-fixture';
 
 /**
  * Import staging and commit (§12 F2).
@@ -56,7 +67,7 @@ beforeEach(async () => {
 	clock = NOW;
 	vault = new VaultService({ file: join(dir, 'vault.json'), now: () => clock });
 	await vault.create(PASS);
-	imports = new ImportService(vault, { now: () => clock });
+	imports = new ImportService(vault, { now: () => clock, monotonicNow: () => clock });
 });
 
 afterEach(() => {
@@ -85,6 +96,22 @@ function stageOne(staged: StagedFile): string {
 		throw new Error(`nothing staged: ${JSON.stringify(report.rejected)}`);
 	}
 	return id;
+}
+
+function observedRecovery(stored: Account[]): {
+	onAccountStored: (account: Account) => string;
+	updateRecovery: (account: Account) => 'updated';
+} {
+	return {
+		onAccountStored: (account) => {
+			stored.push(account);
+			return successfulRecoveryPath(account);
+		},
+		updateRecovery: (account) => {
+			stored.push(account);
+			return 'updated';
+		}
+	};
 }
 
 describe('staging', () => {
@@ -127,7 +154,7 @@ describe('staging', () => {
 		const stored: Account[] = [];
 		const importing = new ImportService(vault, {
 			now: () => clock,
-			onAccountStored: (a) => stored.push(a)
+			...observedRecovery(stored)
 		});
 		const report = importing.stage([file()]);
 		const id = report.candidates[0]?.stagingId ?? '';
@@ -150,7 +177,7 @@ describe('staging', () => {
 		const stored: Account[] = [];
 		const importing = new ImportService(vault, {
 			now: () => clock,
-			onAccountStored: (a) => stored.push(a)
+			...observedRecovery(stored)
 		});
 
 		const first = importing.stage([file()]);
@@ -194,7 +221,7 @@ describe('staging', () => {
 		const stored: Account[] = [];
 		const importing = new ImportService(vault, {
 			now: () => clock,
-			onAccountStored: (a) => stored.push(a)
+			...observedRecovery(stored)
 		});
 
 		const first = importing.stage([file()]);
@@ -240,7 +267,7 @@ describe('staging', () => {
 		const stored: Account[] = [];
 		const importing = new ImportService(vault, {
 			now: () => clock,
-			onAccountStored: (a) => stored.push(a)
+			...observedRecovery(stored)
 		});
 
 		// The first file has no revocation code at all.
@@ -276,13 +303,11 @@ describe('staging', () => {
 			});
 	});
 
-	it('does not write one for a replacement that only renames the account', () => {
-		// The other half of the same rule: a backup per re-import would pile up
-		// files and make the one that matters harder to find.
+	it('refreshes recovery when a replacement changes a field recovery restores', () => {
 		const stored: Account[] = [];
 		const importing = new ImportService(vault, {
 			now: () => clock,
-			onAccountStored: (a) => stored.push(a)
+			...observedRecovery(stored)
 		});
 
 		const first = importing.stage([file()]);
@@ -305,8 +330,67 @@ describe('staging', () => {
 				]);
 			})
 			.then(() => {
-				expect(stored).toHaveLength(1);
+				expect(stored).toHaveLength(2);
+				expect(stored[1]?.accountName).toBe('trader-renamed');
 			});
+	});
+
+	it('restores active status after a status-only pendingActivation replacement', async () => {
+		/*
+		 * This uses the real import service, vault encryption, recovery writer,
+		 * recovery updater, and recovery reader. The authenticator secrets do not
+		 * change: status is the only recovery-semantic difference. If status drops
+		 * out of `recoveryCriticalChange`, the second commit never updates the file
+		 * and the final restore comes back pendingActivation.
+		 */
+		const recovery = createRecoveryHooks({
+			userDataPath: () => dir,
+			seal: (plaintext) => vault.sealForBackup(plaintext),
+			now: () => clock
+		});
+		const importing = new ImportService(vault, {
+			now: () => clock,
+			monotonicNow: () => clock,
+			onAccountStored: recovery.writeRecovery,
+			updateRecovery: recovery.updateRecovery
+		});
+
+		const pending = importing.stage([file({ fully_enrolled: false, revocation_code: undefined })]);
+		await importing.commit([
+			{
+				stagingId: pending.candidates[0]?.stagingId ?? '',
+				replaceExisting: false,
+				adoptProxy: false
+			}
+		]);
+		expect(vault.read().accounts[0]?.status).toBe('pendingActivation');
+
+		const active = importing.stage([file({ fully_enrolled: true, revocation_code: undefined })]);
+		await importing.commit([
+			{
+				stagingId: active.candidates[0]?.stagingId ?? '',
+				replaceExisting: true,
+				adoptProxy: false
+			}
+		]);
+		expect(vault.read().accounts[0]?.status).toBe('active');
+
+		const [path] = recoveryFilesFor(dir, '76561198000000001');
+		expect(path).toBeDefined();
+		const recovered = await readRecoveryFile(readFileSync(path!, 'utf8'), PASS);
+
+		// Remove the live row first. The encrypted file is now the only source of
+		// the account being restored.
+		await vault.mutate((draft) => {
+			draft.accounts.splice(0);
+		});
+		expect(vault.read().accounts).toHaveLength(0);
+
+		// Exercise the same final vault write as account recovery.
+		await vault.mutate((draft) => {
+			draft.accounts.push(recovered.account);
+		});
+		expect(vault.read().accounts[0]?.status).toBe('active');
 	});
 
 	it('still imports when the recovery file cannot be written', () => {
@@ -328,7 +412,9 @@ describe('staging', () => {
 			])
 			.then((outcomes) => {
 				expect(outcomes[0]?.result).toBe('imported');
+				expect(outcomes[0]?.warning).toMatch(/recovery backup is not current/i);
 				expect(vault.read().accounts).toHaveLength(1);
+				expect(vault.read().accounts[0]?.recoveryBackup?.state).toBe('pending');
 			});
 	});
 
@@ -1003,6 +1089,23 @@ describe('a session across a routing change', () => {
  * from the same once-a-second sweep as the vault's idle lock, and discards.
  */
 describe('staging expiry enforcement', () => {
+	it('uses elapsed time even when the injected wall clock jumps both ways', () => {
+		let wall = NOW;
+		let elapsed = 1_000;
+		vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+		const independent = new ImportService(vault, {
+			now: () => wall,
+			ttlMs: 1_000
+		});
+		independent.stage([file()]);
+
+		wall += 24 * 60 * 60_000;
+		expect(independent.enforceExpiry()).toBe(false);
+		wall -= 48 * 60 * 60_000;
+		elapsed += 1_001;
+		expect(independent.enforceExpiry()).toBe(true);
+	});
+
 	it('drops staged secrets once the TTL passes', () => {
 		imports.stage([file()]);
 		expect(imports.enforceExpiry()).toBe(false);
@@ -1037,5 +1140,111 @@ describe('staging expiry enforcement', () => {
 		await expect(
 			imports.commit([{ stagingId: 'any', replaceExisting: false, adoptProxy: false }])
 		).rejects.toThrow(/took too long/);
+	});
+});
+
+describe('imports beside durable Steam workflows', () => {
+	it('does not create a same-id account while enrollment or transfer recovery is unresolved', async () => {
+		const accountMutationBlocked = vi.fn((steamId64: string) => steamId64 === '76561198000000001');
+		imports = new ImportService(vault, { now: () => clock, accountMutationBlocked });
+		const id = stageOne(file());
+
+		await expect(
+			imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+		).resolves.toEqual([
+			expect.objectContaining({
+				result: 'skipped',
+				reason: expect.stringMatching(/finish or resolve/i)
+			})
+		]);
+		expect(accountMutationBlocked).toHaveBeenCalledWith('76561198000000001');
+		expect(vault.read().accounts).toEqual([]);
+	});
+
+	it('does not replace secrets that a saved workflow can still reconcile', async () => {
+		await vault.mutate((draft) => {
+			draft.accounts.push(existingAccount());
+		});
+		imports = new ImportService(vault, {
+			now: () => clock,
+			accountMutationBlocked: () => true
+		});
+		const id = stageOne(file());
+
+		const outcomes = await imports.commit([
+			{ stagingId: id, replaceExisting: true, adoptProxy: false }
+		]);
+		expect(outcomes).toEqual([
+			expect.objectContaining({
+				result: 'skipped',
+				reason: expect.stringMatching(/finish or resolve/i)
+			})
+		]);
+		expect(vault.read().accounts[0]).toEqual(existingAccount());
+	});
+
+	it('does not replace the authenticator owned by an activation or removal note', async () => {
+		const existing = existingAccount();
+		await vault.mutate((draft) => {
+			draft.accounts.push(existing);
+		});
+		const workflows = memoryWorkflowJournal();
+		const operations = memoryOperationJournal();
+		operations.record({
+			steamId64: existing.steamId64,
+			kind: 'activate',
+			fingerprint: authenticatorFingerprint(existing),
+			at: new Date(clock).toISOString()
+		});
+		imports = new ImportService(vault, {
+			now: () => clock,
+			accountMutationBlocked: (id) =>
+				accountMutationBlockedByDurableState(vault, workflows, operations, id)
+		});
+		const id = stageOne(file());
+
+		await expect(
+			imports.commit([{ stagingId: id, replaceExisting: true, adoptProxy: false }])
+		).resolves.toEqual([
+			expect.objectContaining({
+				result: 'skipped',
+				reason: expect.stringMatching(/finish or resolve/i)
+			})
+		]);
+		expect(vault.read().accounts).toEqual([existing]);
+		expect(operations.readKind(existing.steamId64, 'activate')).toBeDefined();
+	});
+
+	it('retains staging and refuses import before an in-flight Steam operation writes its journal', async () => {
+		const keyCoordinator = new VaultKeyOperationCoordinator();
+		imports = new ImportService(vault, { now: () => clock, keyCoordinator });
+		const id = stageOne(file());
+		const releaseSteam = keyCoordinator.beginTransferSubmission('76561198000000001');
+
+		await expect(
+			imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+		).rejects.toThrow(/transfer submission.*in progress/i);
+		expect(imports.stagedCount(), 'a transient conflict discarded the chosen import').toBe(1);
+		expect(vault.read().accounts).toEqual([]);
+
+		releaseSteam();
+		await expect(
+			imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+		).resolves.toEqual([expect.objectContaining({ result: 'imported' })]);
+		const releaseAfterImport = keyCoordinator.beginTransferSubmission('76561198000000001');
+		releaseAfterImport();
+	});
+
+	it('releases its reservation when the vault write fails', async () => {
+		const keyCoordinator = new VaultKeyOperationCoordinator();
+		imports = new ImportService(vault, { now: () => clock, keyCoordinator });
+		const id = stageOne(file());
+		vi.spyOn(vault, 'mutate').mockRejectedValueOnce(new Error('disk write failed'));
+
+		await expect(
+			imports.commit([{ stagingId: id, replaceExisting: false, adoptProxy: false }])
+		).rejects.toThrow(/disk write failed/i);
+		const releaseAfterFailure = keyCoordinator.beginEnrollmentSubmission('76561198000000001');
+		releaseAfterFailure();
 	});
 });

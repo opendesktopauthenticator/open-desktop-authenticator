@@ -30,7 +30,7 @@ describe('the sign-in prompt among the other screens', () => {
 		return index;
 	};
 
-	const prompt = () => at('if (mayShowSignInPrompt(browserSignIn, view))');
+	const prompt = () => at('if (mayShowSignInPrompt(browserSignIn, view, overlayOpen))');
 
 	it.each([
 		['the auto-confirm screen', 'if (autoConfirmFor)'],
@@ -98,13 +98,18 @@ describe('the screens that count as covering the account list', () => {
 		const start = source.indexOf('const openConfirmationsFor = useCallback(');
 		expect(start, 'openConfirmationsFor is gone').toBeGreaterThan(-1);
 		const body = source.slice(start, source.indexOf('setConfirmingFor(account);', start));
-		return body
-			.split(String.fromCharCode(10))
-			.map((line) => line.trim())
-			.filter((line) => line.startsWith('set') && line.includes('(undefined)'))
-			.map((line) => line.slice(3, line.indexOf('(')))
-			.map((name) => name.charAt(0).toLowerCase() + name.slice(1))
-			.sort();
+		return (
+			body
+				.split(String.fromCharCode(10))
+				.map((line) => line.trim())
+				.filter((line) => line.startsWith('set') && line.includes('(undefined)'))
+				.map((line) => line.slice(3, line.indexOf('(')))
+				.map((name) => name.charAt(0).toLowerCase() + name.slice(1))
+				// The stale browser prompt is discarded by the navigation, but it is
+				// not itself an overlay state that this two-list comparison describes.
+				.filter((name) => name !== 'browserSignIn' && name !== 'browserOpenContinuation')
+				.sort()
+		);
 	}
 
 	/** The state names inside the `overlayOpen` expression. */
@@ -179,6 +184,54 @@ describe('an answer arriving behind an overlay', () => {
 	});
 });
 
+describe('notification navigation superseding a browser sign-in', () => {
+	const source = readFileSync(join(__dirname, '..', 'src', 'renderer', 'App.tsx'), 'utf8');
+
+	it('raises the settlement barrier and clears the held prompt before opening Confirmations', () => {
+		const start = source.indexOf('const openConfirmationsFor = useCallback(');
+		expect(start, 'openConfirmationsFor is gone').toBeGreaterThan(-1);
+		const end = source.indexOf('setConfirmingFor(account);', start);
+		expect(end, 'notification navigation no longer opens Confirmations').toBeGreaterThan(start);
+		const body = source.slice(start, end);
+		const supersede = body.indexOf('supersedeBrowserSignInForOverlay(');
+		expect(
+			supersede,
+			'a notification can cover a held browser password prompt without discarding it first'
+		).toBeGreaterThan(-1);
+		expect(body).toContain('setBrowserSignIn(undefined);');
+		expect(
+			body,
+			'the navigation clears the password prompt but leaves its password-free browser retry behind'
+		).toContain('setBrowserOpenContinuation(undefined);');
+		expect(supersede).toBeLessThan(body.indexOf("setView('accounts')"));
+	});
+});
+
+describe('account-overlay navigation superseding a browser sign-in', () => {
+	const source = readFileSync(join(__dirname, '..', 'src', 'renderer', 'App.tsx'), 'utf8');
+
+	it('raises all three settlement barriers synchronously before opening the overlay', () => {
+		const start = source.indexOf('const openAccountOverlay = useCallback(');
+		expect(start, 'account overlays no longer share one navigation boundary').toBeGreaterThan(-1);
+		const end = source.indexOf('const fatal = api', start);
+		expect(
+			end,
+			'openAccountOverlay changed shape; inspect its settlement ordering'
+		).toBeGreaterThan(start);
+		const body = source.slice(start, end);
+		const supersede = body.indexOf('supersedeBrowserSignInForOverlay(');
+		const open = body.lastIndexOf('open();');
+
+		expect(
+			supersede,
+			'an overlay waits for an effect before disowning a browser open'
+		).toBeGreaterThan(-1);
+		expect(body).toContain('setBrowserSignIn(undefined);');
+		expect(body).toContain('setBrowserOpenContinuation(undefined);');
+		expect(open, 'the requested overlay is never opened').toBeGreaterThan(supersede);
+	});
+});
+
 /**
  * **Leaving the account list has to discard the prompt, not just stop new ones.**
  *
@@ -200,7 +253,7 @@ describe('navigating away from a held sign-in prompt', () => {
 	const source = readFileSync(join(__dirname, '..', 'src', 'renderer', 'App.tsx'), 'utf8');
 
 	/** The block that resets the prompt when the view has changed under it. */
-	const reset = (() => {
+	function resetBlock(): string {
 		const start = source.indexOf('if (signInBelongsTo !== view) {');
 		expect(
 			start,
@@ -214,11 +267,15 @@ describe('navigating away from a held sign-in prompt', () => {
 		);
 		expect(end, 'the reset changed shape; this test needs rewriting').toBeGreaterThan(start);
 		return source.slice(start, end);
-	})();
+	}
+
+	it('locates the reset it is testing', () => {
+		expect(resetBlock()).toContain('signInBelongsTo !== view');
+	});
 
 	it('discards the prompt already held, as well as the ones still coming', () => {
 		expect(
-			reset,
+			resetBlock(),
 			'the view change is noticed but the prompt in state is left alone, so it takes the ' +
 				'window again the moment the user comes back to the account list'
 		).toContain('setBrowserSignIn(undefined)');

@@ -1,4 +1,5 @@
 import { releaseGaps, reviewAsk } from '../markup.mjs';
+import { publicationSummary } from '../publication.mjs';
 
 /** Download status, migration, documentation hub, FAQ, support and 404. */
 
@@ -15,8 +16,7 @@ export const download = {
 			<div class="callout" data-download>
 				<h2>Two places, and nowhere else</h2>
 				<p>
-					${s.name} 1.0 is published in the Microsoft Store and on this project's
-					GitHub releases page. <strong>Those are the only two places a genuine build
+					${publicationSummary(s)} <strong>Those are the only two places a genuine build
 					comes from.</strong> Not a mirror, not a lookalike domain, not a sponsored
 					search result, and not this page — every button here is a link somewhere
 					else, never a file we serve.
@@ -37,7 +37,7 @@ export const download = {
 
 				<div class="download-primary download-linux">
 					<p>
-						<a class="button" href="${s.repo}/releases/latest" rel="noopener" data-got-it="the Linux build">Download for Linux</a>
+						<a class="button" href="${s.repo}/releases/tag/v${s.publication.github.latestVersion}" rel="noopener" data-got-it="the Linux build">Download ${s.publication.github.latestVersion} for Linux</a>
 					</p>
 					<p class="download-why">
 						An AppImage and a <code>.deb</code>, published on the releases page.
@@ -51,9 +51,11 @@ export const download = {
 					<summary>Can't use the Store, or want to check the bytes yourself?</summary>
 					<p>
 						The same builds are on
-						<a href="${s.repo}/releases/latest" rel="noopener" data-got-it="a build from the release page">the GitHub releases page</a>,
-						including the portable build, which has no Store equivalent — it writes
-						nothing outside its own folder and runs from a USB stick. Take this route
+						<a href="${s.repo}/releases/tag/v${s.publication.github.latestVersion}" rel="noopener" data-got-it="a build from the release page">the GitHub ${s.publication.github.latestVersion} release page</a>,
+						including the portable build, which has no Store equivalent — its vault,
+						settings and recovery data stay beside the executable, so it can run from
+						a USB stick. The single-file launcher extracts Electron and Chromium runtime
+						files to Windows Temp while it runs and normally removes them on exit. Take this route
 						if the Store is missing from your Windows image, if the machine is locked
 						down, or if you would rather verify a download than be told it is fine.
 					</p>
@@ -272,9 +274,10 @@ ${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
 				has not used the thing is worth nothing to the reader it is meant to
 				reassure. They are one click from a download, so they have not used it.
 			-->
-			<aside class="ask ask-prompt" data-review-prompt hidden>
+			<aside class="ask ask-prompt" data-review-prompt hidden
+			       role="dialog" aria-modal="true" aria-labelledby="review-prompt-title">
 				<div class="ask-body">
-					<h2>One thing before you go</h2>
+					<h2 id="review-prompt-title">One thing before you go</h2>
 					<p>
 						Your download is one click away and this does not hold it up. When you have
 						actually used it — today, next week, whenever — come back and say how it
@@ -488,9 +491,12 @@ export const uninstall = {
 				</dd>
 				<dt>Windows portable</dt>
 				<dd>
-					A portable build has no installer and touches no registry key. Delete the
+					A portable build has no installer. Delete the
 					<code>.exe</code> and the <code>open-desktop-authenticator</code> folder
-					beside it, which is where a portable build keeps everything.
+					beside it, which is where it keeps the vault, settings, recovery records and
+					other normal application data. While it runs, the single-file launcher also
+					extracts Electron and Chromium runtime files to Windows Temp; it normally
+					removes that runtime-only stage on exit.
 				</dd>
 				<dt>Linux AppImage</dt>
 				<dd>Delete the <code>.AppImage</code> file. Nothing else was installed.</dd>
@@ -504,8 +510,12 @@ export const uninstall = {
 
 			<h2>2. What is left, and where</h2>
 			<p>
-				Everything the application stored lives in one directory. Nothing is written
-				anywhere else, and nothing was ever sent anywhere.
+				This project operates no server that stores a copy of your vault or account
+				data. The application's persistent data lives in the directory below.
+				Requested authenticator and confirmation operations send the necessary
+				requests to Steam, and the optional update check contacts GitHub when it is
+				enabled. <a href="/privacy">The privacy page names those destinations and
+				what they receive.</a>
 			</p>
 			<dl class="facts">
 				<dt>Windows, installed</dt>
@@ -740,13 +750,16 @@ export const faq = {
 	title: 'FAQ: Steam Guard codes, maFiles and security',
 	description:
 		'Is it free, does it work with SDA maFiles, can it take my items, and what happens if I lose my passphrase. Answers about Open Desktop Authenticator.',
-	structuredData: () => ({
+	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'FAQPage',
 		mainEntity: FAQ_ITEMS.map((item) => ({
 			'@type': 'Question',
 			name: item.q,
-			acceptedAnswer: { '@type': 'Answer', text: item.plain }
+			acceptedAnswer: {
+				'@type': 'Answer',
+				text: typeof item.plain === 'function' ? item.plain(s) : item.plain
+			}
 		}))
 	}),
 	body: (s) => `
@@ -807,8 +820,8 @@ const FAQ_ITEMS = [
 	},
 	{
 		q: 'How do I know this is not itself a scam?',
-		plain:
-			'Do not take our word for it. The source is public, the publisher is a registered company, and 1.0 is out — so the honest answer includes what is still not finished.',
+		plain: (s) =>
+			`Do not take our word for it. The source is public, the publisher is a registered company, and ${s.publication.github.latestVersion ?? s.publication.store.latestVersion} is publicly available — so the honest answer includes what is still not finished.`,
 		/*
 		 * **Derived, because this paragraph made a promise it was breaking.**
 		 *
@@ -950,8 +963,10 @@ export const support = {
 					<p class="hint">
 						Files upload as soon as you choose them, so we can check the type and size
 						before you finish writing. <strong>Remove</strong> deletes our copy, not
-						just the thumbnail. Anything you never attach to a report is deleted
-						within two hours. <a href="/privacy">What we keep, and for how long</a>.
+						just the thumbnail. Anything you never attach to a report becomes eligible
+						for deletion after two hours and is normally removed within a few hours.
+						A failed removal is retried until it succeeds.
+						<a href="/privacy">What we keep, and for how long</a>.
 					</p>
 					<ul class="attachments" data-list></ul>
 				</div>

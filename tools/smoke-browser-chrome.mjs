@@ -153,6 +153,51 @@ app.whenReady().then(async () => {
 		'back is enabled when history allows it',
 		(await run('!document.getElementById("back").disabled')) === true
 	);
+	check(
+		'the strip exposes a tablist with one selected semantic tab',
+		(await run(`JSON.stringify({
+			list: document.getElementById('tabs').getAttribute('role'),
+			tabs: document.querySelectorAll('[role="tab"]').length,
+			selected: document.querySelectorAll('[role="tab"][aria-selected="true"]').length,
+			activeTabStop: document.querySelector('[role="tab"][aria-selected="true"]').tabIndex
+		})`)) === JSON.stringify({ list: 'tablist', tabs: 2, selected: 1, activeTabStop: 0 })
+	);
+	check(
+		'every tab and close control has an accessible name',
+		(await run(`[...document.querySelectorAll('[role="tab"], .tab .x')]
+			.every((control) => control.tagName === 'BUTTON' && !!control.getAttribute('aria-label'))`)) ===
+			true
+	);
+
+	const keyboardResult = await run(`(() => {
+		const key = (target, value) => target.dispatchEvent(
+			new KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true })
+		);
+		const tabs = [...document.querySelectorAll('[role="tab"]')];
+		tabs[0].focus();
+		key(tabs[0], 'ArrowRight');
+		const right = document.activeElement.getAttribute('data-tab-id');
+		key(document.activeElement, 'Home');
+		const home = document.activeElement.getAttribute('data-tab-id');
+		key(document.activeElement, 'End');
+		const end = document.activeElement.getAttribute('data-tab-id');
+		key(document.activeElement, 'Enter');
+		key(document.activeElement, 'ArrowLeft');
+		const left = document.activeElement.getAttribute('data-tab-id');
+		key(document.activeElement, ' ');
+		return JSON.stringify({ right, home, end, left });
+	})()`);
+	check(
+		'arrow, Home and End move focus among tabs',
+		keyboardResult === JSON.stringify({ right: '2', home: '1', end: '2', left: '1' }),
+		keyboardResult
+	);
+	check(
+		'Enter and Space select the focused tab',
+		heard.some(([verb, id]) => verb === 'select-tab' && id === 2) &&
+			heard.some(([verb, id]) => verb === 'select-tab' && id === 1),
+		heard.map(([verb, id]) => `${verb}:${String(id)}`).join(', ')
+	);
 
 	// 5. Clicking a tab and its close control reaches the main process.
 	await run(
@@ -168,6 +213,40 @@ app.whenReady().then(async () => {
 			heard.some(([v, id]) => v === 'close-tab' && id === 1) &&
 			heard.some(([v]) => v === 'new-tab'),
 		heard.map(([v, p]) => `${v}${p === undefined ? '' : `(${p})`}`).join(', ')
+	);
+
+	await run(`(() => {
+		const second = document.querySelectorAll('[role="tab"]')[1];
+		second.focus();
+		second.dispatchEvent(new KeyboardEvent('keydown', {
+			key: 'Delete', bubbles: true, cancelable: true
+		}));
+	})()`);
+	check(
+		'Delete closes the focused tab',
+		heard.some(([verb, id]) => verb === 'close-tab' && id === 2),
+		heard.map(([verb, id]) => `${verb}:${String(id)}`).join(', ')
+	);
+	window.webContents.send('browser-chrome:state', {
+		url: 'https://steamcommunity.com/my/tradeoffers/',
+		canGoBack: true,
+		canGoForward: false,
+		loading: false,
+		offSteam: false,
+		tabs: [
+			{
+				id: 1,
+				title: 'Trade Offers',
+				url: 'https://steamcommunity.com/x',
+				active: true,
+				offSteam: false
+			}
+		]
+	});
+	await new Promise((resolve) => setTimeout(resolve, 150));
+	check(
+		'closing a focused tab moves focus to its neighbour',
+		(await run(`document.activeElement?.getAttribute('data-tab-id')`)) === '1'
 	);
 
 	// 6. A page title is text, never markup.

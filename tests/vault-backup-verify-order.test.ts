@@ -1,6 +1,6 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { seal } from '../src/main/vault/crypto';
 import {
@@ -33,6 +33,7 @@ import { MINIMUM_SCRYPT } from '../src/shared/vault-format';
 const state = vi.hoisted(() => ({
 	corruptStaged: false,
 	corruptMain: false,
+	corruptMainOnce: 0,
 	corruptDestination: false,
 	corruptDestinationOnce: 0,
 	failRestore: false
@@ -50,6 +51,10 @@ vi.mock('node:fs', async () => {
 			return (actual.copyFileSync as (...args: unknown[]) => void)(from, to, ...rest);
 		},
 		readFileSync: (path: unknown, ...rest: unknown[]) => {
+			if (state.corruptMainOnce > 0 && typeof path === 'string' && path.endsWith('vault.json')) {
+				state.corruptMainOnce -= 1;
+				return '{"not":"what was written"}';
+			}
 			if (state.corruptMain && typeof path === 'string' && path.endsWith('vault.json')) {
 				return '{"not":"what was written"}';
 			}
@@ -91,6 +96,7 @@ beforeEach(() => {
 	file = join(dir, 'vault.json');
 	state.corruptStaged = false;
 	state.corruptMain = false;
+	state.corruptMainOnce = 0;
 	state.corruptDestination = false;
 	state.corruptDestinationOnce = 0;
 	state.failRestore = false;
@@ -99,6 +105,7 @@ beforeEach(() => {
 afterEach(() => {
 	state.corruptStaged = false;
 	state.corruptMain = false;
+	state.corruptMainOnce = 0;
 	state.corruptDestination = false;
 	state.corruptDestinationOnce = 0;
 	state.failRestore = false;
@@ -160,6 +167,25 @@ describe('replacing the backup when the new one does not verify', () => {
  * reason to go looking at `.bak`.
  */
 describe('a failed write whose rollback also fails', () => {
+	it('takes back a first publication that fails its final verification', async () => {
+		state.corruptMainOnce = 1;
+		let thrown: unknown;
+		try {
+			writeEnvelope(file, await envelope('{"seq":1}'));
+		} catch (err) {
+			thrown = err;
+		}
+
+		expect(thrown).toBeInstanceOf(VaultStorageError);
+		expect(
+			(thrown as VaultStorageError).unchanged,
+			'the writer claimed the absent destination was unchanged while its rejected publication remained'
+		).toBe(true);
+		expect(existsSync(file), 'the rejected first vault was left live at the destination').toBe(
+			false
+		);
+	});
+
 	it('does not claim the previous vault was restored', async () => {
 		writeEnvelope(file, await envelope('{"seq":1}'));
 		writeEnvelope(file, await envelope('{"seq":2}'));
@@ -188,14 +214,14 @@ describe('a failed write whose rollback also fails', () => {
 		writeEnvelope(file, await envelope('{"seq":1}'));
 		writeEnvelope(file, await envelope('{"seq":2}'));
 
-		state.corruptMain = true;
+		state.corruptMainOnce = 1;
 		let message = '';
 		try {
 			writeEnvelope(file, await envelope('{"seq":3}'));
 		} catch (err) {
 			message = err instanceof Error ? err.message : String(err);
 		}
-		state.corruptMain = false;
+		state.corruptMainOnce = 0;
 
 		expect(message).toMatch(/previous file was restored/);
 	});
@@ -254,7 +280,7 @@ describe('replacing the backup when the published file does not verify', () => {
 
 		expect(readFileSync(paths.backup, 'utf8')).toBe(before);
 		expect(
-			existsSync(`${paths.backup}.previous`),
+			readdirSync(dir).some((name) => name.includes('.bak.previous-')),
 			'a second copy of the vault was left on disk after a restore that worked'
 		).toBe(false);
 	});
@@ -273,7 +299,6 @@ describe('replacing the backup when the published file does not verify', () => {
 		writeEnvelope(file, await envelope('{"seq":1}'));
 		writeEnvelope(file, await envelope('{"seq":2}'));
 		const paths = vaultPaths(file);
-		const previous = `${paths.backup}.previous`;
 		const good = readFileSync(paths.backup, 'utf8');
 
 		const replacement = await envelope('{"seq":3}');
@@ -286,28 +311,65 @@ describe('replacing the backup when the published file does not verify', () => {
 			thrown = err;
 		}
 		state.corruptDestination = false;
+		const previous = readdirSync(dir)
+			.map((name) => join(dir, name))
+			.find((path) => path.includes('.bak.previous-'));
 
 		expect(
-			existsSync(previous),
+			previous !== undefined && existsSync(previous),
 			'the only remaining good copy of the vault was deleted by the cleanup that runs after a ' +
 				'restore nobody checked'
 		).toBe(true);
-		expect(readFileSync(previous, 'utf8'), 'and what survived is not the good copy').toBe(good);
+		expect(readFileSync(previous as string, 'utf8'), 'and what survived is not the good copy').toBe(
+			good
+		);
 		expect(
 			(thrown as Error | undefined)?.message,
 			'the file that has to be kept is not named anywhere the user will see it'
-		).toContain(previous);
+		).toContain(basename(previous as string));
+		expect((thrown as VaultStorageError | undefined)?.rescueBasename).toBe(
+			basename(previous as string)
+		);
+		expect((thrown as Error | undefined)?.message).not.toContain(dir);
 	});
 
 	/* And the ordinary path leaves nothing behind either. */
 	it('leaves no copy behind when the write succeeds', async () => {
 		writeEnvelope(file, await envelope('{"seq":1}'));
 		writeEnvelope(file, await envelope('{"seq":2}'));
-		const paths = vaultPaths(file);
 
 		writeBackupEnvelope(file, await envelope('{"seq":3}'));
 
-		expect(existsSync(`${paths.backup}.previous`)).toBe(false);
+		expect(readdirSync(dir).some((name) => name.includes('.bak.previous-'))).toBe(false);
 		expect(readBackupEnvelope(file)).toBeDefined();
+	});
+
+	it('does not overwrite the retained good copy on a later failed retry', async () => {
+		writeEnvelope(file, await envelope('{"seq":1}'));
+		writeEnvelope(file, await envelope('{"seq":2}'));
+		const paths = vaultPaths(file);
+		const good = readFileSync(paths.backup, 'utf8');
+		const third = await envelope('{"seq":3}');
+
+		state.corruptDestination = true;
+		expect(() => writeBackupEnvelope(file, third)).toThrow(VaultStorageError);
+		state.corruptDestination = false;
+
+		const firstRescue = readdirSync(dir)
+			.map((name) => join(dir, name))
+			.find((path) => path.includes('.previous'));
+		expect(firstRescue, 'the first failed rewrite did not retain its last good copy').toBeDefined();
+		expect(readFileSync(firstRescue as string, 'utf8')).toBe(good);
+
+		writeFileSync(paths.backup, 'corrupt current backup');
+		const fourth = await envelope('{"seq":4}');
+		state.corruptDestination = true;
+		expect(() => writeBackupEnvelope(file, fourth)).toThrow(VaultStorageError);
+		state.corruptDestination = false;
+
+		expect(
+			readFileSync(firstRescue as string, 'utf8'),
+			'the retry reused the fixed rescue name and destroyed the last known-good bytes'
+		).toBe(good);
 	});
 });

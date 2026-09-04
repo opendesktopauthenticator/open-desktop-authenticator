@@ -80,6 +80,9 @@ export type ActivityEntry =
 	 */
 	| { kind: 'signInRequired'; at: string };
 
+type HeldActivityEntry = Extract<ActivityEntry, { kind: 'held' }>;
+type UnreadableActivityEntry = Extract<ActivityEntry, { kind: 'unreadable' }>;
+
 export class ActivityLog {
 	private readonly entries = new Map<string, ActivityEntry[]>();
 
@@ -118,8 +121,21 @@ export class ActivityLog {
 	 *
 	 * `signInRequired` was given run-dedup for exactly this reason. These two
 	 * are the same shape and were left out of it.
+	 *
+	 * Held ids map to the row that currently represents them. The same Steam id
+	 * can occur twice in history after it was resolved and later returned; row
+	 * identity stops eviction of the older occurrence from releasing the newer,
+	 * still-visible one back into the next poll as false news.
 	 */
-	private readonly reported = new Map<string, { unreadable: number; held: Set<string> }>();
+	private readonly reported = new Map<
+		string,
+		{
+			unreadable: number;
+			/** The row which currently represents that count, if it has not been evicted. */
+			unreadableEntry?: UnreadableActivityEntry;
+			held: Map<string, HeldActivityEntry>;
+		}
+	>();
 
 	/**
 	 * A counter, not a timestamp, deciding what counts as unseen.
@@ -164,8 +180,18 @@ export class ActivityLog {
 		this.signInOpen.delete(steamId64);
 		const at = new Date(this.now()).toISOString();
 
-		const seen = this.reported.get(steamId64) ?? { unreadable: 0, held: new Set<string>() };
+		const seen = this.reported.get(steamId64) ?? {
+			unreadable: 0,
+			held: new Map<string, HeldActivityEntry>()
+		};
 		this.reported.set(steamId64, seen);
+		/*
+		 * `push` may have to evict an older security-critical hold while this
+		 * batch is still walking `seen.held`. Release those ids only after the
+		 * whole batch has finished, otherwise an id later in the same batch can
+		 * be appended again immediately and start an eviction cascade.
+		 */
+		const evictedCurrentWarnings = new Set<HeldActivityEntry | UnreadableActivityEntry>();
 
 		// **A rise, not a presence** — the same rule the notifier applies, and for
 		// the same reason. Recorded before the guard so a return to zero is
@@ -176,16 +202,28 @@ export class ActivityLog {
 			// Recorded first, above whatever the pass did manage to do. It is the entry
 			// that says this record is incomplete, and a caveat printed under the
 			// findings it qualifies has already let the reader draw a conclusion.
-			this.push(steamId64, { kind: 'unreadable', at, count: unreadable });
+			const unreadableEntry: UnreadableActivityEntry = {
+				kind: 'unreadable',
+				at,
+				count: unreadable
+			};
+			seen.unreadableEntry = unreadableEntry;
+			this.push(steamId64, unreadableEntry, evictedCurrentWarnings);
+		} else if (unreadable === 0) {
+			seen.unreadableEntry = undefined;
 		}
 
 		if (approved.length > 0) {
-			this.push(steamId64, { kind: 'approved', at, confirmations: approved });
+			this.push(
+				steamId64,
+				{ kind: 'approved', at, confirmations: approved },
+				evictedCurrentWarnings
+			);
 		}
 		// Anything no longer held has been dealt with; if it comes back it is a new
 		// event and deserves saying again.
 		const stillHeld = new Set(held.map((entry) => entry.confirmation.id));
-		for (const id of seen.held) {
+		for (const id of seen.held.keys()) {
 			if (!stillHeld.has(id)) {
 				seen.held.delete(id);
 			}
@@ -198,15 +236,23 @@ export class ActivityLog {
 			if (seen.held.has(entry.confirmation.id)) {
 				continue;
 			}
-			seen.held.add(entry.confirmation.id);
 			// One entry each, not a summary count. A held account-recovery
 			// confirmation is not a statistic.
-			this.push(steamId64, {
+			const activityEntry: HeldActivityEntry = {
 				kind: 'held',
 				at,
 				confirmation: entry.confirmation,
 				reason: entry.reason
-			});
+			};
+			seen.held.set(entry.confirmation.id, activityEntry);
+			this.push(steamId64, activityEntry, evictedCurrentWarnings);
+		}
+
+		// An evicted live warning has no row left to represent it. Release it only
+		// after the whole batch: mutating `seen.held` while the loop above is still
+		// consulting it causes an unchanged pass to rewrite itself.
+		for (const entry of evictedCurrentWarnings) {
+			this.releaseEvictedWarning(steamId64, entry);
 		}
 	}
 
@@ -380,15 +426,48 @@ export class ActivityLog {
 		this.reported.clear();
 	}
 
-	private push(steamId64: string, entry: ActivityEntry): void {
+	private push(
+		steamId64: string,
+		entry: ActivityEntry,
+		deferEvictedCurrentWarnings?: Set<HeldActivityEntry | UnreadableActivityEntry>
+	): void {
 		this.sequence += 1;
 		this.order.set(entry, this.sequence);
 		const list = this.entries.get(steamId64) ?? [];
 		list.push(entry);
 		if (list.length > MAX_ENTRIES_PER_ACCOUNT) {
-			this.trim(list);
+			const evicted = this.trim(list);
+			for (const warning of evicted) {
+				if (deferEvictedCurrentWarnings === undefined) {
+					this.releaseEvictedWarning(steamId64, warning);
+				} else {
+					deferEvictedCurrentWarnings.add(warning);
+				}
+			}
 		}
 		this.entries.set(steamId64, list);
+	}
+
+	/** Make a still-current warning eligible after its exact representing row left the log. */
+	private releaseEvictedWarning(
+		steamId64: string,
+		entry: HeldActivityEntry | UnreadableActivityEntry
+	): void {
+		const reported = this.reported.get(steamId64);
+		if (reported === undefined) return;
+		if (entry.kind === 'held') {
+			if (reported.held.get(entry.confirmation.id) === entry) {
+				reported.held.delete(entry.confirmation.id);
+			}
+			return;
+		}
+		if (reported.unreadableEntry === entry) {
+			reported.unreadableEntry = undefined;
+			// A non-zero count is deduplicated as a state transition. With its row
+			// gone, zero is the truthful baseline for deciding whether the next poll
+			// must recreate that still-current warning.
+			reported.unreadable = 0;
+		}
 	}
 
 	/**
@@ -406,25 +485,17 @@ export class ActivityLog {
 	 * security-critical one. `hasUrgent` counts exactly the last group, so this is
 	 * the order that keeps the badge honest.
 	 *
-	 * **Nothing is released from `reported.held` here, and that is deliberate.** A
-	 * first version of this deleted an evicted hold's id so a later pass could
-	 * record it again — but `recordPass` holds that same Set as `seen` and tests
-	 * it once per confirmation, and `push` reaches this function synchronously
-	 * inside that loop. Releasing an id the batch had not reached yet made it
-	 * record again in the same pass, which evicted the next hold, which released
-	 * that one: with more held confirmations than the log can keep, every
-	 * unchanged poll rewrote the entire set and the badge relit the instant it was
-	 * acknowledged. That is the flood the `reported` docblock exists to stop.
-	 *
-	 * The cost is that an account holding back more than a hundred
-	 * *security-critical* confirmations at once would lose the oldest of them from
-	 * the log. Account-recovery confirmations arrive one at a time; a hundred
-	 * simultaneously is not a state Steam produces.
+	 * Security-critical held ids that fall off are returned to `push`. A push
+	 * outside `recordPass` releases them immediately; a confirmation batch defers
+	 * that release until its loop has finished. This makes a still-live warning
+	 * eligible on the next poll without mutating the map the current poll is
+	 * consulting and recreating the hundred-entry rewrite cascade.
 	 */
-	private trim(list: ActivityEntry[]): void {
+	private trim(list: ActivityEntry[]): Set<HeldActivityEntry | UnreadableActivityEntry> {
+		const evictedCurrentWarnings = new Set<HeldActivityEntry | UnreadableActivityEntry>();
 		let excess = list.length - MAX_ENTRIES_PER_ACCOUNT;
 		if (excess <= 0) {
-			return;
+			return evictedCurrentWarnings;
 		}
 
 		/*
@@ -447,6 +518,12 @@ export class ActivityLog {
 			for (let i = 0; i < list.length && excess > 0;) {
 				const entry = list[i];
 				if (entry !== undefined && mayGo(entry)) {
+					if (
+						(entry.kind === 'held' && entry.confirmation.securityCritical) ||
+						entry.kind === 'unreadable'
+					) {
+						evictedCurrentWarnings.add(entry);
+					}
 					list.splice(i, 1);
 					excess -= 1;
 				} else {
@@ -454,8 +531,9 @@ export class ActivityLog {
 				}
 			}
 			if (excess === 0) {
-				return;
+				return evictedCurrentWarnings;
 			}
 		}
+		return evictedCurrentWarnings;
 	}
 }

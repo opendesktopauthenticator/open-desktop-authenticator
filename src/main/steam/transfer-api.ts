@@ -1,4 +1,5 @@
 import type { SteamTransport } from '../confirmations/client';
+import { wipe } from '../vault/crypto';
 import {
 	decodeContinueResponse,
 	encodeContinueRequest,
@@ -43,11 +44,14 @@ const BASE = 'https://api.steampowered.com/ITwoFactorService';
 
 export class TransferApiError extends Error {
 	readonly status: number;
+	/** True only when Steam supplied an application-level negative result. */
+	readonly provesNoChange: boolean;
 
-	constructor(message: string, status: number) {
+	constructor(message: string, status: number, provesNoChange = false) {
 		super(message);
 		this.name = 'TransferApiError';
 		this.status = status;
+		this.provesNoChange = provesNoChange;
 	}
 }
 
@@ -113,6 +117,36 @@ export async function startTransferChallenge(
 		body: new URLSearchParams({ input_protobuf_encoded: '' }),
 		cookie: ''
 	});
+	const text = response.text ?? '';
+
+	/*
+	 * Steam's authenticated application result outranks the HTTP envelope. A
+	 * proxy or intermediary can supply a misleading status, while x-eresult is
+	 * the endpoint's answer. In particular, Steam has returned EResult.OK with an
+	 * HTTP error status after the text was already sent; inviting another request
+	 * in that case sends a second SMS and spends the account's rate limit.
+	 */
+	if (response.eresult !== undefined) {
+		let shape: StartChallengeResult['shape'] = 'protobuf';
+		if (text !== '') {
+			try {
+				const decoded: unknown = JSON.parse(text);
+				if (typeof decoded === 'object' && decoded !== null && 'response' in decoded) {
+					shape = 'json';
+				}
+			} catch {
+				// A non-JSON body belongs to the protobuf form of this endpoint.
+			}
+		}
+		return {
+			eresult: response.eresult,
+			...(describeResult(response.eresult) === undefined
+				? {}
+				: { meaning: describeResult(response.eresult) }),
+			sent: response.eresult === ERESULT_OK,
+			shape
+		};
+	}
 
 	if (response.status !== 200) {
 		/*
@@ -130,8 +164,6 @@ export async function startTransferChallenge(
 		);
 	}
 
-	const text = response.text ?? '';
-
 	/*
 	 * An empty body is the expected answer here, not a broken one.
 	 *
@@ -143,14 +175,7 @@ export async function startTransferChallenge(
 	 * happened in `x-eresult`.
 	 */
 	if (text === '') {
-		return {
-			...(response.eresult === undefined ? {} : { eresult: response.eresult }),
-			...(describeResult(response.eresult) === undefined
-				? {}
-				: { meaning: describeResult(response.eresult) }),
-			sent: response.eresult === ERESULT_OK,
-			shape: 'protobuf'
-		};
+		return { sent: false, shape: 'protobuf' };
 	}
 
 	try {
@@ -159,26 +184,12 @@ export async function startTransferChallenge(
 			typeof parsed === 'object' && parsed !== null && 'response' in parsed
 				? Boolean((parsed as { response?: { success?: unknown } }).response?.success)
 				: false;
-		return {
-			...(response.eresult === undefined ? {} : { eresult: response.eresult }),
-			...(describeResult(response.eresult) === undefined
-				? {}
-				: { meaning: describeResult(response.eresult) }),
-			sent: success,
-			shape: 'json'
-		};
+		return { sent: success, shape: 'json' };
 	} catch {
 		// A non-empty body that is not JSON is a protobuf message with something in
 		// it, which for this response means `success` was explicitly set. Trust the
 		// header over guessing at the bytes.
-		return {
-			...(response.eresult === undefined ? {} : { eresult: response.eresult }),
-			...(describeResult(response.eresult) === undefined
-				? {}
-				: { meaning: describeResult(response.eresult) }),
-			sent: response.eresult === ERESULT_OK,
-			shape: 'protobuf'
-		};
+		return { sent: false, shape: 'protobuf' };
 	}
 }
 
@@ -201,42 +212,99 @@ export async function continueTransfer(
 	accessToken: string,
 	smsCode: string,
 	/**
-	 * Handed the reply before anything tries to understand it.
+	 * Signals that a response body arrived and may contain replacement material.
 	 *
-	 * Decoding can fail, and by then Steam may already have rotated the
-	 * authenticator — so the bytes have to escape this function before they can
-	 * be lost to a parse error. This is the only copy that exists.
+	 * It is called before an unreadable body is rejected and before a decoded
+	 * replacement is handed to service-level validation. It is not called for a
+	 * bare HTTP error or an empty response, because those contain no recoverable
+	 * bytes and must remain an indeterminate outcome.
 	 */
 	onRaw?: (body: Buffer) => void
 ): Promise<ContinueResult> {
 	const encoded = encodeContinueRequest(smsCode);
+	let body: Buffer | undefined;
+	try {
+		const response = await transport({
+			method: 'POST',
+			url: `${BASE}/RemoveAuthenticatorViaChallengeContinue/v1/?access_token=${encodeURIComponent(accessToken)}`,
+			body: new URLSearchParams({ input_protobuf_encoded: encoded.toString('base64') }),
+			cookie: '',
+			// The reply is raw secret material. Read as UTF-8 it comes back mangled
+			// beyond recovery, and quietly — see SteamRequest.binary.
+			binary: true
+		});
 
-	const response = await transport({
-		method: 'POST',
-		url: `${BASE}/RemoveAuthenticatorViaChallengeContinue/v1/?access_token=${encodeURIComponent(accessToken)}`,
-		body: new URLSearchParams({ input_protobuf_encoded: encoded.toString('base64') }),
-		cookie: '',
-		// The reply is raw secret material. Read as UTF-8 it comes back mangled
-		// beyond recovery, and quietly — see SteamRequest.binary.
-		binary: true
-	});
+		/*
+		 * `latin1`, not `utf8`.
+		 *
+		 * The transport hands back a string, and protobuf is binary. Decoding those
+		 * bytes as UTF-8 replaces every invalid sequence with U+FFFD — which for a
+		 * body full of raw secret material means most of it. latin1 is a byte-for-byte
+		 * mapping, so the buffer that comes out is the one that went in.
+		 */
+		body = Buffer.from(response.text ?? '', 'latin1');
+		let decoded: ContinueResult | undefined;
+		if (body.length !== 0) {
+			try {
+				decoded = decodeContinueResponse(body);
+			} catch {
+				// A body existed, but it was not the response protocol. Preserve that
+				// distinction for recovery without treating HTTP as a rollback receipt.
+				onRaw?.(body);
+				if (response.eresult !== undefined && response.eresult !== ERESULT_OK) {
+					throw new TransferApiError(
+						describeResult(response.eresult) ?? `Steam refused the code (HTTP ${response.status}).`,
+						response.status,
+						true
+					);
+				}
+				throw new TransferApiError(
+					`Steam returned HTTP ${response.status}, but its transfer result could not be read conclusively.`,
+					response.status
+				);
+			}
+		}
 
-	if (response.status !== 200) {
-		throw new TransferApiError(
-			describeResult(response.eresult) ?? `Steam refused the code (HTTP ${response.status}).`,
-			response.status
-		);
+		/*
+		 * Protocol evidence wins over transport metadata. A gateway can replace an
+		 * HTTP status after Steam acted, and a contradictory EResult must never erase
+		 * the only replacement bundle. A token is preserved even if the optional
+		 * success bit is missing or contradictory; validation happens in the service.
+		 */
+		if (decoded?.success === true || decoded?.replacementToken !== undefined) {
+			onRaw?.(body);
+			return decoded;
+		}
+		if (decoded?.success === false) {
+			if (response.eresult === ERESULT_OK) {
+				throw new TransferApiError(
+					'Steam returned contradictory transfer results, so this application cannot safely retry.',
+					response.status
+				);
+			}
+			return decoded;
+		}
+
+		/*
+		 * HTTP status alone cannot prove that an irreversible POST was rolled back.
+		 * Only Steam's authenticated application-level negative result is enough.
+		 */
+		if (response.eresult !== undefined && response.eresult !== ERESULT_OK) {
+			throw new TransferApiError(
+				describeResult(response.eresult) ?? `Steam refused the code (HTTP ${response.status}).`,
+				response.status,
+				true
+			);
+		}
+		if (response.status !== 200) {
+			throw new TransferApiError(
+				`Steam returned HTTP ${response.status} without a conclusive transfer result.`,
+				response.status
+			);
+		}
+		return decoded ?? {};
+	} finally {
+		wipe(encoded);
+		if (body !== undefined) wipe(body);
 	}
-
-	/*
-	 * `latin1`, not `utf8`.
-	 *
-	 * The transport hands back a string, and protobuf is binary. Decoding those
-	 * bytes as UTF-8 replaces every invalid sequence with U+FFFD — which for a
-	 * body full of raw secret material means most of it. latin1 is a byte-for-byte
-	 * mapping, so the buffer that comes out is the one that went in.
-	 */
-	const body = Buffer.from(response.text ?? '', 'latin1');
-	onRaw?.(body);
-	return decodeContinueResponse(body);
 }

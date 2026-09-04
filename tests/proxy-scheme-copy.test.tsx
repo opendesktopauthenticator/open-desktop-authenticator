@@ -250,7 +250,8 @@ const addAuthenticator = (): string =>
 			onBegin={() => Promise.resolve({ state: 'needsEmailCode' as const })}
 			onEmailCode={() => Promise.resolve({ state: 'needsEmailCode' as const })}
 			onCancel={() => Promise.resolve()}
-			onResolve={() => Promise.resolve()}
+			onResolve={() => Promise.resolve({ ok: true as const })}
+			onClearStale={() => Promise.resolve()}
 			onActivate={() => Promise.resolve({ state: 'activated' as const })}
 			onBackup={noop}
 			onClose={noop}

@@ -1,8 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ToastClickRouter } from '../src/main/confirmations/toast-click';
+import {
+	acknowledgeToastClickWhileUnlocked,
+	activateToastForKnownAccount,
+	ToastClickRouter
+} from '../src/main/confirmations/toast-click';
+import {
+	claimConfirmationClick,
+	markConfirmationClickAcknowledged,
+	notificationMayTakeOver,
+	notificationRefreshesOpenAccount,
+	retryConfirmationClickAcknowledgement,
+	shouldAcknowledgeConfirmationClick
+} from '../src/shared/notification-click';
 import { ConfirmationNotifier, type ToastHost } from '../src/main/confirmations/notify';
+import { IPC_CONTRACT } from '../src/shared/ipc';
+import { CHANNELS } from '../src/shared/channels';
 import type { ConfirmationSummary } from '../src/shared/ipc';
 
 /**
@@ -129,7 +143,32 @@ describe('routing a click', () => {
 	it('pushes the id as the fast path', () => {
 		const r = router();
 		r.router.activate(ID);
-		expect(r.push).toHaveBeenCalledWith(ID);
+		expect(r.push).toHaveBeenCalledWith({ steamId64: ID, token: 1 });
+	});
+
+	it('touches an unlocked known account before routing the activation', () => {
+		const r = router();
+		const touch = vi.fn();
+		expect(activateToastForKnownAccount(r.router, ID, () => true, touch)).toBe(true);
+		expect(touch).toHaveBeenCalledOnce();
+		expect(r.router.peek()).toEqual({ steamId64: ID, token: 1 });
+	});
+
+	it('refuses a history toast for an account already removed from the vault', () => {
+		const r = router();
+		const touch = vi.fn();
+		expect(activateToastForKnownAccount(r.router, ID, () => false, touch)).toBe(false);
+		expect(touch).not.toHaveBeenCalled();
+		expect(r.reveal).not.toHaveBeenCalled();
+		expect(r.router.peek()).toEqual({});
+	});
+
+	it('retains a click while locked without treating it as vault activity', () => {
+		const r = router();
+		const touch = vi.fn();
+		expect(activateToastForKnownAccount(r.router, ID, () => undefined, touch)).toBe(true);
+		expect(touch).not.toHaveBeenCalled();
+		expect(r.router.peek()).toEqual({ steamId64: ID, token: 1 });
 	});
 
 	/*
@@ -142,7 +181,7 @@ describe('routing a click', () => {
 		const r = router();
 		r.router.activate(ID);
 		expect(r.push).toHaveBeenCalled();
-		expect(r.router.peek()).toEqual({ steamId64: ID });
+		expect(r.router.peek()).toEqual({ steamId64: ID, token: 1 });
 	});
 
 	it('answers nothing when no click is waiting', () => {
@@ -156,8 +195,8 @@ describe('routing a click', () => {
 	it('gives a click away only once, once it has been acted on', () => {
 		const r = router();
 		r.router.activate(ID);
-		expect(r.router.peek()).toEqual({ steamId64: ID });
-		r.router.acknowledge(ID);
+		expect(r.router.peek()).toEqual({ steamId64: ID, token: 1 });
+		r.router.acknowledge({ steamId64: ID, token: 1 });
 		expect(r.router.peek(), 'an acted-on click navigated somebody twice').toEqual({});
 	});
 
@@ -176,12 +215,12 @@ describe('routing a click', () => {
 		r.router.activate(ID);
 
 		// The renderer looked, found no such account yet, and acknowledged nothing.
-		expect(r.router.peek()).toEqual({ steamId64: ID });
+		expect(r.router.peek()).toEqual({ steamId64: ID, token: 1 });
 
 		expect(
 			r.router.peek(),
 			'the click was consumed by a renderer that never navigated anywhere'
-		).toEqual({ steamId64: ID });
+		).toEqual({ steamId64: ID, token: 1 });
 	});
 
 	/**
@@ -193,14 +232,15 @@ describe('routing a click', () => {
 		const r = router();
 		const other = '76561198000000002';
 		r.router.activate(ID);
+		const first = r.router.peek();
 		r.router.activate(other);
 
-		r.router.acknowledge(ID);
+		r.router.acknowledge(first as { steamId64: string; token: number });
 
 		expect(
 			r.router.peek(),
 			'acknowledging the click that was superseded threw away the one that superseded it'
-		).toEqual({ steamId64: other });
+		).toEqual({ steamId64: other, token: 2 });
 	});
 
 	it('keeps only the most recent of two clicks', () => {
@@ -208,9 +248,23 @@ describe('routing a click', () => {
 		const other = '76561198000000002';
 		r.router.activate(ID);
 		r.router.activate(other);
-		expect(r.router.peek()).toEqual({ steamId64: other });
-		r.router.acknowledge(other);
+		expect(r.router.peek()).toEqual({ steamId64: other, token: 2 });
+		r.router.acknowledge({ steamId64: other, token: 2 });
 		expect(r.router.peek()).toEqual({});
+	});
+
+	it('acknowledges the exact click token when the same account is clicked twice', () => {
+		const r = router();
+		r.router.activate(ID);
+		const first = r.router.peek();
+		r.router.activate(ID);
+		const second = r.router.peek();
+
+		expect(first).toMatchObject({ steamId64: ID, token: 1 });
+		expect(second).toMatchObject({ steamId64: ID, token: 2 });
+		r.router.acknowledge(first as { steamId64: string; token: number });
+
+		expect(r.router.peek()).toEqual(second);
 	});
 
 	/*
@@ -223,6 +277,162 @@ describe('routing a click', () => {
 		r.router.activate(ID);
 		r.router.forget();
 		expect(r.router.peek(), 'a click from before a lock navigated after it').toEqual({});
+	});
+});
+
+describe('acknowledgement across a lock reload', () => {
+	it('keeps a new click when the dying renderer acknowledges while locked', () => {
+		const router = new ToastClickRouter({ reveal: vi.fn(), push: vi.fn() });
+		let unlocked = false;
+		router.activate(ID);
+
+		expect(
+			acknowledgeToastClickWhileUnlocked(router, () => unlocked, {
+				steamId64: ID,
+				token: 1
+			})
+		).toBe(false);
+		expect(router.peek()).toEqual({ steamId64: ID, token: 1 });
+
+		unlocked = true;
+		expect(
+			acknowledgeToastClickWhileUnlocked(router, () => unlocked, {
+				steamId64: ID,
+				token: 1
+			})
+		).toBe(true);
+		expect(router.peek()).toEqual({});
+	});
+});
+
+describe('settling both delivery paths for one click', () => {
+	it('does not accept a SteamID-only acknowledgement', () => {
+		expect(
+			IPC_CONTRACT[CHANNELS.takePendingConfirmations].request.safeParse({
+				acknowledged: ID
+			}).success
+		).toBe(false);
+	});
+
+	it('opens once when the push settles first', () => {
+		const handled = { newestObserved: undefined, handled: undefined };
+		const navigate = vi.fn(() => true);
+		const click = { steamId64: ID, token: 1 };
+
+		expect(claimConfirmationClick(handled, click.token, navigate)).toBe(true);
+		expect(claimConfirmationClick(handled, click.token, navigate)).toBe(false);
+		expect(navigate).toHaveBeenCalledTimes(1);
+	});
+
+	it('opens once when the slow recovery settles first', () => {
+		const handled = { newestObserved: undefined, handled: undefined };
+		const navigate = vi.fn(() => true);
+		const click = { steamId64: ID, token: 1 };
+
+		expect(claimConfirmationClick(handled, click.token, navigate)).toBe(true);
+		expect(claimConfirmationClick(handled, click.token, navigate)).toBe(false);
+		expect(navigate).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not let a delayed older click roll back a newer one', () => {
+		const handled = { newestObserved: undefined, handled: undefined };
+		const navigate = vi.fn(() => true);
+		const newer = { steamId64: '76561198000000002', token: 2 };
+		const older = { steamId64: ID, token: 1 };
+
+		expect(claimConfirmationClick(handled, newer.token, navigate)).toBe(true);
+		expect(claimConfirmationClick(handled, older.token, navigate)).toBe(false);
+		expect(navigate).toHaveBeenCalledTimes(1);
+		expect(handled.handled).toBe(newer.token);
+	});
+
+	it('does not let an older same-account click roll back a replacement', () => {
+		const handled = { newestObserved: undefined, handled: undefined };
+		const navigate = vi.fn(() => true);
+		const newer = { steamId64: ID, token: 2 };
+		const older = { steamId64: ID, token: 1 };
+
+		expect(claimConfirmationClick(handled, newer.token, navigate)).toBe(true);
+		expect(claimConfirmationClick(handled, older.token, navigate)).toBe(false);
+		expect(navigate).toHaveBeenCalledTimes(1);
+		expect(handled.handled).toBe(newer.token);
+	});
+
+	it('does not let an older click win while the newer click is waiting for its account', () => {
+		const handled = { newestObserved: undefined, handled: undefined };
+		const newerNavigate = vi.fn(() => false);
+		const olderNavigate = vi.fn(() => true);
+
+		expect(claimConfirmationClick(handled, 2, newerNavigate)).toBe(false);
+		expect(claimConfirmationClick(handled, 1, olderNavigate)).toBe(false);
+		expect(olderNavigate, 'the obsolete click was allowed to navigate').not.toHaveBeenCalled();
+		expect(handled).toEqual({ newestObserved: 2, handled: undefined });
+
+		// The second delivery of the current click remains useful once accounts exist.
+		expect(claimConfirmationClick(handled, 2, () => true)).toBe(true);
+		expect(handled).toEqual({ newestObserved: 2, handled: 2 });
+	});
+});
+
+describe('notification acknowledgement recovery', () => {
+	it('retries an exact failed acknowledgement without navigating again', () => {
+		const claims = { newestObserved: undefined, handled: undefined, acknowledged: undefined };
+		const navigate = vi.fn(() => true);
+		expect(claimConfirmationClick(claims, 1, navigate)).toBe(true);
+		expect(shouldAcknowledgeConfirmationClick(claims, 1)).toBe(true);
+
+		// The first IPC acknowledgement rejected, so no acknowledgement is marked.
+		expect(claimConfirmationClick(claims, 1, navigate)).toBe(false);
+		expect(shouldAcknowledgeConfirmationClick(claims, 1)).toBe(true);
+		expect(navigate).toHaveBeenCalledOnce();
+
+		markConfirmationClickAcknowledged(claims, 1);
+		expect(shouldAcknowledgeConfirmationClick(claims, 1)).toBe(false);
+	});
+
+	it('actively retries a rejected acknowledgement without any UI state change', async () => {
+		const claims = { newestObserved: undefined, handled: undefined, acknowledged: undefined };
+		const navigate = vi.fn(() => true);
+		expect(claimConfirmationClick(claims, 1, navigate)).toBe(true);
+		const acknowledge = vi
+			.fn<() => Promise<void>>()
+			.mockRejectedValueOnce(new Error('IPC failed'))
+			.mockResolvedValue(undefined);
+		const wait = vi.fn(() => Promise.resolve());
+
+		await expect(retryConfirmationClickAcknowledgement(claims, 1, acknowledge, wait)).resolves.toBe(
+			true
+		);
+		expect(acknowledge).toHaveBeenCalledTimes(2);
+		expect(wait).toHaveBeenCalledOnce();
+		expect(navigate).toHaveBeenCalledOnce();
+		expect(claims.acknowledged).toBe(1);
+	});
+
+	it('never acknowledges an older token after a newer intention was observed', () => {
+		const claims = { newestObserved: 2, handled: 1, acknowledged: undefined };
+		expect(shouldAcknowledgeConfirmationClick(claims, 1)).toBe(false);
+	});
+
+	it('lets a toast replace only the idle account list', () => {
+		const idle = { view: 'accounts', overlayOpen: false, signInOpen: false };
+		expect(notificationMayTakeOver(idle)).toBe(true);
+		expect(notificationMayTakeOver({ ...idle, view: 'activity' })).toBe(true);
+		expect(notificationMayTakeOver({ ...idle, view: 'about' })).toBe(true);
+		expect(notificationMayTakeOver({ ...idle, view: 'enroll' })).toBe(false);
+		expect(notificationMayTakeOver({ ...idle, view: 'move' })).toBe(false);
+		expect(notificationMayTakeOver({ ...idle, view: 'settings' })).toBe(false);
+		expect(notificationMayTakeOver({ ...idle, overlayOpen: true })).toBe(false);
+		expect(notificationMayTakeOver({ ...idle, signInOpen: true })).toBe(false);
+		expect(notificationMayTakeOver({ ...idle, accountListBusy: true })).toBe(false);
+	});
+
+	it('refreshes only a distinct click for the account already on screen', () => {
+		expect(notificationRefreshesOpenAccount(ID, { steamId64: ID, token: 2 }, 1)).toBe(true);
+		expect(notificationRefreshesOpenAccount(ID, { steamId64: ID, token: 1 }, 1)).toBe(false);
+		expect(
+			notificationRefreshesOpenAccount(ID, { steamId64: '76561198000000002', token: 2 }, 1)
+		).toBe(false);
 	});
 });
 
@@ -253,7 +463,8 @@ describe('a click nobody came to collect', () => {
 
 		clock.ms += 60_000;
 		expect(router.peek(), 'an ordinary unlock takes longer than this').toEqual({
-			steamId64: ID
+			steamId64: ID,
+			token: 1
 		});
 	});
 
@@ -309,7 +520,7 @@ describe('a click nobody came to collect', () => {
 		router.peek();
 
 		router.activate(ID);
-		expect(router.peek()).toEqual({ steamId64: ID });
+		expect(router.peek()).toEqual({ steamId64: ID, token: 2 });
 	});
 });
 
@@ -346,7 +557,8 @@ describe('a click for an account that has been removed', () => {
 		router.forgetAccount(ID);
 
 		expect(router.peek(), 'removing one account threw away another account/s click').toEqual({
-			steamId64: other
+			steamId64: other,
+			token: 1
 		});
 	});
 });
@@ -387,7 +599,7 @@ describe('the clock a pending click is aged against', () => {
 				'the expiry is measured against the system clock, so moving that clock moves the ' +
 					'deadline - forwards here, and backwards is the case that keeps a click alive ' +
 					'past ten real minutes'
-			).toEqual({ steamId64: ID });
+			).toEqual({ steamId64: ID, token: 1 });
 		} finally {
 			clock.mockRestore();
 		}

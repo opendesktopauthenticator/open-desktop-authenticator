@@ -21,6 +21,34 @@ import { describe, expect, it } from 'vitest';
 
 const WORKFLOW = readFileSync(join(__dirname, '..', '.github', 'workflows', 'release.yml'), 'utf8');
 
+function packageTargets(workflow: string, os: string): string[] {
+	const packageJob = workflow.slice(workflow.indexOf('  package:'), workflow.indexOf('  publish:'));
+	const rows = [
+		...packageJob.matchAll(/^\s*- os:\s*([^\s#]+)\s*\r?\n\s*targets:\s*([^\r\n#]+)$/gm)
+	];
+	const row = rows.find((match) => match[1] === os);
+	if (!row) throw new Error(`the package matrix has no exact ${os} row`);
+	return (row[2] ?? '').trim().split(/\s+/);
+}
+
+function declaredArchitectures(from: string, to: string): string[] {
+	const config = readFileSync(join(__dirname, '..', 'electron-builder.config.mjs'), 'utf8');
+	const block = config.slice(config.indexOf(from), config.indexOf(to));
+	return [...block.matchAll(/arch: \[([^\]]+)\]/g)]
+		.flatMap((match) =>
+			[...(match[1] ?? '').matchAll(/'([^']+)'/g)].map((architecture) => architecture[1] ?? '')
+		)
+		.filter((architecture) => architecture !== '')
+		.filter((architecture, index, all) => all.indexOf(architecture) === index);
+}
+
+function missingArchitectures(workflow: string, os: string, from: string, to: string): string[] {
+	const targets = packageTargets(workflow, os);
+	return declaredArchitectures(from, to).filter(
+		(architecture) => !targets.some((target) => target.endsWith(`:${architecture}`))
+	);
+}
+
 /** The publish job only — the package job legitimately handles the appx. */
 const PUBLISH = WORKFLOW.slice(WORKFLOW.indexOf('  publish:'));
 
@@ -73,21 +101,24 @@ describe('the release publishes only what it attests', () => {
 	 * as the project has existed. Neither file was wrong on its own.
 	 */
 	it.each([
-		['win', '	win: {', '	nsis: {', 'targets: --win'],
-		['mac', '	mac: {', '	dmg: {', 'targets: --mac']
-	])('builds every %s architecture the config declares', (_platform, from, to, workflowTargets) => {
-		const config = readFileSync(join(__dirname, '..', 'electron-builder.config.mjs'), 'utf8');
-		const block = config.slice(config.indexOf(from), config.indexOf(to));
-		const declared = [...block.matchAll(/arch: \[([^\]]+)\]/g)]
-			.flatMap((m) => [...(m[1] ?? '').matchAll(/'([^']+)'/g)].map((a) => a[1] ?? ''))
-			.filter((a) => a !== '')
-			.filter((a, i, all) => all.indexOf(a) === i);
-
-		expect(declared).toContain('arm64');
-		const targets = WORKFLOW.slice(WORKFLOW.indexOf(workflowTargets));
-		for (const arch of declared) {
-			expect(targets, `the workflow never builds ${arch}`).toContain(`:${arch}`);
+		['win', 'windows-latest', '	win: {', '	nsis: {'],
+		['mac', 'macos-latest', '	mac: {', '	dmg: {']
+	])(
+		"builds every %s architecture in that platform's exact matrix row",
+		(_platform, os, from, to) => {
+			expect(declaredArchitectures(from, to)).toContain('arm64');
+			expect(missingArchitectures(WORKFLOW, os, from, to)).toEqual([]);
 		}
+	);
+
+	it('fails when Windows loses arm64 even though the macOS row still names it', () => {
+		const fixture = WORKFLOW.replace(
+			'targets: --win nsis:x64 nsis:arm64 portable:x64',
+			'targets: --win nsis:x64 portable:x64'
+		);
+		expect(fixture, 'the Windows fixture mutation did not apply').not.toBe(WORKFLOW);
+		expect(missingArchitectures(fixture, 'windows-latest', '	win: {', '	nsis: {')).toEqual(['arm64']);
+		expect(missingArchitectures(fixture, 'macos-latest', '	mac: {', '	dmg: {')).toEqual([]);
 	});
 
 	it('still states that the Store package is not a release asset', () => {

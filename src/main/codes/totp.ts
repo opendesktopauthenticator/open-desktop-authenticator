@@ -89,11 +89,14 @@ export function decodeSharedSecret(sharedSecret: string): Buffer {
 
 /** Whether a secret will produce codes at all. Used to refuse a useless import. */
 export function isUsableSharedSecret(sharedSecret: string): boolean {
+	let decoded: Buffer | undefined;
 	try {
-		decodeSharedSecret(sharedSecret);
+		decoded = decodeSharedSecret(sharedSecret);
 		return true;
 	} catch {
 		return false;
+	} finally {
+		decoded?.fill(0);
 	}
 }
 
@@ -111,30 +114,37 @@ function withPadding(value: string): string {
  */
 export function generateGuardCode(sharedSecret: string, unixSeconds: number): string {
 	const key = decodeSharedSecret(sharedSecret);
-	const counter = Math.floor(unixSeconds / WINDOW_SECONDS);
-
-	// Eight-byte big-endian counter. Written as two 32-bit halves because the
-	// counter is a JavaScript number, and `writeBigUInt64BE` would mean carrying
-	// a BigInt through for a value that cannot reach 2^53 until the year 8.6
-	// billion.
 	const buffer = Buffer.alloc(8);
-	buffer.writeUInt32BE(Math.floor(counter / 2 ** 32), 0);
-	buffer.writeUInt32BE(counter >>> 0, 4);
+	let digest: Buffer | undefined;
+	try {
+		const counter = Math.floor(unixSeconds / WINDOW_SECONDS);
 
-	const digest = createHmac('sha1', key).update(buffer).digest();
+		// Eight-byte big-endian counter. Written as two 32-bit halves because the
+		// counter is a JavaScript number, and `writeBigUInt64BE` would mean carrying
+		// a BigInt through for a value that cannot reach 2^53 until the year 8.6
+		// billion.
+		buffer.writeUInt32BE(Math.floor(counter / 2 ** 32), 0);
+		buffer.writeUInt32BE(counter >>> 0, 4);
 
-	// RFC 4226 dynamic truncation: the low nibble of the last byte picks the
-	// four-byte window, and the top bit is masked off so the value is positive
-	// regardless of how the platform reads a signed integer.
-	const offset = (digest[digest.length - 1] as number) & 0x0f;
-	let value = digest.readUInt32BE(offset) & 0x7fffffff;
+		digest = createHmac('sha1', key).update(buffer).digest();
 
-	let code = '';
-	for (let i = 0; i < CODE_LENGTH; i++) {
-		code += ALPHABET[value % ALPHABET.length];
-		value = Math.floor(value / ALPHABET.length);
+		// RFC 4226 dynamic truncation: the low nibble of the last byte picks the
+		// four-byte window, and the top bit is masked off so the value is positive
+		// regardless of how the platform reads a signed integer.
+		const offset = (digest[digest.length - 1] as number) & 0x0f;
+		let value = digest.readUInt32BE(offset) & 0x7fffffff;
+
+		let code = '';
+		for (let i = 0; i < CODE_LENGTH; i++) {
+			code += ALPHABET[value % ALPHABET.length];
+			value = Math.floor(value / ALPHABET.length);
+		}
+		return code;
+	} finally {
+		key.fill(0);
+		buffer.fill(0);
+		digest?.fill(0);
 	}
-	return code;
 }
 
 /**

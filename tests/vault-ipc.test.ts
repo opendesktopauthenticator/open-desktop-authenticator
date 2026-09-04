@@ -7,6 +7,7 @@ import {
 	RevocationCeremony,
 	toSummary
 } from '../src/main/vault/ipc';
+import { authenticatorFingerprint } from '../src/main/steam/authenticator-secrets';
 import { accountSummary, CHANNELS, IPC_CONTRACT } from '../src/shared/ipc';
 
 /**
@@ -133,6 +134,86 @@ describe('account summaries carry no secrets', () => {
 
 	it('keeps the SteamID a string', () => {
 		expect(typeof toSummary(account).steamId64).toBe('string');
+	});
+
+	it('marks a stale vault record with an opaque exact-record token without exposing its fingerprint', () => {
+		const oldFingerprint = authenticatorFingerprint({ sharedSecret: 'OLDER-SECRET-VALUE' });
+		const summary = toSummary({
+			...account,
+			unresolvedOperation: {
+				kind: 'activate' as const,
+				guidance: 'old record',
+				fingerprint: oldFingerprint,
+				at: '2026-01-01T00:00:00.000Z'
+			}
+		});
+
+		expect(summary.unresolvedOperation).toMatchObject({ stale: true });
+		expect(summary.unresolvedOperation?.staleToken).toMatch(/^[a-f0-9]{64}$/);
+		expect(JSON.stringify(summary)).not.toContain(oldFingerprint);
+	});
+
+	it('gives an applicable record an opaque token without exposing its internal identity', () => {
+		const currentFingerprint = authenticatorFingerprint(account);
+		const operationId = '11111111-1111-4111-8111-111111111111';
+		const summary = toSummary({
+			...account,
+			unresolvedOperation: {
+				kind: 'activate' as const,
+				guidance: 'check Steam',
+				fingerprint: currentFingerprint,
+				operationId,
+				at: '2026-01-01T00:00:00.000Z'
+			}
+		});
+
+		expect(summary.unresolvedOperation?.operationToken).toMatch(/^[a-f0-9]{64}$/);
+		expect(summary.unresolvedOperation?.staleToken).toBeUndefined();
+		expect(JSON.stringify(summary)).not.toContain(currentFingerprint);
+		expect(JSON.stringify(summary)).not.toContain(operationId);
+		expect(accountSummary.safeParse(summary).success).toBe(true);
+	});
+
+	it.each([
+		'',
+		'a'.repeat(15),
+		'a'.repeat(17),
+		'ABCDEF0123456789',
+		'gggggggggggggggg',
+		'fingerprint-for-an-older-authenticator'
+	])(
+		'fails an unverifiable fingerprint closed without making it discardable (%j)',
+		(fingerprint) => {
+			const summary = toSummary({
+				...account,
+				unresolvedOperation: {
+					kind: 'activate' as const,
+					guidance: 'unverifiable record',
+					fingerprint,
+					at: '2026-01-01T00:00:00.000Z'
+				}
+			});
+
+			expect(summary.unresolvedOperation).toMatchObject({ unidentified: true });
+			expect(summary.unresolvedOperation?.stale).toBeUndefined();
+			expect(summary.unresolvedOperation?.staleToken).toBeUndefined();
+			expect(accountSummary.safeParse(summary).success).toBe(true);
+		}
+	);
+
+	it('fails a legacy record closed without presenting it as discardable', () => {
+		const summary = toSummary({
+			...account,
+			unresolvedOperation: {
+				kind: 'deactivate' as const,
+				guidance: 'legacy record',
+				at: '2026-01-01T00:00:00.000Z'
+			}
+		});
+
+		expect(summary.unresolvedOperation).toMatchObject({ unidentified: true });
+		expect(summary.unresolvedOperation?.stale).toBeUndefined();
+		expect(summary.unresolvedOperation?.staleToken).toBeUndefined();
 	});
 });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	EnrollmentError,
+	EnrollmentSecretsError,
 	finalizeEnrollment,
 	removeAuthenticator,
 	startEnrollment
@@ -80,6 +81,188 @@ describe('starting enrollment', () => {
 		expect(started.deviceId).toMatch(/^android:/);
 	});
 
+	it('preserves the optional secret_1 field for maFile fidelity', async () => {
+		const secret1 = Buffer.alloc(20, 9).toString('base64');
+		const { transport } = transportReturning([
+			{ response: { ...okAdd.response, secret_1: secret1 } }
+		]);
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.toMatchObject({ secret1 });
+	});
+
+	it('preserves a complete one-time bundle even when status contradicts it', async () => {
+		const contradictory = { response: { ...okAdd.response, status: 29 } };
+		const { transport } = transportReturning([contradictory]);
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.toMatchObject({
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345'
+		});
+	});
+
+	it.each([
+		['malformed login secret', 'not base64!', IDENTITY],
+		['short login secret', 'YQ==', IDENTITY],
+		['malformed confirmation secret', SHARED, 'not base64!'],
+		['short confirmation secret', SHARED, 'YQ==']
+	])('retains but refuses a complete-looking bundle with a %s', async (_case, shared, identity) => {
+		const reply = {
+			response: {
+				...okAdd.response,
+				shared_secret: shared,
+				identity_secret: identity
+			}
+		};
+		const { transport } = transportReturning([reply]);
+
+		const thrown = await startEnrollment(transport, {
+			steamId64: STEAM_ID,
+			accessToken: ACCESS,
+			unixSeconds: NOW_SECONDS
+		}).then(
+			() => undefined,
+			(err: unknown) => err
+		);
+
+		expect(thrown).toBeInstanceOf(EnrollmentSecretsError);
+		expect(thrown).toMatchObject({
+			committed: true,
+			started: {
+				sharedSecret: shared,
+				identitySecret: identity,
+				revocationCode: 'R12345'
+			}
+		});
+	});
+
+	it.each([
+		['missing', undefined],
+		['a string', '1'],
+		['null', null]
+	])('keeps a complete usable bundle when status is %s', async (_case, status) => {
+		const response: Record<string, unknown> = { ...okAdd.response, status };
+		if (status === undefined) delete response.status;
+		const { transport } = transportReturning([{ response }]);
+
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.toMatchObject({
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345'
+		});
+	});
+
+	it('ignores malformed optional metadata without discarding usable secrets', async () => {
+		const { transport } = transportReturning([
+			{
+				response: {
+					...okAdd.response,
+					serial_number: 123,
+					account_name: null,
+					token_gid: {},
+					uri: false,
+					phone_number_hint: []
+				}
+			}
+		]);
+
+		const started = await startEnrollment(transport, {
+			steamId64: STEAM_ID,
+			accessToken: ACCESS,
+			unixSeconds: NOW_SECONDS
+		});
+
+		expect(started).toMatchObject({
+			sharedSecret: SHARED,
+			identitySecret: IDENTITY,
+			revocationCode: 'R12345'
+		});
+		expect(started).not.toHaveProperty('serialNumber');
+		expect(started).not.toHaveProperty('accountName');
+		expect(started).not.toHaveProperty('tokenGid');
+		expect(started).not.toHaveProperty('uri');
+		expect(started).not.toHaveProperty('phoneNumberHint');
+	});
+
+	it('omits an oversized phone hint before the one-time bundle is sealed', async () => {
+		const { transport } = transportReturning([
+			{ response: { ...okAdd.response, phone_number_hint: '1'.repeat(65) } }
+		]);
+
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.not.toHaveProperty('phoneNumberHint');
+	});
+
+	it('keeps usable authenticator keys when Steam omits the optional revocation code', async () => {
+		const response = { ...okAdd.response } as Record<string, unknown>;
+		delete response.revocation_code;
+		const { transport } = transportReturning([{ response }]);
+
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).resolves.toMatchObject({ sharedSecret: SHARED, identitySecret: IDENTITY });
+	});
+
+	it('drops oversized optional metadata before it can exceed the recovery journal', async () => {
+		const { transport } = transportReturning([
+			{
+				response: {
+					...okAdd.response,
+					account_name: 'a'.repeat(65),
+					serial_number: '1'.repeat(129),
+					token_gid: 'g'.repeat(129),
+					uri: 'u'.repeat(8 * 1024 + 1)
+				}
+			}
+		]);
+
+		const started = await startEnrollment(transport, {
+			steamId64: STEAM_ID,
+			accessToken: ACCESS,
+			unixSeconds: NOW_SECONDS
+		});
+		expect(started).not.toHaveProperty('accountName');
+		expect(started).not.toHaveProperty('serialNumber');
+		expect(started).not.toHaveProperty('tokenGid');
+		expect(started).not.toHaveProperty('uri');
+	});
+
+	it('treats partial secret material with a refusal as indeterminate', async () => {
+		const { transport } = transportReturning([{ response: { status: 29, shared_secret: SHARED } }]);
+		await expect(
+			startEnrollment(transport, {
+				steamId64: STEAM_ID,
+				accessToken: ACCESS,
+				unixSeconds: NOW_SECONDS
+			})
+		).rejects.toMatchObject({ committed: true, certain: false });
+	});
+
 	it('asks Steam to use the phone already on the account', async () => {
 		// This app never manages phone numbers, and no library in the ecosystem
 		// does either (F-10). `sms_phone_id: 1` is how you say "the one you have".
@@ -117,7 +300,7 @@ describe('starting enrollment', () => {
 	 * would leave the user retrying against an account that is already locked.
 	 */
 	it('says plainly when Steam accepted but withheld the secrets', async () => {
-		for (const missing of ['shared_secret', 'identity_secret', 'revocation_code']) {
+		for (const missing of ['shared_secret', 'identity_secret']) {
 			const partial = { response: { ...okAdd.response } };
 			delete (partial.response as Record<string, unknown>)[missing];
 
@@ -591,12 +774,13 @@ describe('a refusal that happened before the request was sent', () => {
 			'the routing check refuses a direct connection',
 			new EgressError(
 				'this account is set to route through http://***:***@proxy.example:8080, but this ' +
-					'connection would be made directly instead. Refusing to connect.'
+					'connection would be made directly instead. Refusing to connect.',
+				false
 			)
 		],
 		[
 			'the account was closed while the transport was held',
-			new EgressError('this account was closed before the request was sent')
+			new EgressError('this account was closed before the request was sent', false)
 		]
 	])('is passed through unchanged when %s', async (_what, error) => {
 		const { transport } = transportRefusing(error);

@@ -1,4 +1,12 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -27,13 +35,67 @@ const state = vi.hoisted(() => ({
 	silentShortWrite: false,
 	noProgress: false,
 	noHardLinks: false,
-	failRename: false
+	failRename: false,
+	failUpdateSync: false,
+	directorySyncCalls: 0,
+	failDirectorySyncAt: undefined as number | undefined,
+	replaceStageOnStatWith: undefined as string | undefined,
+	replaceStageOnStatAt: 1,
+	stageStatCalls: 0,
+	replaceTargetOnStatWith: undefined as string | undefined,
+	replaceTargetOnStatAt: 1,
+	targetStatCalls: 0
 }));
 
 vi.mock('node:fs', async () => {
 	const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
 	return {
 		...actual,
+		fsyncSync: (fd: number) => {
+			if (actual.fstatSync(fd).isDirectory()) {
+				state.directorySyncCalls += 1;
+				if (state.directorySyncCalls === state.failDirectorySyncAt) {
+					throw Object.assign(new Error('EIO: recovery directory did not flush'), {
+						code: 'EIO'
+					});
+				}
+			}
+			if (state.failUpdateSync) {
+				throw Object.assign(new Error('EIO: recovery update did not flush'), { code: 'EIO' });
+			}
+			return actual.fsyncSync(fd);
+		},
+		statSync: (path: unknown, ...rest: unknown[]) => {
+			if (typeof path === 'string' && path.endsWith('.tmp')) {
+				state.stageStatCalls += 1;
+				if (
+					state.replaceStageOnStatWith !== undefined &&
+					state.stageStatCalls === state.replaceStageOnStatAt
+				) {
+					const foreign = state.replaceStageOnStatWith;
+					state.replaceStageOnStatWith = undefined;
+					actual.unlinkSync(path);
+					actual.writeFileSync(path, foreign);
+				}
+			}
+			if (
+				typeof path === 'string' &&
+				!path.endsWith('.tmp') &&
+				path.includes('76561199000000001')
+			) {
+				state.targetStatCalls += 1;
+				if (
+					state.replaceTargetOnStatWith !== undefined &&
+					state.targetStatCalls === state.replaceTargetOnStatAt
+				) {
+					const foreign = state.replaceTargetOnStatWith;
+					state.replaceTargetOnStatWith = undefined;
+					actual.unlinkSync(path);
+					actual.writeFileSync(path, foreign);
+				}
+			}
+			return (actual.statSync as (...args: unknown[]) => unknown)(path, ...rest);
+		},
 		writeSync: (fd: number, data: unknown, ...rest: unknown[]) => {
 			if (state.silentShortWrite || state.noProgress) {
 				/*
@@ -110,7 +172,13 @@ vi.mock('node:fs', async () => {
 	};
 });
 
-import { writeRecoveryFile } from '../src/main/vault/recovery';
+import {
+	reconcileRecoveryFiles,
+	recoveryDirectory,
+	recoveryPathFor,
+	updateRecoveryFile,
+	writeRecoveryFile
+} from '../src/main/vault/recovery';
 
 let dir: string;
 let path: string;
@@ -124,15 +192,260 @@ beforeEach(() => {
 	state.noProgress = false;
 	state.noHardLinks = false;
 	state.failRename = false;
+	state.failUpdateSync = false;
+	state.directorySyncCalls = 0;
+	state.failDirectorySyncAt = undefined;
+	state.replaceStageOnStatWith = undefined;
+	state.replaceStageOnStatAt = 1;
+	state.stageStatCalls = 0;
+	state.replaceTargetOnStatWith = undefined;
+	state.replaceTargetOnStatAt = 1;
+	state.targetStatCalls = 0;
 });
 
 afterEach(() => {
 	state.shortWrite = false;
 	state.hideDestination = false;
+	state.failUpdateSync = false;
+	state.failDirectorySyncAt = undefined;
+	state.replaceStageOnStatWith = undefined;
+	state.replaceStageOnStatAt = 1;
+	state.stageStatCalls = 0;
+	state.replaceTargetOnStatWith = undefined;
+	state.replaceTargetOnStatAt = 1;
+	state.targetStatCalls = 0;
 	rmSync(dir, { recursive: true, force: true });
 });
 
 const envelope = { v: 1, kdf: { type: 'scrypt' }, ciphertext: 'a'.repeat(400) };
+const validEnvelope = {
+	version: 1,
+	kdf: { type: 'scrypt', N: 16384, r: 8, p: 1, salt: 'c2FsdHktc2FsdGE=' },
+	cipher: {
+		type: 'aes-256-gcm',
+		nonce: 'bm9uY2UtdmFsdWUtaGVy',
+		tag: 'dGFnLXZhbHVlLWdvZXNoZXJl'
+	},
+	ciphertext: 'a'.repeat(200),
+	modifiedAt: '2026-01-01T00:00:00.000Z'
+};
+
+describe('recovery-directory durability barriers', () => {
+	it('keeps a complete stage when the new directory parent cannot be synced and retries it', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		state.failDirectorySyncAt = 1;
+
+		expect(() => writeRecoveryFile(recoveryPath, validEnvelope)).toThrow(
+			/recovery directory did not flush/
+		);
+		const recoveryDir = recoveryDirectory(dir);
+		const staged = readdirSync(recoveryDir).filter((name) => name.endsWith('.tmp'));
+		expect(staged).toHaveLength(1);
+		expect(existsSync(recoveryPath)).toBe(false);
+
+		state.directorySyncCalls = 0;
+		state.failDirectorySyncAt = undefined;
+		expect(writeRecoveryFile(recoveryPath, { ignored: 'retry reseal' })).toBe(recoveryPath);
+
+		expect(JSON.parse(readFileSync(recoveryPath, 'utf8'))).toEqual(validEnvelope);
+		expect(readdirSync(recoveryDir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+		expect(state.directorySyncCalls).toBeGreaterThanOrEqual(2);
+	});
+
+	it('keeps target and stage until the publication directory itself has synced', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		state.failDirectorySyncAt = 2;
+
+		expect(() => writeRecoveryFile(recoveryPath, validEnvelope)).toThrow(
+			/recovery directory did not flush/
+		);
+		const recoveryDir = recoveryDirectory(dir);
+		const staged = readdirSync(recoveryDir).filter((name) => name.endsWith('.tmp'));
+		expect(staged).toHaveLength(1);
+		expect(JSON.parse(readFileSync(recoveryPath, 'utf8'))).toEqual(validEnvelope);
+
+		state.directorySyncCalls = 0;
+		state.failDirectorySyncAt = undefined;
+		expect(writeRecoveryFile(recoveryPath, { ignored: 'retry reseal' })).toBe(recoveryPath);
+
+		expect(readdirSync(recoveryDir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+		expect(JSON.parse(readFileSync(recoveryPath, 'utf8'))).toEqual(validEnvelope);
+	});
+
+	it('propagates a genuine reconciliation sync failure without deleting its witness', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		const recoveryDir = recoveryDirectory(dir);
+		const staged = `${recoveryPath}.4f0a1c22-0000-4000-8000-000000000000.tmp`;
+		const body = `${JSON.stringify(validEnvelope, null, 2)}\n`;
+		mkdirSync(recoveryDir, { recursive: true });
+		writeFileSync(recoveryPath, body);
+		writeFileSync(staged, body);
+		// Parent durability succeeds; the sync protecting target-before-stage-cleanup fails.
+		state.failDirectorySyncAt = 2;
+
+		expect(() => reconcileRecoveryFiles(dir)).toThrow(/recovery directory did not flush/);
+		expect(readFileSync(recoveryPath, 'utf8')).toBe(body);
+		expect(readFileSync(staged, 'utf8')).toBe(body);
+	});
+});
+
+describe('descriptor-owned cleanup', () => {
+	it('does not remove a pathname that replaced an incomplete stage', () => {
+		state.shortWrite = true;
+		state.replaceStageOnStatWith = 'foreign stage bytes';
+
+		expect(() => writeRecoveryFile(path, envelope)).toThrow(/ENOSPC/);
+		state.shortWrite = false;
+
+		const [staged] = readdirSync(recoveryDirectory(dir)).filter((name) => name.endsWith('.tmp'));
+		expect(staged).toBeDefined();
+		expect(readFileSync(join(recoveryDirectory(dir), staged!), 'utf8')).toBe('foreign stage bytes');
+	});
+
+	it('preserves a pathname replacement before hard-link stage cleanup', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		state.replaceStageOnStatWith = 'foreign stage bytes';
+
+		expect(() => writeRecoveryFile(recoveryPath, validEnvelope)).toThrow(
+			/refusing to remove a recovery staging pathname/
+		);
+
+		const [staged] = readdirSync(recoveryDirectory(dir)).filter((name) => name.endsWith('.tmp'));
+		expect(staged).toBeDefined();
+		expect(readFileSync(join(recoveryDirectory(dir), staged!), 'utf8')).toBe('foreign stage bytes');
+		expect(JSON.parse(readFileSync(recoveryPath, 'utf8'))).toEqual(validEnvelope);
+	});
+
+	it('preserves the stage when a hard-link destination changes after its sync', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		state.replaceTargetOnStatAt = 2;
+		state.replaceTargetOnStatWith = 'foreign post-sync target bytes';
+
+		expect(() => writeRecoveryFile(recoveryPath, validEnvelope)).toThrow(
+			/changed after its directory sync/
+		);
+
+		expect(readFileSync(recoveryPath, 'utf8')).toBe('foreign post-sync target bytes');
+		const [staged] = readdirSync(recoveryDirectory(dir)).filter((name) => name.endsWith('.tmp'));
+		expect(staged).toBeDefined();
+		expect(JSON.parse(readFileSync(join(recoveryDirectory(dir), staged!), 'utf8'))).toEqual(
+			validEnvelope
+		);
+	});
+
+	it('preserves a pathname replacement before fallback stage cleanup', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		state.noHardLinks = true;
+		state.replaceStageOnStatWith = 'foreign fallback-stage bytes';
+
+		expect(() => writeRecoveryFile(recoveryPath, validEnvelope)).toThrow(
+			/refusing to remove a recovery staging pathname/
+		);
+
+		const [staged] = readdirSync(recoveryDirectory(dir)).filter((name) => name.endsWith('.tmp'));
+		expect(staged).toBeDefined();
+		expect(readFileSync(join(recoveryDirectory(dir), staged!), 'utf8')).toBe(
+			'foreign fallback-stage bytes'
+		);
+		expect(JSON.parse(readFileSync(recoveryPath, 'utf8'))).toEqual(validEnvelope);
+	});
+
+	it('preserves target and stage replacements on the no-hard-link fallback', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		state.noHardLinks = true;
+		state.replaceTargetOnStatWith = 'foreign target bytes';
+
+		expect(() => writeRecoveryFile(recoveryPath, validEnvelope)).toThrow(/was replaced/);
+
+		expect(readFileSync(recoveryPath, 'utf8')).toBe('foreign target bytes');
+		const [staged] = readdirSync(recoveryDirectory(dir)).filter((name) => name.endsWith('.tmp'));
+		expect(staged).toBeDefined();
+		expect(JSON.parse(readFileSync(join(recoveryDirectory(dir), staged!), 'utf8'))).toEqual(
+			validEnvelope
+		);
+	});
+
+	it('does not reconcile through a stage pathname replaced after it was opened', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		const recoveryDir = recoveryDirectory(dir);
+		const staged = `${recoveryPath}.4f0a1c22-0000-4000-8000-000000000000.tmp`;
+		mkdirSync(recoveryDir, { recursive: true });
+		writeFileSync(staged, `${JSON.stringify(validEnvelope, null, 2)}\n`);
+		state.replaceStageOnStatAt = 1;
+		state.replaceStageOnStatWith = 'foreign reconciliation bytes';
+
+		expect(reconcileRecoveryFiles(dir)).toEqual([]);
+
+		expect(existsSync(recoveryPath)).toBe(false);
+		expect(readFileSync(staged, 'utf8')).toBe('foreign reconciliation bytes');
+	});
+
+	it('reconciles an absent destination without hard-link support', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		const recoveryDir = recoveryDirectory(dir);
+		const staged = `${recoveryPath}.4f0a1c22-0000-4000-8000-000000000000.tmp`;
+		const body = `${JSON.stringify(validEnvelope, null, 2)}\n`;
+		mkdirSync(recoveryDir, { recursive: true });
+		writeFileSync(staged, body);
+		state.noHardLinks = true;
+
+		expect(reconcileRecoveryFiles(dir)).toEqual([recoveryPath]);
+
+		expect(readFileSync(recoveryPath, 'utf8')).toBe(body);
+		expect(existsSync(staged)).toBe(false);
+	});
+
+	it('preserves both witnesses if a fallback reconciliation target is replaced', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		const recoveryDir = recoveryDirectory(dir);
+		const staged = `${recoveryPath}.4f0a1c22-0000-4000-8000-000000000000.tmp`;
+		const body = `${JSON.stringify(validEnvelope, null, 2)}\n`;
+		mkdirSync(recoveryDir, { recursive: true });
+		writeFileSync(staged, body);
+		state.noHardLinks = true;
+		state.replaceTargetOnStatWith = 'foreign reconciliation target';
+
+		expect(() => reconcileRecoveryFiles(dir)).toThrow(/was replaced/);
+
+		expect(readFileSync(recoveryPath, 'utf8')).toBe('foreign reconciliation target');
+		expect(readFileSync(staged, 'utf8')).toBe(body);
+	});
+
+	it('does not delete a stage pathname replaced at reconciliation cleanup', () => {
+		const recoveryPath = recoveryPathFor(dir, '76561199000000001');
+		const recoveryDir = recoveryDirectory(dir);
+		const staged = `${recoveryPath}.4f0a1c22-0000-4000-8000-000000000000.tmp`;
+		const body = `${JSON.stringify(validEnvelope, null, 2)}\n`;
+		mkdirSync(recoveryDir, { recursive: true });
+		writeFileSync(recoveryPath, body);
+		writeFileSync(staged, body);
+		state.replaceStageOnStatAt = 2;
+		state.replaceStageOnStatWith = 'foreign cleanup bytes';
+
+		expect(() => reconcileRecoveryFiles(dir)).toThrow(
+			/refusing to remove a recovery staging pathname/
+		);
+
+		expect(readFileSync(recoveryPath, 'utf8')).toBe(body);
+		expect(readFileSync(staged, 'utf8')).toBe('foreign cleanup bytes');
+	});
+});
+
+describe('a recovery correction whose durable stage cannot be flushed', () => {
+	it('fails without replacing the last readable recovery file', () => {
+		writeRecoveryFile(path, envelope);
+		const original = readFileSync(path, 'utf8');
+
+		state.failUpdateSync = true;
+		expect(() =>
+			updateRecoveryFile(path, { ...envelope, ciphertext: 'updated'.repeat(80) })
+		).toThrow(/did not flush/);
+		state.failUpdateSync = false;
+
+		expect(readFileSync(path, 'utf8')).toBe(original);
+		expect(readdirSync(join(dir, 'recovery')).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+	});
+});
 
 describe('a recovery file whose write runs out of disk', () => {
 	it('leaves nothing at the destination', () => {
@@ -331,23 +644,19 @@ describe('the same file on a filesystem that cannot make hard links', () => {
 		expect(second, 'the second write went to the destination anyway').not.toBe(path);
 	});
 
-	/**
-	 * And the cost of claiming the name first is a placeholder, which must not
-	 * outlive a write that failed: leaving it would deny the name to every later
-	 * attempt for an enrollment that was never recorded.
-	 */
-	it('leaves nothing behind when the write cannot be published', () => {
+	/** The fallback writes through the exclusive final descriptor. It must never
+	 * rename over that name after claiming it. */
+	it('does not use an overwrite rename after claiming the destination', () => {
 		state.noHardLinks = true;
 		state.failRename = true;
-		expect(() => writeRecoveryFile(path, envelope)).toThrow(/EIO/);
+		expect(writeRecoveryFile(path, envelope)).toBe(path);
 		state.failRename = false;
 		state.noHardLinks = false;
 
+		expect(readFileSync(path, 'utf8')).toBe(`${JSON.stringify(envelope, null, 2)}\n`);
 		expect(
-			existsSync(path),
-			'an empty file was left at the destination by a write that failed, and every later ' +
-				'enrollment for this account will now be pushed aside by it'
-		).toBe(false);
-		expect(readdirSync(join(dir, 'recovery')), 'a staged copy was left beside it').toEqual([]);
+			readdirSync(join(dir, 'recovery')).filter((name) => name.endsWith('.tmp')),
+			'a staged copy was left beside it'
+		).toEqual([]);
 	});
 });

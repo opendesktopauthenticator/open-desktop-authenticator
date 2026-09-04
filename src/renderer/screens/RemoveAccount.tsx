@@ -2,6 +2,7 @@ import { useState } from 'react';
 import type { AccountSummary } from '../../shared/ipc';
 import { DEACTIVATE_ACK, matchesDeactivateAck } from '../../shared/acknowledgements';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * Removing an account from the vault.
@@ -25,6 +26,7 @@ export function RemoveAccount({
 	onRemove,
 	onDeactivate,
 	onResolve,
+	onClearStale,
 	onClose
 }: {
 	account: AccountSummary;
@@ -41,7 +43,15 @@ export function RemoveAccount({
 	onDeactivate: (
 		passphrase: string,
 		acknowledgement: string
-	) => Promise<{ state?: 'uncertain'; guidance?: string; certain?: boolean; persisted?: boolean }>;
+	) => Promise<{
+		state?: 'uncertain' | 'staleOperation' | 'unidentifiedOperation';
+		kind?: 'activate' | 'deactivate';
+		guidance?: string;
+		certain?: boolean;
+		persisted?: boolean;
+		staleToken?: string;
+		operationToken?: string;
+	}>;
 	/**
 	 * Clear the vault's record that an irreversible operation on this account was
 	 * left unresolved. Called only when the user says they have checked it.
@@ -51,7 +61,13 @@ export function RemoveAccount({
 	 * removal, because that path deletes the only copy of the account's secrets
 	 * and being unlocked is not enough to do that.
 	 */
-	onResolve: (steamActed: boolean, passphrase?: string) => Promise<unknown>;
+	onResolve: (
+		kind: 'activate' | 'deactivate',
+		operationToken: string,
+		steamActed: boolean,
+		passphrase?: string
+	) => Promise<unknown>;
+	onClearStale: (kind: 'activate' | 'deactivate', staleToken: string) => Promise<unknown>;
 	onClose: () => void;
 }): React.JSX.Element {
 	const [passphrase, setPassphrase] = useState('');
@@ -71,14 +87,33 @@ export function RemoveAccount({
 	 * The vault remembers it now, and this is where that record is read.
 	 */
 	const [uncertain, setUncertain] = useState<
-		{ guidance: string; certain: boolean; persisted?: boolean } | undefined
+		| {
+				kind: 'activate' | 'deactivate';
+				guidance: string;
+				certain: boolean;
+				persisted?: boolean;
+				stale?: boolean;
+				staleToken?: string;
+				operationToken?: string;
+				unidentified?: boolean;
+		  }
+		| undefined
 	>(
-		account.unresolvedOperation?.kind === 'deactivate'
+		account.unresolvedOperation !== undefined
 			? {
+					kind: account.unresolvedOperation.kind,
 					guidance: account.unresolvedOperation.guidance,
 					certain: account.unresolvedOperation.certain === true,
 					// Read from the account, so it is durable by construction.
-					persisted: true
+					persisted: true,
+					...(account.unresolvedOperation.stale === true ? { stale: true } : {}),
+					...(account.unresolvedOperation.staleToken === undefined
+						? {}
+						: { staleToken: account.unresolvedOperation.staleToken }),
+					...(account.unresolvedOperation.operationToken === undefined
+						? {}
+						: { operationToken: account.unresolvedOperation.operationToken }),
+					...(account.unresolvedOperation.unidentified === true ? { unidentified: true } : {})
 				}
 			: undefined
 	);
@@ -97,9 +132,18 @@ export function RemoveAccount({
 		if (busy) {
 			return;
 		}
+		const submittedPassphrase = passphrase;
 		setBusy(true);
 		setError(undefined);
-		(detaching ? onDeactivate(passphrase, acknowledgement) : onRemove(passphrase))
+		let attempt: Promise<unknown>;
+		try {
+			attempt = detaching
+				? onDeactivate(submittedPassphrase, acknowledgement)
+				: onRemove(submittedPassphrase);
+		} catch (err) {
+			attempt = Promise.reject(err instanceof Error ? err : new Error(messageOf(err)));
+		}
+		attempt
 			.then((result: unknown) => {
 				/*
 				 * **A removal Steam may already have performed is not a failure to
@@ -113,24 +157,47 @@ export function RemoveAccount({
 				 * known to have performed rendered as one nobody can be sure about.
 				 */
 				const outcome = result as
-					{ state?: string; guidance?: string; certain?: boolean; persisted?: boolean } | undefined;
-				if (outcome?.state === 'uncertain') {
+					| {
+							state?: string;
+							kind?: 'activate' | 'deactivate';
+							guidance?: string;
+							certain?: boolean;
+							persisted?: boolean;
+							staleToken?: string;
+							operationToken?: string;
+					  }
+					| undefined;
+				if (
+					outcome?.state === 'uncertain' ||
+					outcome?.state === 'staleOperation' ||
+					outcome?.state === 'unidentifiedOperation'
+				) {
 					setUncertain({
+						kind: outcome.kind === 'activate' ? 'activate' : 'deactivate',
 						guidance: outcome.guidance ?? 'Steam did not answer, so the outcome is unknown.',
 						certain: outcome.certain === true,
-						persisted: outcome.persisted === true
+						persisted: outcome.persisted === true,
+						...(outcome.state === 'staleOperation' ? { stale: true } : {}),
+						...(outcome.staleToken === undefined ? {} : { staleToken: outcome.staleToken }),
+						...(outcome.operationToken === undefined
+							? {}
+							: { operationToken: outcome.operationToken }),
+						...(outcome.state === 'unidentifiedOperation' ? { unidentified: true } : {})
 					});
 					return;
 				}
-				setPassphrase('');
 				setAcknowledgement('');
 				onClose();
 			})
 			.catch((err: unknown) => setError(messageOf(err)))
-			.finally(() => setBusy(false));
+			.finally(() => {
+				setPassphrase('');
+				setBusy(false);
+			});
 	};
 
 	if (uncertain !== undefined) {
+		const activation = uncertain.kind === 'activate';
 		/*
 		 * The detach reached Steam and the reply may not have come back, so the
 		 * authenticator may already be gone. The form is not offered again:
@@ -148,21 +215,36 @@ export function RemoveAccount({
 			<main className="shell">
 				<header className="row">
 					<h1>
-						{uncertain.certain
-							? 'Steam has already removed this'
-							: 'This may already have happened'}
+						{uncertain.unidentified
+							? 'This safety record cannot be matched'
+							: uncertain.stale
+								? 'An old safety record needs clearing'
+								: activation
+									? uncertain.certain
+										? 'Steam has already activated this'
+										: 'Activation may already have happened'
+									: uncertain.certain
+										? 'Steam has already removed this'
+										: 'This may already have happened'}
 					</h1>
 				</header>
 				<p className="muted">
 					{account.accountName} <span className="muted">{account.steamId64}</span>
 				</p>
-				<p className="error">{uncertain.guidance}</p>
+				<DynamicError>{uncertain.guidance}</DynamicError>
 				<p>
-					{uncertain.certain
-						? 'The account has no second factor until you add one somewhere else — do that ' +
-							'before anything else.'
-						: 'Nothing here can tell whether Steam acted on the request. Check Steam Guard on ' +
-							'the account before doing anything else.'}
+					{uncertain.unidentified
+						? 'The app cannot prove whether this record describes the authenticator stored now, so it will not clear the record, remove this account, detach Steam Guard, or contact Steam.'
+						: uncertain.stale
+							? 'The old record does not describe the authenticator stored now. Clearing it does not contact Steam, remove this account, or detach Steam Guard.'
+							: activation
+								? 'This record is about finishing activation, not removing Steam Guard. Check ' +
+									'whether Steam Guard is active before deciding what happened.'
+								: uncertain.certain
+									? 'The account has no second factor until you add one somewhere else — do that ' +
+										'before anything else.'
+									: 'Nothing here can tell whether Steam acted on the request. Check Steam Guard on ' +
+										'the account before doing anything else.'}
 				</p>
 				{/*
 				 * **Only promised when it is true.** The refusal is kept on the account,
@@ -171,13 +253,19 @@ export function RemoveAccount({
 				 * that does not exist.
 				 */}
 				<p>
-					{uncertain.persisted === false
-						? 'This warning could not be saved, so it will be gone once you close this window. ' +
-							'The account will still be listed here and will still show codes, which may ' +
-							'mean nothing. Write down what it says above before you close it.'
-						: 'This application will not send the request again.'}
+					{uncertain.unidentified
+						? 'Keep your backup and contact support before changing Steam Guard for this account.'
+						: uncertain.stale
+							? 'The removal form stays unavailable until that exact old record is cleared.'
+							: uncertain.persisted === false
+								? 'This warning could not be saved, so it will be gone once you close this window. ' +
+									'The account will still be listed here and will still show codes, which may ' +
+									'mean nothing. Write down what it says above before you close it.'
+								: 'This application will not send the request again.'}
 				</p>
-				{resolveError !== undefined && <p className="error">{resolveError}</p>}
+				{resolveError !== undefined && (
+					<DynamicError id="resolve-account-error">{resolveError}</DynamicError>
+				)}
 				{/*
 				 * **Nothing to resolve means nothing to offer.** Where the record could
 				 * not be written there is no stored operation for the handler to act
@@ -185,22 +273,51 @@ export function RemoveAccount({
 				 * invitation to press a button that cannot work, and the paragraph
 				 * above has already said the warning will not survive this window.
 				 */}
-				{uncertain.persisted !== false && (
-					<label htmlFor="resolve-passphrase">Vault passphrase, to remove this account here</label>
-				)}
-				{uncertain.persisted !== false && (
-					<input
-						id="resolve-passphrase"
-						type="password"
-						value={resolvePassphrase}
-						onChange={(event) => setResolvePassphrase(event.target.value)}
-						autoComplete="off"
-					/>
-				)}
+				{!uncertain.stale &&
+					!uncertain.unidentified &&
+					uncertain.persisted !== false &&
+					uncertain.operationToken !== undefined &&
+					!activation && (
+						<label htmlFor="resolve-passphrase">
+							Vault passphrase, to remove this account here
+						</label>
+					)}
+				{!uncertain.stale &&
+					!uncertain.unidentified &&
+					uncertain.persisted !== false &&
+					uncertain.operationToken !== undefined &&
+					!activation && (
+						<input
+							id="resolve-passphrase"
+							aria-invalid={resolveError !== undefined}
+							aria-describedby={resolveError === undefined ? undefined : 'resolve-account-error'}
+							type="password"
+							value={resolvePassphrase}
+							onChange={(event) => setResolvePassphrase(event.target.value)}
+							autoComplete="off"
+							disabled={resolving}
+						/>
+					)}
 				<div className="controls">
 					<button type="button" onClick={onClose}>
 						Close
 					</button>
+					{uncertain.stale && uncertain.staleToken !== undefined && (
+						<button
+							type="button"
+							disabled={resolving}
+							onClick={() => {
+								setResolving(true);
+								setResolveError(undefined);
+								void onClearStale(uncertain.kind, uncertain.staleToken!)
+									.then(onClose)
+									.catch((err: unknown) => setResolveError(messageOf(err)))
+									.finally(() => setResolving(false));
+							}}
+						>
+							Clear old safety record
+						</button>
+					)}
 					{/*
 					 * **The only thing that can settle this is the user.** Nothing local
 					 * knows what Steam did, so the record is cleared by the person
@@ -222,38 +339,105 @@ export function RemoveAccount({
 					 * would clear the protection and re-offer an operation that has
 					 * already happened.
 					 */}
-					{uncertain.persisted !== false && (
-						<button
-							type="button"
-							disabled={resolving || resolvePassphrase === ''}
-							onClick={() => {
-								setResolving(true);
-								setResolveError(undefined);
-								void onResolve(true, resolvePassphrase)
-									.then(onClose)
-									.catch((err: unknown) => setResolveError(messageOf(err)))
-									.finally(() => setResolving(false));
-							}}
-						>
-							Steam Guard is off — remove this account here
-						</button>
-					)}
-					{uncertain.persisted !== false && !uncertain.certain && (
-						<button
-							type="button"
-							disabled={resolving}
-							onClick={() => {
-								setResolving(true);
-								setResolveError(undefined);
-								void onResolve(false)
-									.then(onClose)
-									.catch((err: unknown) => setResolveError(messageOf(err)))
-									.finally(() => setResolving(false));
-							}}
-						>
-							Steam Guard is still on — let me try again
-						</button>
-					)}
+					{!uncertain.stale &&
+						!uncertain.unidentified &&
+						uncertain.persisted !== false &&
+						uncertain.operationToken !== undefined &&
+						activation && (
+							<button
+								type="button"
+								disabled={resolving}
+								onClick={() => {
+									setResolving(true);
+									setResolveError(undefined);
+									void onResolve('activate', uncertain.operationToken!, true)
+										.then(onClose)
+										.catch((err: unknown) => setResolveError(messageOf(err)))
+										.finally(() => setResolving(false));
+								}}
+							>
+								Steam Guard is on — finish this account here
+							</button>
+						)}
+					{!uncertain.stale &&
+						!uncertain.unidentified &&
+						uncertain.persisted !== false &&
+						uncertain.operationToken !== undefined &&
+						activation &&
+						!uncertain.certain && (
+							<button
+								type="button"
+								disabled={resolving}
+								onClick={() => {
+									setResolving(true);
+									setResolveError(undefined);
+									void onResolve('activate', uncertain.operationToken!, false)
+										.then(onClose)
+										.catch((err: unknown) => setResolveError(messageOf(err)))
+										.finally(() => setResolving(false));
+								}}
+							>
+								Steam Guard is not on — let me retry activation
+							</button>
+						)}
+					{!uncertain.stale &&
+						!uncertain.unidentified &&
+						uncertain.persisted !== false &&
+						uncertain.operationToken !== undefined &&
+						!activation && (
+							<button
+								type="button"
+								disabled={resolving || resolvePassphrase === ''}
+								onClick={() => {
+									const submittedPassphrase = resolvePassphrase;
+									setResolving(true);
+									setResolveError(undefined);
+									let attempt: Promise<unknown>;
+									try {
+										attempt = onResolve(
+											'deactivate',
+											uncertain.operationToken!,
+											true,
+											submittedPassphrase
+										);
+									} catch (err) {
+										attempt = Promise.reject(
+											err instanceof Error ? err : new Error(messageOf(err))
+										);
+									}
+									void attempt
+										.then(onClose)
+										.catch((err: unknown) => setResolveError(messageOf(err)))
+										.finally(() => {
+											setResolvePassphrase('');
+											setResolving(false);
+										});
+								}}
+							>
+								Steam Guard is off — remove this account here
+							</button>
+						)}
+					{!uncertain.stale &&
+						!uncertain.unidentified &&
+						uncertain.persisted !== false &&
+						uncertain.operationToken !== undefined &&
+						!activation &&
+						!uncertain.certain && (
+							<button
+								type="button"
+								disabled={resolving}
+								onClick={() => {
+									setResolving(true);
+									setResolveError(undefined);
+									void onResolve('deactivate', uncertain.operationToken!, false)
+										.then(onClose)
+										.catch((err: unknown) => setResolveError(messageOf(err)))
+										.finally(() => setResolving(false));
+								}}
+							>
+								Steam Guard is still on — let me try again
+							</button>
+						)}
 				</div>
 			</main>
 		);
@@ -275,7 +459,7 @@ export function RemoveAccount({
 				{account.accountName} <span className="muted">{account.steamId64}</span>
 			</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError id="remove-account-error">{error}</DynamicError>}
 
 			{/* The heading has to follow the action. With detaching on, this screen
 			    does the exact opposite of what it said — and the block further down
@@ -353,10 +537,13 @@ export function RemoveAccount({
 				<label htmlFor="remove-passphrase">Confirm your vault passphrase</label>
 				<input
 					id="remove-passphrase"
+					aria-invalid={error !== undefined}
+					aria-describedby={error === undefined ? undefined : 'remove-account-error'}
 					type="password"
 					value={passphrase}
 					onChange={(event) => setPassphrase(event.target.value)}
 					autoComplete="off"
+					disabled={busy}
 				/>
 				<p className="hint">
 					Asked because being unlocked means this machine was used recently, not that you are the

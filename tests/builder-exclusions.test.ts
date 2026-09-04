@@ -243,6 +243,8 @@ describe('the exclusions the shipped build really has', () => {
 
 		expect(entries, 'electron-builder.config.mjs exports no files array').toBeInstanceOf(Array);
 		expect(entries?.length, 'the files array is empty, so this asserts nothing').toBeGreaterThan(5);
+		expect(entries).toContain('LICENSE');
+		expect(entries).toContain('THIRD_PARTY_NOTICES.txt');
 
 		expect(
 			[...excludedPackagesFrom(entries ?? [])].sort(),

@@ -101,6 +101,8 @@ export interface ProxyCapableSession {
 	 * was supposed to end it.
 	 */
 	clearStorageData?(): Promise<void>;
+	/** Closes sockets owned by an attempt-scoped session before it is retired. */
+	closeAllConnections?(): Promise<void>;
 
 	// Deliberately no `login` event. Electron's `Session` does not emit one —
 	// only `App`, `ClientRequest`, `UtilityProcess` and `WebContents` do. An
@@ -353,7 +355,7 @@ export class SteamTransportFactory {
 		 * honest answer rather than a time fetched the forbidden way.
 		 */
 		if (this.requireProxies() && (account.proxyUrl === undefined || account.proxyUrl === '')) {
-			throw new EgressError(PROXY_REQUIRED);
+			throw new EgressError(PROXY_REQUIRED, false);
 		}
 
 		// **Captured before the first await, and carried into every request this
@@ -456,7 +458,8 @@ export class SteamTransportFactory {
 			throw new EgressError(
 				`this account is set to route through ${plan.redacted}, but ${reason}. ` +
 					'Refusing to connect: sending this request anyway would expose the address the ' +
-					'proxy exists to hide.'
+					'proxy exists to hide.',
+				false
 			);
 		};
 
@@ -631,7 +634,7 @@ export class SteamTransportFactory {
 	/** Throw unless the permission granted earlier is still the current one. */
 	private assertGranted(steamId64: string, granted: Grant): void {
 		if (!this.stillGranted(steamId64, granted)) {
-			throw new EgressError('this account was closed before the request was sent');
+			throw new EgressError('this account was closed before the request was sent', false);
 		}
 	}
 
@@ -845,7 +848,8 @@ export class SteamTransportFactory {
 			throw new EgressError(
 				`could not route this account through ${plan?.redacted ?? 'the network'}: ${redactCredentials(
 					err instanceof Error ? err.message : String(err)
-				)}`
+				)}`,
+				false
 			);
 		}
 		this.appliedProxy.set(steamId64, SteamTransportFactory.describeProxy(plan));
@@ -891,25 +895,18 @@ export class SteamTransportFactory {
 			// "nothing currently" is not a control, and the cost of being wrong is a
 			// session posted to somebody else's server.
 			if (!isSteamEndpoint(request.url)) {
-				reject(new EgressError('refusing to send a Steam session anywhere but Steam'));
+				reject(new EgressError('refusing to send a Steam session anywhere but Steam', false));
 				return;
 			}
 
 			/**
-			 * **Whether any of this request has left the machine.**
-			 *
-			 * Derived from one fact — `handle.end()` has been called — rather than
-			 * decided at each rejection. It was decided at each rejection, and the
-			 * timeout was missed: a timeout happens by definition *after* the request
-			 * has gone, and it reported `sent: false`, so `enroll.ts` passed a real
-			 * lost-reply on an irreversible Steam call straight through as an
-			 * ordinary failure. That is the exact case the whole "committed, reply
-			 * unknown" distinction exists for, defeated by one unmarked constructor.
-			 *
-			 * Every rejection below reads this, so a handler added later cannot be
-			 * the one somebody forgot to mark.
+			 * Handoff is the irreversible boundary. Once `end()` or `write()` is
+			 * called, Steam may have received the request. A later proxy-looking code
+			 * cannot move that boundary backwards: Chromium can replay a rewindable
+			 * upload internally, and the fresh tunnel for that replay can fail after
+			 * the first connection already delivered the POST.
 			 */
-			let sent = false;
+			let handedToChromium = false;
 
 			const handle = this.electron.request({
 				url: request.url,
@@ -1008,16 +1005,18 @@ export class SteamTransportFactory {
 					reject(
 						new EgressError(
 							'Steam did not answer in time; the connection or proxy may be down.',
-							sent
+							handedToChromium
 						)
 					)
 				);
 			}, REQUEST_TIMEOUT_MS);
 			timer.unref?.();
 
-			handle.on('error', (error) =>
-				finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), sent)))
-			);
+			handle.on('error', (error) => {
+				finish(() =>
+					reject(new EgressError(describeNetworkError(error, routedThrough), handedToChromium))
+				);
+			});
 
 			handle.on('response', (response) => {
 				// Bytes, decoded **once** at the end — never chunk by chunk. Chromium
@@ -1053,14 +1052,14 @@ export class SteamTransportFactory {
 							// Already finished or never connected. Nothing to stop.
 						}
 						finish(() =>
-							reject(new EgressError('Steam sent an implausibly large response.', sent))
+							reject(new EgressError('Steam sent an implausibly large response.', true))
 						);
 						return;
 					}
 					chunks.push(bytes);
 				});
 				response.on('error', (error) =>
-					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), sent)))
+					finish(() => reject(new EgressError(describeNetworkError(error, routedThrough), true)))
 				);
 				response.on('end', () =>
 					finish(() => {
@@ -1078,17 +1077,17 @@ export class SteamTransportFactory {
 				);
 			});
 
+			/*
+			 * Set immediately before the first handoff to Chromium. `write()` itself can
+			 * begin transmission or synchronously emit `error`; setting this afterwards
+			 * would label that network attempt definitely pre-send and make an
+			 * irreversible operation look safe to repeat.
+			 */
+			handedToChromium = true;
 			if (request.body) {
 				handle.write(request.body.toString());
 			}
 			handle.end();
-			/*
-			 * After `end`, because that is the moment the request is Chromium's and
-			 * an answer becomes something that can be lost rather than never asked
-			 * for. Everything that rejects above this line rejected before a byte
-			 * went; everything after it may not have.
-			 */
-			sent = true;
 		});
 	}
 }

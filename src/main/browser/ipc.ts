@@ -14,10 +14,13 @@ import { BrowserSignInRequired, type AccountBrowsers } from './window';
  *
  *  1. The vault must be unlocked. A locked vault has no accounts to speak of
  *     and no consent behind the request.
- *  2. The account must have a usable session. Opening a window that lands on a
+ *  2. The requested route must still satisfy the vault's proxy policy. A
+ *     missing session must not turn a route the policy forbids into a password
+ *     prompt for an action that still cannot succeed.
+ *  3. The account must have a usable session. Opening a window that lands on a
  *     login page would be worse than refusing, because the user would type a
  *     Steam password into a window this application drew.
- *  3. The token is minted **through the account's own routing**, so the request
+ *  4. The token is minted **through the account's own routing**, so the request
  *     that fetches it leaves by the same address the browsing will.
  *
  * ## "Sign in" is a state, not an error
@@ -76,7 +79,8 @@ export interface BrowserHandlerDeps {
  */
 export const DIRECT_REFUSED =
 	'this vault is set to require proxies, so only the fully routed window can be opened. ' +
-	'"Steam only" sends some sites straight out, and Direct sends everything. Turn off ' +
+	'"Steam only" sends some sites straight out. Direct does not use this account’s proxy; it ' +
+	'follows this machine’s network settings instead, including any system or company proxy. Turn off ' +
 	'"Require proxies" in Settings, or use the routed button.';
 
 /**
@@ -112,20 +116,15 @@ export function registerBrowserHandlers(deps: BrowserHandlerDeps): void {
 			throw new BrowserRequestError('that account is not in this vault');
 		}
 
-		if (account.refreshToken === undefined || account.refreshToken === '') {
-			return {
-				signInRequired: true,
-				reason: `There is no saved Steam session for ${account.accountName}.`
-			};
-		}
-
 		/*
-		 * **Before the token is minted, because minting is the leak.**
+		 * **Before both the sign-in state and the token mint.**
 		 *
 		 * `mintToken` on a `direct` route goes to Steam over this machine's own
-		 * network. Refusing afterwards would mean the request the setting exists
-		 * to prevent had already been made, and the refusal would be a message
-		 * about something that had already happened.
+		 * network, so refusing after it would only report a leak that had already
+		 * happened. The missing-session answer has to come after this guard too:
+		 * it makes the renderer offer a password form, but signing in cannot make a
+		 * forbidden route acceptable. Asking for credentials for an action that is
+		 * guaranteed to be refused is not an actionable state.
 		 *
 		 * An account with no proxy is refused too, and deliberately: with this on
 		 * there is no route for it, and opening it "as best we can" is the exact
@@ -134,6 +133,13 @@ export function registerBrowserHandlers(deps: BrowserHandlerDeps): void {
 		 */
 		if (deps.requireProxies() && !routeSatisfiesStrictMode(route, account.proxyUrl)) {
 			throw new BrowserRequestError(DIRECT_REFUSED);
+		}
+
+		if (account.refreshToken === undefined || account.refreshToken === '') {
+			return {
+				signInRequired: true,
+				reason: `There is no saved Steam session for ${account.accountName}.`
+			};
 		}
 
 		/*

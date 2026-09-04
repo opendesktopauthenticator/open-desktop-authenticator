@@ -173,6 +173,10 @@ export const electronBrowserHost: BrowserHost = {
 			width,
 			height,
 			title: options.title,
+			// Account windows are born hidden and revealed only after their first
+			// landing passes the main-process sign-in check. Direct host users such as
+			// the smoke harness keep Electron's existing visible default.
+			show: options.show ?? true,
 			// The same mark the main window carries. Without it this window took
 			// Electron's default and announced itself as a generic Electron app in
 			// the taskbar, while holding a live Steam session.
@@ -228,6 +232,11 @@ export const electronBrowserHost: BrowserHost = {
 
 		/** Set once `openAccountBrowser` subscribes; called as the active tab moves. */
 		let navigated: () => void = () => undefined;
+		/**
+		 * Set once `openAccountBrowser` subscribes; called with the tab that actually
+		 * committed a navigation, whether or not that tab is active.
+		 */
+		let tabNavigated: (url: string) => boolean = () => true;
 		/** The address last announced, so the same one is not announced twice. */
 		let lastAnnounced: string | undefined;
 
@@ -242,6 +251,9 @@ export const electronBrowserHost: BrowserHost = {
 		const tabs = new Map<number, WebContentsView>();
 		let nextId = 1;
 		let activeId = 0;
+		let windowOpenPolicy: (details: { url: string }) => { action: 'allow' | 'deny' } = () => ({
+			action: 'allow'
+		});
 
 		const bodyBounds = (): Electron.Rectangle => {
 			const bounds = window.getContentBounds();
@@ -340,6 +352,20 @@ export const electronBrowserHost: BrowserHost = {
 		const show = (id: number): void => {
 			const chosen = living(id);
 			if (!chosen || !alive()) {
+				return;
+			}
+			/*
+			 * Validate the tab while it is still hidden.
+			 *
+			 * Its committed navigation normally reported this URL already, but a
+			 * selection can race the event delivery and an adopted popup can already
+			 * carry a document. The lifetime login-page guard must get the last word
+			 * before either visibility or focus. A forbidden URL is rejected immediately
+			 * while its callback starts closing the whole window; the native-object check
+			 * is a second guard for a close that has already settled.
+			 */
+			const accepted = tabNavigated(shown(chosen));
+			if (!accepted || !alive() || chosen.webContents.isDestroyed()) {
 				return;
 			}
 			activeId = id;
@@ -442,7 +468,10 @@ export const electronBrowserHost: BrowserHost = {
 				 * `data:` from web content on its own; this refuses them a step
 				 * earlier, and is the same gate the address bar uses.
 				 */
-				if (addressToUrl(details.url) === undefined) {
+				if (
+					windowOpenPolicy({ url: details.url }).action !== 'allow' ||
+					addressToUrl(details.url) === undefined
+				) {
 					return { action: 'deny' };
 				}
 				// The ceiling is decided here, because `createWindow` below has no way
@@ -522,8 +551,28 @@ export const electronBrowserHost: BrowserHost = {
 
 			// Listed rather than looped: TypeScript types each of these separately,
 			// and a loop over the names loses the overload that checks the listener.
-			view.webContents.on('did-navigate', publish);
-			view.webContents.on('did-navigate-in-page', publish);
+			/*
+			 * Security follows the tab that moved; chrome follows the active tab.
+			 *
+			 * Sending every event through `publish` lost that distinction because
+			 * `publish` deliberately reads `activeId`. A background tab could therefore
+			 * commit a Steam login page without the whole-window guard ever seeing it.
+			 */
+			const reportCommittedNavigation = (): void => {
+				if (!alive() || view.webContents.isDestroyed()) {
+					return;
+				}
+				if (!tabNavigated(shown(view))) {
+					return;
+				}
+				// The security callback may have closed the window and every view.
+				if (!alive() || chrome.webContents.isDestroyed()) {
+					return;
+				}
+				publish();
+			};
+			view.webContents.on('did-navigate', reportCommittedNavigation);
+			view.webContents.on('did-navigate-in-page', reportCommittedNavigation);
 			view.webContents.on('did-start-loading', publish);
 			view.webContents.on('did-stop-loading', publish);
 			view.webContents.on('page-title-updated', publish);
@@ -699,11 +748,35 @@ export const electronBrowserHost: BrowserHost = {
 				}
 			}
 		};
-		const onSelectTab = (event: IpcMainEvent, id: unknown): void => {
-			if (mine(event) && typeof id === 'number') show(id);
+		const onSelectTab = (event: IpcMainEvent, id: unknown, keepChromeFocus: unknown): void => {
+			if (!mine(event) || typeof id !== 'number') return;
+			show(id);
+			// ARIA tab activation by Enter/Space keeps keyboard focus in the
+			// tablist. Pointer selection omits this flag and keeps the ordinary
+			// browser behavior: the selected page receives focus.
+			if (keepChromeFocus === true && alive() && !chrome.webContents.isDestroyed()) {
+				chrome.webContents.focus();
+			}
 		};
-		const onCloseTab = (event: IpcMainEvent, id: unknown): void => {
-			if (mine(event) && typeof id === 'number') closeTab(id);
+		const onCloseTab = (event: IpcMainEvent, id: unknown, keepChromeFocus: unknown): void => {
+			if (!mine(event) || typeof id !== 'number') return;
+			closeTab(id);
+			/*
+			 * Keep a keyboard close in the keyboard surface that issued it.
+			 *
+			 * Closing the active tab calls `show` for its neighbour, and `show`
+			 * correctly focuses that page for every pointer-driven selection. For
+			 * Delete (or the tab's keyboard close control), however, that transfers
+			 * native focus out of the chrome WebContents before `drawTabs` can put
+			 * DOM focus on the neighbouring tab. A DOM element can be focused inside
+			 * a background WebContents without Chromium sending it the next key.
+			 * Return native focus only for this chrome-originated close; selecting a
+			 * tab still focuses the page as normal. The last tab may already have
+			 * closed the whole window, so both native objects are checked first.
+			 */
+			if (keepChromeFocus === true && alive() && !chrome.webContents.isDestroyed()) {
+				chrome.webContents.focus();
+			}
 		};
 
 		ipcMain.on('browser-chrome:back', onBack);
@@ -776,7 +849,7 @@ export const electronBrowserHost: BrowserHost = {
 				if (!view) {
 					return Promise.reject(new Error('the browser window has no tab to load into'));
 				}
-				return view.webContents.loadURL(url);
+				return view.webContents.loadURL(url).then(() => view.webContents.getURL());
 			},
 			// The contents' URL, not the one requested: after Steam's redirects
 			// these differ, and the difference is the only way to tell a signed-in
@@ -791,6 +864,11 @@ export const electronBrowserHost: BrowserHost = {
 					window.restore();
 				}
 				window.focus();
+			},
+			show: () => {
+				if (alive()) {
+					window.show();
+				}
 			},
 			// Guarded like the rest: the lock sweep and the landing check both close
 			// this window while pages are still settling, and a title set afterwards
@@ -826,6 +904,10 @@ export const electronBrowserHost: BrowserHost = {
 					window.on('closed', listener as () => void);
 					return;
 				}
+				if (event === 'tab-navigated') {
+					tabNavigated = listener as (url: string) => boolean;
+					return;
+				}
 				/*
 				 * Two events, because one is not enough. `did-navigate` covers a real
 				 * page load; `did-navigate-in-page` covers history.pushState, which
@@ -842,16 +924,17 @@ export const electronBrowserHost: BrowserHost = {
 				};
 				navigated = report;
 			},
-			setWindowOpenHandler: () => {
+			setWindowOpenHandler: (handler) => {
 				/*
-				 * Accepted and ignored, deliberately.
+				 * The caller may refuse a popup, but may never replace the machinery
+				 * that keeps an accepted one inside this tab strip.
 				 *
 				 * Every tab already has a handler that turns a page's `window.open`
 				 * into another tab in this window — hardened identically and listed in
 				 * the same strip. Letting a caller replace that would let a page's
-				 * request escape into a window with no address bar and no tab strip,
-				 * which is the shape this feature exists to avoid.
+				 * request escape into a window with no address bar and no tab strip.
 				 */
+				windowOpenPolicy = handler;
 			}
 		};
 	}

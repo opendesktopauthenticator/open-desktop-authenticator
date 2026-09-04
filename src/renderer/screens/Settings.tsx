@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { VaultSettingsView } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /**
  * The two timings a user can change (§10.3).
@@ -108,7 +109,7 @@ export function Settings({
 				</button>
 			</header>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError>{error}</DynamicError>}
 
 			{settings === undefined ? (
 				error === undefined ? (
@@ -251,17 +252,23 @@ export function PassphraseChange({
 		onBusy?.(true);
 		setError(undefined);
 		setDone(false);
-		onChange(current, next)
+		// Enter the callback from a promise turn as well: the real bridge returns a
+		// promise, but a broken bridge can still throw before returning one. That is
+		// a rejected attempt too, and must reach the same error and cleanup paths.
+		Promise.resolve()
+			.then(() => onChange(current, next))
 			.then(() => {
 				setDone(true);
-				// Passphrases have no business sitting in component state after the
-				// change. The success line is what remains.
-				setCurrent('');
-				setNext('');
-				setConfirm('');
 			})
 			.catch((err: unknown) => setError(messageOf(err)))
 			.finally(() => {
+				// These fields are frozen for the whole attempt, so they still hold
+				// exactly the submitted values. Drop every copy however the request
+				// settles; a rejected current passphrase is still a credential and a
+				// rejected replacement should not remain in the DOM either.
+				setCurrent('');
+				setNext('');
+				setConfirm('');
 				setBusy(false);
 				onBusy?.(false);
 			});
@@ -278,6 +285,8 @@ export function PassphraseChange({
 			<label htmlFor="passphrase-current">Current passphrase</label>
 			<input
 				id="passphrase-current"
+				aria-invalid={error !== undefined}
+				aria-describedby={error === undefined ? undefined : 'passphrase-change-error'}
 				type="password"
 				disabled={busy}
 				autoComplete="current-password"
@@ -288,6 +297,8 @@ export function PassphraseChange({
 			<label htmlFor="passphrase-next">New passphrase</label>
 			<input
 				id="passphrase-next"
+				aria-invalid={error !== undefined}
+				aria-describedby={error === undefined ? undefined : 'passphrase-change-error'}
 				type="password"
 				disabled={busy}
 				autoComplete="new-password"
@@ -298,6 +309,8 @@ export function PassphraseChange({
 			<label htmlFor="passphrase-confirm">New passphrase, again</label>
 			<input
 				id="passphrase-confirm"
+				aria-invalid={error !== undefined}
+				aria-describedby={error === undefined ? undefined : 'passphrase-change-error'}
 				type="password"
 				disabled={busy}
 				autoComplete="new-password"
@@ -305,7 +318,7 @@ export function PassphraseChange({
 				onChange={(event) => setConfirm(event.target.value)}
 			/>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError id="passphrase-change-error">{error}</DynamicError>}
 
 			<div className="controls">
 				<button type="submit" disabled={busy || !current || !next || !confirm}>

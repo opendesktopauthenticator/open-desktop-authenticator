@@ -2,18 +2,23 @@ import {
 	chmodSync,
 	closeSync,
 	copyFileSync,
+	constants,
 	existsSync,
 	fsyncSync,
+	linkSync,
 	mkdirSync,
 	openSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	statSync,
 	unlinkSync,
 	writeSync
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { basename, dirname, join } from 'node:path';
 import { envelopeSchema, type Envelope } from '../../shared/vault-format';
+import { renameWithTransientRetry } from '../atomic-replace';
 
 /**
  * Reading and writing the vault file (§10.3).
@@ -54,15 +59,23 @@ export class VaultStorageError extends Error {
 	 * default because most of them are.
 	 */
 	readonly unchanged: boolean;
+	/**
+	 * Exact application-owned rescue basename retained by a failed storage
+	 * transaction. A basename is safe to show in recovery copy; an absolute path
+	 * is not, because the renderer has no need to learn the user's profile path.
+	 */
+	readonly rescueBasename: string | undefined;
 
 	constructor(
 		message: string,
 		override readonly cause?: unknown,
-		unchanged = true
+		unchanged = true,
+		rescueBasename?: string
 	) {
 		super(message);
 		this.name = 'VaultStorageError';
 		this.unchanged = unchanged;
+		this.rescueBasename = rescueBasename;
 	}
 }
 
@@ -79,6 +92,9 @@ export function vaultPaths(file: string): VaultPaths {
 export function vaultExists(file: string): boolean {
 	return existsSync(file);
 }
+
+/** Filesystems on which a durable stage cannot be published by hard link. */
+const NO_LINK = new Set(['EACCES', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP', 'EPERM', 'EXDEV']);
 
 /** Read and validate an envelope. Does not decrypt. */
 export function readEnvelope(file: string): Envelope {
@@ -117,6 +133,7 @@ export function writeEnvelope(file: string, envelope: Envelope): void {
 	const paths = vaultPaths(file);
 	const serialised = `${JSON.stringify(envelope, null, 2)}\n`;
 
+	let publication: 'none' | 'maybe' | 'complete' = 'none';
 	try {
 		mkdirSync(dirname(file), { recursive: true });
 	} catch (err) {
@@ -166,7 +183,49 @@ export function writeEnvelope(file: string, envelope: Envelope): void {
 			closeSync(fd);
 		}
 
-		renameSync(paths.temp, file);
+		if (hadExisting) {
+			renameWithTransientRetry(renameSync, paths.temp, file);
+			publication = 'complete';
+		} else {
+			/*
+			 * A first write must not use replacement rename. The destination was
+			 * absent when staging began, but another process can create it before
+			 * publication; rename would silently erase that file. A hard link is an
+			 * atomic no-clobber publication of the already-flushed inode. Filesystems
+			 * without links fall back to an exclusive copy.
+			 */
+			try {
+				if (process.platform === 'win32') {
+					const unsupported = new Error(
+						'Windows first publication uses the exclusive-copy fallback'
+					) as NodeJS.ErrnoException;
+					unsupported.code = 'ENOTSUP';
+					throw unsupported;
+				}
+				linkSync(paths.temp, file);
+				publication = 'complete';
+			} catch (err) {
+				const code = (err as NodeJS.ErrnoException | undefined)?.code;
+				if (!NO_LINK.has(code ?? '')) {
+					throw err;
+				}
+				publication = 'maybe';
+				try {
+					copyFileSync(paths.temp, file, constants.COPYFILE_EXCL);
+					// Unlike rename/link, a copy creates a second inode. Flush that inode
+					// before publication is considered complete.
+					syncFile(file);
+					publication = 'complete';
+				} catch (copyError) {
+					// Exclusive refusal proves this attempt did not touch the winner.
+					if ((copyError as NodeJS.ErrnoException | undefined)?.code === 'EEXIST') {
+						publication = 'none';
+					}
+					throw copyError;
+				}
+			}
+			unlinkSync(paths.temp);
+		}
 		// Vaults written by an earlier build are already on disk at `0o644`, and the
 		// mode above only fixes files created from here on. Narrowing both on every
 		// write is what actually repairs an existing install.
@@ -183,10 +242,12 @@ export function writeEnvelope(file: string, envelope: Envelope): void {
 		}
 		envelopeSchema.parse(JSON.parse(readBack));
 	} catch (err) {
-		const putBack = restore(paths, hadExisting);
+		const putBack = restore(paths, hadExisting, publication !== 'none', serialised);
 		throw new VaultStorageError(
 			putBack
-				? 'the vault write failed and the previous file was restored'
+				? hadExisting
+					? 'the vault write failed and the previous file was restored'
+					: 'the vault write failed and no existing file was replaced'
 				: 'the vault write failed and the previous file could NOT be put back. The file on ' +
 						'disk may be incomplete. The last good copy is beside it, named vault.json.bak — ' +
 						'do not delete it, and use Restore from backup in Settings.',
@@ -219,6 +280,16 @@ function syncDirectory(dir: string): void {
 				/* nothing useful to do */
 			}
 		}
+	}
+}
+
+/** Flush one already-complete file before another name is allowed to depend on it. */
+function syncFile(file: string): void {
+	const fd = openSync(file, 'r+');
+	try {
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
 	}
 }
 
@@ -263,6 +334,65 @@ function syncDirectory(dir: string): void {
  */
 const journalPath = (file: string): string => `${file}.rotating`;
 
+/**
+ * The exact bytes occupying the rotation-journal slot before another rotation.
+ *
+ * Parsing is deliberately not involved. An unreadable journal is evidence that
+ * a prior rotation may still be unfinished, and replacing it with a new record
+ * must remain reversible even though this build cannot understand its bytes.
+ */
+export type RotationJournalSnapshot = Buffer | undefined;
+
+export function snapshotRotationJournal(file: string): RotationJournalSnapshot {
+	try {
+		return readFileSync(journalPath(file));
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+			return undefined;
+		}
+		throw new VaultStorageError('the existing rotation record could not be preserved', err);
+	}
+}
+
+/** Put the exact pre-rotation journal back after an unchanged vault write. */
+export function restoreRotationJournalSnapshot(
+	file: string,
+	snapshot: RotationJournalSnapshot
+): void {
+	if (snapshot === undefined) {
+		clearRotationJournal(file);
+		return;
+	}
+
+	const target = journalPath(file);
+	const temp = `${target}.tmp`;
+	try {
+		const fd = openSync(temp, 'w', 0o600);
+		try {
+			writeAll(fd, snapshot);
+			fsyncSync(fd);
+		} finally {
+			closeSync(fd);
+		}
+		renameWithTransientRetry(renameSync, temp, target);
+		tighten(target);
+		syncDirectory(dirname(file));
+
+		if (!readFileSync(target).equals(snapshot)) {
+			throw new Error('the restored rotation record does not match its previous bytes');
+		}
+	} catch (err) {
+		try {
+			if (existsSync(temp)) {
+				unlinkSync(temp);
+			}
+		} catch {
+			/* best effort; the original error is the actionable one */
+		}
+		throw new VaultStorageError('the previous rotation record could not be restored', err);
+	}
+}
+
 /** Record the backup a rotation is about to write. */
 export function writeRotationJournal(file: string, envelope: Envelope, vaultNonce?: string): void {
 	/*
@@ -285,7 +415,7 @@ export function writeRotationJournal(file: string, envelope: Envelope, vaultNonc
 		} finally {
 			closeSync(fd);
 		}
-		renameSync(temp, journalPath(file));
+		renameWithTransientRetry(renameSync, temp, journalPath(file));
 		tighten(journalPath(file));
 		syncDirectory(dirname(file));
 	} catch (err) {
@@ -405,13 +535,83 @@ export function clearRotationJournal(file: string): void {
 	try {
 		if (existsSync(journalPath(file))) {
 			unlinkSync(journalPath(file));
+			syncDirectory(dirname(file));
 		}
 	} catch {
 		/* best effort: a stale journal is re-read and re-applied, which is a no-op */
 	}
 }
 
-export function writeBackupEnvelope(file: string, envelope: Envelope): void {
+export interface BackupCleanupResult {
+	/** False means an app-owned rescue still exists, or the directory could not be inspected. */
+	complete: boolean;
+	/** Exact local paths retained after cleanup. Never forward these across IPC. */
+	remaining: string[];
+}
+
+export interface BackupWriteResult {
+	/** Publication succeeded; this reports only the post-publication cleanup. */
+	cleanup: BackupCleanupResult;
+}
+
+const BACKUP_RESCUE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/** Enumerate only the random sibling names this module itself allocates. */
+function backupRescues(file: string): string[] {
+	const paths = vaultPaths(file);
+	const directory = dirname(paths.backup);
+	const prefix = `${basename(paths.backup)}.previous-`;
+	return readdirSync(directory)
+		.filter((name) => name.startsWith(prefix) && BACKUP_RESCUE_ID.test(name.slice(prefix.length)))
+		.map((name) => join(directory, name));
+}
+
+/**
+ * Inspect app-owned backup rescues without deleting them.
+ *
+ * A rescue is also the durable evidence that a failed backup replacement may
+ * have left the public `.bak` unusable. Absence must be proved: if the directory
+ * cannot be read, callers keep the backup unavailable rather than silently
+ * trusting it.
+ */
+export function inspectBackupRescues(file: string): BackupCleanupResult {
+	try {
+		const remaining = backupRescues(file);
+		return { complete: remaining.length === 0, remaining };
+	} catch {
+		return { complete: false, remaining: [] };
+	}
+}
+
+/**
+ * Remove backup-replacement rescues after a verified new backup exists.
+ *
+ * Failure is data, not a thrown backup-write error: publication has already
+ * committed and sending this through rollback would describe the opposite
+ * transaction. An unreadable directory is also incomplete because absence was
+ * not proved.
+ */
+export function cleanupBackupRescues(file: string): BackupCleanupResult {
+	const inspected = inspectBackupRescues(file);
+	if (inspected.complete) return inspected;
+	const candidates = inspected.remaining;
+	if (candidates.length === 0) return inspected;
+
+	const remaining: string[] = [];
+	let removed = false;
+	for (const candidate of candidates) {
+		try {
+			unlinkSync(candidate);
+			removed = true;
+		} catch {
+			remaining.push(candidate);
+		}
+	}
+	if (removed) syncDirectory(dirname(file));
+	return { complete: remaining.length === 0, remaining };
+}
+
+export function writeBackupEnvelope(file: string, envelope: Envelope): BackupWriteResult {
 	const paths = vaultPaths(file);
 	const serialised = `${JSON.stringify(envelope, null, 2)}\n`;
 	const temp = `${paths.backup}.tmp`;
@@ -470,12 +670,11 @@ export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 		 */
 		let previous: string | undefined;
 		if (existsSync(paths.backup)) {
-			previous = `${paths.backup}.previous`;
-			copyFileSync(paths.backup, previous);
+			previous = exclusiveSiblingCopy(paths.backup, 'previous');
 		}
 
 		try {
-			renameSync(temp, paths.backup);
+			renameWithTransientRetry(renameSync, temp, paths.backup);
 			tighten(paths.backup);
 			syncDirectory(dirname(file));
 
@@ -506,6 +705,7 @@ export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 				try {
 					copyFileSync(previous, paths.backup);
 					tighten(paths.backup);
+					syncFile(paths.backup);
 					syncDirectory(dirname(file));
 					// Verified, not assumed: this is the copy everything else now
 					// depends on, and it is being made under whatever conditions broke
@@ -520,15 +720,18 @@ export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 				try {
 					unlinkSync(previous);
 				} catch {
-					/* best effort: a stray copy is overwritten by the next write */
+					/* best effort: this attempt's verified duplicate may remain */
 				}
 			}
 
 			if (previous !== undefined && !restored) {
+				const rescueBasename = basename(previous);
 				throw new VaultStorageError(
 					'the vault backup could not be rewritten, and the previous backup could not be put ' +
-						`back. The last good copy is still on disk at ${previous} - do not delete it.`,
-					err
+						`back. The last good copy is still on disk as "${rescueBasename}" - do not delete it.`,
+					err,
+					true,
+					rescueBasename
 				);
 			}
 			throw err;
@@ -540,15 +743,12 @@ export function writeBackupEnvelope(file: string, envelope: Envelope): void {
 		 * `finally`, because a `finally` is exactly what deleted it after a failed
 		 * restore.
 		 */
-		if (previous !== undefined) {
-			try {
-				if (existsSync(previous)) {
-					unlinkSync(previous);
-				}
-			} catch {
-				/* best effort: a stray copy is overwritten by the next write */
-			}
-		}
+		/*
+		 * The destination is verified now, so this attempt's rescue and any crash
+		 * leftovers can be removed. A refusal is returned separately from the
+		 * successful publication; callers decide how to surface that cleanup debt.
+		 */
+		return { cleanup: cleanupBackupRescues(file) };
 	} catch (err) {
 		try {
 			if (existsSync(temp)) {
@@ -589,7 +789,7 @@ export function restoreEnvelopeInPlace(file: string, envelope: Envelope): void {
 		} finally {
 			closeSync(fd);
 		}
-		renameSync(paths.temp, file);
+		renameWithTransientRetry(renameSync, paths.temp, file);
 		tighten(file);
 		syncDirectory(dirname(file));
 	} catch (err) {
@@ -618,8 +818,8 @@ export function restoreEnvelopeInPlace(file: string, envelope: Envelope): void {
  * lands on a byte boundary and slicing UTF-8 by character would resume in the
  * wrong place.
  */
-function writeAll(fd: number, text: string): void {
-	const bytes = Buffer.from(text, 'utf8');
+function writeAll(fd: number, text: string | Buffer): void {
+	const bytes = Buffer.isBuffer(text) ? text : Buffer.from(text, 'utf8');
 	let written = 0;
 	while (written < bytes.length) {
 		const wrote = writeSync(fd, bytes, written, bytes.length - written);
@@ -652,7 +852,12 @@ function tighten(file: string): void {
  * @returns whether the previous vault is back in place. `true` when there was
  * nothing to put back, because then nothing was displaced either.
  */
-function restore(paths: VaultPaths, hadExisting: boolean): boolean {
+function restore(
+	paths: VaultPaths,
+	hadExisting: boolean,
+	published: boolean,
+	serialised: string
+): boolean {
 	try {
 		if (existsSync(paths.temp)) {
 			unlinkSync(paths.temp);
@@ -660,39 +865,134 @@ function restore(paths: VaultPaths, hadExisting: boolean): boolean {
 	} catch {
 		/* best effort: a stray temp file is not what the caller is told about */
 	}
-	if (!hadExisting) {
+	if (!published) {
+		// Nothing crossed the commit boundary, so the destination was never ours to
+		// remove or replace. In particular, do not copy the backup over a foreign
+		// file that appeared while staging failed.
 		return true;
+	}
+
+	const atDestination = exactText(paths.file, serialised);
+	if (atDestination === 'foreign' || atDestination === 'unknown') {
+		// The destination no longer proves it is this attempt's publication. The
+		// safe failure is to preserve it and tell the caller rollback is uncertain.
+		return false;
+	}
+
+	if (!hadExisting) {
+		if (atDestination === 'absent') {
+			return true;
+		}
+		try {
+			unlinkSync(paths.file);
+			syncDirectory(dirname(paths.file));
+			return !existsSync(paths.file);
+		} catch {
+			return false;
+		}
 	}
 	if (!existsSync(paths.backup)) {
 		// Nothing to copy from. The file on disk is whatever the failed write left.
 		return false;
 	}
 	try {
+		const previous = readFileSync(paths.backup, 'utf8');
 		copyFileSync(paths.backup, paths.file);
-		return true;
+		tighten(paths.file);
+		syncFile(paths.file);
+		syncDirectory(dirname(paths.file));
+		return readFileSync(paths.file, 'utf8') === previous;
 	} catch {
 		return false;
 	}
 }
 
+type ExactText = 'ours' | 'foreign' | 'absent' | 'unknown';
+
+/** Classify a destination without treating an unreadable file as absent. */
+function exactText(file: string, expected: string): ExactText {
+	try {
+		return readFileSync(file, 'utf8') === expected ? 'ours' : 'foreign';
+	} catch (err) {
+		return (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT' ? 'absent' : 'unknown';
+	}
+}
+
+/**
+ * Copy a file to a random sibling without ever replacing a path already there.
+ *
+ * A retained copy exists because the working file could not be trusted. Reusing
+ * a deterministic name on the next attempt destroys the very evidence the first
+ * failure asked the user to preserve.
+ */
+function exclusiveSiblingCopy(file: string, suffix: string): string {
+	for (let attempt = 0; attempt < 16; attempt += 1) {
+		const sibling = `${file}.${suffix}-${randomUUID()}`;
+		let created = false;
+		try {
+			copyFileSync(file, sibling, constants.COPYFILE_EXCL);
+			created = true;
+			tighten(sibling);
+			syncFile(sibling);
+			syncDirectory(dirname(file));
+			return sibling;
+		} catch (err) {
+			if (created) {
+				try {
+					unlinkSync(sibling);
+				} catch {
+					/* the source remains; preserving a duplicate is the safe fallback */
+				}
+			}
+			if ((err as NodeJS.ErrnoException | undefined)?.code === 'EEXIST') {
+				continue;
+			}
+			throw err;
+		}
+	}
+	throw new Error('could not allocate an unused rescue filename');
+}
+
 /**
  * Move the current vault out of the way, keeping it.
  *
- * Used before restoring a backup over it. Deliberately a rename rather than a
- * delete: the file being displaced may be corrupt, or it may be a perfectly good
- * vault that the user is rolling back by mistake, and nothing here is in a
- * position to tell those apart. A file holding revocation codes does not get
- * thrown away on an assumption.
+ * Used before restoring a backup over it. The file being displaced may be
+ * corrupt, or it may be a perfectly good vault that the user is rolling back by
+ * mistake, and nothing here is in a position to tell those apart. It is copied
+ * durably to an exclusive name and verified before the live name is removed: a
+ * crash may leave a duplicate, but cannot destroy an older rescue by collision.
  */
 export function setAside(file: string): string | undefined {
 	if (!existsSync(file)) {
 		return undefined;
 	}
-	const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-	const moved = `${file}.superseded-${stamp}`;
+	let moved: string | undefined;
 	try {
-		renameSync(file, moved);
+		/*
+		 * Copy exclusively, verify, then remove the live name. A rename onto an
+		 * existing name replaces it on Windows, so a timestamp collision used to
+		 * destroy an older rescue. A crash between copy and unlink now leaves two
+		 * exact copies, which is untidy and recoverable rather than destructive.
+		 */
+		const before = readFileSync(file);
+		moved = exclusiveSiblingCopy(file, 'superseded');
+		if (!readFileSync(moved).equals(before)) {
+			throw new Error('the set-aside copy does not match the current vault');
+		}
+		syncDirectory(dirname(file));
+		unlinkSync(file);
+		syncDirectory(dirname(file));
 	} catch (err) {
+		// Before the live name is removed, a failed attempt owns only its new sibling
+		// and may clean that duplicate up. Once the live name is gone the function
+		// cannot reach this catch: directory sync is best effort.
+		if (moved !== undefined && existsSync(file)) {
+			try {
+				unlinkSync(moved);
+			} catch {
+				/* the source still exists; a duplicate is safer than another deletion */
+			}
+		}
 		throw new VaultStorageError('could not set the current vault file aside', err);
 	}
 	// **Returned so the move can be undone.** Whatever replaces this file may fail
@@ -703,15 +1003,30 @@ export function setAside(file: string): string | undefined {
 	return moved;
 }
 
-/** Undo a `setAside`. Best effort: the caller is already handling a failure. */
-export function putBack(moved: string, file: string): void {
+/** Undo a `setAside`, returning true only after exact bytes are back at the live name. */
+export function putBack(moved: string, file: string): boolean {
 	try {
-		if (existsSync(moved) && !existsSync(file)) {
-			renameSync(moved, file);
+		if (!existsSync(moved) || existsSync(file)) {
+			return false;
 		}
+		const expected = readFileSync(moved);
+		copyFileSync(moved, file, constants.COPYFILE_EXCL);
+		tighten(file);
+		syncFile(file);
+		syncDirectory(dirname(file));
+		if (!readFileSync(file).equals(expected)) {
+			return false;
+		}
+		try {
+			unlinkSync(moved);
+			syncDirectory(dirname(file));
+		} catch {
+			// The requested destination is nevertheless restored and verified. The
+			// duplicate is safer than retracting that truthful result.
+		}
+		return true;
 	} catch {
-		// Nothing useful to do. The file is still on disk under its moved name, and
-		// the caller's error says so.
+		return false;
 	}
 }
 

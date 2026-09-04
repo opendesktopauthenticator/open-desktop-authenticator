@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { LOCKED_DURING_OPEN, VaultService } from '../src/main/vault/service';
 
@@ -201,10 +202,10 @@ describe('an adoption that lands during a restore', () => {
 	 *  4. The restore then finds the counter moved and refuses.
 	 *
 	 * The load-bearing part is that a create's key derivation is far longer than
-	 * the head start, so step 2 cannot lose. `mutate` and `changePassphrase`
-	 * still have no deterministic shape — both need an unlock, and a restore
-	 * refuses while the vault is open — so the counter's other write paths stay
-	 * covered by `the vault-file revision` below.
+	 * the head start, so step 2 cannot lose. The ordinary-save case below uses a
+	 * different deterministic shape: start the restore while open, save before
+	 * its scrypt finishes, then lock before the restore reaches its open-state
+	 * check. The AST guard below covers every remaining publication path.
 	 */
 	it('refuses rather than replacing a vault created while it derived', async () => {
 		await backupOnly(17);
@@ -221,24 +222,53 @@ describe('an adoption that lands during a restore', () => {
 		await expect(restoring).rejects.toThrow(/another vault was put in place/i);
 	});
 
-	it('refuses rather than replacing the vault that was just adopted', async () => {
+	it('refuses rather than restoring over an ordinary save that lands while it derives', async () => {
+		const vault = service();
+		await vault.create(PASSPHRASE);
+		await vault.mutate((draft) => {
+			draft.settings.autoLockMinutes = 7;
+		});
+		// This leaves the 7-minute state in `.bak` and 9 in the main vault.
+		await vault.mutate((draft) => {
+			draft.settings.autoLockMinutes = 9;
+		});
+
+		// `restoreFromBackup` captures the file generation synchronously and then
+		// yields to scrypt. A mutation needs no derivation once the vault is open,
+		// so it deterministically lands before that restore can finish. Locking in
+		// the same turn removes the independent "vault is open" refusal and leaves
+		// the file-generation check as the only reason the restore can decline.
+		const restoring = vault.restoreFromBackup(PASSPHRASE);
+		await vault.mutate((draft) => {
+			draft.settings.autoLockMinutes = 42;
+		});
+		vault.lock();
+
+		await expect(restoring).rejects.toThrow(/another vault was put in place/i);
+		await vault.unlock(PASSPHRASE);
+		expect(vault.settings().autoLockMinutes).toBe(42);
+	});
+
+	it('allows exactly one of a concurrent restore and adoption to replace the vault', async () => {
 		await backupOnly(17);
 		const other = await elsewhere(42);
 
 		const vault = service();
 		const restoring = vault.restoreFromBackup(PASSPHRASE);
-		// The adoption lands while the backup's key is still deriving.
-		vault.adoptFrom(other);
+		const adopting = vault.adoptFrom(other, PASSPHRASE);
+		const outcomes = await Promise.allSettled([restoring, adopting]);
+		expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+		expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toHaveLength(1);
 
-		await expect(restoring).rejects.toThrow(/another vault was put in place/i);
-
-		// And the adopted vault is the one that is actually there.
+		// Whichever operation won is exactly the vault on disk; the losing slow
+		// derivation cannot overwrite it afterwards.
 		await vault.unlock(PASSPHRASE);
+		const expectedMinutes = outcomes[1]?.status === 'fulfilled' ? 42 : 17;
 		expect(
 			vault.settings().autoLockMinutes,
-			'the restore replaced a vault adopted after it started'
-		).toBe(42);
-	});
+			'the losing replacement overwrote the operation that completed first'
+		).toBe(expectedMinutes);
+	}, 20_000);
 
 	it('still restores when nothing else touched the file', async () => {
 		await backupOnly(17);
@@ -270,41 +300,81 @@ describe('an adoption that lands during a restore', () => {
  * the bump, so that is what is checked.
  */
 describe('the vault-file revision', () => {
-	/*
-	 * **Comments stripped, because both checks below measure distance.**
-	 *
-	 * They scan a fixed window of characters either side of a bump. That makes
-	 * the answer depend on how much prose happens to sit between the write and
-	 * the bump — and it did: a comment added above one of these pushed its
-	 * `writeEnvelope` outside the window and turned this red for a change that
-	 * moved no code at all. A guard that fails when somebody explains themselves
-	 * is a guard that gets widened until it means nothing.
-	 */
-	const source = readFileSync(join(__dirname, '../src/main/vault/service.ts'), 'utf8')
-		.replace(/\/\*[\s\S]*?\*\//g, ' ')
-		.replace(new RegExp('//[^' + String.fromCharCode(10) + ']*', 'g'), ' ');
+	const source = readFileSync(join(__dirname, '../src/main/vault/service.ts'), 'utf8');
+	const file = ts.createSourceFile(
+		'service.ts',
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS
+	);
 
-	it('advances after every write to the main vault file', () => {
-		const writes = [...source.matchAll(/writeEnvelope\(this\.file,[\s\S]{0,400}?\n/g)];
-		expect(writes.length, 'no writes found — the pattern has drifted').toBeGreaterThanOrEqual(3);
+	type MainWrite = {
+		method: string;
+		statement: ts.ExpressionStatement;
+		body: ts.Block;
+	};
+
+	const isFileGenerationAdvance = (statement: ts.Statement): boolean =>
+		ts.isExpressionStatement(statement) &&
+		ts.isBinaryExpression(statement.expression) &&
+		statement.expression.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken &&
+		statement.expression.left.getText(file) === 'this.fileGeneration' &&
+		statement.expression.right.getText(file) === '1';
+
+	const writes: MainWrite[] = [];
+	const findWrites = (node: ts.Node): void => {
+		if (ts.isMethodDeclaration(node) && node.body !== undefined) {
+			const method = node.name.getText(file);
+			const visit = (child: ts.Node): void => {
+				if (
+					ts.isCallExpression(child) &&
+					ts.isIdentifier(child.expression) &&
+					child.expression.text === 'writeEnvelope' &&
+					child.arguments[0]?.getText(file) === 'this.file'
+				) {
+					let statement: ts.Node = child;
+					while (!ts.isExpressionStatement(statement)) statement = statement.parent;
+					writes.push({ method, statement, body: node.body! });
+				}
+				ts.forEachChild(child, visit);
+			};
+			ts.forEachChild(node.body, visit);
+			return;
+		}
+		ts.forEachChild(node, findWrites);
+	};
+	findWrites(file);
+
+	const successfulContinuation = ({ statement, body }: MainWrite): ts.Statement[] => {
+		const continuation: ts.Statement[] = [];
+		let cursor: ts.Node = statement;
+		while (cursor !== body) {
+			const parent = cursor.parent;
+			if (ts.isBlock(parent)) {
+				const index = parent.statements.findIndex((candidate) => candidate === cursor);
+				if (index >= 0) continuation.push(...parent.statements.slice(index + 1));
+			}
+			cursor = parent;
+		}
+		return continuation;
+	};
+
+	it('pairs every successful main-vault publication with an unconditional advance', () => {
+		expect(writes.map((write) => write.method)).toEqual([
+			'create',
+			'mutate',
+			'changePassphraseOnce',
+			'adoptFrom',
+			'restoreFromBackup'
+		]);
 
 		for (const write of writes) {
-			const after = source.slice(write.index ?? 0, (write.index ?? 0) + 2000);
+			const continuation = successfulContinuation(write);
 			expect(
-				after,
-				`a write to the vault file does not advance fileGeneration:\n${write[0].slice(0, 120)}`
-			).toMatch(/this\.fileGeneration \+= 1/);
-		}
-	});
-
-	it('advances it after the write, never before', () => {
-		// A write that threw replaced nothing. Bumping first would make a restore
-		// refuse over a save that never happened.
-		for (const match of source.matchAll(/this\.fileGeneration \+= 1;/g)) {
-			const before = source.slice(Math.max(0, (match.index ?? 0) - 2000), match.index);
-			expect(before, 'fileGeneration advanced with no preceding write or rename').toMatch(
-				/writeEnvelope\(|renameSync|rename\(/
-			);
+				continuation.some(isFileGenerationAdvance),
+				`${write.method} publishes the main vault without advancing fileGeneration on its success path`
+			).toBe(true);
 		}
 	});
 });

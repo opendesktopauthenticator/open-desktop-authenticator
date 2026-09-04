@@ -88,11 +88,80 @@
 
 	var proceed = prompt.querySelector('[data-review-continue]');
 	var dismiss = prompt.querySelector('[data-review-dismiss]');
+	var invoker = null;
+	var inerted = [];
+
+	/*
+	 * `aria-modal` describes the relationship; `inert` enforces it for pointer,
+	 * keyboard and assistive-technology navigation in browsers that implement it.
+	 * Walk outwards from the prompt so only sibling branches are disabled — an
+	 * ancestor containing the dialog itself must never become inert. Remember the
+	 * old value because a page may already have disabled a branch for its own
+	 * reason.
+	 */
+	function makeBackgroundInert() {
+		if (!document.body || !prompt.parentElement) return;
+		var child = prompt;
+		var parent = prompt.parentElement;
+		while (parent) {
+			var siblings = Array.from(parent.children || []);
+			for (var i = 0; i < siblings.length; i += 1) {
+				if (siblings[i] === child || !('inert' in siblings[i])) continue;
+				inerted.push({ node: siblings[i], value: siblings[i].inert });
+				siblings[i].inert = true;
+			}
+			if (parent === document.body) break;
+			child = parent;
+			parent = parent.parentElement;
+		}
+	}
+
+	function restoreBackground() {
+		for (var i = inerted.length - 1; i >= 0; i -= 1) {
+			inerted[i].node.inert = inerted[i].value;
+		}
+		inerted = [];
+	}
+
+	function closePrompt(restoreFocus) {
+		prompt.hidden = true;
+		restoreBackground();
+		if (restoreFocus && invoker && typeof invoker.focus === 'function') invoker.focus();
+		invoker = null;
+	}
+
+	function activationStaysOnPage(event) {
+		return Boolean(
+			(event.button !== undefined && event.button !== 0) ||
+			event.metaKey ||
+			event.ctrlKey ||
+			event.shiftKey ||
+			event.altKey
+		);
+	}
 
 	if (dismiss) {
 		dismiss.addEventListener('click', function () {
 			remember(DISMISSED);
-			prompt.hidden = true;
+			closePrompt(true);
+		});
+	}
+
+	if (proceed) {
+		/*
+		 * This remains an ordinary anchor. The handler records only that the ask
+		 * was answered; the browser still owns navigation, so Ctrl/Cmd/Shift/Alt
+		 * and middle clicks keep the destination context the reader requested.
+		 */
+		proceed.addEventListener('click', function (event) {
+			remember(DISMISSED);
+			closePrompt(activationStaysOnPage(event));
+		});
+		proceed.addEventListener('auxclick', function (event) {
+			if (event.button === 1) {
+				remember(DISMISSED);
+				closePrompt(true);
+			}
 		});
 	}
 
@@ -103,8 +172,9 @@
 	 */
 	var writes = prompt.querySelectorAll('a[href]:not([data-review-continue])');
 	for (var w = 0; w < writes.length; w += 1) {
-		writes[w].addEventListener('click', function () {
+		writes[w].addEventListener('click', function (event) {
 			remember(DISMISSED);
+			closePrompt(activationStaysOnPage(event));
 		});
 	}
 
@@ -119,14 +189,32 @@
 	 */
 	document.addEventListener('keydown', function (event) {
 		if (event.key === 'Escape' && !prompt.hidden) {
-			prompt.hidden = true;
+			event.preventDefault?.();
+			closePrompt(true);
+			return;
+		}
+		if (event.key !== 'Tab' || prompt.hidden) return;
+		var controls = Array.from(
+			prompt.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')
+		);
+		if (controls.length === 0) return;
+		var first = controls[0];
+		var last = controls[controls.length - 1];
+		var inside = typeof prompt.contains === 'function' && prompt.contains(document.activeElement);
+		if (event.shiftKey && (document.activeElement === first || !inside)) {
+			event.preventDefault();
+			last.focus();
+		} else if (!event.shiftKey && (document.activeElement === last || !inside)) {
+			event.preventDefault();
+			first.focus();
 		}
 	});
 
 	var routes = document.querySelectorAll('[data-got-it]');
 	for (var i = 0; i < routes.length; i += 1) {
 		routes[i].addEventListener('click', function (event) {
-			var href = this.getAttribute('href');
+			var target = event.currentTarget;
+			var href = target.getAttribute('href');
 			if (!href || remembered(DISMISSED)) return;
 
 			/*
@@ -138,17 +226,11 @@
 			if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
 
 			event.preventDefault();
+			invoker = target;
 			if (proceed) {
 				proceed.setAttribute('href', href);
 				proceed.textContent =
-					'Continue to ' + (this.getAttribute('data-got-it') || 'the download') + ' \u2192';
-				proceed.onclick = function (e) {
-					e.preventDefault();
-					// Asked once: they are on their way, and the next click goes straight
-					// through.
-					remember(DISMISSED);
-					window.location.href = href;
-				};
+					'Continue to ' + (target.getAttribute('data-got-it') || 'the download') + ' \u2192';
 			}
 			/*
 			 * No `scrollIntoView`. The prompt is fixed while it is open — see
@@ -156,6 +238,7 @@
 			 * reader is looking at. Scrolling to it was what dragged them 3,798px
 			 * down the page to reach it, which is the thing being fixed.
 			 */
+			makeBackgroundInert();
 			prompt.hidden = false;
 			if (proceed) proceed.focus();
 		});

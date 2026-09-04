@@ -80,6 +80,7 @@ function save(request: Record<string, unknown>): Promise<unknown> {
 function harness(initial: Partial<VaultSettings> = {}) {
 	const { vault, settings } = fakeVault(initial);
 	const fired = vi.fn();
+	const relaxed = vi.fn();
 	registerVaultHandlers(
 		vault,
 		() => undefined,
@@ -87,9 +88,17 @@ function harness(initial: Partial<VaultSettings> = {}) {
 		() => undefined,
 		() => undefined,
 		() => undefined,
-		fired
+		fired,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		relaxed
 	);
-	return { settings, fired };
+	return { settings, fired, relaxed };
 }
 
 const REQUEST = {
@@ -133,9 +142,19 @@ describe('saving Require proxies', () => {
 	});
 
 	it('does not fire when the setting is being turned off', async () => {
-		const { fired } = harness({ requireProxies: true });
+		const { fired, relaxed } = harness({ requireProxies: true });
 		await save({ ...REQUEST, requireProxies: false });
 		expect(fired).not.toHaveBeenCalled();
+		expect(
+			relaxed,
+			'the scheduler was not told that unproxied accounts became eligible'
+		).toHaveBeenCalledOnce();
+	});
+
+	it('does not rebuild policy schedules on a save that leaves strict routing off', async () => {
+		const { relaxed } = harness({ requireProxies: false });
+		await save({ ...REQUEST, requireProxies: false, clipboardClearSeconds: 60 });
+		expect(relaxed).not.toHaveBeenCalled();
 	});
 
 	/**

@@ -2617,12 +2617,15 @@ async function handleAdmin(request, response, url) {
 
 refreshBootstrap();
 
+/** Requests whose handler has not settled, including a body still streaming to disk. */
+const activeRequests = new Set();
+
 const server = createServer((request, response) => {
 	// The origin is fixed rather than taken from the Host header: this process is
 	// only ever reached through nginx for one hostname, and parsing an
 	// attacker-supplied Host into routing decisions is how host-header bugs start.
 	const url = new URL(request.url ?? '/', 'https://opendesktopauthenticator.com');
-	Promise.resolve()
+	const work = Promise.resolve()
 		.then(() => handle(request, response, url))
 		.then((done) => (done === undefined ? handleAdmin(request, response, url) : done))
 		.then((done) => {
@@ -2649,7 +2652,74 @@ const server = createServer((request, response) => {
 				);
 			}
 		});
+	activeRequests.add(work);
+	// Use both arms instead of a bare `finally`: `finally` creates another
+	// rejecting promise when a future error escapes the handler, and leaving that
+	// promise unobserved would turn one request failure into an unhandled rejection.
+	void work.then(
+		() => activeRequests.delete(work),
+		() => activeRequests.delete(work)
+	);
 });
+
+const SHUTDOWN_DEADLINE_MS = 65_000;
+let shutdownInFlight;
+let databaseClosed = false;
+
+/**
+ * Stop taking work, drain what was already accepted, then close durable state.
+ *
+ * `systemctl stop` is the consistency barrier used by the backup script. Node's
+ * default SIGTERM action killed the process in the middle of `receiveUpload`,
+ * bypassing its close/error cleanup and leaving `incoming-*` beside a database
+ * snapshot that could never name it. The manifest quite correctly refused that
+ * archive — and then every later backup met the same abandoned file.
+ *
+ * `server.close()` preserves active requests. The deadline handles a client
+ * that deliberately never finishes a body: destroy its connection, wait for
+ * the request promise (and therefore temp-file cleanup) to settle, and only then
+ * let the process end. systemd's stop deadline is longer than this one, so its
+ * unconditional kill is never the first cleanup mechanism.
+ */
+function shutdownTicketServer({ forceAfterMs = SHUTDOWN_DEADLINE_MS } = {}) {
+	if (shutdownInFlight) return shutdownInFlight;
+
+	shutdownInFlight = new Promise((resolve, reject) => {
+		const force = setTimeout(
+			() => {
+				server.closeAllConnections();
+			},
+			Math.max(1, forceAfterMs)
+		);
+
+		server.close((closeError) => {
+			clearTimeout(force);
+			void Promise.allSettled([...activeRequests]).then((settled) => {
+				const requestFailure = settled.find((answer) => answer.status === 'rejected');
+				try {
+					if (!databaseClosed) {
+						db.close();
+						databaseClosed = true;
+					}
+				} catch (error) {
+					reject(error);
+					return;
+				}
+				if (closeError && closeError.code !== 'ERR_SERVER_NOT_RUNNING') {
+					reject(closeError);
+					return;
+				}
+				if (requestFailure) {
+					reject(requestFailure.reason);
+					return;
+				}
+				resolve();
+			});
+		});
+	});
+
+	return shutdownInFlight;
+}
 
 // Loopback only. nginx is the only thing that may reach this.
 if (process.env.TICKETS_NO_LISTEN !== '1') {
@@ -2678,6 +2748,15 @@ if (process.env.TICKETS_NO_LISTEN !== '1') {
 	};
 	sweepAll();
 	setInterval(sweepAll, 60 * 60 * 1000).unref();
+
+	const stop = (signal) => {
+		void shutdownTicketServer().catch((error) => {
+			process.stderr.write(`${signal} shutdown failed: ${error?.message}\n`);
+			process.exitCode = 1;
+		});
+	};
+	process.once('SIGTERM', () => stop('SIGTERM'));
+	process.once('SIGINT', () => stop('SIGINT'));
 }
 
-export { handleAdmin, server, loginPage };
+export { handleAdmin, server, loginPage, shutdownTicketServer };

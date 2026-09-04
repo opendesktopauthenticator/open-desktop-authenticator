@@ -39,13 +39,17 @@ const GUIDANCE =
 	'Steam Guard has been removed on Steam, but the account could not be removed here.';
 
 /** The screen as it renders for an account carrying a stored outcome. */
-function rendered(certain: boolean | undefined): string {
+function rendered(
+	certain: boolean | undefined,
+	operationToken: string | null = '0'.repeat(64)
+): string {
 	const summary = {
 		...account,
 		unresolvedOperation: {
 			kind: 'deactivate' as const,
 			guidance: GUIDANCE,
 			at: '2026-01-01T00:00:00.000Z',
+			...(operationToken === null ? {} : { operationToken }),
 			...(certain !== undefined ? { certain } : {})
 		}
 	} as unknown as AccountSummary;
@@ -56,6 +60,50 @@ function rendered(certain: boolean | undefined): string {
 			onRemove={() => Promise.resolve()}
 			onDeactivate={() => Promise.resolve({})}
 			onResolve={() => Promise.resolve()}
+			onClearStale={() => Promise.resolve()}
+			onClose={() => undefined}
+		/>
+	);
+}
+
+function renderedStale(): string {
+	return renderToStaticMarkup(
+		<RemoveAccount
+			account={{
+				...account,
+				unresolvedOperation: {
+					kind: 'deactivate',
+					guidance: 'This record belongs to an older authenticator.',
+					at: '2026-01-01T00:00:00.000Z',
+					stale: true,
+					staleToken: 'a'.repeat(64)
+				}
+			}}
+			onRemove={() => Promise.resolve()}
+			onDeactivate={() => Promise.resolve({})}
+			onResolve={() => Promise.resolve()}
+			onClearStale={() => Promise.resolve()}
+			onClose={() => undefined}
+		/>
+	);
+}
+
+function renderedUnidentified(): string {
+	return renderToStaticMarkup(
+		<RemoveAccount
+			account={{
+				...account,
+				unresolvedOperation: {
+					kind: 'deactivate',
+					guidance: 'This record was written before authenticator identities were stored.',
+					at: '2026-01-01T00:00:00.000Z',
+					unidentified: true
+				}
+			}}
+			onRemove={() => Promise.resolve()}
+			onDeactivate={() => Promise.resolve({})}
+			onResolve={() => Promise.resolve()}
+			onClearStale={() => Promise.resolve()}
 			onClose={() => undefined}
 		/>
 	);
@@ -116,6 +164,41 @@ describe('an outcome whose record was saved', () => {
 		expect(html, 'the passphrase this path requires is not asked for').toContain(
 			'resolve-passphrase'
 		);
+	});
+
+	it('does not offer either answer when the exact saved operation token is absent', () => {
+		const html = rendered(false, null);
+
+		expect(html).not.toContain('Steam Guard is off — remove this account here');
+		expect(html).not.toContain('Steam Guard is still on — let me try again');
+		expect(html).not.toContain('resolve-passphrase');
+	});
+});
+
+describe('a removal record for an older authenticator', () => {
+	const html = renderedStale();
+
+	it('offers only exact-record cleanup, not removal or a Steam outcome answer', () => {
+		expect(html).toContain('An old safety record needs clearing');
+		expect(html).toContain('Clear old safety record');
+		expect(html).not.toContain('Steam Guard is off — remove this account here');
+		expect(html).not.toContain('Steam Guard is still on — let me try again');
+		expect(html).not.toContain('resolve-passphrase');
+		expect(html).not.toContain('type="submit"');
+	});
+});
+
+describe('a legacy removal record whose authenticator cannot be identified', () => {
+	const html = renderedUnidentified();
+
+	it('fails closed without offering cleanup, removal, or a Steam outcome answer', () => {
+		expect(html).toContain('This safety record cannot be matched');
+		expect(html).toMatch(/contact support/i);
+		expect(html).not.toContain('Clear old safety record');
+		expect(html).not.toContain('Steam Guard is off — remove this account here');
+		expect(html).not.toContain('Steam Guard is still on — let me try again');
+		expect(html).not.toContain('resolve-passphrase');
+		expect(html).not.toContain('type="submit"');
 	});
 });
 

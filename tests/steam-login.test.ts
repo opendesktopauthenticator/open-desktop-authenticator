@@ -1,3 +1,7 @@
+import { createServer, request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
+import { connect, createServer as createTcpServer, type AddressInfo, type Socket } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it, vi } from 'vitest';
 import {
 	PLATFORM_MOBILE_APP,
@@ -6,6 +10,8 @@ import {
 	type LoginSessionLike
 } from '../src/main/steam/login';
 import { steamSessionProxy } from '../src/main/net/egress';
+import { PROXY_CONNECT_TIMEOUT_MS } from '../src/main/net/bounded-https-proxy-agent';
+import { SYSTEM_PROXY_AUTH_REQUIRED } from '../src/main/steam/system-login-transport';
 // **Statically, not with `await import` inside the test.**
 //
 // `steam-session` is a heavy real dependency and takes ~600ms to load cold. Done
@@ -237,15 +243,19 @@ describe('signing in for an account this app does not hold yet', () => {
 	});
 
 	it('refuses when it has neither a secret nor a typed code', async () => {
-		const { session } = fakeSession({});
-		await expect(
-			signIn(
-				{ accountName: 'someone', password: 'pw', unixSeconds: 1 },
-				undefined,
-				() => session,
-				at
-			)
-		).rejects.toThrow(/secret or a Steam Guard code/);
+		const factory = vi.fn(() => fakeSession({}).session);
+		const request = { accountName: 'someone', password: 'pw', unixSeconds: 1 };
+
+		await expect(signIn(request, undefined, factory, at)).rejects.toThrow(
+			/secret or a Steam Guard code/
+		);
+		await expect(signIn(request, 'http://proxy.example:8080', factory, at)).rejects.toThrow(
+			/secret or a Steam Guard code/
+		);
+		expect(
+			factory,
+			'input refusal acquired either system or explicit-proxy state'
+		).not.toHaveBeenCalled();
 	});
 
 	it('never keeps the typed code on the result', async () => {
@@ -329,6 +339,48 @@ describe('what a sign-in refuses to accept', () => {
 		);
 	});
 
+	it('identifies a refused CONNECT tunnel as a proxy failure, not a Steam refusal', async () => {
+		const { session } = fakeSession({
+			startError: new Error('Proxy CONNECT 407 Proxy Authentication Required')
+		});
+
+		const result = signIn(REQUEST, 'http://proxy.example:8080', () => session, at);
+		await expect(result).rejects.toThrow(/proxy requires.*or did not accept/i);
+		await expect(result).rejects.not.toThrow(/Steam refused/i);
+	});
+
+	it('preserves the actionable system-proxy authentication refusal without remote details', async () => {
+		const { session } = fakeSession({ startError: new Error(SYSTEM_PROXY_AUTH_REQUIRED) });
+
+		const result = signIn(REQUEST, undefined, () => session, at);
+		await expect(result).rejects.toThrow(SYSTEM_PROXY_AUTH_REQUIRED);
+		await expect(result).rejects.not.toThrow(/Steam refused/i);
+	});
+
+	it('identifies an agent handshake timeout as a proxy failure, not a Steam refusal', async () => {
+		const { session } = fakeSession({
+			startError: new Error('A "socket" was not created for HTTP request before 5000ms')
+		});
+
+		const result = signIn(REQUEST, 'socks5://proxy.example:1080', () => session, at);
+		await expect(result).rejects.toThrow(/proxy did not finish opening/i);
+		await expect(result).rejects.not.toThrow(/Steam refused/i);
+	});
+
+	it.each([
+		'Proxy CONNECT response headers exceeded 16384 bytes',
+		'Proxy connection ended before receiving CONNECT response',
+		'Invalid response from proxy CONNECT request',
+		'Invalid header in proxy CONNECT response',
+		'Proxy CONNECT failed: read ECONNRESET'
+	])('identifies a malformed proxy response instead of blaming Steam: %s', async (failure) => {
+		const { session } = fakeSession({ startError: new Error(failure) });
+
+		const result = signIn(REQUEST, 'http://proxy.example:8080', () => session, at);
+		await expect(result).rejects.toThrow(/proxy closed.*or sent an invalid response/i);
+		await expect(result).rejects.not.toThrow(/Steam refused/i);
+	});
+
 	it('reports a timeout as worth retrying', async () => {
 		const { session } = fakeSession({ emitTimeout: true });
 
@@ -360,6 +412,18 @@ describe('what a sign-in refuses to accept', () => {
  * Steam — over the account's proxy — after the user has been told it failed.
  */
 describe('a failed sign-in', () => {
+	it('cancels immediately if later session setup throws synchronously', async () => {
+		const { session, cancelled } = fakeSession();
+		session.on = () => {
+			throw new Error('the installed session event seam changed');
+		};
+
+		await expect(signIn(REQUEST, undefined, () => session, at)).rejects.toThrow(
+			/event seam changed/i
+		);
+		expect(cancelled(), 'the acquired login session kept its transport lease').toBe(1);
+	});
+
 	it('cancels the attempt when a guard challenge cannot be answered', async () => {
 		const { session, cancelled } = fakeSession({ validActions: [{ type: 2 }] });
 
@@ -406,6 +470,104 @@ describe('signing in through a proxy', () => {
 
 		expect(factory).toHaveBeenCalledWith(undefined);
 	});
+
+	it('keeps a real HTTP 407 classified as a proxy failure through steam-session', async () => {
+		const proxy = createServer();
+		proxy.on('connect', (_request, socket) => {
+			socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n');
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const result = signIn(REQUEST, `http://127.0.0.1:${port}`);
+			await expect(result).rejects.toThrow(/proxy requires.*or did not accept/i);
+			await expect(result).rejects.not.toThrow(/Steam refused/i);
+		} finally {
+			await new Promise<void>((resolve) => proxy.close(() => resolve()));
+		}
+	});
+
+	it('never displays a proxy-controlled CONNECT reason phrase', async () => {
+		const proxyPassword = 'swordfish-reason-phrase-secret';
+		let authorization: string | undefined;
+		const proxy = createServer();
+		proxy.on('connect', (request, socket) => {
+			authorization = request.headers['proxy-authorization'];
+			const encoded = authorization?.replace(/^Basic\s+/i, '') ?? '';
+			const supplied = Buffer.from(encoded, 'base64').toString('utf8');
+			const password = supplied.split(':').slice(1).join(':');
+			// A proxy controls this text and already knows the credentials it was
+			// sent. Echoing them proves the renderer never treats its prose as ours.
+			socket.end(`HTTP/1.1 407 rejected-${password}\r\nConnection: close\r\n\r\n`);
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const outcome = await signIn(
+				REQUEST,
+				`http://alice:${proxyPassword}@127.0.0.1:${port}`
+			).catch((error: unknown) => error);
+
+			expect(authorization).toBe(
+				`Basic ${Buffer.from(`alice:${proxyPassword}`, 'utf8').toString('base64')}`
+			);
+			expect(outcome).toBeInstanceOf(SteamLoginError);
+			expect((outcome as Error).message).toMatch(/proxy requires.*CONNECT 407/i);
+			expect((outcome as Error).message).not.toContain(proxyPassword);
+			expect((outcome as Error).message).not.toContain(REQUEST.password);
+		} finally {
+			await new Promise<void>((resolve) => proxy.close(() => resolve()));
+		}
+	});
+
+	it.each([
+		'InvalidPassword',
+		'InvalidCredentials',
+		'RateLimitExceeded',
+		'TooManyAttempts — 密碼 swordfish-proxy-secret'
+	])('classifies a hostile proxy reason before Steam result names: %s', async (reason) => {
+		let tunnels = 0;
+		const proxy = createServer();
+		proxy.on('connect', (_request, socket) => {
+			tunnels += 1;
+			socket.end(`HTTP/1.1 407 ${reason}\r\nConnection: close\r\n\r\n`);
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const outcome = await signIn(REQUEST, `http://127.0.0.1:${port}`).catch(
+				(error: unknown) => error
+			);
+
+			expect(outcome).toBeInstanceOf(SteamLoginError);
+			expect((outcome as Error).message).toBe(
+				'The proxy requires a username and password, or did not accept the ones configured (CONNECT 407).'
+			);
+			expect((outcome as Error).message).not.toContain(reason);
+			expect(tunnels, 'the refused proxy response was retried or bypassed').toBe(1);
+		} finally {
+			await new Promise<void>((resolve) => proxy.close(() => resolve()));
+		}
+	});
+
+	it('keeps a real SOCKS handshake refusal classified as a proxy failure', async () => {
+		const proxy = createTcpServer((socket) => {
+			socket.once('data', () => socket.end(Buffer.from([5, 0xff])));
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const result = signIn(REQUEST, `socks5://127.0.0.1:${port}`);
+			await expect(result).rejects.toThrow(/SOCKS proxy rejected/i);
+			await expect(result).rejects.not.toThrow(/Steam refused/i);
+		} finally {
+			await new Promise<void>((resolve) => proxy.close(() => resolve()));
+		}
+	});
 });
 
 /**
@@ -416,48 +578,584 @@ describe('signing in through a proxy', () => {
  * fail-closed rule exists to prevent.
  */
 describe('proxy options for steam-session', () => {
-	it('keeps credentials, which the library authenticates with itself', () => {
-		expect(steamSessionProxy('http://user:pa55@1.2.3.4:8080')).toEqual({
-			httpProxy: 'http://user:pa55@1.2.3.4:8080'
-		});
+	it('keeps the production handshake deadline at no more than five seconds', () => {
+		expect(PROXY_CONNECT_TIMEOUT_MS).toBeGreaterThan(0);
+		expect(PROXY_CONNECT_TIMEOUT_MS).toBeLessThanOrEqual(5_000);
 	});
 
-	it('routes SOCKS through socksProxy, never httpProxy — in the remote-DNS spelling', () => {
+	it('uses an explicit agent for HTTP proxying', () => {
+		const options = steamSessionProxy('http://user:pa55@1.2.3.4:8080');
+		expect('agent' in options).toBe(true);
+	});
+
+	it.each([
+		['reserved characters', 'user%40host', 'p%40ss%3Aword', 'user@host:p@ss:word'],
+		['non-ASCII characters', 'us%C3%A9r', 'p%C3%A5ss', 'usér:påss'],
+		['a literal percent', 'user', '100%sure', 'user:100%sure']
+	])('authenticates with decoded %s', async (_name, username, password, expected) => {
+		let authorization: string | undefined;
+		const proxy = createServer();
+		proxy.on('connect', (request, socket) => {
+			authorization = request.headers['proxy-authorization'];
+			socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n');
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const options = steamSessionProxy(`http://${username}:${password}@127.0.0.1:${port}`);
+			if (!('agent' in options)) {
+				throw new Error('HTTP proxy did not produce an agent');
+			}
+
+			const outcome = await new Promise<string>((resolve) => {
+				const request = httpsRequest(
+					{
+						hostname: 'steam.invalid',
+						path: '/',
+						agent: options.agent
+					},
+					(response) => {
+						response.resume();
+						resolve(`unexpected response ${response.statusCode}`);
+					}
+				);
+				request.once('error', (error) => resolve(error.message));
+				request.end();
+			});
+
+			expect(outcome).toMatch(/Proxy CONNECT 407 Proxy Authentication Required/);
+			expect(authorization).toBe(`Basic ${Buffer.from(expected, 'utf8').toString('base64')}`);
+		} finally {
+			await new Promise<void>((resolve, reject) =>
+				proxy.close((err) => (err === undefined ? resolve() : reject(err)))
+			);
+		}
+	});
+
+	it('ends a CONNECT attempt whose proxy accepts the socket but never answers', async () => {
+		const sockets = new Set<Socket>();
+		let proxySawEnd!: () => void;
+		const ended = new Promise<void>((resolve) => {
+			proxySawEnd = resolve;
+		});
+		const proxy = createServer();
+		let connects = 0;
+		proxy.on('connection', (socket) => {
+			sockets.add(socket);
+			socket.on('error', () => {
+				// A peer closing while this deliberately hostile server is writing is
+				// the expected outcome under test.
+			});
+			socket.once('close', () => {
+				sockets.delete(socket);
+			});
+			socket.once('end', proxySawEnd);
+		});
+		proxy.on('connect', (_connectRequest, socket) => {
+			connects += 1;
+			if (connects > 1) {
+				socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n');
+				return;
+			}
+			// A blackhole proxy: it accepted the CONNECT request and deliberately
+			// never sends a response. The agent, not the outer request, owns this
+			// socket while it waits.
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		let request: ReturnType<typeof httpsRequest> | undefined;
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const options = steamSessionProxy(`http://127.0.0.1:${port}`, 100);
+			if (!('agent' in options)) throw new Error('HTTP proxy did not produce an agent');
+
+			const outcome = new Promise<string>((resolve) => {
+				request = httpsRequest({ hostname: 'steam.invalid', agent: options.agent });
+				request.once('error', (error) => resolve(error.message));
+				request.end();
+			});
+
+			expect(await Promise.race([outcome, delay(750, '<still pending>')])).toMatch(
+				/proxy connection timed out/i
+			);
+			expect(
+				await Promise.race([ended.then(() => true), delay(500, false)]),
+				'the agent reported a timeout but did not close its side of the proxy socket'
+			).toBe(true);
+
+			const second = new Promise<string>((resolve) => {
+				const next = httpsRequest({ hostname: 'steam.invalid', agent: options.agent });
+				next.once('error', (error) => resolve(error.message));
+				next.end();
+			});
+			expect(
+				await Promise.race([second, delay(750, '<still pending>')]),
+				'a timeout poisoned the shared agent for later requests'
+			).toMatch(/Proxy CONNECT 407 Proxy Authentication Required/);
+		} finally {
+			request?.destroy();
+			for (const socket of sockets) socket.destroy();
+			proxy.closeAllConnections();
+			await new Promise<void>((resolve) => proxy.close(() => resolve()));
+		}
+	});
+
+	it('rejects and closes an unterminated oversized CONNECT response', async () => {
+		const sockets = new Set<Socket>();
+		let proxySocketClosed!: () => void;
+		const closed = new Promise<void>((resolve) => {
+			proxySocketClosed = resolve;
+		});
+		const proxy = createServer();
+		proxy.on('connection', (socket) => {
+			sockets.add(socket);
+			socket.on('error', () => {
+				// Expected when the bounded client drops this oversized response.
+			});
+			socket.once('close', () => {
+				sockets.delete(socket);
+				proxySocketClosed();
+			});
+		});
+		proxy.on('connect', (_connectRequest, socket) => {
+			socket.write(`HTTP/1.1 200 Connection Established\r\nX-Fill: ${'a'.repeat(256 * 1024)}`);
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		let request: ReturnType<typeof httpsRequest> | undefined;
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const options = steamSessionProxy(`http://127.0.0.1:${port}`, 1_000);
+			if (!('agent' in options)) throw new Error('HTTP proxy did not produce an agent');
+
+			const outcome = new Promise<Error>((resolve) => {
+				request = httpsRequest({ hostname: 'steam.invalid', agent: options.agent });
+				request.once('error', resolve);
+				request.end();
+			});
+
+			const failure = await Promise.race([outcome, delay(750, '<still pending>')]);
+			expect(failure).toBeInstanceOf(Error);
+			if (!(failure instanceof Error)) throw new Error(failure);
+			expect(failure.message).toMatch(/proxy CONNECT response headers exceeded/i);
+			// Rejection remains bounded above; only the server-side close event gets
+			// scheduler headroom after the client has already rejected and torn down.
+			const socketCloseObservationMs = 5_000;
+			expect(
+				await Promise.race([closed.then(() => true), delay(socketCloseObservationMs, false)]),
+				'the agent rejected the response but left its proxy socket open'
+			).toBe(true);
+
+			const { session } = fakeSession({ startError: failure });
+			const signInResult = signIn(REQUEST, `http://127.0.0.1:${port}`, () => session, at);
+			await expect(signInResult).rejects.toThrow(/proxy closed.*or sent an invalid response/i);
+			await expect(signInResult).rejects.not.toThrow(/Steam refused/i);
+		} finally {
+			request?.destroy();
+			for (const socket of sockets) socket.destroy();
+			proxy.closeAllConnections();
+			await new Promise<void>((resolve) => proxy.close(() => resolve()));
+		}
+	}, 10_000);
+
+	it('does not retry directly after a proxy refuses the tunnel', async () => {
+		let originConnections = 0;
+		const origin = createTcpServer((socket) => {
+			originConnections += 1;
+			socket.destroy();
+		});
+		await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
+		const originPort = (origin.address() as AddressInfo).port;
+
+		let proxyAuthorization: string | undefined;
+		const proxy = createServer();
+		proxy.on('connect', (request, socket) => {
+			proxyAuthorization = request.headers['proxy-authorization'];
+			socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n');
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const proxyPort = (proxy.address() as AddressInfo).port;
+			const options = steamSessionProxy(`http://alice:s3cret@127.0.0.1:${proxyPort}`);
+			if (!('agent' in options)) throw new Error('HTTP proxy did not produce an agent');
+
+			const outcome = await new Promise<string>((resolve) => {
+				const request = httpsRequest(
+					{ hostname: '127.0.0.1', port: originPort, agent: options.agent },
+					(response) => {
+						response.resume();
+						resolve(`unexpected response ${response.statusCode}`);
+					}
+				);
+				request.once('error', (error) => resolve(error.message));
+				request.end();
+			});
+
+			expect(outcome).toMatch(/Proxy CONNECT 407 Proxy Authentication Required/);
+			expect(proxyAuthorization).toBe(
+				`Basic ${Buffer.from('alice:s3cret', 'utf8').toString('base64')}`
+			);
+			expect(originConnections, 'the failed proxy tunnel fell back to a direct connection').toBe(0);
+		} finally {
+			await Promise.all([
+				new Promise<void>((resolve, reject) =>
+					proxy.close((err) => (err === undefined ? resolve() : reject(err)))
+				),
+				new Promise<void>((resolve, reject) =>
+					origin.close((err) => (err === undefined ? resolve() : reject(err)))
+				)
+			]);
+		}
+	});
+
+	it('formats an IPv6 destination as a CONNECT authority', async () => {
+		let authority: string | undefined;
+		const proxy = createServer();
+		proxy.on('connect', (request, socket) => {
+			authority = request.url;
+			socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nConnection: close\r\n\r\n');
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const options = steamSessionProxy(`http://127.0.0.1:${port}`);
+			if (!('agent' in options)) throw new Error('HTTP proxy did not produce an agent');
+
+			const outcome = await new Promise<Error>((resolve) => {
+				const request = httpsRequest(
+					{ hostname: '::1', port: 443, agent: options.agent },
+					(response) => {
+						response.resume();
+						resolve(new Error(`unexpected response ${response.statusCode}`));
+					}
+				);
+				request.once('error', resolve);
+				request.end();
+			});
+			expect(outcome.message).toMatch(/Proxy CONNECT 407 Proxy Authentication Required/);
+			expect(authority).toBe('[::1]:443');
+
+			const { session } = fakeSession({ startError: outcome });
+			const signInResult = signIn(REQUEST, `http://127.0.0.1:${port}`, () => session, at);
+			await expect(signInResult).rejects.toThrow(/proxy requires.*or did not accept/i);
+			await expect(signInResult).rejects.not.toThrow(/Steam refused/i);
+		} finally {
+			await new Promise<void>((resolve, reject) =>
+				proxy.close((err) => (err === undefined ? resolve() : reject(err)))
+			);
+		}
+	});
+
+	it('sends Proxy-Authorization only to the proxy, never through the tunnel', async () => {
+		let originAuthorization: string | undefined;
+		const origin = createServer((request, response) => {
+			originAuthorization = request.headers['proxy-authorization'];
+			response.end('ok');
+		});
+		await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
+		const originPort = (origin.address() as AddressInfo).port;
+
+		let connectAuthorization: string | undefined;
+		const proxy = createServer();
+		proxy.on('connect', (request, client) => {
+			connectAuthorization = request.headers['proxy-authorization'];
+			const upstream = connect(originPort, '127.0.0.1', () => {
+				client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+				client.pipe(upstream);
+				upstream.pipe(client);
+			});
+			upstream.once('error', () => client.destroy());
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const proxyPort = (proxy.address() as AddressInfo).port;
+			const options = steamSessionProxy(`http://alice:s3cret@127.0.0.1:${proxyPort}`);
+			if (!('agent' in options)) throw new Error('HTTP proxy did not produce an agent');
+
+			const body = await new Promise<string>((resolve, reject) => {
+				const request = httpRequest(
+					{ hostname: '127.0.0.1', port: originPort, path: '/', agent: options.agent },
+					(response) => {
+						const chunks: Buffer[] = [];
+						response.on('data', (chunk: Buffer) => chunks.push(chunk));
+						response.once('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+					}
+				);
+				request.once('error', reject);
+				request.end();
+			});
+
+			expect(body).toBe('ok');
+			expect(connectAuthorization).toBe(
+				`Basic ${Buffer.from('alice:s3cret', 'utf8').toString('base64')}`
+			);
+			expect(originAuthorization).toBeUndefined();
+		} finally {
+			await Promise.all([
+				new Promise<void>((resolve, reject) =>
+					proxy.close((err) => (err === undefined ? resolve() : reject(err)))
+				),
+				new Promise<void>((resolve, reject) =>
+					origin.close((err) => (err === undefined ? resolve() : reject(err)))
+				)
+			]);
+		}
+	});
+
+	it('accepts a CONNECT header terminator split across socket reads', async () => {
+		const proxy = createServer();
+		proxy.on('connect', (_request, socket) => {
+			socket.write('HTTP/1.1 200 Connection Established\r\nProxy-Agent: test\r\n\r');
+			setImmediate(() => {
+				socket.once('data', () => {
+					socket.end('HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok');
+				});
+				socket.write('\n');
+			});
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const options = steamSessionProxy(`http://127.0.0.1:${port}`);
+			const result = await new Promise<{ status: number | undefined; body: string }>(
+				(resolve, reject) => {
+					const request = httpRequest(
+						{ hostname: 'steam.invalid', path: '/', agent: options.agent },
+						(response) => {
+							const chunks: Buffer[] = [];
+							response.on('data', (chunk: Buffer) => chunks.push(chunk));
+							response.once('end', () =>
+								resolve({
+									status: response.statusCode,
+									body: Buffer.concat(chunks).toString('utf8')
+								})
+							);
+						}
+					);
+					request.once('error', reject);
+					request.end();
+				}
+			);
+
+			expect(result).toEqual({ status: 200, body: 'ok' });
+		} finally {
+			await new Promise<void>((resolve) => proxy.close(() => resolve()));
+		}
+	});
+
+	it('uses the same decoded-auth agent for an HTTPS proxy endpoint', () => {
+		const options = steamSessionProxy('https://user%40host:p%40ss@proxy.example:8443');
+		const agent = options.agent as unknown as { proxy: URL };
+		expect(agent.proxy.protocol).toBe('https:');
+		expect(decodeURIComponent(agent.proxy.username)).toBe('user@host');
+		expect(decodeURIComponent(agent.proxy.password)).toBe('p@ss');
+	});
+
+	it('routes SOCKS through a bounded agent in the remote-DNS spelling', () => {
 		// `socks5h`, not `socks5`. socks-proxy-agent reads `socks5` as *resolve
 		// the hostname locally*, so the plain spelling had every sign-in look
 		// Steam's hostnames up on the user's own resolver — at the exact moments
 		// an account was being tied to a route. Chromium's half of the app already
 		// resolves at the proxy for `socks5`; this makes the Node half agree.
-		expect(steamSessionProxy('socks5://1.2.3.4:1080')).toEqual({
-			socksProxy: 'socks5h://1.2.3.4:1080'
-		});
+		const agent = steamSessionProxy('socks5://1.2.3.4:1080').agent as unknown as {
+			shouldLookup: boolean;
+			proxy: { host: string; port: number; type: number };
+		};
+		expect(agent.shouldLookup).toBe(false);
+		expect(agent.proxy).toMatchObject({ host: '1.2.3.4', port: 1080, type: 5 });
 	});
 
 	it('never downgrades an explicit remote-DNS spelling', () => {
 		// The old normalisation rewrote socks5h to socks5 — turning the one
 		// spelling a user chooses *specifically for remote DNS* into the local
 		// one, silently.
-		expect(steamSessionProxy('socks5h://1.2.3.4:1080')).toEqual({
-			socksProxy: 'socks5h://1.2.3.4:1080'
-		});
+		const agent = steamSessionProxy('socks5h://1.2.3.4:1080').agent as unknown as {
+			shouldLookup: boolean;
+		};
+		expect(agent.shouldLookup).toBe(false);
 		// `socks4a` is refused outright: Chromium has no such rule and its nearest
 		// equivalent resolves locally, so accepting it would mean sign-in and
 		// confirmations resolving Steam in two different places.
 		expect(() => steamSessionProxy('socks4a://1.2.3.4:1080')).toThrow(/not supported|use http/i);
 	});
 
-	it('produces URLs the real agent reads as remote-DNS', async () => {
+	it('ends the deadline when SOCKS negotiation succeeds and leaves slow origin traffic alive', async () => {
+		const handshakeDeadlineMs = 75;
+		const originDelayMs = 225;
+		const sockets = new Set<Socket>();
+		const origin = createServer((_request, response) => {
+			setTimeout(() => {
+				response.setHeader('Connection', 'close');
+				response.end('ok');
+			}, originDelayMs);
+		});
+		await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
+		const originPort = (origin.address() as AddressInfo).port;
+
+		const proxy = createTcpServer((client) => {
+			sockets.add(client);
+			client.once('close', () => sockets.delete(client));
+			client.on('error', () => undefined);
+			let phase: 'greeting' | 'request' | 'tunnel' = 'greeting';
+			let buffered = Buffer.alloc(0);
+
+			const receiveHandshake = (chunk: Buffer): void => {
+				buffered = Buffer.concat([buffered, chunk]);
+				if (phase === 'greeting') {
+					const methods = buffered[1];
+					if (methods === undefined || buffered.length < 2 + methods) return;
+					buffered = buffered.subarray(2 + methods);
+					phase = 'request';
+					client.write(Buffer.from([5, 0]));
+				}
+
+				if (phase !== 'request' || buffered.length < 5) return;
+				const addressType = buffered[3];
+				const requestLength =
+					addressType === 1
+						? 10
+						: addressType === 4
+							? 22
+							: addressType === 3
+								? 7 + (buffered[4] ?? 0)
+								: Number.POSITIVE_INFINITY;
+				if (buffered.length < requestLength) return;
+				phase = 'tunnel';
+				client.removeListener('data', receiveHandshake);
+
+				const upstream = connect(originPort, '127.0.0.1', () => {
+					sockets.add(upstream);
+					upstream.once('close', () => sockets.delete(upstream));
+					client.pipe(upstream);
+					upstream.pipe(client);
+					client.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]));
+				});
+				upstream.on('error', () => client.destroy());
+			};
+			client.on('data', receiveHandshake);
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		let request: ReturnType<typeof httpRequest> | undefined;
+		try {
+			const proxyPort = (proxy.address() as AddressInfo).port;
+			const agent = steamSessionProxy(`socks5://127.0.0.1:${proxyPort}`, handshakeDeadlineMs).agent;
+			const startedAt = Date.now();
+			const body = await Promise.race([
+				new Promise<string>((resolve, reject) => {
+					request = httpRequest(
+						{ hostname: 'steam.invalid', port: 80, path: '/', agent },
+						(response) => {
+							const chunks: Buffer[] = [];
+							response.on('data', (chunk: Buffer) => chunks.push(chunk));
+							response.once('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+						}
+					);
+					request.once('error', reject);
+					request.end();
+				}),
+				delay(2_000, '<still pending>')
+			]);
+
+			expect(body).toBe('ok');
+			expect(
+				Date.now() - startedAt,
+				'the origin answered before the injected handshake deadline elapsed'
+			).toBeGreaterThan(handshakeDeadlineMs);
+		} finally {
+			request?.destroy();
+			for (const socket of sockets) socket.destroy();
+			origin.closeAllConnections();
+			await Promise.all([
+				new Promise<void>((resolve) => proxy.close(() => resolve())),
+				new Promise<void>((resolve) => origin.close(() => resolve()))
+			]);
+		}
+	});
+
+	it('bounds a blackhole SOCKS handshake, closes it, and remains reusable', async () => {
+		const sockets = new Set<Socket>();
+		let firstSocketGone!: () => void;
+		const firstGone = new Promise<void>((resolve) => {
+			firstSocketGone = resolve;
+		});
+		let connections = 0;
+		const proxy = createTcpServer((socket) => {
+			connections += 1;
+			const current = connections;
+			sockets.add(socket);
+			socket.on('error', () => undefined);
+			socket.on('data', () => undefined);
+			socket.once('close', () => {
+				sockets.delete(socket);
+				if (current === 1) firstSocketGone();
+			});
+			if (current === 1) {
+				socket.once('end', firstSocketGone);
+				return;
+			}
+			// A decisive second response: the proxy was reached, but supports no
+			// authentication method. This proves the first timeout did not poison
+			// the shared agent used by the rest of the sign-in.
+			socket.once('data', () => socket.end(Buffer.from([5, 0xff])));
+		});
+		await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
+
+		let first: ReturnType<typeof httpsRequest> | undefined;
+		try {
+			const port = (proxy.address() as AddressInfo).port;
+			const agent = steamSessionProxy(`socks5://127.0.0.1:${port}`, 100).agent;
+
+			const firstOutcome = new Promise<string>((resolve) => {
+				first = httpsRequest({ hostname: 'steam.invalid', agent });
+				first.once('error', (error) => resolve(error.message));
+				first.end();
+			});
+			expect(await Promise.race([firstOutcome, delay(750, '<still pending>')])).toMatch(
+				/timeout|timed out|before 100ms/i
+			);
+			expect(
+				await Promise.race([firstGone.then(() => true), delay(500, false)]),
+				'the SOCKS timeout did not close its side of the proxy socket'
+			).toBe(true);
+
+			const secondOutcome = new Promise<Error>((resolve) => {
+				const second = httpsRequest({ hostname: 'steam.invalid', agent });
+				second.once('error', resolve);
+				second.end();
+			});
+			const secondFailure = await Promise.race([secondOutcome, delay(750, '<still pending>')]);
+			expect(
+				secondFailure,
+				'a SOCKS timeout poisoned the agent for its next request'
+			).toBeInstanceOf(Error);
+			if (!(secondFailure instanceof Error)) throw new Error(secondFailure);
+			expect(secondFailure.name).toBe('ProxyConnectionError');
+			expect(connections).toBe(2);
+
+			const { session } = fakeSession({ startError: secondFailure });
+			const signInResult = signIn(REQUEST, `socks5://127.0.0.1:${port}`, () => session, at);
+			await expect(signInResult).rejects.toThrow(/SOCKS proxy rejected/i);
+			await expect(signInResult).rejects.not.toThrow(/Steam refused/i);
+		} finally {
+			first?.destroy();
+			for (const socket of sockets) socket.destroy();
+			await new Promise<void>((resolve) => proxy.close(() => resolve()));
+		}
+	});
+
+	it('builds agents the real SOCKS library reads as remote-DNS', () => {
 		// Against the library itself, not our reading of its documentation:
 		// `shouldLookup === false` is socks-proxy-agent's own flag for "send the
 		// hostname to the proxy". If a future version changes its scheme table,
 		// this is the test that notices.
-		const { SocksProxyAgent } = await import('socks-proxy-agent');
 		for (const stored of ['socks5://1.2.3.4:1080', 'socks5h://1.2.3.4:1080']) {
-			const options = steamSessionProxy(stored);
-			if (!('socksProxy' in options)) {
-				throw new Error('expected a socksProxy');
-			}
-			const agent = new SocksProxyAgent(options.socksProxy) as unknown as {
+			const agent = steamSessionProxy(stored).agent as unknown as {
 				shouldLookup: boolean;
 			};
 			expect(agent.shouldLookup).toBe(false);
@@ -469,7 +1167,7 @@ describe('proxy options for steam-session', () => {
 		expect(() => steamSessionProxy('not a url')).toThrow();
 	});
 
-	it('always returns exactly one of the two option keys', () => {
+	it('always returns exactly one recognised option key', () => {
 		// The invariant `createLoginSession` asserts before handing the object to
 		// the library. `steam-session` ignores an unrecognised key in silence and
 		// connects direct, and there is no way to ask it afterwards — so returning
@@ -482,7 +1180,7 @@ describe('proxy options for steam-session', () => {
 		]) {
 			const keys = Object.keys(steamSessionProxy(url));
 			expect(keys, url).toHaveLength(1);
-			expect(['httpProxy', 'socksProxy'], url).toContain(keys[0]);
+			expect(keys, url).toEqual(['agent']);
 		}
 	});
 });
@@ -514,19 +1212,15 @@ describe('SteamLoginError', () => {
  */
 describe('a portless SOCKS proxy', () => {
 	it('carries the port steam-session needs', () => {
-		expect(steamSessionProxy('socks5://proxy.example')).toEqual({
-			socksProxy: 'socks5h://proxy.example:1080'
-		});
+		const agent = steamSessionProxy('socks5://proxy.example').agent as unknown as {
+			proxy: { port: number };
+		};
+		expect(agent.proxy.port).toBe(1080);
 	});
 
-	it('produces a URL the real agent reads as a usable port', async () => {
-		const { SocksProxyAgent } = await import('socks-proxy-agent');
+	it('produces agents the real library reads as a usable port', () => {
 		for (const stored of ['socks5://proxy.example', 'socks5h://proxy.example']) {
-			const options = steamSessionProxy(stored);
-			if (!('socksProxy' in options)) {
-				throw new Error('expected a socksProxy');
-			}
-			const agent = new SocksProxyAgent(options.socksProxy) as unknown as {
+			const agent = steamSessionProxy(stored).agent as unknown as {
 				proxy: { port: number };
 			};
 			expect(Number.isFinite(agent.proxy.port)).toBe(true);
@@ -542,9 +1236,7 @@ describe('a portless SOCKS proxy', () => {
 			/cannot authenticate/i
 		);
 		// http and https carry credentials on both stacks and are unaffected.
-		expect(steamSessionProxy('http://user:pa55%40word@1.2.3.4:8080')).toEqual({
-			httpProxy: 'http://user:pa55%40word@1.2.3.4:8080'
-		});
+		expect('agent' in steamSessionProxy('http://user:pa55%40word@1.2.3.4:8080')).toBe(true);
 	});
 });
 

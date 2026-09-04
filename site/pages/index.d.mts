@@ -15,7 +15,7 @@ export interface SitePage {
 	/** Long-form guides receive review metadata and an on-page contents list. */
 	guide?: boolean;
 	title: string;
-	description: string;
+	description: string | ((site: unknown) => string);
 	/**
 	 * The page's HTML.
 	 *

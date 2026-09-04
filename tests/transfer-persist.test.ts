@@ -4,6 +4,8 @@ import { TransferApiError } from '../src/main/steam/transfer-api';
 import type { SteamTransportFactory } from '../src/main/net/transport';
 import type { VaultService } from '../src/main/vault/service';
 import type { Account } from '../src/shared/vault-schema';
+import { memoryWorkflowJournal, type WorkflowJournal } from '../src/main/steam/workflow-journal';
+import { successfulRecoveryPath } from './recovery-fixture';
 
 /*
  * What happens after Steam has rotated the authenticator.
@@ -15,19 +17,23 @@ import type { Account } from '../src/shared/vault-schema';
 
 const STEAM_ID = '76561198000000001';
 const TOKEN = 'eyJhbGciOiJub25lIn0.eyJhdWQiOlsibW9iaWxlIl0sImV4cCI6MjAwMDAwMDAwMH0.';
+const VALID_SHARED = Buffer.alloc(20, 1).toString('base64');
+const VALID_IDENTITY = Buffer.alloc(20, 2).toString('base64');
 
 /** A real encoded reply, so the retry path decodes rather than pretends. */
 function goodReply(): Buffer {
+	const shared = Buffer.alloc(20, 1);
+	const identity = Buffer.alloc(20, 2);
 	const token = Buffer.concat([
-		Buffer.from([0x0a, 0x06]),
-		Buffer.from('shared', 'utf8'),
+		Buffer.from([0x0a, shared.length]),
+		shared,
 		Buffer.from([0x1a, 0x06]),
 		Buffer.from('R55555', 'utf8'),
 		// server_time (field 5) is uint64 — a varint, not a length-delimited field.
 		// Getting that wrong produced a body protobufjs read past the end of.
 		Buffer.from([0x28, 0x80, 0xe2, 0xcf, 0xaa, 0x06]),
-		Buffer.from([0x42, 0x08]),
-		Buffer.from('identity', 'utf8'),
+		Buffer.from([0x42, identity.length]),
+		identity,
 		(() => {
 			const b = Buffer.alloc(9);
 			b[0] = 0x61;
@@ -39,12 +45,41 @@ function goodReply(): Buffer {
 }
 
 const REPLACEMENT = {
-	sharedSecret: 'c2hhcmVk',
-	identitySecret: 'aWRlbnRpdHk=',
+	sharedSecret: VALID_SHARED,
+	identitySecret: VALID_IDENTITY,
 	revocationCode: 'R55555',
 	serverTime: '1700000000',
 	steamId64: STEAM_ID
 };
+
+type IssuedOptionalField = 'serialNumber' | 'tokenGid' | 'uri' | 'secret1';
+
+function scopedKeyMethods(): {
+	sealScopedKey: (value: Buffer) => object;
+	openScopedEnvelope: () => Buffer;
+} {
+	let key: Buffer | undefined;
+	return {
+		sealScopedKey: (value) => {
+			key = Buffer.from(value);
+			return {
+				version: 1,
+				kdf: { type: 'scrypt', N: 16384, r: 8, p: 1, salt: Buffer.alloc(32).toString('base64') },
+				cipher: {
+					type: 'aes-256-gcm',
+					nonce: Buffer.alloc(12).toString('base64'),
+					tag: Buffer.alloc(16).toString('base64')
+				},
+				ciphertext: '',
+				modifiedAt: new Date(0).toISOString()
+			};
+		},
+		openScopedEnvelope: () => {
+			if (key === undefined) throw new Error('no scoped key');
+			return Buffer.from(key);
+		}
+	};
+}
 
 function harness(
 	options: {
@@ -55,6 +90,7 @@ function harness(
 		now?: () => number;
 		mutateThrows?: boolean;
 		readsBackWrong?: boolean;
+		dropOnRead?: IssuedOptionalField;
 		writeRecoveryThrows?: boolean;
 		/**
 		 * Holds a sign-in open, so something can happen while it awaits Steam.
@@ -69,6 +105,8 @@ function harness(
 		continueGate?: Promise<void>;
 		/** And for the challenge, so a test can hold the text request open. */
 		startChallengeGate?: () => Promise<void>;
+		/** Override the durable record for failure-ordering tests. */
+		workflowJournal?: WorkflowJournal;
 	} = {}
 ): {
 	service: TransferService;
@@ -81,10 +119,15 @@ function harness(
 	let continueCalls = 0;
 
 	const vault = {
+		isUnlocked: () => true,
 		read: () => ({
-			accounts: options.readsBackWrong
-				? stored.map((a) => ({ ...a, sharedSecret: 'something-else' }))
-				: stored
+			accounts: stored.map((account) => {
+				const copy = options.readsBackWrong
+					? { ...account, sharedSecret: 'something-else' }
+					: { ...account };
+				if (options.dropOnRead !== undefined) delete copy[options.dropOnRead];
+				return copy;
+			})
 		}),
 		mutate: (change: (draft: { accounts: Account[] }) => void) => {
 			if (options.mutateThrows) {
@@ -92,7 +135,8 @@ function harness(
 			}
 			change({ accounts: stored });
 			return Promise.resolve();
-		}
+		},
+		...scopedKeyMethods()
 	} as unknown as VaultService;
 
 	const transports = {
@@ -106,11 +150,11 @@ function harness(
 			return { refreshToken: TOKEN, steamId64: STEAM_ID };
 		},
 		mintAccessToken: () => Promise.resolve('access'),
-		startChallenge: (async () => {
+		startChallenge: async () => {
 			await options.startChallengeGate?.();
 			return { sent: true, shape: 'protobuf' };
-		}) as never,
-		continueChallenge: (async (
+		},
+		continueChallenge: async (
 			_t: unknown,
 			_a: unknown,
 			_c: unknown,
@@ -127,13 +171,15 @@ function harness(
 			return Promise.resolve(
 				options.continueResult ?? { success: true, replacementToken: REPLACEMENT }
 			);
-		}) as never,
+		},
 		writeRecovery: (account: Account) => {
 			if (options.writeRecoveryThrows) {
 				throw new Error('cannot write');
 			}
 			recoveryWrites.push(account);
-		}
+			return successfulRecoveryPath(account);
+		},
+		workflowJournal: options.workflowJournal ?? memoryWorkflowJournal()
 	});
 
 	return {
@@ -187,8 +233,8 @@ describe('storing a replacement Steam has issued', () => {
 		const h = harness();
 		await readyToSubmit(h);
 		await h.service.completeTransfer('12345');
-		expect(h.stored[0]?.sharedSecret).toBe('c2hhcmVk');
-		expect(h.stored[0]?.identitySecret).toBe('aWRlbnRpdHk=');
+		expect(h.stored[0]?.sharedSecret).toBe(VALID_SHARED);
+		expect(h.stored[0]?.identitySecret).toBe(VALID_IDENTITY);
 		expect(h.stored[0]?.deviceId).toBeTruthy();
 	});
 
@@ -225,16 +271,73 @@ describe('storing a replacement Steam has issued', () => {
 });
 
 describe('when storing fails after Steam has already rotated', () => {
+	it('does not claim restart durability when the encrypted replacement update failed', async () => {
+		const backing = memoryWorkflowJournal();
+		const journal: WorkflowJournal = {
+			...backing,
+			updateTransfer: () => {
+				throw new Error('disk is full');
+			}
+		};
+		const h = harness({ workflowJournal: journal });
+		await readyToSubmit(h);
+
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/Do not close this app/i);
+		expect(h.service.awaiting()).toBe('persist');
+		expect(h.service.recovery()).toMatchObject({ state: 'sending' });
+
+		// A renderer remount in this same process sees persist + sending and must use
+		// the memory-only copy. A process restart has no plaintext to recover, so the
+		// same durable intent becomes an unanswered outcome instead of a fake retry.
+		const restarted = new TransferService(
+			{
+				isUnlocked: () => true,
+				read: () => ({ accounts: [] }),
+				...scopedKeyMethods()
+			} as unknown as VaultService,
+			{ forAccount: () => Promise.resolve(vi.fn()) } as unknown as SteamTransportFactory,
+			() => 0,
+			{ workflowJournal: backing }
+		);
+		expect(restarted.awaiting()).toBe('unanswered');
+		expect(restarted.recovery()).toMatchObject({ state: 'sending' });
+	});
+
+	it('refuses every resolution while an unpublishable reply is still held', async () => {
+		const backing = memoryWorkflowJournal();
+		const journal: WorkflowJournal = {
+			...backing,
+			updateTransfer: () => {
+				throw new Error('disk is full');
+			}
+		};
+		const h = harness({ workflowJournal: journal });
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/Do not close this app/i);
+		const sending = backing.transfers()[0];
+		expect(sending?.state).toBe('sending');
+
+		for (const resolution of ['notReplaced', 'replaced', 'resolvedOutsideApp'] as const) {
+			await expect(h.service.resolve(sending!.attemptId, resolution)).rejects.toThrow(
+				/still holds or is saving replacement secrets/i
+			);
+			expect(backing.transfers()).toEqual([sending]);
+			expect(h.service.hasUnsaved()).toBe(true);
+		}
+	});
+
 	it('does not report success', async () => {
 		const h = harness({ mutateThrows: true });
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/could not be saved/);
 	});
 
-	it('says a recovery file exists when one does', async () => {
+	it('says the encrypted workflow remains when the vault refuses the row', async () => {
 		const h = harness({ mutateThrows: true });
 		await readyToSubmit(h);
-		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/recovery file was written/);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(
+			/encrypted workflow is intact/
+		);
 	});
 
 	/*
@@ -242,10 +345,14 @@ describe('when storing fails after Steam has already rotated', () => {
 	 * backup could not be written either. The code is then the only copy in
 	 * existence and belongs on screen, not in a log.
 	 */
-	it('puts the recovery code in the error when nothing else holds it', async () => {
+	it('does not expose the recovery code when the optional recovery file fails', async () => {
 		const h = harness({ mutateThrows: true, writeRecoveryThrows: true });
 		await readyToSubmit(h);
-		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/R55555/);
+		const message = await h.service
+			.completeTransfer('12345')
+			.catch((error: Error) => error.message);
+		expect(message).toMatch(/encrypted workflow is intact/);
+		expect(message).not.toContain('R55555');
 	});
 
 	it('keeps the secrets so storage can be retried without asking Steam again', async () => {
@@ -321,6 +428,25 @@ describe('when Steam answers but the reply cannot be read', () => {
 });
 
 describe('bugs found by reading the flow rather than exercising it', () => {
+	it('expires the pre-submit session by elapsed time across wall-clock jumps', async () => {
+		let wall = 1_700_000_000_000;
+		let elapsed = 1_000;
+		vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+
+		const forward = harness({ now: () => wall });
+		await readyToSubmit(forward);
+		wall += 24 * 60 * 60_000;
+		expect(forward.service.current()).toBeDefined();
+
+		wall = 1_700_000_000_000;
+		elapsed = 10_000;
+		const backward = harness({ now: () => wall });
+		await readyToSubmit(backward);
+		wall -= 24 * 60 * 60_000;
+		elapsed += 15 * 60_000 + 1;
+		expect(backward.service.current()).toBeUndefined();
+	});
+
 	/*
 	 * A retry after a bad read-back must not store the account twice.
 	 *
@@ -337,6 +463,7 @@ describe('bugs found by reading the flow rather than exercising it', () => {
 		let faithful = false;
 		const stored: Account[] = [];
 		const vault = {
+			isUnlocked: () => true,
 			read: () => ({
 				// Fails the read-back the first time, passes the second.
 				accounts: faithful ? stored : stored.map((a) => ({ ...a, sharedSecret: 'wrong' }))
@@ -344,7 +471,8 @@ describe('bugs found by reading the flow rather than exercising it', () => {
 			mutate: (change: (draft: { accounts: Account[] }) => void) => {
 				change({ accounts: stored });
 				return Promise.resolve();
-			}
+			},
+			...scopedKeyMethods()
 		} as unknown as VaultService;
 
 		const service = new TransferService(
@@ -356,12 +484,13 @@ describe('bugs found by reading the flow rather than exercising it', () => {
 				signIn: () => Promise.resolve({ refreshToken: TOKEN, steamId64: STEAM_ID }),
 				mintAccessToken: () => Promise.resolve('access'),
 				continueChallenge: () => Promise.resolve({ success: true, replacementToken: REPLACEMENT }),
-				writeRecovery: () => undefined
+				writeRecovery: successfulRecoveryPath,
+				workflowJournal: memoryWorkflowJournal()
 			}
 		);
 
 		await service.authenticate('someone', 'pw', 'QK4TX');
-		await expect(service.completeTransfer('12345')).rejects.toThrow(/does not read back/);
+		await expect(service.completeTransfer('12345')).rejects.toThrow(/different authenticator/);
 
 		faithful = true;
 		await service.retryPersist();
@@ -384,17 +513,16 @@ describe('bugs found by reading the flow rather than exercising it', () => {
 
 describe('when Steam refuses the request outright', () => {
 	/*
-	 * A non-200 is Steam declining to act: rate limit, expired token, malformed
-	 * request. Nothing rotated. Reporting that as "your authenticator has
-	 * probably been replaced, do not close this window" is false, and frightening
-	 * in a way that invites exactly the wrong reaction.
+	 * An application-level EResult is Steam declining to act. HTTP status alone
+	 * is not enough: a gateway can answer after the irreversible request ran.
 	 */
 	it('does not claim the authenticator was replaced', async () => {
 		const h = harness({
 			continueThrows: true,
 			continueError: new TransferApiError(
 				'Steam is rate-limiting these requests. Wait several minutes before asking again.',
-				429
+				429,
+				true
 			)
 		});
 		await readyToSubmit(h);
@@ -410,11 +538,24 @@ describe('when Steam refuses the request outright', () => {
 	it('holds nothing, because nothing was issued', async () => {
 		const h = harness({
 			continueThrows: true,
-			continueError: new TransferApiError('Steam refused the code (HTTP 401).', 401)
+			continueError: new TransferApiError('Steam refused the code (EResult 15).', 401, true)
 		});
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow();
 		expect(h.service.hasUnsaved()).toBe(false);
+		expect(h.service.awaiting()).toBeUndefined();
+	});
+
+	it('preserves a replacement token even when its success bit contradicts it', async () => {
+		const h = harness({
+			continueResult: { success: false, replacementToken: REPLACEMENT }
+		});
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).resolves.toMatchObject({
+			steamId64: STEAM_ID,
+			revocationCode: REPLACEMENT.revocationCode
+		});
+		expect(h.stored).toHaveLength(1);
 		expect(h.service.awaiting()).toBeUndefined();
 	});
 });
@@ -460,8 +601,27 @@ describe('when the vault takes it but does not give it back', () => {
 	it('refuses to call a bad read-back a success', async () => {
 		const h = harness({ readsBackWrong: true });
 		await readyToSubmit(h);
-		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/does not read back/);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/different authenticator/);
 		expect(h.service.hasUnsaved()).toBe(true);
+	});
+
+	it.each([
+		['serialNumber', 'serial-once'],
+		['tokenGid', 'gid-once'],
+		['uri', 'otpauth://totp/Steam:trader?secret=ONCE'],
+		['secret1', 'c2VjcmV0LW9uY2U=']
+	] as const)('does not clear recovery when read-back drops issued %s', async (field, value) => {
+		const h = harness({
+			dropOnRead: field,
+			continueResult: {
+				success: true,
+				replacementToken: { ...REPLACEMENT, [field]: value }
+			}
+		});
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/different authenticator/i);
+		expect(h.service.awaiting()).toBe('persist');
+		expect(h.service.hasDurableWorkflow()).toBe(true);
 	});
 });
 
@@ -486,6 +646,18 @@ describe('what it refuses before touching Steam', () => {
 		});
 		await readyToSubmit(h);
 		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/no login secret/);
+		expect(h.service.awaiting()).toBe('unreadable');
+	});
+
+	it.each([
+		['an absent success field', { replacementToken: {} }],
+		['a contradictory false field', { success: false, replacementToken: { steamId64: STEAM_ID } }]
+	] as const)('keeps %s with an incomplete token indeterminate', async (_label, result) => {
+		const h = harness({ continueResult: result });
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/incomplete replacement/i);
+		expect(h.service.awaiting()).toBe('unanswered');
+		expect(h.stored).toEqual([]);
 	});
 
 	it('rejects an empty code without spending anything', async () => {
@@ -537,7 +709,9 @@ describe('what a lock does to a transfer', () => {
 		await h.service.completeTransfer('12345').catch(() => undefined);
 
 		expect(h.service.awaiting()).toBe('persist');
-		expect(h.service.forgetIfIdle()).toBe(false);
+		// The plaintext copy can now be dropped because its encrypted workflow is
+		// durable; only the recoverable status survives the lock.
+		expect(h.service.forgetIfIdle()).toBe(true);
 		// Unchanged by the attempt, so a second lock cannot erode it either.
 		expect(h.service.awaiting()).toBe('persist');
 		expect(h.service.hasUnsaved()).toBe(true);
@@ -608,7 +782,7 @@ describe('holding on to a transfer that is mid-flight', () => {
 		await h.service.completeTransfer('12345').catch(() => undefined);
 
 		await expect(h.service.authenticate('someone-else', 'pw', 'QK4TX')).rejects.toThrow(
-			/has not finished/
+			/unresolved safety record/
 		);
 	});
 
@@ -618,7 +792,7 @@ describe('holding on to a transfer that is mid-flight', () => {
 		await h.service.completeTransfer('12345').catch(() => undefined);
 
 		await expect(h.service.authenticate('someone-else', 'pw', 'QK4TX')).rejects.toThrow(
-			/has not finished/
+			/unresolved safety record/
 		);
 	});
 
@@ -693,6 +867,22 @@ describe('when the connection dies before Steam answers', () => {
 		await h.service.completeTransfer('12345').catch(() => undefined);
 
 		expect(h.recoveryWrites).toHaveLength(0);
+	});
+});
+
+describe('when an HTTP reply is present but not a conclusive Steam result', () => {
+	it('keeps the outcome indeterminate even though response bytes arrived', async () => {
+		const h = harness({
+			continueThrows: true,
+			rawReply: Buffer.from('<html>temporary error</html>'),
+			continueError: new TransferApiError(
+				'Steam returned HTTP 200, but its transfer result could not be read conclusively.',
+				200
+			)
+		});
+		await readyToSubmit(h);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/cannot tell/i);
+		expect(h.service.awaiting()).toBe('unanswered');
 	});
 });
 
@@ -846,13 +1036,14 @@ describe('an unanswered submission stays visible', () => {
 	});
 
 	it('is cleared when the user says they have checked', async () => {
-		// Cancel is allowed here — nothing is held — and is how the user discharges
-		// it. Without that the warning would be permanent.
+		// The exact answer, not a generic cancel, discharges the durable attempt.
 		const h = lost();
 		await readyToSubmit(h);
 		await h.service.completeTransfer('12345').catch(() => undefined);
 
-		h.service.cancel();
+		const recovery = h.service.recovery();
+		expect(recovery).toBeDefined();
+		await h.service.resolve(recovery!.attemptId, 'notReplaced');
 
 		expect(h.service.awaiting()).toBeUndefined();
 		expect(h.service.current()).toBeUndefined();
@@ -916,7 +1107,9 @@ describe('resubmitting while something is held', () => {
 		await readyToSubmit(h);
 		await h.service.completeTransfer('12345').catch(() => undefined);
 
-		await expect(h.service.completeTransfer('12345')).rejects.toThrow(/already replaced/i);
+		await expect(h.service.completeTransfer('12345')).rejects.toThrow(
+			/unresolved outcome or an unsaved replacement/i
+		);
 		expect(h.service.hasUnsaved()).toBe(true);
 	});
 
@@ -1038,7 +1231,7 @@ describe('a second sign-in cannot interleave with an unfinished transfer', () =>
 		releaseSignIn?.();
 
 		await expect(signingIn).resolves.toMatchObject({
-			message: expect.stringMatching(/has not been dealt with|has not finished/i)
+			message: expect.stringMatching(/unresolved safety record/i)
 		});
 	});
 

@@ -65,6 +65,12 @@ const record = vi.hoisted(() => ({
 	views: [] as { options: ViewOptions; loaded: string[] }[],
 	/** The window-open handlers tabs installed, so the popup path can be driven. */
 	windowOpenHandlers: [] as WindowOpenHandler[],
+	/** Native-window options and explicit reveals observed by the Electron fake. */
+	nativeWindows: [] as {
+		options: Record<string, unknown>;
+		shown: number;
+		closed: boolean;
+	}[],
 	/**
 	 * Preloads registered on a *session*. Electron offers this as well, and it
 	 * reaches every view in the partition without appearing in any construction.
@@ -184,10 +190,15 @@ vi.mock('electron', () => {
 	}
 
 	class BaseWindow {
+		private readonly recorded: (typeof record.nativeWindows)[number];
 		readonly contentView = {
 			addChildView: () => undefined,
 			removeChildView: () => undefined
 		};
+		constructor(options: Record<string, unknown>) {
+			this.recorded = { options: { ...options }, shown: 0, closed: false };
+			record.nativeWindows.push(this.recorded);
+		}
 		on(): this {
 			return this;
 		}
@@ -195,15 +206,20 @@ vi.mock('electron', () => {
 			return { x: 0, y: 0, width: 1280, height: 860 };
 		}
 		isDestroyed(): boolean {
-			return false;
+			return this.recorded.closed;
 		}
 		isMinimized(): boolean {
 			return false;
 		}
 		restore(): void {}
 		focus(): void {}
+		show(): void {
+			this.recorded.shown += 1;
+		}
 		setTitle(): void {}
-		close(): void {}
+		close(): void {
+			this.recorded.closed = true;
+		}
 	}
 
 	record.pendingContents = (): unknown => new FakeContents([], 'persist:pending-popup');
@@ -234,6 +250,7 @@ function openWindow(): { toolbar: { options: ViewOptions } | undefined; pages: V
 	record.views.length = 0;
 	record.windowOpenHandlers.length = 0;
 	record.sessionPreloads.length = 0;
+	record.nativeWindows.length = 0;
 
 	const handle = electronBrowserHost.createWindow({
 		width: 1280,
@@ -569,11 +586,13 @@ describe('the Electron adapter for the in-app browser', () => {
 		);
 	});
 
-	it('refuses to let a caller replace that handler', () => {
-		// The port still has `setWindowOpenHandler`, and honouring it would let a
-		// page's request escape into a chromeless window.
-		const exposed = ADAPTER.slice(ADAPTER.indexOf('setWindowOpenHandler: ()'));
+	it('lets a caller refuse a popup without replacing the tab-strip handler', () => {
+		const exposed = ADAPTER.slice(ADAPTER.indexOf('setWindowOpenHandler: (handler)'));
+		expect(exposed.slice(0, 400)).toMatch(/windowOpenPolicy = handler/);
 		expect(exposed.slice(0, 400)).not.toMatch(/webContents\.setWindowOpenHandler/);
+
+		const installed = ADAPTER.slice(ADAPTER.indexOf('setWindowOpenHandler((details)'));
+		expect(installed.slice(0, 500)).toMatch(/windowOpenPolicy/);
 	});
 
 	/*
@@ -604,6 +623,38 @@ describe('the Electron adapter for the in-app browser', () => {
 		expect(ADAPTER, 'a BrowserWindow takes its title from the document').not.toMatch(
 			/new BrowserWindow\(/
 		);
+	});
+
+	it('passes hidden creation through to Electron and reveals only on an explicit call', () => {
+		record.nativeWindows.length = 0;
+		const handle = electronBrowserHost.createWindow({
+			width: 1280,
+			height: 860,
+			title: 'unjudged landing',
+			partition: 'browser-hidden-test',
+			userAgent: 'test',
+			show: false
+		});
+
+		const native = record.nativeWindows.at(-1);
+		expect(native?.options.show).toBe(false);
+		expect(native?.shown).toBe(0);
+
+		handle.show();
+		expect(native?.shown).toBe(1);
+	});
+
+	it('preserves visible-by-default semantics for direct host consumers', () => {
+		record.nativeWindows.length = 0;
+		electronBrowserHost.createWindow({
+			width: 800,
+			height: 600,
+			title: 'direct host user',
+			partition: 'browser-visible-test',
+			userAgent: 'test'
+		});
+
+		expect(record.nativeWindows.at(-1)?.options.show).toBe(true);
 	});
 
 	/*

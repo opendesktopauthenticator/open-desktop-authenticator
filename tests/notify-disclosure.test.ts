@@ -79,7 +79,7 @@ describe('opening confirmations from a notification', () => {
 	const body = (() => {
 		const start = source.indexOf('const openConfirmationsFor = useCallback(');
 		expect(start, 'openConfirmationsFor no longer exists').toBeGreaterThan(-1);
-		const end = source.indexOf('[accounts]', start);
+		const end = source.indexOf('const confirmationClickClaims', start);
 		expect(end, 'openConfirmationsFor changed shape; this test needs rewriting').toBeGreaterThan(
 			start
 		);
@@ -88,6 +88,25 @@ describe('opening confirmations from a notification', () => {
 
 	it('looks the account up rather than trusting the id', () => {
 		expect(body).toContain('confirmationsTargetFor(accounts, steamId64)');
+	});
+
+	it('refuses to bypass any child screen navigation lock', () => {
+		expect(body).toContain('!notificationTakeoverReady');
+		expect(source).toContain('overlayOpen,');
+		expect(source).toContain('signInOpen: browserSignIn !== undefined');
+		expect(source).toContain('browserOpenContinuation !== undefined');
+		expect(source).toContain('accountListBusy: accountListOperationBusy(');
+		expect(body).toContain('recoveryBackupAccounts.current.size > 0');
+		expect(source).toContain('notificationTakeoverReady');
+	});
+
+	it('routes an already-open account through a fresh list before acknowledgement', () => {
+		expect(source).toContain('notificationRefreshesOpenAccount(');
+		expect(source).toContain('onNotificationRefresh={completeNotificationRefresh}');
+		expect(source).toContain('completeNotificationRefresh');
+		expect(body.indexOf('!notificationTakeoverReady')).toBeLessThan(
+			body.indexOf('setConfirmingFor(account)')
+		);
 	});
 
 	it('clears the screens that sit above confirmations in the view stack', () => {
@@ -114,6 +133,56 @@ describe('opening confirmations from a notification', () => {
 		expect(target).toBeGreaterThan(body.indexOf('setRemovingFor(undefined)'));
 	});
 
+	it('routes both IPC delivery paths through the monotonic click claim', () => {
+		const file = ts.createSourceFile(
+			'App.tsx',
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TSX
+		);
+		const effects: Array<{ fast: boolean; slow: boolean; delegates: number }> = [];
+		const visit = (node: ts.Node): void => {
+			if (
+				ts.isCallExpression(node) &&
+				ts.isIdentifier(node.expression) &&
+				node.expression.text === 'useEffect'
+			) {
+				let delegates = 0;
+				const countDelegates = (child: ts.Node): void => {
+					if (
+						ts.isCallExpression(child) &&
+						ts.isPropertyAccessExpression(child.expression) &&
+						child.expression.getText() === 'processConfirmationClickRef.current'
+					) {
+						delegates += 1;
+					}
+					ts.forEachChild(child, countDelegates);
+				};
+				countDelegates(node);
+				const text = node.getText();
+				if (text.includes('onOpenConfirmations') || text.includes('pending.steamId64')) {
+					effects.push({
+						fast: text.includes('onOpenConfirmations'),
+						slow: text.includes('pending.steamId64'),
+						delegates
+					});
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(file);
+
+		expect(effects.filter((effect) => effect.fast)).toEqual([
+			{ fast: true, slow: false, delegates: 1 }
+		]);
+		expect(effects.filter((effect) => effect.slow)).toEqual([
+			{ fast: false, slow: true, delegates: 1 }
+		]);
+		expect(source).toContain('const processConfirmationClick = useCallback(');
+		expect(source).toContain('claimConfirmationClick(claims, click.token');
+	});
+
 	/*
 	 * The collection path is what makes a lock survivable, and it is gated on
 	 * there being an account list to navigate within — asking a beat too early
@@ -126,9 +195,9 @@ describe('opening confirmations from a notification', () => {
 	 * backwards depends on how much prose happens to sit above the call, and an
 	 * unbounded slice forwards is not an assertion about this effect at all. So the
 	 * slice runs from the `useEffect` that owns the call to that effect's own
-	 * dependency array, and the guard has to be found *before* the call inside it —
-	 * which is the whole point, since a check that runs inside the `.then` runs
-	 * after main has already handed the intent over and cleared it.
+	 * dependency array, and the guard has to be found *before* the call inside it.
+	 * Peeking is intentionally non-destructive; this ordering prevents a useless
+	 * round trip before the renderer has anything it can navigate to.
 	 *
 	 * Still read from the source rather than rendered: effects do not run under
 	 * `renderToStaticMarkup`, which is the only rendering this suite has.
@@ -182,7 +251,7 @@ describe('opening confirmations from a notification', () => {
 		/*
 		 * **Comments stripped, because a substring search cannot tell code from
 		 * prose.** Remove the guard and leave a sentence behind — "previously gated
-		 * on accounts.length === 0" — and an index check on the raw text is still
+		 * on confirmationAccounts.length === 0" — and an index check on the raw text is still
 		 * satisfied by the sentence.
 		 */
 		const strip = (text: string): string =>
@@ -201,7 +270,7 @@ describe('opening confirmations from a notification', () => {
 	 * and where a *substring* sits is not where control flow short-circuits. Two
 	 * escapes were measured on the text version, both leaving the whole suite
 	 * green while the click was consumed and lost: hoisting the condition to
-	 * `const noAccountsYet = accounts.length === 0;` above the call and consuming
+	 * `const noAccountsYet = confirmationAccounts.length === 0;` above the call and consuming
 	 * it inside the callback, and — once the literal `accounts` was forbidden
 	 * after the call — the same hoist, because `noAccountsYet` does not contain
 	 * the word.
@@ -259,16 +328,15 @@ describe('opening confirmations from a notification', () => {
 	})();
 
 	it('waits for an account list before collecting a pending click', () => {
-		const guard = collection.body.indexOf('accounts.length === 0');
+		const guard = collection.body.indexOf('confirmationAccounts.length === 0');
 		expect(
 			guard,
 			'the effect collects the pending click without waiting for an account list'
 		).toBeGreaterThan(-1);
 		expect(
 			guard,
-			'the account list is checked only after the click has been taken, so main clears the ' +
-				'intent, the renderer finds nobody to navigate to, and a click made while the vault ' +
-				'was locked is lost'
+			'the account list is checked only after IPC, so the renderer asks for a click before ' +
+				'it has anything it can navigate to'
 		).toBeLessThan(collection.body.indexOf('.takePendingConfirmations()'));
 	});
 
@@ -277,11 +345,9 @@ describe('opening confirmations from a notification', () => {
 	 *
 	 * The index check above is a proxy and both of its escapes were measured on
 	 * the real file, each leaving 97 files and 2248 tests green while a click made
-	 * during a lock was consumed and thrown away. This is the property itself: the
-	 * `.then` may not read the account list, and it may not read anything the
-	 * effect worked out from the account list either — because by the time it
-	 * runs, main has handed the intent over and cleared it, and returning without
-	 * navigating loses it for good.
+	 * during a lock was consumed and thrown away under the former destructive-read
+	 * protocol. Peeking is safe now; this still pins the simpler control flow: the
+	 * decision to ask belongs before IPC, not in its asynchronous answer.
 	 */
 	it('decides before it asks, not inside the callback', () => {
 		expect(
@@ -311,18 +377,17 @@ describe('opening confirmations from a notification', () => {
 	 * effect once a second for the life of an unlocked session, asking main for a
 	 * pending click each time.
 	 *
-	 * That churn *lost* clicks. `takePendingConfirmations` is read-and-clear, so
-	 * a call whose round trip straddled a poll tick had already emptied the slot
-	 * in main by the time the teardown set `cancelled` — and the result was then
-	 * dropped, with nothing anywhere reporting it. A count is a number: it
-	 * changes when the account list changes, which is the only thing this effect
-	 * waits for.
+	 * Peeking is non-destructive now, so this churn no longer loses a click. It
+	 * still creates and cancels an IPC round trip every second for no state change.
+	 * A stable membership signature changes when the available Steam IDs change,
+	 * including a same-length replacement, but not when polling returns a fresh
+	 * array containing the same accounts.
 	 */
 	it('does not re-run on every status poll', () => {
 		expect(
 			collection.deps,
 			'the effect depends on a callback rebuilt every second, so it asks main for a pending ' +
-				'click once a second — and loses one whose round trip straddles a tick'
+				'click once a second for no state change'
 		).not.toContain('openConfirmationsFor');
 	});
 
@@ -333,7 +398,18 @@ describe('opening confirmations from a notification', () => {
 		expect(
 			collection.deps,
 			'the effect does not depend on the account list, so it never re-runs once the accounts land'
-		).toContain('accounts.length');
+		).toContain('confirmationAccounts');
+	});
+
+	it('does not confuse equal list lengths with equal membership', () => {
+		expect(
+			collection.deps,
+			'the effect watches only the number of accounts, so replacing A with B at the same ' +
+				"length leaves B's retained click asleep"
+		).not.toContain('accounts.length');
+		expect(source).toContain(
+			'const confirmationAccounts = confirmationAccountMembership(accounts)'
+		);
 	});
 });
 

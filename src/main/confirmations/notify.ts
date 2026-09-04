@@ -49,7 +49,12 @@ export interface ToastHost {
 	 * `void` still means delivered, so a test host that pushes to an array stays
 	 * a valid host and a throwing one is still caught.
 	 */
-	show(options: { title: string; body: string; onClick?: () => void }): void | Promise<boolean>;
+	show(options: {
+		steamId64: string;
+		title: string;
+		body: string;
+		onClick?: () => void;
+	}): void | Promise<boolean>;
 }
 
 export interface ConfirmationNotifierOptions {
@@ -112,18 +117,21 @@ interface AccountNotifyState {
 	 */
 	lastUnreadable: number;
 
+	/** The current unreadable state that no delivered toast has covered yet. */
+	unreadableDue: { revision: number; count: number } | undefined;
+	/** Delivery attempt -> unreadable revision carried by that toast. */
+	unreadableInFlight: Map<number, number>;
 	/**
-	 * Which delivery attempt last moved `lastUnreadable`, and which last set
-	 * `toldSignInNeeded`.
+	 * Identity of one continuous non-zero unreadable episode.
 	 *
-	 * Both were rolled back by comparing the *value* — "is it still the number I
-	 * wrote" — or by not checking at all. A later poll that happens to record the
-	 * same count reads as this attempt's own work and gets undone; a later
-	 * sign-in notice that was delivered has its flag cleared by an earlier one
-	 * that was not, and the user is told twice. `seen` is keyed by attempt for
-	 * exactly this reason and these two were not.
+	 * A delivery from before the count reached zero may not cover an identical
+	 * count that appeared afterwards: those are different events even though the
+	 * number is the same.
 	 */
-	unreadableBy: number;
+	unreadableEpoch: number;
+	/** Highest unreadable count successfully shown in the current episode. */
+	unreadableDelivered: number;
+	/** Which delivery attempt last set `toldSignInNeeded`. */
 	signInBy: number;
 }
 
@@ -144,8 +152,10 @@ const MAX_STEAM_TEXT = 60;
  * Left in, these can reorder how a body renders — so the visible text of a
  * toast would not be the text this code composed.
  */
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2066-\u2069]/g;
+/* eslint-disable no-control-regex -- this is the set the sanitizer exists to remove. */
+const CONTROL_CHARACTERS =
+	/[\u0000-\u001F\u007F-\u009F\u061C\u200B-\u200F\u2028-\u202E\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
 /**
  * Cap and strip a string this application did not author.
@@ -159,7 +169,10 @@ const CONTROL_CHARACTERS = /[\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202
  */
 function safeSteamText(value: string): string {
 	const stripped = value.replace(CONTROL_CHARACTERS, '').trim();
-	return stripped.length > MAX_STEAM_TEXT ? `${stripped.slice(0, MAX_STEAM_TEXT - 1)}…` : stripped;
+	const characters = Array.from(stripped);
+	return characters.length > MAX_STEAM_TEXT
+		? `${characters.slice(0, MAX_STEAM_TEXT - 1).join('')}…`
+		: stripped;
 }
 
 /** `2 confirmations`, `1 confirmation`. */
@@ -279,6 +292,8 @@ export class ConfirmationNotifier {
 	 * counter was not, which is the same defect written twice in one file.
 	 */
 	private deliveries = 0;
+	/** Global so a callback surviving `forget()` cannot match a new account state. */
+	private unreadableChanges = 0;
 
 	constructor(options: ConfirmationNotifierOptions) {
 		this.host = options.host;
@@ -323,7 +338,8 @@ export class ConfirmationNotifier {
 		 * it. A caller that committed optimistically has it undone the moment the
 		 * failure is known, and the next poll says the thing again.
 		 */
-		onUndelivered: () => void = () => undefined
+		onUndelivered: () => void = () => undefined,
+		onDelivered: () => void = () => undefined
 	): void {
 		// The title is sanitised here rather than at each call site, for the same
 		// reason the click is attached here: four call sites is three chances to
@@ -331,6 +347,7 @@ export class ConfirmationNotifier {
 		let outcome: void | Promise<boolean>;
 		try {
 			outcome = this.host.show({
+				steamId64,
 				title: safeSteamText(title),
 				body,
 				onClick: () => this.onActivate(steamId64)
@@ -350,11 +367,14 @@ export class ConfirmationNotifier {
 		 */
 		const settled = outcome as Promise<boolean> | undefined;
 		if (typeof settled?.then !== 'function') {
+			onDelivered();
 			return;
 		}
 		void settled.then(
 			(delivered) => {
-				if (!delivered) {
+				if (delivered) {
+					onDelivered();
+				} else {
 					onUndelivered();
 				}
 			},
@@ -393,11 +413,17 @@ export class ConfirmationNotifier {
 		//    account takeover would show nothing at all.
 		if (!existing?.seeded) {
 			const critical = awaiting.filter((entry) => entry.securityCritical);
-			const seedState = {
+			const unreadableEpoch = ++this.unreadableChanges;
+			const unreadableDue =
+				unreadable > 0 ? { revision: ++this.unreadableChanges, count: unreadable } : undefined;
+			const seedState: AccountNotifyState = {
 				seeded: true,
 				seen: new Map<string, number>([...ids].map((id) => [id, 0])),
 				toldSignInNeeded: false,
-				unreadableBy: 0,
+				unreadableDue,
+				unreadableInFlight: new Map(),
+				unreadableEpoch,
+				unreadableDelivered: 0,
 				signInBy: 0,
 				// What was already there is the baseline, not news — the same
 				// reasoning as seeding `seen`. Recording 0 here instead would make
@@ -417,41 +443,54 @@ export class ConfirmationNotifier {
 				for (const entry of critical) {
 					seedState.seen.set(entry.id, attempt);
 				}
-				seedState.unreadableBy = attempt;
-				this.toast(steamId64, accountName, composeBody(detail, critical, unreadable), () => {
-					/*
-					 * **The seed stands; the announcement does not.**
-					 *
-					 * Staying seeded is right — the baseline was established, and
-					 * re-seeding would announce the whole backlog next time. But a
-					 * critical confirmation only reached `seen` as part of that
-					 * baseline, and it was supposed to be announced *despite* the
-					 * seeding. Left in, it would never be mentioned again: an account
-					 * takeover attempt, silently swallowed by a failed toast.
-					 */
-					const seeded = this.stateFor(steamId64);
-					if (!seeded) {
-						return;
-					}
-					for (const entry of critical) {
-						// Only if this attempt is still the one that marked it. A later
-						// poll re-announcing the same confirmation successfully owns it
-						// now, and deleting it here would show it to the user twice.
-						if (seeded.seen.get(entry.id) === attempt) {
-							seeded.seen.delete(entry.id);
+				const unreadableRevision = seedState.unreadableDue?.revision;
+				if (unreadableRevision !== undefined) {
+					seedState.unreadableInFlight.set(attempt, unreadableRevision);
+				}
+				this.toast(
+					steamId64,
+					accountName,
+					composeBody(detail, critical, unreadable),
+					() => {
+						/*
+						 * **The seed stands; the announcement does not.** Staying seeded
+						 * avoids announcing the whole backlog. Only the critical ids this
+						 * failed attempt claimed become new again.
+						 */
+						const seeded = this.stateFor(steamId64);
+						if (!seeded) return;
+						for (const entry of critical) {
+							if (seeded.seen.get(entry.id) === attempt) {
+								seeded.seen.delete(entry.id);
+							}
 						}
+						seeded.unreadableInFlight.delete(attempt);
+					},
+					() => {
+						const seeded = this.stateFor(steamId64);
+						if (!seeded) return;
+						if (
+							unreadableRevision !== undefined &&
+							seeded.unreadableInFlight.get(attempt) === unreadableRevision &&
+							seeded.unreadableEpoch === unreadableEpoch
+						) {
+							// A delivery finishing after the count fell covers the state the
+							// user has now, not a permanent high-water mark from the past.
+							// Otherwise 5 -> 2 -> 4 is suppressed after the user saw 5.
+							seeded.unreadableDelivered = Math.max(
+								seeded.unreadableDelivered,
+								Math.min(unreadable, seeded.lastUnreadable)
+							);
+							if (
+								seeded.unreadableDue !== undefined &&
+								seeded.unreadableDelivered >= seeded.unreadableDue.count
+							) {
+								seeded.unreadableDue = undefined;
+							}
+						}
+						seeded.unreadableInFlight.delete(attempt);
 					}
-					/*
-					 * And the count only if nothing has moved it since. Setting 0
-					 * unconditionally overwrote whatever a later poll had recorded,
-					 * which is how a rise this poll knew nothing about stopped being a
-					 * rise and was never announced.
-					 */
-					if (seeded.unreadableBy === attempt) {
-						seeded.lastUnreadable = 0;
-						seeded.unreadableBy = 0;
-					}
-				});
+				);
 			}
 			return;
 		}
@@ -471,10 +510,6 @@ export class ConfirmationNotifier {
 
 		// 4. What is actually new.
 		const fresh = awaiting.filter((entry) => !existing.seen.has(entry.id));
-		const attempt = ++this.deliveries;
-		for (const entry of fresh) {
-			existing.seen.set(entry.id, attempt);
-		}
 
 		// 5. **A rise, not a presence.** `unreadable > 0` describes a state that
 		//    persists until somebody looks; announcing it per poll is an alarm,
@@ -485,74 +520,107 @@ export class ConfirmationNotifier {
 		//    a poll that returns to zero would never be recorded, so a later
 		//    reappearance would compare against the old high-water mark and be
 		//    swallowed for good.
-		const newlyUnreadable = unreadable > existing.lastUnreadable;
-		/** What was announced before this poll, so a failed toast can restore it. */
-		const previouslyUnreadable = existing.lastUnreadable;
-		existing.lastUnreadable = unreadable;
+		if (unreadable !== existing.lastUnreadable) {
+			if (unreadable > existing.lastUnreadable) {
+				if (unreadable > existing.unreadableDelivered) {
+					existing.unreadableDue = {
+						revision: ++this.unreadableChanges,
+						count: unreadable
+					};
+				}
+			} else if (unreadable === 0) {
+				existing.unreadableDue = undefined;
+				existing.unreadableDelivered = 0;
+				existing.unreadableEpoch = ++this.unreadableChanges;
+			} else {
+				// A delivered count only covers the current level. Keeping 5 as a
+				// permanent high-water mark after a fall to 2 suppresses a genuine rise
+				// to 4. Clamping retains the useful fact that the remaining two were
+				// already represented in the earlier alert while letting the next rise
+				// become news again.
+				existing.unreadableDelivered = Math.min(existing.unreadableDelivered, unreadable);
+				if (existing.unreadableDue !== undefined) {
+					// A drop is not news, but it also is not proof that an alert which
+					// never reached the OS may be forgotten. Keep the same revision so an
+					// already in-flight toast can still satisfy it.
+					existing.unreadableDue = { ...existing.unreadableDue, count: unreadable };
+				}
+			}
+			existing.lastUnreadable = unreadable;
+			if (
+				existing.unreadableDue !== undefined &&
+				existing.unreadableDelivered >= existing.unreadableDue.count
+			) {
+				existing.unreadableDue = undefined;
+			}
+		}
+
+		const unreadableClaim = existing.unreadableDue;
+		const unreadableAttemptNeeded =
+			unreadableClaim !== undefined &&
+			![...existing.unreadableInFlight.values()].includes(unreadableClaim.revision);
 
 		// 6. One toast, not two. A poll bringing both a new confirmation and an
 		//    unparseable one is still one thing happening.
-		if (fresh.length === 0 && !newlyUnreadable) {
+		if (fresh.length === 0 && !unreadableAttemptNeeded) {
 			return;
 		}
 
-		/*
-		 * **Claimed only by a poll that is about to say something.**
-		 *
-		 * This was stamped above, beside the assignment, so every quiet poll took
-		 * ownership of the marker — and a quiet poll is the common case, one every
-		 * fifteen seconds. An attempt whose toast was still in flight then found the
-		 * marker owned by a poll that had announced nothing, could not roll it back,
-		 * and the rise it had failed to report was recorded as reported. Permanently:
-		 * nothing lowers the mark again.
-		 *
-		 * The value still moves on every poll, which is what stops an unchanged
-		 * count re-announcing itself. Only the claim is reserved for the attempt
-		 * that actually tries to deliver.
-		 */
-		existing.unreadableBy = attempt;
-		this.toast(steamId64, accountName, composeBody(detail, fresh, unreadable), () => {
-			/*
-			 * **Nothing was said, so nothing may be marked as said.**
-			 *
-			 * Step 4 put these ids in `seen` and step 5 raised the unreadable
-			 * high-water mark, both meaning "announced". Leaving them after a toast
-			 * that never appeared suppresses those confirmations for the rest of
-			 * the session; undoing them makes the next poll try again, which is the
-			 * only useful response to an OS notification failing.
-			 */
-			for (const entry of fresh) {
+		const attempt = ++this.deliveries;
+		const unreadableEpoch = existing.unreadableEpoch;
+		for (const entry of fresh) {
+			existing.seen.set(entry.id, attempt);
+		}
+		if (unreadableClaim !== undefined) {
+			existing.unreadableInFlight.set(attempt, unreadableClaim.revision);
+		}
+		this.toast(
+			steamId64,
+			accountName,
+			composeBody(detail, fresh, unreadable),
+			() => {
 				/*
-				 * Only what this attempt marked, and only while it is still marked by
-				 * this attempt. Deleting unconditionally undid a *later* poll's
-				 * successful announcement of the same confirmation, and the poll after
-				 * that showed it to the user a second time.
+				 * **Nothing was said, so nothing may be marked as said.**
+				 *
+				 * Step 4 put these ids in `seen` and step 5 raised the unreadable
+				 * high-water mark, both meaning "announced". Leaving them after a toast
+				 * that never appeared suppresses those confirmations for the rest of
+				 * the session; undoing them makes the next poll try again, which is the
+				 * only useful response to an OS notification failing.
 				 */
-				if (existing.seen.get(entry.id) === attempt) {
-					existing.seen.delete(entry.id);
+				for (const entry of fresh) {
+					/*
+					 * Only what this attempt marked, and only while it is still marked by
+					 * this attempt. Deleting unconditionally undid a *later* poll's
+					 * successful announcement of the same confirmation, and the poll after
+					 * that showed it to the user a second time.
+					 */
+					if (existing.seen.get(entry.id) === attempt) {
+						existing.seen.delete(entry.id);
+					}
 				}
+				existing.unreadableInFlight.delete(attempt);
+			},
+			() => {
+				if (
+					unreadableClaim !== undefined &&
+					existing.unreadableInFlight.get(attempt) === unreadableClaim.revision &&
+					existing.unreadableEpoch === unreadableEpoch
+				) {
+					existing.unreadableDelivered = Math.max(
+						existing.unreadableDelivered,
+						Math.min(unreadableClaim.count, existing.lastUnreadable)
+					);
+					if (
+						existing.unreadableDue !== undefined &&
+						existing.unreadableDelivered >= existing.unreadableDue.count
+					) {
+						existing.unreadableDue = undefined;
+					}
+				}
+				existing.unreadableInFlight.delete(attempt);
 			}
-			/*
-			 * The high-water mark likewise, and only if this attempt's value is
-			 * still the one standing. Restoring it blind put back a number from
-			 * before a later poll had run, so a rise that poll had already announced
-			 * looked new again — or one it recorded looked already-said and was
-			 * swallowed.
-			 */
-			/*
-			 * **By ownership, not by value.** Comparing the number matched whenever a
-			 * later poll happened to record the same count — a count that has not
-			 * moved is the ordinary case, not a rare one — and this then rolled that
-			 * poll's work back to a figure from before it ran. Where the earlier
-			 * figure was the higher of the two, that *raised* the mark, so the next
-			 * genuine rise looked like something already said and was never
-			 * announced.
-			 */
-			if (existing.unreadableBy === attempt) {
-				existing.lastUnreadable = previouslyUnreadable;
-				existing.unreadableBy = 0;
-			}
-		});
+		);
 	}
 
 	/**
@@ -597,7 +665,10 @@ export class ConfirmationNotifier {
 			this.state.set(steamId64, {
 				seeded: false,
 				seen: new Map(),
-				unreadableBy: 0,
+				unreadableDue: undefined,
+				unreadableInFlight: new Map(),
+				unreadableEpoch: ++this.unreadableChanges,
+				unreadableDelivered: 0,
 				signInBy: attempt,
 				toldSignInNeeded: true,
 				lastUnreadable: 0

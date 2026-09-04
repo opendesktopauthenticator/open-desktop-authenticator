@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { abandonPendingSignIns, claimSignInScreen, mayShowSignInPrompt } from '../src/renderer/App';
+import {
+	abandonPendingSignIns,
+	claimSignInScreen,
+	mayShowSignInPrompt,
+	supersedeBrowserSignInForOverlay
+} from '../src/renderer/App';
 import { accountSummary, type AccountSummary, type OpenBrowserResult } from '../src/shared/ipc';
 
 /**
@@ -158,6 +163,25 @@ describe('two browser opens in flight at once', () => {
  * not watch. Leaving the screen now abandons what that screen started.
  */
 describe('a browser open the user has navigated away from', () => {
+	it('is invalidated synchronously when an overlay takes the account list', () => {
+		const settle = claimSignInScreen();
+		const overlay = { current: false };
+		let heldPrompt = true;
+
+		supersedeBrowserSignInForOverlay(overlay, () => {
+			heldPrompt = false;
+		});
+
+		expect(overlay.current, 'the promise-settlement guard still sees the old screen').toBe(true);
+		expect(heldPrompt, 'the prompt already in state was merely hidden and can resurface').toBe(
+			false
+		);
+		expect(
+			settle(A, 'direct', NEEDS_SIGN_IN),
+			'a browser answer that belonged to the covered account list still installed behind the overlay'
+		).toBeUndefined();
+	});
+
 	it('cannot put its sign-in screen up afterwards', () => {
 		const settle = claimSignInScreen();
 
@@ -224,7 +248,11 @@ describe('whether a sign-in prompt may take the window', () => {
 	const PROMPT = { account: A, route: 'direct' as const };
 
 	it('may, on the screen the open was started from', () => {
-		expect(mayShowSignInPrompt(PROMPT, 'accounts')).toBe(true);
+		expect(mayShowSignInPrompt(PROMPT, 'accounts', false)).toBe(true);
+	});
+
+	it('may not while an overlay covers that same accounts view', () => {
+		expect(mayShowSignInPrompt(PROMPT, 'accounts', true)).toBe(false);
 	});
 
 	it.each(['settings', 'import', 'activity', 'enroll', 'move', 'recover', 'about'])(

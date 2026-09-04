@@ -145,6 +145,13 @@ export const accountSummary = z.object({
 	/** Whether a revocation code is on file — not the code itself. */
 	hasRevocationCode: z.boolean(),
 	/**
+	 * The separate encrypted recovery file still needs local publication.
+	 *
+	 * Deliberately only the actionable state: its filename, generation and
+	 * authenticator fingerprint remain in the main process.
+	 */
+	recoveryBackup: z.enum(['pending', 'stale']).optional(),
+	/**
 	 * An irreversible operation on this account whose outcome was never
 	 * established, carried so the screens keep refusing to repeat it across a
 	 * close and a restart rather than for the life of a React component.
@@ -154,6 +161,14 @@ export const accountSummary = z.object({
 			kind: z.enum(['activate', 'deactivate']),
 			guidance: z.string(),
 			certain: z.boolean().optional(),
+			/** Opaque identity required when answering what this exact record means. */
+			operationToken: z.string().length(64).optional(),
+			/** The fingerprint proves the record names an older authenticator, so it may be discarded. */
+			stale: z.boolean().optional(),
+			/** Opaque identity of the exact stale record displayed. */
+			staleToken: z.string().length(64).optional(),
+			/** A legacy record has no identity, so it cannot safely be discarded or reconciled. */
+			unidentified: z.boolean().optional(),
 			at: z.string()
 		})
 		.optional(),
@@ -353,12 +368,27 @@ export const transferCompleteResponse = z.object({
 	steamId64: z.string(),
 	accountName: z.string(),
 	revocationCode: z.string(),
-	timeOffsetSeconds: z.number()
+	timeOffsetSeconds: z.number(),
+	/** Vault success with a retained local recovery-publication retry. */
+	recoveryWarning: z.string().optional()
 });
 
 /** The transfer in progress, if one is still live. */
 export const transferStatusResponse = z.object({
 	transfer: z.object({ steamId64: z.string(), accountName: z.string() }).optional(),
+	recovery: z
+		.object({
+			attemptId: z.string().uuid(),
+			state: z.enum(['sending', 'unanswered', 'unreadable', 'not-replaced', 'replacement']),
+			at: z.string(),
+			/** Exact replacement ciphertext is present, though this build cannot use it. */
+			retained: z.boolean(),
+			/** This exact recovery choice can delete or replace a proven backup-era row. */
+			requiresPassphrase: z.boolean().optional()
+		})
+		.optional(),
+	/** A malformed/newer durable record. A new transfer remains blocked. */
+	problem: z.string().optional(),
 	/**
 	 * The retry this transfer is waiting on, when it is waiting on one.
 	 *
@@ -368,14 +398,19 @@ export const transferStatusResponse = z.object({
 	 * destroyed. Steam had already rotated the authenticator by then, so what the
 	 * reload stranded was the only copy of the replacement.
 	 *
-	 * `persist` — decoded, and the vault refused it. Retrying storage works, and
-	 *   this is the only one of the three that can still be finished here.
+	 * `persist` — the decoded replacement still needs saving, or its exact stored
+	 *   row still needs verification and workflow cleanup. Retrying never contacts
+	 *   Steam.
 	 * `unanswered` — the request went out and nothing came back, so whether the
 	 *   authenticator was replaced is genuinely not known.
 	 * `unreadable` — Steam answered, so it rotated, and this build cannot use what
 	 *   it sent. A dead end: the account needs Steam Support.
+	 * `cleanup` — Steam provably did not replace the authenticator, but the local
+	 *   safety record could not be cleared; clearing it makes a later retry safe.
 	 */
-	awaiting: z.enum(['persist', 'unanswered', 'unreadable']).optional()
+	awaiting: z
+		.enum(['persist', 'unreadablePersist', 'unanswered', 'unreadable', 'cleanup'])
+		.optional()
 });
 
 export type TransferAuthenticated = z.infer<typeof transferAuthenticateResponse>;
@@ -399,7 +434,22 @@ export type TransferComplete = z.infer<typeof transferCompleteResponse>;
 const haltedOutcome = z.object({
 	state: z.literal('uncertain'),
 	guidance: z.string(),
-	certain: z.boolean().optional()
+	certain: z.boolean().optional(),
+	persisted: z.boolean().optional(),
+	/** The durable operation when an existing account is involved. */
+	kind: z.enum(['enroll', 'activate', 'deactivate']).optional(),
+	/** Main-process generated; never derived from an account name or used unchecked as a path. */
+	attemptId: z.string().uuid().optional(),
+	steamId64: z.string().optional(),
+	accountName: z.string().optional(),
+	/** Exact workflow state/recovery source for a successful reply that still needs saving. */
+	enrollmentState: z
+		.enum(['sending', 'unanswered', 'not-attached', 'attached', 'recoverable', 'unreadable'])
+		.optional(),
+	recovery: z.enum(['durable', 'memory']).optional(),
+	usable: z.boolean().optional(),
+	/** The exact issued authenticator is already stored; only workflow cleanup remains. */
+	stored: z.boolean().optional()
 });
 
 export const enrollBeginResponse = z.discriminatedUnion('state', [
@@ -409,10 +459,45 @@ export const enrollBeginResponse = z.discriminatedUnion('state', [
 		state: z.literal('enrolled'),
 		steamId64: z.string(),
 		accountName: z.string(),
+		hasRevocationCode: z.boolean().optional(),
 		/** Masked digits of the phone Steam is texting, when it says. */
-		phoneNumberHint: z.string().optional()
+		phoneNumberHint: z.string().optional(),
+		/** Vault success with a retained local recovery-publication retry. */
+		recoveryWarning: z.string().optional(),
+		recoveryAttemptId: z.string().uuid().optional(),
+		recoveryAt: z.string().optional()
 	})
 ]);
+
+export const enrollmentStatusResponse = z.object({
+	pending: z
+		.object({
+			attemptId: z.string().uuid(),
+			steamId64: z.string(),
+			accountName: z.string(),
+			state: z.enum([
+				'sending',
+				'unanswered',
+				'not-attached',
+				'attached',
+				'recoverable',
+				'unreadable'
+			]),
+			at: z.string(),
+			/** The account and its secrets are already in the vault; only cleanup remains. */
+			stored: z.boolean(),
+			/** This process or the durable state proves Steam attached the authenticator. */
+			certain: z.boolean().optional(),
+			/** The retained one-time keys pass the app's Base64 and 20-byte checks. */
+			usable: z.boolean().optional(),
+			/** Durable survives restart; memory survives only this process. */
+			recovery: z.enum(['durable', 'memory']).optional()
+		})
+		.optional(),
+	/** A malformed/newer durable record. Irreversible enrollment remains blocked. */
+	problem: z.string().optional()
+});
+export type EnrollmentStatus = z.infer<typeof enrollmentStatusResponse>;
 
 /**
  * What a recovery attempt produced.
@@ -605,7 +690,9 @@ export const importCommitResponse = z.object({
 			accountName: z.string(),
 			result: z.enum(['imported', 'replaced', 'skipped']),
 			/** Present whenever the result is `skipped`. */
-			reason: z.string().optional()
+			reason: z.string().optional(),
+			/** The vault commit succeeded, but its separate recovery publication did not. */
+			warning: z.string().optional()
 		})
 	)
 });
@@ -650,6 +737,15 @@ export const codeCopyResponse = z.object({
 	/** When the clipboard will be wiped, so the user can be told rather than surprised. */
 	clipboardClearsInSeconds: z.number()
 });
+
+/** The identity of one notification click, shared by push and recovery paths. */
+export const toastClick = z
+	.object({
+		steamId64: z.string(),
+		token: z.number().int().positive().safe()
+	})
+	.strict();
+export type ToastClick = z.infer<typeof toastClick>;
 
 /**
  * A pending confirmation, as the renderer may see it.
@@ -793,11 +889,14 @@ export const activityListResponse = z.object({
 	seq: z.number().int().min(0)
 });
 
+/** Maximum ids carried by one confirmation action IPC request. */
+export const CONFIRMATION_ACTION_BATCH_LIMIT = 100;
+
 export const confirmationsActRequest = z
 	.object({
 		steamId64: z.string(),
 		action: z.enum(['allow', 'cancel']),
-		ids: z.array(z.string()).min(1).max(100)
+		ids: z.array(z.string()).min(1).max(CONFIRMATION_ACTION_BATCH_LIMIT)
 	})
 	.strict();
 
@@ -849,10 +948,20 @@ export const IPC_CONTRACT = {
 		response: transferCompleteResponse
 	},
 	[CHANNELS.transferRetryPersist]: {
-		request: emptyRequest,
+		request: z.object({ passphrase: z.string().min(1).max(1024).optional() }).strict(),
 		response: transferCompleteResponse
 	},
 	[CHANNELS.transferStatus]: { request: emptyRequest, response: transferStatusResponse },
+	[CHANNELS.transferResolve]: {
+		request: z
+			.object({
+				attemptId: z.string().uuid(),
+				resolution: z.enum(['notReplaced', 'replaced', 'resolvedOutsideApp']),
+				passphrase: z.string().min(1).max(1024).optional()
+			})
+			.strict(),
+		response: okResponse
+	},
 	[CHANNELS.transferCancel]: { request: emptyRequest, response: z.object({}).strict() },
 
 	[CHANNELS.enrollBegin]: {
@@ -882,9 +991,20 @@ export const IPC_CONTRACT = {
 	[CHANNELS.enrollActivate]: {
 		request: z.object({ steamId64: z.string(), code: z.string().min(1).max(16) }).strict(),
 		response: z.object({
-			state: z.enum(['activated', 'wantMore', 'uncertain']),
+			state: z.enum([
+				'activated',
+				'wantMore',
+				'uncertain',
+				'staleOperation',
+				'unidentifiedOperation'
+			]),
+			kind: z.enum(['activate', 'deactivate']).optional(),
 			/** Present only for `uncertain`. See `uncertainOutcome`. */
 			guidance: z.string().optional(),
+			/** Opaque identity present only for `staleOperation`. */
+			staleToken: z.string().length(64).optional(),
+			/** Opaque identity present when an applicable `uncertain` record may be resolved. */
+			operationToken: z.string().length(64).optional(),
 			/** `true` when Steam is known to have acted, rather than may have. */
 			certain: z.boolean().optional(),
 			/**
@@ -895,8 +1015,25 @@ export const IPC_CONTRACT = {
 			 * that does not exist. `false` means the warning is worth reading now,
 			 * because it will not be there later.
 			 */
-			persisted: z.boolean().optional()
+			persisted: z.boolean().optional(),
+			/** Activation succeeded; only the separate encrypted recovery backup is stale. */
+			recoveryWarning: z.string().optional()
 		})
+	},
+	[CHANNELS.enrollStatus]: { request: emptyRequest, response: enrollmentStatusResponse },
+	[CHANNELS.enrollRetryPersist]: {
+		request: z.object({ attemptId: z.string().uuid(), steamId64: z.string() }).strict(),
+		response: enrollBeginResponse
+	},
+	[CHANNELS.enrollResolve]: {
+		request: z
+			.object({
+				attemptId: z.string().uuid(),
+				steamId64: z.string(),
+				resolution: z.enum(['notAttached', 'storedHere', 'resolvedOutsideApp'])
+			})
+			.strict(),
+		response: okResponse
 	},
 
 	[CHANNELS.enrollCancel]: { request: emptyRequest, response: okResponse },
@@ -913,40 +1050,65 @@ export const IPC_CONTRACT = {
 		 * those and for the third case, where Steam did nothing and a retry is
 		 * exactly what is wanted.
 		 */
-		request: z
+		request: z.union([
+			z
+				.object({
+					steamId64: z.string(),
+					/**
+					 * **Which operation the user is answering about.**
+					 *
+					 * The handler read the *stored* kind and acted on it, so a screen
+					 * asking "is Steam Guard on this account now?" could resolve a
+					 * left-over removal record — and "yes" then meant "the removal
+					 * succeeded", which deleted the account. The caller states what it
+					 * asked, and a record of a different kind is refused rather than
+					 * reinterpreted.
+					 */
+					kind: z.enum(['activate', 'deactivate']),
+					/** The exact applicable record displayed before the user checked Steam. */
+					operationToken: z.string().length(64),
+					steamActed: z.boolean(),
+					/**
+					 * Required to confirm a removal, exactly as `accountDeactivate`
+					 * requires it: this path deletes an account, and being unlocked is
+					 * not enough to do that.
+					 */
+					/*
+					 * Bounded like every other passphrase in the contract. This one reaches
+					 * scrypt, and an unbounded string reaches it with whatever length the
+					 * caller chose — a megabyte of it verified as readily as a sentence.
+					 */
+					passphrase: z.string().min(1).max(1024).optional()
+				})
+				.strict(),
+			z
+				.object({
+					steamId64: z.string(),
+					kind: z.enum(['activate', 'deactivate']),
+					/** Explicitly discard evidence proved to describe an older authenticator. */
+					discardStale: z.literal(true),
+					/** Must identify the exact record that the main process displayed. */
+					staleToken: z.string().length(64)
+				})
+				.strict()
+		]),
+		response: z
 			.object({
-				steamId64: z.string(),
-				/**
-				 * **Which operation the user is answering about.**
-				 *
-				 * The handler read the *stored* kind and acted on it, so a screen
-				 * asking "is Steam Guard on this account now?" could resolve a
-				 * left-over removal record — and "yes" then meant "the removal
-				 * succeeded", which deleted the account. The caller states what it
-				 * asked, and a record of a different kind is refused rather than
-				 * reinterpreted.
-				 */
-				kind: z.enum(['activate', 'deactivate']),
-				steamActed: z.boolean(),
-				/**
-				 * Required to confirm a removal, exactly as `accountDeactivate`
-				 * requires it: this path deletes an account, and being unlocked is
-				 * not enough to do that.
-				 */
-				/*
-				 * Bounded like every other passphrase in the contract. This one reaches
-				 * scrypt, and an unbounded string reaches it with whatever length the
-				 * caller chose — a megabyte of it verified as readily as a sentence.
-				 */
-				passphrase: z.string().min(1).max(1024).optional()
+				ok: z.literal(true),
+				/** Reconciliation succeeded; only the recovery backup correction failed. */
+				recoveryWarning: z.string().optional()
 			})
-			.strict(),
-		response: okResponse
+			.strict()
 	},
 
 	[CHANNELS.accountExport]: {
 		request: z.object({ steamId64: z.string() }).strict(),
 		response: exportResponse
+	},
+
+	[CHANNELS.accountFinishRecoveryBackup]: {
+		request: z.object({ steamId64: z.string() }).strict(),
+		response: okResponse
 	},
 
 	[CHANNELS.accountRecover]: {
@@ -962,8 +1124,9 @@ export const IPC_CONTRACT = {
 	 * whether anything is waiting. Main decides what, from an id it already had.
 	 *
 	 * `steamId64` is optional because "nothing is waiting" is the ordinary
-	 * answer, and reading it **clears** the intent — so a second call returns
-	 * nothing and a stale click cannot navigate somebody twice.
+	 * answer. Reading only peeks; an exact `{ steamId64, token }` acknowledgement
+	 * clears the intent after navigation succeeds. The renderer's monotonic token
+	 * claim prevents a repeated peek from navigating twice.
 	 *
 	 * The matching push lives in `PUSH_CHANNELS`, not here: `IPC_CONTRACT`
 	 * describes `ipcMain.handle` request/response pairs, and a
@@ -975,8 +1138,8 @@ export const IPC_CONTRACT = {
 		 * own, so a renderer that could not navigate — the account not yet in its
 		 * list, which is the case this exists for — lost the click entirely.
 		 */
-		request: z.object({ acknowledged: z.string().optional() }).strict(),
-		response: z.object({ steamId64: z.string().optional() }).strict()
+		request: z.object({ acknowledged: toastClick.optional() }).strict(),
+		response: z.union([z.object({}).strict(), toastClick])
 	},
 
 	[CHANNELS.accountDeactivate]: {
@@ -1004,8 +1167,13 @@ export const IPC_CONTRACT = {
 			 * account may already have had its authenticator detached, so the screen
 			 * must not offer the same removal again.
 			 */
-			state: z.literal('uncertain').optional(),
+			state: z.enum(['uncertain', 'staleOperation', 'unidentifiedOperation']).optional(),
+			kind: z.enum(['activate', 'deactivate']).optional(),
 			guidance: z.string().optional(),
+			/** Opaque identity present only for `staleOperation`. */
+			staleToken: z.string().length(64).optional(),
+			/** Opaque identity present when an applicable `uncertain` record may be resolved. */
+			operationToken: z.string().length(64).optional(),
 			/** `true` when Steam is known to have acted, rather than may have. */
 			certain: z.boolean().optional(),
 			/** Whether the refusal outlives this window. See `enrollActivate`. */
@@ -1124,7 +1292,12 @@ export const IPC_CONTRACT = {
 		response: okResponse
 	},
 
-	[CHANNELS.vaultAdopt]: { request: emptyRequest, response: adoptResponse },
+	[CHANNELS.vaultAdopt]: {
+		// The chosen vault is authenticated before adoption. This also supplies the
+		// actual key needed to prove pending workflow ciphertext remains recoverable.
+		request: z.object({ passphrase }).strict(),
+		response: adoptResponse
+	},
 
 	[CHANNELS.vaultRestoreBackup]: {
 		// The passphrase the **backup** was sealed under, which is usually the
@@ -1237,7 +1410,7 @@ export interface RendererApi {
 	/** Replace the vault with its backup and unlock it. The way out of a corrupt file. */
 	restoreVaultBackup(passphrase: string): Promise<{ ok: true }>;
 	/** Take on a vault file from elsewhere. Only possible when this machine has none. */
-	adoptVaultFile(): Promise<AdoptResult>;
+	adoptVaultFile(passphrase: string): Promise<AdoptResult>;
 	lockVault(): Promise<{ ok: true }>;
 	touchVault(): Promise<{ ok: true }>;
 	changePassphrase(current: string, next: string): Promise<{ ok: true }>;
@@ -1271,11 +1444,23 @@ export interface RendererApi {
 	): Promise<TransferAuthenticated>;
 	startTransferChallenge(): Promise<TransferStartChallenge>;
 	completeTransfer(smsCode: string): Promise<TransferComplete>;
-	retryTransferPersist(): Promise<TransferComplete>;
+	retryTransferPersist(passphrase?: string): Promise<TransferComplete>;
 	getTransferStatus(): Promise<TransferStatus>;
+	resolveTransfer(
+		attemptId: string,
+		resolution: 'notReplaced' | 'replaced' | 'resolvedOutsideApp',
+		passphrase?: string
+	): Promise<{ ok: true }>;
 	cancelTransfer(): Promise<object>;
 	beginEnrollment(accountName: string, password: string, proxyUrl?: string): Promise<EnrollBegin>;
 	submitEnrollmentEmailCode(code: string): Promise<EnrollBegin>;
+	getEnrollmentStatus(): Promise<EnrollmentStatus>;
+	retryEnrollmentPersist(attemptId: string, steamId64: string): Promise<EnrollBegin>;
+	resolveEnrollment(
+		attemptId: string,
+		steamId64: string,
+		resolution: 'notAttached' | 'storedHere' | 'resolvedOutsideApp'
+	): Promise<{ ok: true }>;
 	/**
 	 * Say the account has been checked, clearing the refusal to repeat an
 	 * operation whose outcome was never established.
@@ -1283,8 +1468,15 @@ export interface RendererApi {
 	resolveAccountOperation(
 		steamId64: string,
 		kind: 'activate' | 'deactivate',
+		operationToken: string,
 		steamActed: boolean,
 		passphrase?: string
+	): Promise<{ ok: true; recoveryWarning?: string }>;
+	/** Clear only an exact safety record proved to describe an older authenticator. */
+	clearStaleAccountOperation(
+		steamId64: string,
+		kind: 'activate' | 'deactivate',
+		staleToken: string
 	): Promise<{ ok: true }>;
 	/** Abandon a sign-in that has not attached an authenticator yet. */
 	cancelEnrollment(): Promise<{ ok: true }>;
@@ -1292,7 +1484,10 @@ export interface RendererApi {
 		steamId64: string,
 		code: string
 	): Promise<{
-		state: 'activated' | 'wantMore' | 'uncertain';
+		state: 'activated' | 'wantMore' | 'uncertain' | 'staleOperation' | 'unidentifiedOperation';
+		kind?: 'activate' | 'deactivate';
+		staleToken?: string;
+		operationToken?: string;
 		/**
 		 * Present only for `uncertain`: what the user should do about a request
 		 * Steam may already have acted on. Carried across IPC because an error
@@ -1304,10 +1499,17 @@ export interface RendererApi {
 		certain?: boolean;
 		/** Whether the refusal outlives this window. */
 		persisted?: boolean;
+		/** Activation succeeded; only the separate encrypted recovery backup is stale. */
+		recoveryWarning?: string;
 	}>;
 
 	/** Write an account out as a maFile. Opens the OS save dialog; returns a name. */
 	exportAccount(steamId64: string): Promise<ExportResult>;
+	/**
+	 * Finish this account's separate encrypted recovery backup locally.
+	 * Does not contact Steam and exposes neither a path nor a secret.
+	 */
+	finishRecoveryBackup(steamId64: string): Promise<{ ok: true }>;
 
 	/**
 	 * Restore an account from the recovery file written when it was enrolled.
@@ -1329,7 +1531,10 @@ export interface RendererApi {
 		acknowledgement: string
 	): Promise<{
 		ok?: true;
-		state?: 'uncertain';
+		state?: 'uncertain' | 'staleOperation' | 'unidentifiedOperation';
+		kind?: 'activate' | 'deactivate';
+		staleToken?: string;
+		operationToken?: string;
 		guidance?: string;
 		certain?: boolean;
 		persisted?: boolean;
@@ -1366,14 +1571,16 @@ export interface RendererApi {
 	 * hope rather than a contract — no caller could clean up even when React
 	 * re-ran the effect, and one did, once a second.
 	 */
-	onOpenConfirmations(listener: (steamId64: string) => void): () => void;
+	onOpenConfirmations(listener: (click: ToastClick) => void): () => void;
 	/**
 	 * Take a notification click that arrived while nothing was listening.
 	 *
-	 * Returns `{}` when nothing is waiting, which is the ordinary answer.
-	 * Reading clears it, so a second call returns nothing.
+	 * Returns `{}` when nothing is waiting, which is the ordinary answer. The
+	 * result carries a click token; acknowledgement clears only that exact token.
 	 */
-	takePendingConfirmations(request?: { acknowledged?: string }): Promise<{ steamId64?: string }>;
+	takePendingConfirmations(request?: {
+		acknowledged?: ToastClick;
+	}): Promise<{ steamId64?: string; token?: number }>;
 	/**
 	 * Remove an account and its secrets from this vault.
 	 *

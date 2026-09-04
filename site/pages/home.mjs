@@ -1,4 +1,13 @@
 import { releaseGaps, sentenceList } from '../markup.mjs';
+import { browserFeatureCopy, publicationSummary } from '../publication.mjs';
+
+const downloadForSourceVersion = (site) => {
+	if (site.publication.store.current) return site.store.url;
+	if (site.publication.github.current) {
+		return `${site.repo}/releases/tag/v${site.version}`;
+	}
+	return undefined;
+};
 
 export default {
 	slug: 'index',
@@ -50,7 +59,9 @@ export default {
 				license: 'https://opensource.org/license/mit',
 				publisher: { '@id': s.organizationId },
 				softwareHelp: `${s.origin}/docs`,
-				downloadUrl: s.store.url,
+				...(downloadForSourceVersion(s) !== undefined
+					? { downloadUrl: downloadForSourceVersion(s) }
+					: {}),
 				offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' }
 			}
 		]
@@ -106,11 +117,19 @@ export default {
 	body: (s) => `
 		<article>
 			<div class="callout">
-				<h2>Status: 1.0, in the Microsoft Store and on GitHub</h2>
+				<h2>Status: ${
+					s.publication.github.current && s.publication.store.current
+						? `${s.version}, in the Microsoft Store and on GitHub`
+						: s.publication.github.current
+							? `${s.version} is on GitHub; the Store update is pending`
+							: s.publication.store.current
+								? `${s.version} is in the Store; the GitHub release is pending`
+								: `${s.version} is the upcoming source version`
+				}</h2>
 				<p>
-					<a href="/download">The download page</a> has both, and they are the only
-					two places a genuine build comes from. This page still hosts no installer
-					and never will — every button here links outward.
+					${publicationSummary(s)} <a href="/download">The download page</a> links
+					both official channels. This page still hosts no installer and never will —
+					every button here links outward.
 				</p>
 				<p>
 					${
@@ -214,11 +233,7 @@ export default {
 					page whether a newer version exists, which is the same question any visitor
 					to that page asks. GitHub sees an IP address and that the application is
 					running. Nothing about you or your accounts is sent to anyone, including us.
-					That is the whole of what it reaches on its own — the in-app browser is the
-					exception, and it is one you open. It is a browser: a window for finishing a
-					trade, which goes wherever you point it, on Steam or on a third-party
-					trading site, over whatever network route you configured for that account
-					rather than around it. It carries nothing out of your vault, and
+					${browserFeatureCopy(s).security} It carries nothing out of your vault, and
 					<a href="/security">the security model</a> sets out what it is given.
 				</li>
 				<li>

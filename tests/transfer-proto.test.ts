@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+	boundedReplacementToken,
 	CONTINUE_VERSION,
 	decodeContinueResponse,
 	encodeContinueRequest
@@ -58,6 +59,28 @@ describe('the request that replaces an authenticator', () => {
 });
 
 describe('decoding what Steam sends back', () => {
+	it('bounds every optional field before it can enter a recovery record', () => {
+		const bounded = boundedReplacementToken({
+			sharedSecret: Buffer.alloc(20, 1).toString('base64'),
+			identitySecret: Buffer.alloc(20, 2).toString('base64'),
+			steamId64: '76561198000000001',
+			uri: 'u'.repeat(8 * 1024 + 1),
+			accountName: 'a'.repeat(65),
+			tokenGid: 'g'.repeat(129),
+			secret1: 's'.repeat(513)
+		});
+
+		expect(bounded).toMatchObject({
+			sharedSecret: Buffer.alloc(20, 1).toString('base64'),
+			identitySecret: Buffer.alloc(20, 2).toString('base64'),
+			steamId64: '76561198000000001'
+		});
+		expect(bounded).not.toHaveProperty('uri');
+		expect(bounded).not.toHaveProperty('accountName');
+		expect(bounded).not.toHaveProperty('tokenGid');
+		expect(bounded).not.toHaveProperty('secret1');
+	});
+
 	/**
 	 * A response built by hand, so the test does not depend on the encoder it is
 	 * checking. Field 2 is the replacement token; the inner fields are the ones
@@ -126,6 +149,12 @@ describe('decoding what Steam sends back', () => {
 		const result = decodeContinueResponse(Buffer.from([0x08, 0x00]));
 		expect(result.success).toBe(false);
 		expect(result.replacementToken).toBeUndefined();
+	});
+
+	it('does not invent a refusal when the optional success field is absent', () => {
+		const result = decodeContinueResponse(Buffer.alloc(0));
+		expect(result.success).toBeUndefined();
+		expect(result).not.toHaveProperty('success');
 	});
 
 	/*

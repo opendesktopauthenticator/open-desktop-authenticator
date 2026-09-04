@@ -30,9 +30,8 @@ const handlers = new Map<string, (event: unknown, request: unknown) => Promise<u
 
 /**
  * When set, `writeFile` to exactly this path empties the real file and throws —
- * the observable shape of a write that failed after truncation. The fix writes
- * to a temp name and renames, so the destination itself is never opened for
- * writing and the sabotage never fires against it.
+ * the observable shape of a write that failed after truncation. The fix stages
+ * elsewhere and claims an unused destination without truncating it.
  */
 let sabotageWriteTo: string | undefined;
 
@@ -42,31 +41,18 @@ let sabotageWriteTo: string | undefined;
  */
 let lockDuringWrite: (() => void) | undefined;
 
-/**
- * Fired after a successful `rename`, which is the commit itself.
- *
- * The check before the rename cannot cover the rename, and on the removable and
- * network drives people export to it is not instant.
- */
-let lockDuringRename: (() => void) | undefined;
+/** Fired after a successful no-clobber publication. */
+let afterPublish: (() => void) | undefined;
 
-/**
- * When set, `rm` of a path ending `.prev` fails.
- *
- * The set-aside copy holds the *previous* export's plaintext secrets, and its
- * removal is the last step of a successful export. A scanner holding the file,
- * a network share dropping, a removable drive pulled — all ordinary, and all
- * silent until this was reported.
- */
-let refuseStaleRemoval = false;
+/** A competing writer claims an absent destination at the publication boundary. */
+let foreignBeforePublish: (() => void) | undefined;
+
 /**
  * Refuse to delete the staged plaintext, which is the file the *user* ends up
  * holding when an export gives up.
  *
- * Separate from `refuseStaleRemoval`, which is about the `.prev` copy an export
- * displaced. This one is the temp file the export wrote its secrets into: if it
- * cannot be taken back, the refusal message has to name it, or the user is told
- * nothing was written while a maFile sits in their folder.
+ * This is the temp file the export wrote its secrets into: if it cannot be taken
+ * back, the refusal message has to name it.
  */
 let refuseStagedRemoval = false;
 /**
@@ -77,6 +63,11 @@ let refuseStagedRemoval = false;
  * before.
  */
 let sabotageStagedWrite = false;
+
+let forceLinkUnsupported = false;
+let failStageSync = false;
+let failDirectorySync = false;
+let fallbackWriteFailure: 'partial' | 'foreign' | undefined;
 
 /**
  * When set, `rm` of exactly this path fails.
@@ -96,19 +87,6 @@ let refuseRemovalOf: string | undefined;
 let refuseTempRemoval = false;
 
 /**
- * When set, renaming a `.prev` copy back over the destination fails: the
- * restore half of the rollback. The user's own earlier export then stays
- * stranded under a random suffix nobody would recognise as theirs.
- */
-let refuseRestore = false;
-
-/**
- * When set, renaming the staged `.tmp` onto the destination fails — the publish
- * itself, which is what an unwritable or locked destination does.
- */
-let refusePublish = false;
-
-/**
  * When set, reading exactly this path fails with something other than ENOENT.
  *
  * The ownership check folded "could not look" in with "nothing is there", so an
@@ -123,6 +101,62 @@ vi.mock('node:fs/promises', async () => {
 	const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 	return {
 		...actual,
+		open: async (...args: Parameters<typeof actual.open>) => {
+			const [path, flags] = args;
+			const handle = await actual.open(...args);
+			return new Proxy(handle, {
+				get(target, property, receiver) {
+					if (property === 'sync') {
+						return async () => {
+							if (
+								(failStageSync && typeof path === 'string' && path.endsWith('.tmp')) ||
+								(failDirectorySync && path === dir)
+							) {
+								throw Object.assign(new Error('EIO: injected sync failure'), { code: 'EIO' });
+							}
+							return target.sync();
+						};
+					}
+					if (
+						property === 'writeFile' &&
+						flags === 'wx' &&
+						typeof path === 'string' &&
+						path.endsWith('.maFile') &&
+						fallbackWriteFailure !== undefined
+					) {
+						return async (data: string) => {
+							if (fallbackWriteFailure === 'partial') {
+								await target.writeFile(data.slice(0, 24), 'utf8');
+							} else {
+								await target.close();
+								rmSync(path, { force: true });
+								writeFileSync(path, 'foreign replacement');
+							}
+							throw Object.assign(new Error('EIO: injected fallback write failure'), {
+								code: 'EIO'
+							});
+						};
+					}
+					const value: unknown = Reflect.get(target, property, receiver);
+					if (typeof value === 'function') {
+						return (...callArgs: unknown[]) => Reflect.apply(value, target, callArgs) as unknown;
+					}
+					return value;
+				}
+			});
+		},
+		link: async (
+			from: Parameters<typeof actual.link>[0],
+			to: Parameters<typeof actual.link>[1]
+		) => {
+			if (forceLinkUnsupported) {
+				throw Object.assign(new Error('ENOTSUP: hard links unavailable'), { code: 'ENOTSUP' });
+			}
+			foreignBeforePublish?.();
+			const linked = await actual.link(from, to);
+			afterPublish?.();
+			return linked;
+		},
 		writeFile: async (
 			path: Parameters<typeof actual.writeFile>[0],
 			data: Parameters<typeof actual.writeFile>[1],
@@ -163,9 +197,6 @@ vi.mock('node:fs/promises', async () => {
 			if (refuseStagedRemoval && typeof path === 'string' && path.endsWith('.tmp')) {
 				throw new Error('EBUSY: resource busy or locked');
 			}
-			if (refuseStaleRemoval && typeof path === 'string' && path.endsWith('.prev')) {
-				throw new Error('EBUSY: resource busy or locked');
-			}
 			if (refuseRemovalOf !== undefined && typeof path === 'string' && path === refuseRemovalOf) {
 				throw new Error('EBUSY: resource busy or locked');
 			}
@@ -173,20 +204,6 @@ vi.mock('node:fs/promises', async () => {
 				throw new Error('EBUSY: resource busy or locked');
 			}
 			return actual.rm(path, options);
-		},
-		rename: async (
-			from: Parameters<typeof actual.rename>[0],
-			to: Parameters<typeof actual.rename>[1]
-		) => {
-			if (refuseRestore && typeof from === 'string' && from.endsWith('.prev')) {
-				throw new Error('EBUSY: resource busy or locked');
-			}
-			if (refusePublish && typeof from === 'string' && from.endsWith('.tmp')) {
-				throw new Error('EBUSY: resource busy or locked');
-			}
-			const renamed = await actual.rename(from, to);
-			lockDuringRename?.();
-			return renamed;
 		}
 	};
 });
@@ -225,14 +242,16 @@ beforeEach(() => {
 	handlers.clear();
 	sabotageWriteTo = undefined;
 	lockDuringWrite = undefined;
-	lockDuringRename = undefined;
-	refuseStaleRemoval = false;
+	afterPublish = undefined;
+	foreignBeforePublish = undefined;
 	refuseStagedRemoval = false;
 	sabotageStagedWrite = false;
+	forceLinkUnsupported = false;
+	failStageSync = false;
+	failDirectorySync = false;
+	fallbackWriteFailure = undefined;
 	refuseRemovalOf = undefined;
 	refuseTempRemoval = false;
-	refuseRestore = false;
-	refusePublish = false;
 	refuseReadOf = undefined;
 	destinationsRead = [];
 	__resetRouterForTests();
@@ -244,6 +263,169 @@ afterEach(() => {
 });
 
 describe('accountExport after the dialog', () => {
+	it('never overwrites a foreign file that claims an initially absent destination at publish', async () => {
+		const destination = join(dir, 'out.maFile');
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		foreignBeforePublish = () => {
+			writeFileSync(destination, 'foreign bytes');
+			foreignBeforePublish = undefined;
+		};
+
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow();
+		expect(readFileSync(destination, 'utf8')).toBe('foreign bytes');
+		expect(
+			readdirSync(dir).filter((name) => name.endsWith('.tmp')),
+			'the refused export left its plaintext stage behind'
+		).toEqual([]);
+	});
+
+	it('publishes through an exclusive-create fallback when hard links are unavailable', async () => {
+		const destination = join(dir, 'out.maFile');
+		forceLinkUnsupported = true;
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).resolves.toMatchObject({
+			state: 'saved'
+		});
+		expect(readFileSync(destination, 'utf8')).toBe(toMaFile(account));
+		expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+	});
+
+	it('does not publish when the durable stage cannot be flushed', async () => {
+		const destination = join(dir, 'out.maFile');
+		failStageSync = true;
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow(
+			/could not be written/i
+		);
+		expect(existsSync(destination)).toBe(false);
+		expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+	});
+
+	it('takes back its exact file when the directory entry cannot be flushed', async () => {
+		const destination = join(dir, 'out.maFile');
+		failDirectorySync = true;
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow(
+			/could not be written/i
+		);
+		expect(existsSync(destination)).toBe(false);
+		expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+	});
+
+	it('leaves and names a partial fallback file instead of deleting unverifiable bytes', async () => {
+		const destination = join(dir, 'out.maFile');
+		forceLinkUnsupported = true;
+		fallbackWriteFailure = 'partial';
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		const error = await handler(EVENT, { steamId64: account.steamId64 }).then(
+			() => undefined,
+			(reason: unknown) => reason as Error
+		);
+		expect(error).toBeDefined();
+		expect(readFileSync(destination, 'utf8')).toBe(toMaFile(account).slice(0, 24));
+		expect(error?.message).toMatch(/out\.maFile/);
+		expect(error?.message).toMatch(/may contain part or all/i);
+		expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+	});
+
+	it('preserves a foreign replacement during a failed fallback write', async () => {
+		const destination = join(dir, 'out.maFile');
+		forceLinkUnsupported = true;
+		fallbackWriteFailure = 'foreign';
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		const error = await handler(EVENT, { steamId64: account.steamId64 }).then(
+			() => undefined,
+			(reason: unknown) => reason as Error
+		);
+		expect(error).toBeDefined();
+		expect(readFileSync(destination, 'utf8')).toBe('foreign replacement');
+		expect(error?.message).toMatch(/out\.maFile/);
+		expect(error?.message).toMatch(/another program may have replaced it/i);
+		expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+	});
+
+	it('refuses an occupied destination without changing its bytes', async () => {
+		const destination = join(dir, 'out.maFile');
+		const previous = 'the previous export';
+		writeFileSync(destination, previous);
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
+		});
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow(
+			/already in use|unused file name/i
+		);
+		expect(readFileSync(destination, 'utf8')).toBe(previous);
+		expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+	});
+
 	it('refuses when the account was removed while the dialog was open', async () => {
 		const accounts: Account[] = [account];
 		const destination = join(dir, 'out.maFile');
@@ -277,7 +459,7 @@ describe('accountExport after the dialog', () => {
 	 * The re-check after the dialog covers the long wait — somebody browsing for
 	 * a folder. It does not cover the write, and the drives people export to are
 	 * exactly the slow ones: a USB stick, a network share, an SD card. Lock the
-	 * vault during it and the rename still finished, putting a plaintext maFile
+	 * vault during it and publication still finished, putting a plaintext maFile
 	 * on disk — the same secrets as the vault with none of its encryption —
 	 * after the application had been told nobody is present.
 	 */
@@ -314,14 +496,14 @@ describe('accountExport after the dialog', () => {
 	});
 
 	/*
-	 * **The rename is the commit, and the check before it cannot cover it.**
+	 * **Publication is a commit, and the check before it cannot cover it.**
 	 *
-	 * A lock landing inside the rename still published the plaintext maFile and
+	 * A lock landing inside publication still exposed the plaintext maFile and
 	 * answered `saved`. Nothing was there before, so removing it restores the
 	 * directory exactly as it was — and the lock says nobody is present to have
 	 * wanted it.
 	 */
-	it('removes a file it created when the vault locks during the rename', async () => {
+	it('removes a file it created when the vault locks during publication', async () => {
 		const destination = join(dir, 'out.maFile');
 		let unlocked = true;
 		const vault = {
@@ -330,7 +512,7 @@ describe('accountExport after the dialog', () => {
 			read: () => ({ accounts: [account] })
 		} as unknown as VaultService;
 
-		lockDuringRename = () => {
+		afterPublish = () => {
 			unlocked = false;
 		};
 
@@ -346,66 +528,10 @@ describe('accountExport after the dialog', () => {
 		expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
 	});
 
-	/*
-	 * **And does not take a backup the user already had.**
-	 *
-	 * When something was at that path, the rename has already replaced it, and
-	 * deleting now would destroy a file that existed before anything was pressed
-	 * — a worse outcome than a plaintext maFile for the same account which was
-	 * already sitting there a second ago, and is no new exposure at all.
-	 */
-	it('puts back the file that was already there, byte for byte', async () => {
+	it('refuses a selected existing file and leaves it byte for byte', async () => {
 		const destination = join(dir, 'out.maFile');
 		const original = '{"an":"earlier export"}';
 		writeFileSync(destination, original);
-		let unlocked = true;
-		const vault = {
-			isUnlocked: () => unlocked,
-			touch: () => undefined,
-			read: () => ({ accounts: [account] })
-		} as unknown as VaultService;
-
-		lockDuringRename = () => {
-			unlocked = false;
-		};
-
-		registerEnrollmentHandlers({} as EnrollmentService, vault, {
-			show: () => Promise.resolve(destination)
-		});
-
-		const handler = handlers.get(CHANNELS.accountExport);
-		if (!handler) throw new Error('accountExport was not registered');
-
-		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow(/locked/i);
-
-		/*
-		 * **Which file survived, not merely that one did.**
-		 *
-		 * This asserted `existsSync` and nothing more, so it passed while the
-		 * destination held the *newly exported secrets* — the old backup destroyed,
-		 * fresh plaintext in its place, and the user told the export had failed
-		 * because the vault locked. Three wrong things at once, blessed by a test
-		 * that only counted files.
-		 */
-		expect(existsSync(destination), 'an existing backup was deleted').toBe(true);
-		expect(
-			readFileSync(destination, 'utf8'),
-			'the lock left the new export in place and called it a failure'
-		).toBe(original);
-
-		// And nothing staged is left lying about, in either direction.
-		expect(
-			readdirSync(dir).filter((name) => name.endsWith('.tmp') || name.endsWith('.prev'))
-		).toEqual([]);
-	});
-
-	/*
-	 * The successful path must not leave the set-aside copy behind either: it
-	 * holds the same secrets as the file that replaced it.
-	 */
-	it('removes the copy it set aside when the export succeeds', async () => {
-		const destination = join(dir, 'out.maFile');
-		writeFileSync(destination, '{"an":"earlier export"}');
 		const vault = {
 			isUnlocked: () => true,
 			touch: () => undefined,
@@ -419,13 +545,42 @@ describe('accountExport after the dialog', () => {
 		const handler = handlers.get(CHANNELS.accountExport);
 		if (!handler) throw new Error('accountExport was not registered');
 
-		await expect(handler(EVENT, { steamId64: account.steamId64 })).resolves.toMatchObject({
-			state: 'saved'
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow(
+			/already in use|unused file name/i
+		);
+		expect(existsSync(destination), 'an existing backup was deleted').toBe(true);
+		expect(
+			readFileSync(destination, 'utf8'),
+			'the lock left the new export in place and called it a failure'
+		).toBe(original);
+
+		expect(readdirSync(dir).filter((name) => name.endsWith('.tmp'))).toEqual([]);
+	});
+
+	it('never creates a rescue copy for an occupied destination', async () => {
+		const destination = join(dir, 'out.maFile');
+		const original = '{"an":"earlier export"}';
+		writeFileSync(destination, original);
+		const vault = {
+			isUnlocked: () => true,
+			touch: () => undefined,
+			read: () => ({ accounts: [account] })
+		} as unknown as VaultService;
+
+		registerEnrollmentHandlers({} as EnrollmentService, vault, {
+			show: () => Promise.resolve(destination)
 		});
-		expect(readFileSync(destination, 'utf8')).toContain(account.steamId64);
+
+		const handler = handlers.get(CHANNELS.accountExport);
+		if (!handler) throw new Error('accountExport was not registered');
+
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow(
+			/already in use|unused file name/i
+		);
+		expect(readFileSync(destination, 'utf8')).toBe(original);
 		expect(
 			readdirSync(dir).filter((name) => name.endsWith('.prev')),
-			'a second plaintext copy was left beside the export'
+			'an obsolete rescue-copy path was created'
 		).toEqual([]);
 	});
 
@@ -451,15 +606,7 @@ describe('accountExport after the dialog', () => {
 	});
 });
 
-/*
- * A failed re-export must leave the previous maFile as it was.
- *
- * Writing straight to the destination opens it for truncation before a byte
- * lands, so a write that then failed — disk full, drive unplugged — had
- * already emptied the file it was replacing. Re-exporting over an existing
- * backup is the ordinary case; the export goes to a temp name and is renamed
- * into place, like every other secret-bearing write in the application.
- */
+/* An occupied destination is refused without opening or changing it. */
 describe('a failing export over an existing file', () => {
 	it('leaves the previous export intact', async () => {
 		const destination = join(dir, 'out.maFile');
@@ -478,11 +625,8 @@ describe('a failing export over an existing file', () => {
 		const handler = handlers.get(CHANNELS.accountExport);
 		if (!handler) throw new Error('accountExport was not registered');
 
-		// With the fix, the write goes to `${destination}.tmp` — the sabotage
-		// never fires, the rename replaces the file whole, and the export
-		// SUCCEEDS. What matters either way: the destination is never an empty
-		// husk. (Reverted to a direct write, the sabotage fires: the handler
-		// rejects and the previous content is gone.)
+		// The occupied-path refusal happens without opening the destination for
+		// writing, so the truncation sabotage never fires.
 		await handler(EVENT, { steamId64: account.steamId64 }).catch(() => undefined);
 		const after = readFileSync(destination, 'utf8');
 		expect(after).not.toBe('');
@@ -492,10 +636,8 @@ describe('a failing export over an existing file', () => {
 /*
  * The export's temp file must never be someone else's file.
  *
- * A fixed `${destination}.tmp` name truncated whatever already sat there — a
- * sibling that was never ours — and then renamed it over the destination. The
- * temp name is unique per export now, and opened with `wx`, which cannot empty
- * an existing file.
+ * A fixed `${destination}.tmp` name truncated whatever already sat there. The
+ * stage name is unique per export now and opened with `wx`.
  */
 describe('a sibling .tmp file at the destination', () => {
 	it('is left untouched by an export', async () => {
@@ -588,71 +730,186 @@ describe('accountRecover after a mid-decrypt lock', () => {
 	});
 });
 
-/*
- * **A successful export that leaves a second plaintext file behind.**
- *
- * The rollback design sets the previous export aside so a lock can be undone,
- * and deletes that copy once the new one is in place. The delete's failure was
- * swallowed: the handler answered `saved` while a `.prev` file full of the
- * *previous* authenticator's secrets sat in the user's folder, at a path only
- * the OS dialog knows, with nothing anywhere mentioning it.
- *
- * The export did succeed, so this is not a failure to report — it is a fact the
- * user has to be given.
- */
-describe('an export whose set-aside copy cannot be removed', () => {
-	it('still reports success, and says the old copy is still there', async () => {
-		const destination = join(dir, 'out.maFile');
-		writeFileSync(destination, '{"an":"earlier export"}');
+describe('accountRecover beside an authenticator workflow', () => {
+	it('does not restore an older account over a newer durable enrollment reply', async () => {
+		vi.doMock('../src/main/vault/recovery', async () => {
+			const actual = await vi.importActual<typeof import('../src/main/vault/recovery')>(
+				'../src/main/vault/recovery'
+			);
+			return {
+				...actual,
+				readRecoveryFile: () =>
+					Promise.resolve({
+						steamId64: account.steamId64,
+						accountName: account.accountName,
+						account
+					})
+			};
+		});
+		vi.resetModules();
+		const { registerEnrollmentHandlers: register } =
+			await import('../src/main/steam/enrollment-ipc.js');
+		const { setTrustedSender: trust, __resetRouterForTests: reset } =
+			await import('../src/main/ipc/router.js');
+		const { VaultKeyOperationCoordinator } =
+			await import('../src/main/vault/key-operation-coordinator.js');
+		reset();
+		trust(() => true);
+		handlers.clear();
+
+		const accounts: Account[] = [];
+		let failWrite = false;
+		const mutate = vi.fn((change: (draft: { accounts: Account[] }) => void) => {
+			if (failWrite) {
+				failWrite = false;
+				return Promise.reject(new Error('disk write failed'));
+			}
+			change({ accounts });
+			return Promise.resolve();
+		});
 		const vault = {
 			isUnlocked: () => true,
 			touch: () => undefined,
-			read: () => ({ accounts: [account] })
+			read: () => ({ accounts }),
+			mutate
 		} as unknown as VaultService;
+		const coordinator = new VaultKeyOperationCoordinator();
+		let journalBlocked = true;
+		const blocked = vi.fn((steamId64: string) => journalBlocked && steamId64 === account.steamId64);
+		register(
+			{} as EnrollmentService,
+			vault,
+			{ show: () => Promise.resolve(undefined) },
+			undefined,
+			{ pick: () => Promise.resolve('{"encrypted":"recovery"}') },
+			undefined,
+			undefined,
+			coordinator,
+			blocked
+		);
+		const handler = handlers.get(CHANNELS.accountRecover);
+		if (!handler) throw new Error('accountRecover was not registered');
 
-		refuseStaleRemoval = true;
+		const releaseLiveSteam = coordinator.beginEnrollmentSubmission('76561198000000001');
+		await expect(handler(EVENT, { passphrase: 'a sufficiently long passphrase' })).rejects.toThrow(
+			/enrollment submission.*in progress/i
+		);
+		expect(
+			blocked,
+			'the durable check ran even though the process-local operation already owned the account'
+		).not.toHaveBeenCalled();
+		expect(mutate).not.toHaveBeenCalled();
+		releaseLiveSteam();
 
-		registerEnrollmentHandlers({} as EnrollmentService, vault, {
-			show: () => Promise.resolve(destination)
-		});
+		await expect(handler(EVENT, { passphrase: 'a sufficiently long passphrase' })).rejects.toThrow(
+			/finish or resolve.*before restoring/i
+		);
+		expect(blocked).toHaveBeenCalledWith(account.steamId64);
+		expect(
+			mutate,
+			'the older recovery file displaced the recoverable authenticator'
+		).not.toHaveBeenCalled();
+		expect(accounts).toEqual([]);
 
-		const handler = handlers.get(CHANNELS.accountExport);
-		if (!handler) throw new Error('accountExport was not registered');
+		journalBlocked = false;
+		failWrite = true;
+		await expect(handler(EVENT, { passphrase: 'a sufficiently long passphrase' })).rejects.toThrow(
+			/disk write failed/i
+		);
+		expect(accounts).toEqual([]);
 
-		const result = await handler(EVENT, { steamId64: account.steamId64 });
+		await expect(handler(EVENT, { passphrase: 'a sufficiently long passphrase' })).resolves.toEqual(
+			{
+				state: 'restored',
+				accountName: account.accountName,
+				steamId64: account.steamId64
+			}
+		);
+		expect(mutate).toHaveBeenCalledTimes(2);
+		expect(accounts).toEqual([account]);
 
-		// The export itself worked, and saying otherwise would be its own lie.
-		expect(result).toMatchObject({ state: 'saved' });
-		expect(readFileSync(destination, 'utf8')).toContain(account.steamId64);
-
-		// And the thing the user has to know.
-		expect(result, 'a second plaintext file was left with nobody told').toMatchObject({
-			staleCopy: true
-		});
-		expect(readdirSync(dir).filter((name) => name.endsWith('.prev'))).toHaveLength(1);
+		vi.doUnmock('../src/main/vault/recovery');
+		vi.resetModules();
 	});
 
-	it('says nothing about it when the removal works', async () => {
-		const destination = join(dir, 'out.maFile');
-		writeFileSync(destination, '{"an":"earlier export"}');
+	it('restores the row that makes an orphan activation note reachable again', async () => {
+		vi.doMock('../src/main/vault/recovery', async () => {
+			const actual = await vi.importActual<typeof import('../src/main/vault/recovery')>(
+				'../src/main/vault/recovery'
+			);
+			return {
+				...actual,
+				readRecoveryFile: () =>
+					Promise.resolve({
+						steamId64: account.steamId64,
+						accountName: account.accountName,
+						account
+					})
+			};
+		});
+		vi.resetModules();
+		const { registerEnrollmentHandlers: register } =
+			await import('../src/main/steam/enrollment-ipc.js');
+		const { setTrustedSender: trust, __resetRouterForTests: reset } =
+			await import('../src/main/ipc/router.js');
+		const { VaultKeyOperationCoordinator } =
+			await import('../src/main/vault/key-operation-coordinator.js');
+		const { memoryWorkflowJournal } = await import('../src/main/steam/workflow-journal.js');
+		const { memoryOperationJournal } = await import('../src/main/steam/operation-journal.js');
+		const { accountMutationBlockedByDurableState } =
+			await import('../src/main/steam/account-mutation-guard.js');
+		const { authenticatorFingerprint } = await import('../src/main/steam/authenticator-secrets.js');
+		reset();
+		trust(() => true);
+		handlers.clear();
+
+		const accounts: Account[] = [];
 		const vault = {
 			isUnlocked: () => true,
 			touch: () => undefined,
-			read: () => ({ accounts: [account] })
+			read: () => ({ accounts }),
+			mutate: (change: (draft: { accounts: Account[] }) => void) => {
+				change({ accounts });
+				return Promise.resolve();
+			}
 		} as unknown as VaultService;
-
-		registerEnrollmentHandlers({} as EnrollmentService, vault, {
-			show: () => Promise.resolve(destination)
+		const workflows = memoryWorkflowJournal();
+		const operations = memoryOperationJournal();
+		operations.record({
+			steamId64: account.steamId64,
+			kind: 'activate',
+			fingerprint: authenticatorFingerprint(account),
+			at: '2026-09-03T00:00:00.000Z'
 		});
+		register(
+			{} as EnrollmentService,
+			vault,
+			{ show: () => Promise.resolve(undefined) },
+			undefined,
+			{ pick: () => Promise.resolve('{"encrypted":"recovery"}') },
+			undefined,
+			operations,
+			new VaultKeyOperationCoordinator(),
+			(id) => accountMutationBlockedByDurableState(vault, workflows, operations, id)
+		);
+		const handler = handlers.get(CHANNELS.accountRecover);
+		if (!handler) throw new Error('accountRecover was not registered');
 
-		const handler = handlers.get(CHANNELS.accountExport);
-		if (!handler) throw new Error('accountExport was not registered');
+		await expect(handler(EVENT, { passphrase: 'a sufficiently long passphrase' })).resolves.toEqual(
+			{
+				state: 'restored',
+				accountName: account.accountName,
+				steamId64: account.steamId64
+			}
+		);
+		expect(accounts).toEqual([account]);
+		expect(operations.readKind(account.steamId64, 'activate')).toBeDefined();
+		expect(
+			accountMutationBlockedByDurableState(vault, workflows, operations, account.steamId64)
+		).toBe(true);
 
-		const result = await handler(EVENT, { steamId64: account.steamId64 });
-
-		expect(result).toMatchObject({ state: 'saved' });
-		expect(result).not.toMatchObject({ staleCopy: true });
-		expect(readdirSync(dir).filter((name) => name.endsWith('.prev'))).toEqual([]);
+		vi.doUnmock('../src/main/vault/recovery');
+		vi.resetModules();
 	});
 });
 
@@ -661,8 +918,8 @@ describe('an export whose set-aside copy cannot be removed', () => {
  * not**, so only half the race was closed.
  *
  * The write is a wait — slow on the drives people export to — and an account
- * can be removed, or have its authenticator replaced, while it runs. The rename
- * then published a plaintext maFile holding secrets the vault no longer has,
+ * can be removed, or have its authenticator replaced, while it runs. Publication
+ * can otherwise expose a plaintext maFile holding secrets the vault no longer has,
  * and reported it as saved.
  *
  * Removed is the worse half: it puts the secrets somebody just chose to be rid
@@ -777,18 +1034,17 @@ describe('what a maFile does not carry', () => {
 });
 
 /**
- * **The account can go during the rename, not only during the write.**
+ * **The account can go during publication, not only during the write.**
  *
  * The fingerprint is taken before the write and checked before the publish, so
- * everything up to the rename is covered. The rename itself is a filesystem
+ * everything up to publication is covered. Publication itself is a filesystem
  * round trip — slow on the removable and network drives people export to — and
  * the check after it asked one question: is the vault still open. Removing the
  * account inside that window therefore answered `{ state: 'saved' }` with the
  * plaintext maFile sitting at the destination: secrets published for an
  * authenticator the vault no longer holds.
  *
- * `lockDuringRename` already existed for the vault-lock case; the account case
- * runs through the same door.
+ * The account and vault-lock cases run through the same publication hook.
  */
 describe('accountExport while the publish is in flight', () => {
 	function run(mutate: (accounts: Account[]) => void): {
@@ -808,14 +1064,14 @@ describe('accountExport while the publish is in flight', () => {
 		});
 
 		// After the plaintext has been published, before the answer is given.
-		lockDuringRename = () => mutate(accounts);
+		afterPublish = () => mutate(accounts);
 
 		const handler = handlers.get(CHANNELS.accountExport);
 		if (!handler) throw new Error('accountExport was not registered');
 		return { call: () => handler(EVENT, { steamId64: account.steamId64 }), destination };
 	}
 
-	it('takes the file back when the account is removed mid-rename', async () => {
+	it('takes the file back when the account is removed during publication', async () => {
 		const { call, destination } = run((accounts) => {
 			accounts.length = 0;
 		});
@@ -828,7 +1084,7 @@ describe('accountExport while the publish is in flight', () => {
 		).toBe(false);
 	});
 
-	it('takes it back when the authenticator is replaced mid-rename', async () => {
+	it('takes it back when the authenticator is replaced during publication', async () => {
 		const { call, destination } = run((accounts) => {
 			const current = accounts[0];
 			if (current) {
@@ -846,11 +1102,9 @@ describe('accountExport while the publish is in flight', () => {
 /*
  * **A rollback that could not take back what it had already written.**
  *
- * Every refusal on this path ends with the export undone: the published maFile
- * deleted, and the copy that was there before renamed back over it. Both halves
- * were fired and forgotten - `rm(...).catch(() => undefined)` and
- * `rename(...).catch(() => undefined)` - and the refusal then said "nothing was
- * written" regardless of whether either had worked. Hold the destination open
+ * Every post-publication refusal ends with the new maFile removed. That removal
+ * used to be fired and forgotten, so the refusal said "nothing was written"
+ * regardless of whether it worked. Hold the destination open
  * the way a scanner or a dropped network share does, and the user was told
  * nothing had happened while `shared_secret` and `identity_secret` sat
  * unencrypted in the folder they had just chosen. The message is what stops
@@ -882,13 +1136,8 @@ describe('an export rollback that cannot finish', () => {
 	function namesWhatItLeft(message: string, folder: string): string[] {
 		const leftBehind = readdirSync(folder);
 		for (const name of leftBehind) {
-			/*
-			 * A name that shows up only *inside* a longer one has not been named at
-			 * all: the set-aside copy is `out.maFile.<uuid>.prev`, so a message that
-			 * mentions only that would satisfy a plain `toContain('out.maFile')` and
-			 * report the published export as named when nothing said a word about it.
-			 * The longer siblings are cut out of the message before looking.
-			 */
+			// A name that appears only inside a longer staged name has not itself
+			// been named. Mask longer siblings before checking the message.
 			const masked = leftBehind
 				.filter((other) => other !== name && other.includes(name))
 				.reduce((text, other) => text.split(other).join(''), message);
@@ -913,7 +1162,7 @@ describe('an export rollback that cannot finish', () => {
 			read: () => ({ accounts: [...accounts] })
 		} as unknown as VaultService;
 
-		lockDuringRename = () => {
+		afterPublish = () => {
 			accounts.length = 0;
 		};
 		refuseRemovalOf = destination;
@@ -940,13 +1189,7 @@ describe('an export rollback that cannot finish', () => {
 		).not.toMatch(/nothing was written/i);
 	});
 
-	/*
-	 * The other half. The published copy went, but the file set aside to make the
-	 * publish undoable could not go home - so the user's own earlier export is
-	 * left under a random suffix, in a folder where they have just been told
-	 * nothing happened.
-	 */
-	it('names the set-aside copy it could not put back', async () => {
+	it('keeps the selected old export in place instead of entering the publish path', async () => {
 		const destination = join(dir, 'out.maFile');
 		const original = '{"an":"earlier export"}';
 		writeFileSync(destination, original);
@@ -957,11 +1200,6 @@ describe('an export rollback that cannot finish', () => {
 			read: () => ({ accounts: [...accounts] })
 		} as unknown as VaultService;
 
-		lockDuringRename = () => {
-			accounts.length = 0;
-		};
-		refuseRestore = true;
-
 		registerEnrollmentHandlers({} as EnrollmentService, vault, {
 			show: () => Promise.resolve(destination)
 		});
@@ -970,18 +1208,11 @@ describe('an export rollback that cannot finish', () => {
 
 		const message = await refusal(handler(EVENT, { steamId64: account.steamId64 }));
 
-		const [stranded, ...rest] = namesWhatItLeft(message, dir);
-		if (stranded === undefined) {
-			throw new Error('the restore worked, so this case proves nothing');
-		}
-		expect(rest).toEqual([]);
-		expect(stranded).toMatch(/\.prev$/);
-		expect(readFileSync(join(dir, stranded), 'utf8'), 'the backup itself was mangled').toBe(
-			original
-		);
-		expect(message, 'a plaintext file was left behind under a claim that none was').not.toMatch(
-			/nothing was written/i
-		);
+		expect(readFileSync(destination, 'utf8')).toBe(original);
+		expect(
+			readdirSync(dir).filter((name) => name.endsWith('.tmp') || name.endsWith('.prev'))
+		).toEqual([]);
+		expect(message).toMatch(/already in use|unused file name/i);
 	});
 
 	/*
@@ -998,7 +1229,7 @@ describe('an export rollback that cannot finish', () => {
 			read: () => ({ accounts: [account] })
 		} as unknown as VaultService;
 
-		lockDuringRename = () => {
+		afterPublish = () => {
 			unlocked = false;
 		};
 		refuseRemovalOf = destination;
@@ -1017,7 +1248,7 @@ describe('an export rollback that cannot finish', () => {
 
 	/*
 	 * The same defect one step earlier. Nothing is published here - the refusal
-	 * lands between the write and the rename - but the staged file holds the same
+	 * lands between the write and publication - but the staged file holds the same
 	 * plaintext, and "nothing was written" was just as untrue of it.
 	 */
 	it('names the staged copy it could not remove before publishing', async () => {
@@ -1057,13 +1288,7 @@ describe('an export rollback that cannot finish', () => {
 		);
 	});
 
-	/*
-	 * Both halves failing together, which is the ordinary shape of it: whatever
-	 * holds the destination open - a scanner, a share that dropped, a stick pulled
-	 * out - defeats the delete and the rename alike. Two plaintext files are then
-	 * in that folder, and both have to be named.
-	 */
-	it('names both when neither half of the rollback works', async () => {
+	it('does not touch an occupied destination before publication', async () => {
 		const destination = join(dir, 'out.maFile');
 		const original = '{"an":"earlier export"}';
 		writeFileSync(destination, original);
@@ -1074,12 +1299,6 @@ describe('an export rollback that cannot finish', () => {
 			read: () => ({ accounts: [...accounts] })
 		} as unknown as VaultService;
 
-		lockDuringRename = () => {
-			accounts.length = 0;
-		};
-		refuseRemovalOf = destination;
-		refuseRestore = true;
-
 		registerEnrollmentHandlers({} as EnrollmentService, vault, {
 			show: () => Promise.resolve(destination)
 		});
@@ -1088,23 +1307,14 @@ describe('an export rollback that cannot finish', () => {
 
 		const message = await refusal(handler(EVENT, { steamId64: account.steamId64 }));
 
-		// The published export is still there, and so is the copy it displaced.
-		const left = namesWhatItLeft(message, dir);
-		expect(left).toHaveLength(2);
-		expect(readFileSync(destination, 'utf8')).toContain('shared_secret');
+		expect(readFileSync(destination, 'utf8')).toBe(original);
 		expect(
-			left.filter((name) => name.endsWith('.prev')),
-			'the displaced backup is missing as well as unnamed'
-		).toHaveLength(1);
-		expect(message).not.toMatch(/nothing was written/i);
+			readdirSync(dir).filter((name) => name.endsWith('.tmp') || name.endsWith('.prev'))
+		).toEqual([]);
+		expect(message).toMatch(/already in use|unused file name/i);
 	});
 
-	/*
-	 * And when the publish itself fails, the set-aside copy is all that is left of
-	 * the user's backup. The message there is about the file that could not be
-	 * written; the file that could not be put back has to be in it too.
-	 */
-	it('names the copy stranded when the publish itself fails', async () => {
+	it('leaves the selected old export in place without attempting publication', async () => {
 		const destination = join(dir, 'out.maFile');
 		const original = '{"an":"earlier export"}';
 		writeFileSync(destination, original);
@@ -1114,9 +1324,6 @@ describe('an export rollback that cannot finish', () => {
 			read: () => ({ accounts: [account] })
 		} as unknown as VaultService;
 
-		refusePublish = true;
-		refuseRestore = true;
-
 		registerEnrollmentHandlers({} as EnrollmentService, vault, {
 			show: () => Promise.resolve(destination)
 		});
@@ -1125,21 +1332,19 @@ describe('an export rollback that cannot finish', () => {
 
 		const message = await refusal(handler(EVENT, { steamId64: account.steamId64 }));
 
-		const [stranded, ...rest] = namesWhatItLeft(message, dir);
-		if (stranded === undefined) {
-			throw new Error('the restore worked, so this case proves nothing');
-		}
-		expect(rest).toEqual([]);
-		expect(stranded).toMatch(/\.prev$/);
-		expect(readFileSync(join(dir, stranded), 'utf8')).toBe(original);
+		expect(readFileSync(destination, 'utf8')).toBe(original);
+		expect(
+			readdirSync(dir).filter((name) => name.endsWith('.tmp') || name.endsWith('.prev'))
+		).toEqual([]);
+		expect(message).toMatch(/already in use|unused file name/i);
 	});
 });
 
 /**
  * **The staged plaintext, when it cannot be taken back.**
  *
- * An export writes its secrets to a temp file beside the destination and then
- * renames it into place. Every path that gives up removes that file — and each
+ * An export writes its secrets to a temp file beside the destination before
+ * no-clobber publication. Every path that gives up removes that file — and each
  * of those removals used to be attempted rather than verified, so a scanner
  * holding it, a network share dropping, or a removable drive pulled left a
  * maFile in the user's folder under a message saying nothing had been written.
@@ -1251,7 +1456,7 @@ describe('two exports aimed at the same file', () => {
 		 * on every successful rename, and the restore is one too.
 		 */
 		let renames = 0;
-		lockDuringRename = () => {
+		afterPublish = () => {
 			renames += 1;
 			if (renames === 1) {
 				const index = accounts.findIndex((entry) => entry.steamId64 === account.steamId64);
@@ -1286,17 +1491,10 @@ describe('two exports aimed at the same file', () => {
 		).toBe(other.accountName);
 	});
 
-	/**
-	 * **And the other door into the same loss.**
-	 *
-	 * The ownership check stops the rollback *deleting* a stranger's file. The
-	 * restore half went on renaming the set-aside copy over the destination
-	 * whatever was there — and a rename replaces silently, so the file was gone
-	 * just the same, by the path nobody had looked at.
-	 */
-	it('does not rename its old copy over a file it did not write', async () => {
+	it('does not enter rollback machinery for an occupied destination', async () => {
 		const destination = join(dir, 'out.maFile');
-		writeFileSync(destination, 'the export this one is replacing');
+		const original = 'the export this one is replacing';
+		writeFileSync(destination, original);
 		const accounts: Account[] = [account];
 		const vault = {
 			isUnlocked: () => true,
@@ -1311,28 +1509,14 @@ describe('two exports aimed at the same file', () => {
 		const handler = handlers.get(CHANNELS.accountExport);
 		if (!handler) throw new Error('accountExport was not registered');
 
-		// The mock fires on every successful rename, and there are two here: the
-		// set-aside of the file already at the destination, then the publish. Only
-		// the second is the moment this is about.
-		let renames = 0;
-		lockDuringRename = () => {
-			renames += 1;
-			if (renames !== 2) {
-				return;
-			}
-			// Something else claims the path, and the account goes, so the export
-			// rolls back onto a file that is no longer its own.
-			accounts.length = 0;
-			writeFileSync(destination, 'a file this export did not write');
-		};
-
-		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow();
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow(
+			/already in use|unused file name/i
+		);
 
 		expect(
 			readFileSync(destination, 'utf8'),
-			'the rollback renamed its set-aside copy over a file the export had not written, which ' +
-				'destroys it exactly as deleting it would'
-		).toBe('a file this export did not write');
+			'an occupied destination changed despite the no-overwrite contract'
+		).toBe(original);
 	});
 
 	/**
@@ -1357,7 +1541,7 @@ describe('two exports aimed at the same file', () => {
 		const handler = handlers.get(CHANNELS.accountExport);
 		if (!handler) throw new Error('accountExport was not registered');
 
-		lockDuringRename = () => {
+		afterPublish = () => {
 			// Somebody else's file lands on the path, and the account goes, so the
 			// export rolls back onto something that is no longer its own.
 			accounts.length = 0;
@@ -1401,7 +1585,7 @@ describe('deciding whether the destination is still ours', () => {
 		if (!handler) throw new Error('accountExport was not registered');
 
 		let decoy = '';
-		lockDuringRename = () => {
+		afterPublish = () => {
 			accounts.length = 0;
 			// Exactly as many bytes as the maFile that was just published, written
 			// in the same tick — which is what the old check called "ours".
@@ -1418,42 +1602,27 @@ describe('deciding whether the destination is still ours', () => {
 		).toBe(decoy);
 	});
 
-	it('does not overwrite a destination it could not read', async () => {
+	it('does not read or overwrite an occupied destination', async () => {
 		const destination = join(dir, 'out.maFile');
-		/*
-		 * Something has to be there before the export starts, or there is nothing to
-		 * set aside and the restore never runs — which is how the first version of
-		 * this test passed with the unreadable case mutated back to "absent".
-		 */
-		writeFileSync(destination, 'an earlier export');
+		const original = 'an earlier export';
+		writeFileSync(destination, original);
 		const accounts: Account[] = [account];
+		refuseReadOf = destination;
 		registerEnrollmentHandlers({} as EnrollmentService, vaultThatLoses(accounts), {
 			show: () => Promise.resolve(destination)
 		});
 		const handler = handlers.get(CHANNELS.accountExport);
 		if (!handler) throw new Error('accountExport was not registered');
 
-		// Fires on the set-aside as well as the publish; only the publish matters.
-		let renames = 0;
-		lockDuringRename = () => {
-			renames += 1;
-			if (renames !== 2) {
-				return;
-			}
-			accounts.length = 0;
-			writeFileSync(destination, 'somebody else, and this export cannot read it');
-			// A read that fails with anything but ENOENT. `undefined` used to mean
-			// both "absent" and "could not look".
-			refuseReadOf = destination;
-		};
-
-		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow();
+		await expect(handler(EVENT, { steamId64: account.steamId64 })).rejects.toThrow(
+			/already in use|unused file name/i
+		);
 
 		expect(
 			readFileSync(destination, 'utf8'),
-			'a destination this export could not read was treated as empty, and the rollback wrote ' +
-				'over it'
-		).toBe('somebody else, and this export cannot read it');
+			'an occupied destination was read or overwritten'
+		).toBe(original);
+		expect(destinationsRead).not.toContain(destination);
 	});
 });
 
@@ -1495,7 +1664,7 @@ describe('two exports whose destinations are spelled differently', () => {
 		if (!handler) throw new Error('accountExport was not registered');
 
 		let renames = 0;
-		lockDuringRename = () => {
+		afterPublish = () => {
 			renames += 1;
 			if (renames === 1) {
 				const index = accounts.findIndex((entry) => entry.steamId64 === account.steamId64);
@@ -1568,16 +1737,11 @@ describe('two exports whose destinations are spelled differently', () => {
 		const handler = handlers.get(CHANNELS.accountExport);
 		if (!handler) throw new Error('accountExport was not registered');
 
-		/*
-		 * One export writes its staged copy and renames it into place; the second
-		 * finds a file already there and sets it aside first, so run one after the
-		 * other this reads write, rename, write, rename, rename. Run together it
-		 * begins write, write - both inside the critical section at once, which is
-		 * the state every guarantee downstream is written against.
-		 */
+		// The first stages and publishes. Only after that may the second stage and
+		// refuse the now-occupied name. Interleaving would begin `write write`.
 		const trace: string[] = [];
 		lockDuringWrite = () => trace.push('write');
-		lockDuringRename = () => trace.push('rename');
+		afterPublish = () => trace.push('publish');
 
 		await Promise.allSettled([
 			handler(EVENT, { steamId64: account.steamId64 }),
@@ -1588,7 +1752,7 @@ describe('two exports whose destinations are spelled differently', () => {
 			trace.join(' '),
 			'a junction and its target took two locks for one file, so both exports were inside the ' +
 				'critical section at once'
-		).toBe('write rename write rename rename');
+		).toBe('write publish write');
 	});
 });
 
@@ -1647,7 +1811,7 @@ describe('what the rollback reads before deleting', () => {
 		if (!handler) throw new Error('accountExport was not registered');
 
 		let renames = 0;
-		lockDuringRename = () => {
+		afterPublish = () => {
 			renames += 1;
 			if (renames !== 1) {
 				return;
@@ -1684,7 +1848,7 @@ describe('what the rollback reads before deleting', () => {
 		if (!handler) throw new Error('accountExport was not registered');
 
 		let renames = 0;
-		lockDuringRename = () => {
+		afterPublish = () => {
 			renames += 1;
 			if (renames !== 1) {
 				return;

@@ -34,9 +34,9 @@ import { join } from 'node:path';
  *
  * So this asks the question that can be asked without either: **does any page
  * put a literal version into a release filename?** That is the defect itself
- * rather than a proxy for it — the filenames must come from `SITE.version`, and
- * a hand-typed one is wrong the moment the version moves, whatever the built
- * output happens to say today.
+ * rather than a proxy for it. A filename must come from the latest version
+ * explicitly marked as published on GitHub — never from the package version,
+ * which can move before there is a file for a visitor to download.
  */
 
 const PAGES = join(__dirname, '..', 'site', 'pages');
@@ -86,13 +86,52 @@ describe('the release filenames the site publishes', () => {
 	 * And they interpolate the one value that is derived from the package being
 	 * built, rather than some other string that merely is not a digit.
 	 */
-	it('interpolate the built version', () => {
-		const interpolated = filenames().filter((entry) => entry.text.includes('${s.version}'));
+	it('interpolate the exact version marked as published on GitHub', () => {
+		const interpolated = filenames().filter((entry) =>
+			entry.text.includes('${s.publication.github.latestVersion}')
+		);
 
 		expect(
 			interpolated.length,
-			'no release filename is built from SITE.version, so nothing ties what the site publishes ' +
-				'to what the installer is called'
+			'no release filename is built from the independently verified GitHub publication state'
 		).toBeGreaterThan(0);
+		expect(filenames().some((entry) => entry.text.includes('${s.version}'))).toBe(false);
+	});
+});
+
+describe('release prose distinguishes source and public versions', () => {
+	it('does not call the package version published without an exact channel marker', () => {
+		const home = readFileSync(join(PAGES, 'home.mjs'), 'utf8');
+		const guides = readFileSync(join(PAGES, 'guides.mjs'), 'utf8');
+		const safety = readFileSync(join(PAGES, 'safety.mjs'), 'utf8');
+
+		expect(home).toContain('s.publication.github.current');
+		expect(home).toContain('s.publication.store.current');
+		expect(guides).toContain('publicationSummary(s)');
+		expect(safety).toContain('s.publication.github.latestVersion');
+		expect(`${home}\n${guides}\n${safety}`).not.toMatch(
+			/Status: 1\.0|\b1\.0 is published|commands apply to 1\.0|\b1\.0 is out/
+		);
+	});
+
+	it('keeps historical first-release statements explicitly tied to 1.0', () => {
+		const all = pageSources()
+			.map(({ source }) => source)
+			.join('\n');
+		expect(all).toContain('Version 1.0 was published on');
+	});
+});
+
+describe('the 1.5 route notes name the routes the UI actually offers', () => {
+	it('describes account proxy, Steam-only through it, and Direct', () => {
+		const changelog = readFileSync(join(__dirname, '..', 'CHANGELOG.md'), 'utf8');
+		const current = changelog.slice(
+			changelog.indexOf('## [1.5.0]'),
+			changelog.indexOf('## [1.0.0]')
+		);
+		expect(current).toMatch(/account's\s+proxy/);
+		expect(current).toMatch(/Steam-only[^\n]*same proxy/i);
+		expect(current).toContain('Direct');
+		expect(current).not.toContain('a different one');
 	});
 });

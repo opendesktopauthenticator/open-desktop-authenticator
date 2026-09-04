@@ -3,7 +3,12 @@ import { describeType, isAutoConfirmable, isSecurityCritical } from './policy';
 import { ConfirmationProtocolError } from './protocol';
 import type { Confirmation, ConfirmationAction } from './protocol';
 import { AccessTokenError, mintAccessToken } from '../steam/access-token';
-import { PROXY_POLICY_STOPPED, signIn, SteamLoginError } from '../steam/login';
+import {
+	PROXY_POLICY_STOPPED,
+	signIn,
+	SteamLoginError,
+	type LoginSessionFactory
+} from '../steam/login';
 import { isUsableMobileToken, jwtExpiry } from '../steam-jwt';
 import type { VaultService } from '../vault/service';
 import type { SteamTransportFactory } from '../net/transport';
@@ -53,12 +58,13 @@ export interface ConfirmationsServiceOptions {
 	 * a caching rule nobody can prove.
 	 */
 	signIn?: typeof signIn;
+	/** System-aware session construction for accounts with no stored proxy. */
+	loginSession?: LoginSessionFactory;
 	/**
 	 * Whether the vault refuses to talk to Steam without a proxy.
 	 *
-	 * Needed here and not only at the transport because this one path does not
-	 * use a transport: `steam-session` speaks over Node's own HTTP stack, so the
-	 * factory's refusal never sees it.
+	 * Needed before constructing even the system-routed sign-in transport: under
+	 * the strict setting, an account without its own proxy must emit no request.
 	 */
 	requireProxies?: () => boolean;
 }
@@ -132,6 +138,7 @@ export class ConfirmationsService {
 	private readonly now: () => number;
 	private readonly offset: () => number;
 	private readonly performSignIn: typeof signIn;
+	private readonly loginSession: LoginSessionFactory | undefined;
 	private readonly requireProxies: () => boolean;
 
 	private readonly sessions = new Map<string, SessionState>();
@@ -207,6 +214,7 @@ export class ConfirmationsService {
 		this.now = options.now ?? (() => Date.now());
 		this.offset = options.timeOffsetSeconds ?? ((): number => 0);
 		this.performSignIn = options.signIn ?? signIn;
+		this.loginSession = options.loginSession;
 		this.requireProxies = options.requireProxies ?? (() => false);
 	}
 
@@ -464,10 +472,9 @@ export class ConfirmationsService {
 				);
 			}
 
-			// No transport is built here. `steam-session` speaks to Steam over Node's
-			// own HTTP stack, so it takes the proxy URL directly and authenticates to
-			// the proxy itself — the Electron transport is for confirmations, which
-			// are still ours.
+			// Explicit account proxies stay on steam-session's agent. An absent route
+			// receives the injected Electron system transport, including Direct browser
+			// re-authentication; neither case may silently become a plain Node request.
 			let result;
 			try {
 				result = await this.performSignIn(
@@ -489,7 +496,7 @@ export class ConfirmationsService {
 					// Both proxied routes mint through the account's proxy: "Steam only"
 					// still sends every Steam request that way, and a sign-in is one.
 					route === 'direct' ? undefined : stored.proxyUrl,
-					undefined,
+					this.loginSession,
 					undefined,
 					/*
 					 * Kept only while this attempt is in the air. See `signingIn`.

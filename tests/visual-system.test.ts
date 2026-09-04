@@ -191,7 +191,9 @@ describe('the gate screens', () => {
 	it('still has two labelled fields on the create screen', () => {
 		// Guards the premise of the test above rather than the styling: if this
 		// screen ever became single-field, the scoping would stop mattering and
-		// somebody should notice deliberately rather than by breaking it.
-		expect(create.match(/<label htmlFor=/g) ?? []).toHaveLength(2);
+		// somebody should notice deliberately rather than by breaking it. The
+		// separate existing-vault adoption control is outside this creation form.
+		const createForm = create.slice(create.indexOf('<form'), create.indexOf('</form>'));
+		expect(createForm.match(/<label htmlFor=/g) ?? []).toHaveLength(2);
 	});
 });

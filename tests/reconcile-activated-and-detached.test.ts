@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { authenticatorFingerprint, EnrollmentService } from '../src/main/steam/enrollment';
+import {
+	authenticatorFingerprint,
+	EnrollmentService,
+	type OperationResolutionGuard
+} from '../src/main/steam/enrollment';
+import { operationRecordToken } from '../src/main/steam/authenticator-secrets';
 import type { SteamTransportFactory } from '../src/main/net/transport';
 import type { VaultService } from '../src/main/vault/service';
 import type { Account } from '../src/shared/vault-schema';
@@ -27,6 +32,8 @@ import type { Account } from '../src/shared/vault-schema';
  */
 
 const ID = '76561198000000001';
+const OPERATION_ID = '11111111-1111-4111-8111-111111111111';
+const JOURNAL_GUARD = { source: 'journal' } as const satisfies OperationResolutionGuard;
 
 function account(overrides: Partial<Account> = {}): Account {
 	return {
@@ -42,6 +49,15 @@ function account(overrides: Partial<Account> = {}): Account {
 }
 
 const transports = {} as unknown as SteamTransportFactory;
+
+function vaultGuard(stored: Account): OperationResolutionGuard {
+	const record = stored.unresolvedOperation;
+	if (record === undefined) throw new Error('the test account has no unresolved operation');
+	return {
+		source: 'vault',
+		operationToken: operationRecordToken('vault', { steamId64: stored.steamId64, ...record })
+	};
+}
 
 /** A vault that keeps what a mutate wrote and records passphrase checks. */
 function vaultHolding(accounts: Account[], options: { refuse?: boolean } = {}) {
@@ -68,7 +84,7 @@ describe('an activation the user confirmed on Steam', () => {
 		const { vault } = vaultHolding(accounts);
 		const service = new EnrollmentService(vault, transports, {});
 
-		await service.reconcileActivated(ID, authenticatorFingerprint(account()));
+		await service.reconcileActivated(ID, authenticatorFingerprint(account()), JOURNAL_GUARD);
 
 		expect(
 			accounts[0]?.status,
@@ -83,7 +99,7 @@ describe('an activation the user confirmed on Steam', () => {
 		const { vault } = vaultHolding(accounts);
 		const service = new EnrollmentService(vault, transports, {});
 
-		await service.reconcileActivated(ID, authenticatorFingerprint(account()));
+		await service.reconcileActivated(ID, authenticatorFingerprint(account()), JOURNAL_GUARD);
 
 		expect(accounts[0]?.status).toBe('active');
 	});
@@ -93,15 +109,91 @@ describe('an activation the user confirmed on Steam', () => {
 		accounts[0]!.unresolvedOperation = {
 			kind: 'activate',
 			guidance: 'check the account',
+			fingerprint: authenticatorFingerprint(accounts[0]!),
+			operationId: OPERATION_ID,
 			at: '2026-01-01T00:00:00.000Z'
 		};
 		const { vault } = vaultHolding(accounts);
 
 		await new EnrollmentService(vault, transports, {}).reconcileActivated(
 			ID,
-			authenticatorFingerprint(account())
+			authenticatorFingerprint(account()),
+			vaultGuard(accounts[0]!)
 		);
 
+		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
+	});
+
+	it('does not consume a vault record on behalf of an unrelated journal answer', async () => {
+		const accounts = [account()];
+		const fingerprint = authenticatorFingerprint(accounts[0]!);
+		accounts[0]!.unresolvedOperation = {
+			kind: 'activate',
+			guidance: 'check the account',
+			fingerprint,
+			operationId: OPERATION_ID,
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		const record = accounts[0]!.unresolvedOperation;
+		const { vault } = vaultHolding(accounts);
+
+		const applied = await new EnrollmentService(vault, transports, {}).reconcileActivated(
+			ID,
+			fingerprint,
+			JOURNAL_GUARD
+		);
+
+		expect(applied).toBe(false);
+		expect(accounts[0]?.status).toBe('pendingActivation');
+		expect(accounts[0]?.unresolvedOperation).toBe(record);
+	});
+
+	it('can reconcile a current journal answer while preserving identified stale vault evidence', async () => {
+		const accounts = [account()];
+		accounts[0]!.unresolvedOperation = {
+			kind: 'activate',
+			guidance: 'older authenticator',
+			fingerprint: '0123456789abcdef',
+			operationId: OPERATION_ID,
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		const record = accounts[0]!.unresolvedOperation;
+		const { vault } = vaultHolding(accounts);
+
+		const applied = await new EnrollmentService(vault, transports, {}).reconcileActivated(
+			ID,
+			authenticatorFingerprint(accounts[0]!),
+			JOURNAL_GUARD
+		);
+
+		expect(applied).toBe(true);
+		expect(accounts[0]?.status).toBe('pendingRevocationBackup');
+		expect(accounts[0]?.unresolvedOperation).toBe(record);
+	});
+
+	it("consumes a vault latch only when it is the journal record's exact companion", async () => {
+		const accounts = [account()];
+		const fingerprint = authenticatorFingerprint(accounts[0]!);
+		const at = '2026-01-01T00:00:00.000Z';
+		accounts[0]!.unresolvedOperation = {
+			kind: 'activate',
+			guidance: 'check the account',
+			fingerprint,
+			operationId: OPERATION_ID,
+			at
+		};
+		const { vault } = vaultHolding(accounts);
+
+		const applied = await new EnrollmentService(vault, transports, {}).reconcileActivated(
+			ID,
+			fingerprint,
+			{
+				source: 'journal',
+				companion: { operationId: OPERATION_ID, kind: 'activate', fingerprint, at }
+			}
+		);
+
+		expect(applied).toBe(true);
 		expect(accounts[0]?.unresolvedOperation).toBeUndefined();
 	});
 
@@ -120,13 +212,35 @@ describe('an activation the user confirmed on Steam', () => {
 			}
 		});
 
-		await service.reconcileActivated(ID, authenticatorFingerprint(account()));
+		await service.reconcileActivated(ID, authenticatorFingerprint(account()), JOURNAL_GUARD);
 
 		expect(
 			updated.map((entry) => entry.status),
 			'the vault moved on and the recovery file was left describing an account that never ' +
 				'finished enrolling'
 		).toEqual(['pendingRevocationBackup']);
+	});
+
+	it('reports that reconciliation succeeded when only its recovery correction failed', async () => {
+		const accounts = [account()];
+		const { vault } = vaultHolding(accounts);
+		const service = new EnrollmentService(vault, transports, {
+			updateRecovery: () => {
+				throw new Error('disk unavailable');
+			}
+		});
+
+		await expect(
+			service.reconcileActivatedWithRecoveryStatus(
+				ID,
+				authenticatorFingerprint(account()),
+				JOURNAL_GUARD
+			)
+		).resolves.toEqual({
+			applied: true,
+			recoveryWarning: expect.stringMatching(/recovery backup.*could not be updated/i)
+		});
+		expect(accounts[0]?.status).toBe('pendingRevocationBackup');
 	});
 
 	/* A missing account is not an error worth failing a reconciliation over. */
@@ -136,7 +250,8 @@ describe('an activation the user confirmed on Steam', () => {
 		await expect(
 			new EnrollmentService(vault, transports, {}).reconcileActivated(
 				ID,
-				authenticatorFingerprint(account())
+				authenticatorFingerprint(account()),
+				JOURNAL_GUARD
 			)
 		).resolves.not.toThrow();
 	});
@@ -149,7 +264,12 @@ describe('a removal the user confirmed on Steam', () => {
 		const service = new EnrollmentService(vault, transports, {});
 
 		await expect(
-			service.reconcileDetached(ID, 'the wrong passphrase', authenticatorFingerprint(account()))
+			service.reconcileDetached(
+				ID,
+				'the wrong passphrase',
+				authenticatorFingerprint(account()),
+				JOURNAL_GUARD
+			)
 		).rejects.toThrow();
 
 		expect(checked, 'the passphrase was never checked at all').toEqual(['the wrong passphrase']);
@@ -167,7 +287,8 @@ describe('a removal the user confirmed on Steam', () => {
 		await new EnrollmentService(vault, transports, {}).reconcileDetached(
 			ID,
 			'a passphrase long enough',
-			authenticatorFingerprint(account())
+			authenticatorFingerprint(account()),
+			JOURNAL_GUARD
 		);
 
 		expect(checked).toEqual(['a passphrase long enough']);
@@ -182,10 +303,58 @@ describe('a removal the user confirmed on Steam', () => {
 		await new EnrollmentService(vault, transports, {}).reconcileDetached(
 			ID,
 			'a passphrase long enough',
-			authenticatorFingerprint(account())
+			authenticatorFingerprint(account()),
+			JOURNAL_GUARD
 		);
 
 		expect(accounts.map((entry) => entry.steamId64)).toEqual(['76561198000000002']);
+	});
+
+	it('can remove the current authenticator from a journal answer despite identified stale vault evidence', async () => {
+		const accounts = [account({ status: 'active' })];
+		accounts[0]!.unresolvedOperation = {
+			kind: 'activate',
+			guidance: 'older authenticator',
+			fingerprint: '0123456789abcdef',
+			operationId: OPERATION_ID,
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		const { vault } = vaultHolding(accounts);
+
+		const applied = await new EnrollmentService(vault, transports, {}).reconcileDetached(
+			ID,
+			'a passphrase long enough',
+			authenticatorFingerprint(accounts[0]!),
+			JOURNAL_GUARD
+		);
+
+		expect(applied).toBe(true);
+		expect(accounts).toEqual([]);
+	});
+
+	it('does not delete an account when the displayed vault record token no longer matches', async () => {
+		const accounts = [account({ status: 'active' })];
+		const fingerprint = authenticatorFingerprint(accounts[0]!);
+		accounts[0]!.unresolvedOperation = {
+			kind: 'deactivate',
+			guidance: 'check whether Steam Guard is still on',
+			fingerprint,
+			operationId: OPERATION_ID,
+			at: '2026-01-01T00:00:00.000Z'
+		};
+		const record = accounts[0]!.unresolvedOperation;
+		const { vault } = vaultHolding(accounts);
+
+		const applied = await new EnrollmentService(vault, transports, {}).reconcileDetached(
+			ID,
+			'a passphrase long enough',
+			fingerprint,
+			{ source: 'vault', operationToken: '0'.repeat(64) }
+		);
+
+		expect(applied).toBe(false);
+		expect(accounts).toHaveLength(1);
+		expect(accounts[0]?.unresolvedOperation).toBe(record);
 	});
 });
 
@@ -239,7 +408,8 @@ describe('a row replaced while the reconciliation was in flight', () => {
 		const applied = await new EnrollmentService(vault, transports, {}).reconcileDetached(
 			ID,
 			'a passphrase long enough',
-			expected
+			expected,
+			JOURNAL_GUARD
 		);
 
 		expect(applied, 'a removal that deleted nothing was reported as done').toBe(false);
@@ -253,7 +423,8 @@ describe('a row replaced while the reconciliation was in flight', () => {
 
 		const applied = await new EnrollmentService(vault, transports, {}).reconcileActivated(
 			ID,
-			expected
+			expected,
+			JOURNAL_GUARD
 		);
 
 		expect(applied).toBe(false);
@@ -267,7 +438,8 @@ describe('a row replaced while the reconciliation was in flight', () => {
 		expect(
 			await new EnrollmentService(vault, transports, {}).reconcileActivated(
 				ID,
-				authenticatorFingerprint(accounts[0]!)
+				authenticatorFingerprint(accounts[0]!),
+				JOURNAL_GUARD
 			)
 		).toBe(true);
 	});
@@ -280,7 +452,8 @@ describe('a row replaced while the reconciliation was in flight', () => {
 		await new EnrollmentService(vault, transports, {}).reconcileDetached(
 			ID,
 			'a passphrase long enough',
-			expected
+			expected,
+			JOURNAL_GUARD
 		);
 
 		expect(
@@ -297,7 +470,11 @@ describe('a row replaced while the reconciliation was in flight', () => {
 		accounts[0] = account({ sharedSecret: 'YSBkaWZmZXJlbnQgc2VjcmV0' });
 		const { vault } = vaultHolding(accounts);
 
-		await new EnrollmentService(vault, transports, {}).reconcileActivated(ID, expected);
+		await new EnrollmentService(vault, transports, {}).reconcileActivated(
+			ID,
+			expected,
+			JOURNAL_GUARD
+		);
 
 		expect(
 			accounts[0]?.status,

@@ -3,6 +3,7 @@ import type { AccountSummary } from '../../shared/ipc';
 import type { NotifyDetail } from '../../shared/vault-schema';
 import { matchesTradesAck, TRADES_ACK } from '../../shared/acknowledgements';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 
 /** Below this, the screen says what the interval costs. */
 export const RATE_WARNING_BELOW_SECONDS = 30;
@@ -180,7 +181,7 @@ export function AutoConfirm({
 				{account.accountName} <span className="muted">{account.steamId64}</span>
 			</p>
 
-			{error && <p className="error">{error}</p>}
+			{error && <DynamicError>{error}</DynamicError>}
 
 			{/*
 				**Nothing on this screen said the switches were doing nothing.**
@@ -211,6 +212,7 @@ export function AutoConfirm({
 					<input
 						type="checkbox"
 						checked={marketListings}
+						disabled={busy}
 						onChange={(event) => setMarketListings(event.target.checked)}
 					/>
 					<span>
@@ -226,6 +228,7 @@ export function AutoConfirm({
 					<input
 						type="checkbox"
 						checked={trades}
+						disabled={busy}
 						onChange={(event) => setTrades(event.target.checked)}
 					/>
 					<span>
@@ -247,6 +250,7 @@ export function AutoConfirm({
 							id="trade-acknowledgement"
 							type="text"
 							value={acknowledgement}
+							disabled={busy}
 							onChange={(event) => setAcknowledgement(event.target.value)}
 							autoComplete="off"
 							spellCheck={false}
@@ -262,6 +266,7 @@ export function AutoConfirm({
 					<input
 						type="checkbox"
 						checked={notifyEnabled}
+						disabled={busy}
 						onChange={(event) => setNotifyEnabled(event.target.checked)}
 					/>
 					<span>
@@ -325,6 +330,7 @@ export function AutoConfirm({
 									name="notify-detail"
 									value={value}
 									checked={notifyDetail === value}
+									disabled={busy}
 									onChange={() => setNotifyDetail(value)}
 								/>
 								<span>
@@ -347,6 +353,7 @@ export function AutoConfirm({
 					min={10}
 					max={3600}
 					value={pollIntervalSeconds}
+					disabled={busy}
 					onChange={(event) =>
 						setPollIntervalSeconds(Number.parseInt(event.target.value, 10) || 15)
 					}

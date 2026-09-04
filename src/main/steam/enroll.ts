@@ -3,6 +3,10 @@ import { generateGuardCode } from '../codes/totp';
 import { deviceIdFor } from '../confirmations/key';
 import type { SteamTransport } from '../confirmations/client';
 import { EgressError } from '../net/egress';
+import {
+	authenticatorSecretProblem,
+	describeAuthenticatorSecretProblem
+} from './authenticator-secrets';
 
 /**
  * Attaching a new authenticator to a Steam account (§12 F3).
@@ -166,7 +170,7 @@ async function commitRequest(
 		 * that cannot say is treated as sent — that is the assumption that cannot
 		 * lose an authenticator.
 		 */
-		if (err instanceof EgressError && !err.sent) {
+		if (err instanceof EgressError && err.sent === false) {
 			throw err;
 		}
 		// Not `permanent: false`. Trying again is exactly what must not happen
@@ -181,25 +185,41 @@ function describeCause(err: unknown): string {
 	return message.length > 120 ? `${message.slice(0, 119)}…` : message;
 }
 
-const addResponseSchema = z.object({
-	response: z.object({
-		status: z.number().int(),
-		/** Base64. The seed every Steam Guard code for this account comes from. */
-		shared_secret: z.string().optional(),
-		/** Base64. Signs confirmation requests. */
-		identity_secret: z.string().optional(),
-		/** `RXXXXX`. The only way back if the authenticator is ever lost. */
-		revocation_code: z.string().optional(),
-		serial_number: z.string().optional(),
-		/** `otpauth://` URI. Useful for a user who wants a second copy elsewhere. */
-		uri: z.string().optional(),
-		account_name: z.string().optional(),
-		token_gid: z.string().optional(),
-		/** Last digits of the phone Steam will text. Shown so the user knows where to look. */
-		phone_number_hint: z.string().optional(),
-		server_time: z.union([z.string(), z.number()]).optional()
-	})
-});
+type AddResponse = Record<string, unknown>;
+
+// Steam's ordinary values are tiny. These bounds keep a hostile or corrupted
+// reply from turning a one-time authenticator into a journal record that the
+// journal itself must reject for size. Optional metadata is omitted when it is
+// outside the format this application can safely preserve.
+const MAX_ENCODED_SECRET_LENGTH = 128;
+const MAX_OPTIONAL_SECRET_LENGTH = 512;
+const MAX_REVOCATION_CODE_LENGTH = 256;
+const MAX_ACCOUNT_NAME_LENGTH = 64;
+const MAX_IDENTIFIER_LENGTH = 128;
+const MAX_URI_LENGTH = 8 * 1024;
+
+/** Preserve the one-time fields before optional metadata gets a vote. */
+function addResponse(value: unknown): AddResponse | undefined {
+	if (typeof value !== 'object' || value === null || !('response' in value)) return undefined;
+	const response = (value as { response?: unknown }).response;
+	return typeof response === 'object' && response !== null
+		? (response as Record<string, unknown>)
+		: undefined;
+}
+
+function nonemptyString(
+	record: AddResponse,
+	field: string,
+	maxLength = Number.POSITIVE_INFINITY
+): string | undefined {
+	const value = record[field];
+	return typeof value === 'string' && value !== '' && value.length <= maxLength ? value : undefined;
+}
+
+function integer(record: AddResponse, field: string): number | undefined {
+	const value = record[field];
+	return typeof value === 'number' && Number.isInteger(value) ? value : undefined;
+}
 
 const removeResponseSchema = z.object({
 	response: z.object({
@@ -227,14 +247,50 @@ const finalizeResponseSchema = z.object({
 export interface StartedEnrollment {
 	sharedSecret: string;
 	identitySecret: string;
-	revocationCode: string;
+	revocationCode?: string;
 	deviceId: string;
 	serialNumber?: string;
 	accountName?: string;
 	tokenGid?: string;
 	uri?: string;
+	secret1?: string;
 	/** Masked digits of the phone Steam is texting, when it says. */
 	phoneNumberHint?: string;
+}
+
+/** Bounded one-time fields from a reply that cannot form a working account. */
+export interface RetainedEnrollmentReply {
+	sharedSecret?: string;
+	identitySecret?: string;
+	revocationCode?: string;
+	deviceId: string;
+	serialNumber?: string;
+	accountName?: string;
+	tokenGid?: string;
+	uri?: string;
+	secret1?: string;
+	phoneNumberHint?: string;
+}
+
+export class EnrollmentPartialSecretsError extends EnrollmentError {
+	readonly retained: RetainedEnrollmentReply;
+
+	constructor(message: string, retained: RetainedEnrollmentReply, certain: boolean) {
+		super(message, true, true, certain);
+		this.name = 'EnrollmentPartialSecretsError';
+		this.retained = retained;
+	}
+}
+
+/** A complete one-time reply that must be retained, but must not be stored as usable. */
+export class EnrollmentSecretsError extends EnrollmentError {
+	readonly started: StartedEnrollment;
+
+	constructor(message: string, started: StartedEnrollment) {
+		super(message, true, true, true);
+		this.name = 'EnrollmentSecretsError';
+		this.started = started;
+	}
 }
 
 /**
@@ -390,51 +446,101 @@ export async function startEnrollment(
 		UNCERTAIN.add
 	);
 
-	const parsed = addResponseSchema.safeParse(
-		readJson(response.text, response.status, UNCERTAIN.add, true)
-	);
-	if (!parsed.success) {
+	const body = addResponse(readJson(response.text, response.status, UNCERTAIN.add, true));
+	if (body === undefined) {
 		// **Not "nothing was changed".** The request went before this reply came
 		// back, so an unreadable one says nothing about what Steam did with it.
 		throw new EnrollmentError(UNCERTAIN.add, true, true);
 	}
 
-	const body = parsed.data.response;
-	if (body.status !== ERESULT.ok) {
-		throw new EnrollmentError(describeStatus(body.status), body.status !== ERESULT.rateLimited);
-	}
-
 	// Checked together, and hard. A partial response here is the worst case in
 	// the whole application: Steam has attached the authenticator, and a missing
 	// field means the account is now protected by a secret nobody holds.
-	const { shared_secret, identity_secret, revocation_code } = body;
-	if (!shared_secret || !identity_secret || !revocation_code) {
+	const shared_secret = nonemptyString(body, 'shared_secret', MAX_ENCODED_SECRET_LENGTH);
+	const identity_secret = nonemptyString(body, 'identity_secret', MAX_ENCODED_SECRET_LENGTH);
+	const revocation_code = nonemptyString(body, 'revocation_code', MAX_REVOCATION_CODE_LENGTH);
+	const serialNumber = nonemptyString(body, 'serial_number', MAX_IDENTIFIER_LENGTH);
+	const accountName = nonemptyString(body, 'account_name', MAX_ACCOUNT_NAME_LENGTH);
+	const tokenGid = nonemptyString(body, 'token_gid', MAX_IDENTIFIER_LENGTH);
+	const uri = nonemptyString(body, 'uri', MAX_URI_LENGTH);
+	const secret1 = nonemptyString(body, 'secret_1', MAX_OPTIONAL_SECRET_LENGTH);
+	const phoneNumberHint = nonemptyString(body, 'phone_number_hint', 64);
+	const status = integer(body, 'status');
+	if (!shared_secret || !identity_secret) {
+		const retained: RetainedEnrollmentReply = { deviceId };
+		if (shared_secret !== undefined) retained.sharedSecret = shared_secret;
+		if (identity_secret !== undefined) retained.identitySecret = identity_secret;
+		if (revocation_code !== undefined) retained.revocationCode = revocation_code;
+		if (serialNumber !== undefined) retained.serialNumber = serialNumber;
+		if (accountName !== undefined) retained.accountName = accountName;
+		if (tokenGid !== undefined) retained.tokenGid = tokenGid;
+		if (uri !== undefined) retained.uri = uri;
+		if (secret1 !== undefined) retained.secret1 = secret1;
+		if (phoneNumberHint !== undefined) retained.phoneNumberHint = phoneNumberHint;
+		const anySecretMaterial =
+			shared_secret !== undefined ||
+			identity_secret !== undefined ||
+			revocation_code !== undefined ||
+			secret1 !== undefined;
+		if (status !== undefined && status !== ERESULT.ok && !anySecretMaterial) {
+			throw new EnrollmentError(describeStatus(status), status !== ERESULT.rateLimited);
+		}
+		if (anySecretMaterial) {
+			throw new EnrollmentPartialSecretsError(
+				'Steam returned only part of the new authenticator. The bounded one-time fields were retained ' +
+					'encrypted, but they cannot form a working account. Do not retry until this is resolved through Steam or Steam Support.',
+				retained,
+				status === ERESULT.ok
+			);
+		}
 		/*
 		 * **Certainly committed.** Steam answered `ok` — it attached one — and the
 		 * fields this application needs are not in the reply. Retrying cannot help
 		 * and must not be offered, which is what the last two arguments are for.
 		 */
-		throw new EnrollmentError(
-			'Steam accepted the request but did not return the secrets. This account may now have an ' +
-				'authenticator nobody can use — contact Steam Support with your account details before ' +
-				'trying again.',
-			true,
-			true,
-			true
-		);
+		if (status === ERESULT.ok) {
+			throw new EnrollmentError(
+				'Steam accepted the request but did not return the secrets. This account may now have an ' +
+					'authenticator nobody can use — contact Steam Support with your account details before ' +
+					'trying again.',
+				true,
+				true,
+				true
+			);
+		}
+		// With no trustworthy status, even an empty-looking response cannot prove
+		// that Steam did nothing. The request was sent, so retrying may create a
+		// second operation after the first one actually succeeded.
+		throw new EnrollmentError(UNCERTAIN.add, true, true);
 	}
+	/*
+	 * A complete one-time bundle wins over contradictory metadata. Discarding it
+	 * because `status` said no can permanently lose an authenticator Steam did
+	 * attach; storing it is recoverable and activation will establish whether it
+	 * is live. A refusal remains retryable only when no secret material arrived.
+	 */
 
 	const started: StartedEnrollment = {
 		sharedSecret: shared_secret,
 		identitySecret: identity_secret,
-		revocationCode: revocation_code,
 		deviceId
 	};
-	if (body.serial_number !== undefined) started.serialNumber = body.serial_number;
-	if (body.account_name !== undefined) started.accountName = body.account_name;
-	if (body.token_gid !== undefined) started.tokenGid = body.token_gid;
-	if (body.uri !== undefined) started.uri = body.uri;
-	if (body.phone_number_hint !== undefined) started.phoneNumberHint = body.phone_number_hint;
+	if (revocation_code !== undefined) started.revocationCode = revocation_code;
+	if (serialNumber !== undefined) started.serialNumber = serialNumber;
+	if (accountName !== undefined) started.accountName = accountName;
+	if (tokenGid !== undefined) started.tokenGid = tokenGid;
+	if (uri !== undefined) started.uri = uri;
+	if (secret1 !== undefined) started.secret1 = secret1;
+	if (phoneNumberHint !== undefined) started.phoneNumberHint = phoneNumberHint;
+
+	const secretProblem = authenticatorSecretProblem(started);
+	if (secretProblem !== undefined) {
+		throw new EnrollmentSecretsError(
+			`Steam returned a complete-looking authenticator, but ${describeAuthenticatorSecretProblem(secretProblem)}. ` +
+				'The one-time reply must be retained for recovery and must not be reported as a usable account.',
+			started
+		);
+	}
 
 	return started;
 }

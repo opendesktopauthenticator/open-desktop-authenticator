@@ -41,7 +41,7 @@ ticket=$(curl -s -o /dev/null -w '%{http_code}' -m 10 \
   https://opendesktopauthenticator.com/support/ticket/ODA-HEALTHCHECK 2>/dev/null)
 if [ "$ticket" != "404" ]; then log err "ticket service returned $ticket, expected 404"; fail=1; fi
 
-cert=/etc/letsencrypt/live/opendesktopauthenticator.com/cert.pem
+cert=${ODA_CERT_FILE:-/etc/letsencrypt/live/opendesktopauthenticator.com/cert.pem}
 if [ -r "$cert" ]; then
   ends=$(date -d "$(openssl x509 -in "$cert" -noout -enddate | cut -d= -f2)" +%s)
   days=$(( (ends - $(date +%s)) / 86400 ))
@@ -52,9 +52,35 @@ else
   log err "certificate unreadable at $cert"; fail=1
 fi
 
-used=$(df --output=pcent / | tail -1 | tr -dc '0-9')
-if [ "$used" -gt 90 ]; then log err "disk ${used}% full"; fail=1
-elif [ "$used" -gt 80 ]; then log warning "disk ${used}% full"; fi
+# Do not turn arbitrary output into a plausible percentage by deleting the
+# characters we do not understand. `df` failing, returning nothing, or changing
+# its format is itself a health failure; treating `8x%` as `8%` reports the exact
+# opposite. `pipefail` carries a failure from either command in the pipeline.
+if ! disk_raw=$(df --output=pcent / | tail -1); then
+  log err "disk usage probe failed"
+  fail=1
+else
+  # The real value may be padded around one number and one percent sign. Match
+  # that complete shape instead of deleting whitespace: `8 1%` is malformed,
+  # not a different spelling of `81%`.
+  if [[ ! "$disk_raw" =~ ^[[:space:]]*([0-9]{1,3})%[[:space:]]*$ ]]; then
+    log err "disk usage probe returned an invalid value"
+    fail=1
+  else
+    used=${BASH_REMATCH[1]}
+    # Explicit base ten so a padded value such as 081 is not read as octal.
+    used_number=$((10#$used))
+    if [ "$used_number" -gt 100 ]; then
+      log err "disk usage probe returned an out-of-range value"
+      fail=1
+    elif [ "$used_number" -gt 90 ]; then
+      log err "disk ${used_number}% full"
+      fail=1
+    elif [ "$used_number" -gt 80 ]; then
+      log warning "disk ${used_number}% full"
+    fi
+  fi
+fi
 
 [ "$fail" -eq 0 ] && log info "ok"
 exit "$fail"

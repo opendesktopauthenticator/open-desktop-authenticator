@@ -9,8 +9,10 @@ import {
 	net,
 	Notification,
 	powerMonitor,
+	safeStorage,
 	session
 } from 'electron';
+import type { NotificationConstructorOptions } from 'electron';
 import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -21,6 +23,7 @@ import { setTrustedSender } from './ipc/router';
 import { registerAppInfoHandler } from './app-info';
 import { VaultService } from './vault/service';
 import { registerVaultHandlers } from './vault/ipc';
+import { VaultKeyOperationCoordinator } from './vault/key-operation-coordinator';
 import { RevocationCeremony } from './vault/revocation-ceremony';
 import { ImportService } from './import/service';
 import { registerImportHandlers } from './import/ipc';
@@ -35,9 +38,14 @@ import { electronBrowserHost, isAccountBrowserContents } from './browser/electro
 import { EnrollmentService } from './steam/enrollment';
 import { registerEnrollmentHandlers } from './steam/enrollment-ipc';
 import { fileOperationJournal } from './steam/operation-journal';
+import { fileWorkflowJournal } from './steam/workflow-journal';
+import { accountMutationBlockedByDurableState } from './steam/account-mutation-guard';
 import { TransferService } from './steam/transfer';
+import { createSystemAwareLoginSessionFactory } from './steam/login';
+import { createSystemLoginTransportFactory } from './steam/system-login-transport';
 import { registerTransferHandlers } from './steam/transfer-ipc';
 import { createRecoveryHooks, reconcileRecoveryFiles, RECOVERY_EXTENSION } from './vault/recovery';
+import { finishRecoveryBackup as completeRecoveryBackup } from './vault/recovery-state';
 import { SteamTransportFactory, type ElectronNetworking } from './net/transport';
 import { ConfirmationsService } from './confirmations/service';
 import { AutoConfirmEngine } from './confirmations/auto';
@@ -45,7 +53,17 @@ import { ActivityLog } from './confirmations/activity';
 import { notificationImage, windowImage } from './logo-image';
 import { ConfirmationNotifier } from './confirmations/notify';
 import { ProxyConsent } from './net/proxy-consent';
-import { registerToastClickHandlers, ToastClickRouter } from './confirmations/toast-click';
+import {
+	activateToastForKnownAccount,
+	registerToastClickHandlers,
+	ToastClickRouter
+} from './confirmations/toast-click';
+import {
+	buildWindowsToastXml,
+	issueWindowsToastActivation,
+	WINDOWS_TOAST_ACTIVATOR_CLSID,
+	WindowsToastActivationRouter
+} from './confirmations/windows-toast-activation';
 import { createTray } from './tray';
 import { registerWindowsIdentity } from './windows-identity';
 import { registerConfirmationHandlers } from './confirmations/ipc';
@@ -165,18 +183,20 @@ function start(): void {
 	/*
 	 * **The portable build keeps its data beside itself.**
 	 *
-	 * `electron-builder.config.mjs` describes that target as "no installer, no
-	 * writes outside its own directory", which is the whole reason somebody runs
-	 * it from a USB stick on a machine they do not control. This line put the
-	 * vault under `%APPDATA%` unconditionally, so a portable copy left encrypted
-	 * account data on the host and shared it with any installed copy — the
-	 * opposite of what the target promises.
+	 * `electron-builder.config.mjs` promises that vaults, settings and recovery
+	 * data stay beside the executable. The single-file launcher itself extracts
+	 * Electron/Chromium runtime files to Windows Temp while it runs; those are
+	 * normally removed on exit and contain no account data. This line used to put
+	 * the vault under `%APPDATA%` unconditionally, so a portable copy left
+	 * encrypted account data on the host and shared it with any installed copy.
 	 *
 	 * electron-builder sets `PORTABLE_EXECUTABLE_DIR` for that target and nothing
 	 * else, so it is also the only signal available at runtime: the binary is
 	 * otherwise identical to the installed one.
 	 */
 	const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
+	const persistentWindowsToastActivation =
+		process.platform === 'win32' && portableDir === undefined;
 	app.setPath(
 		'userData',
 		portableDir
@@ -198,6 +218,13 @@ function start(): void {
 	// place. It has to be set before any window is created.
 	if (process.platform === 'win32') {
 		app.setAppUserModelId(branding.appId);
+		// A stable activator is what lets Action Center route a click after the
+		// original Notification object — or the whole process — is gone. Portable
+		// deliberately keeps the per-run identity: its contract forbids leaving COM
+		// registration or shortcut state on the host machine.
+		if (persistentWindowsToastActivation) {
+			app.setToastActivatorCLSID(WINDOWS_TOAST_ACTIVATOR_CLSID);
+		}
 	}
 
 	// Tell Windows what to call us above a notification. Deliberately not awaited:
@@ -205,9 +232,8 @@ function start(): void {
 	// up a launch. See the module for what it writes and why it is that and not a
 	// Start Menu shortcut.
 	//
-	// **Not in the portable build.** That target's whole contract is "no
-	// installer, no writes outside its own directory" — the reason somebody runs
-	// it from a USB stick on a machine they do not control — and this writes two
+	// **Not in the portable build.** Its user-data contract keeps the vault,
+	// settings and recovery records beside the executable, and this writes two
 	// values under `HKCU\Software\Classes\AppUserModelId`, one of them a path
 	// pointing back at the copy they were only trying out. The cost of skipping
 	// it is a plainer caption on a toast notification, which is the right trade
@@ -271,9 +297,12 @@ function start(): void {
 	 * and on every platform that builds its menu at the instant of the click.
 	 */
 	let trayStateChanged: () => void = () => undefined;
+	const keyCoordinator = new VaultKeyOperationCoordinator();
 
 	const vault = new VaultService({
 		file: join(app.getPath('userData'), 'vault.json'),
+		beforeMutationCommit: (current, next) =>
+			keyCoordinator.assertAccountSnapshotsUnchanged(current.accounts, next.accounts),
 		onUnlock: () => trayStateChanged(),
 		onLock: () => {
 			// Staged maFile secrets do not outlive the unlocked session. A lock means
@@ -456,6 +485,9 @@ function start(): void {
 	 * Locked reads false, and a locked vault has nothing to request with anyway.
 	 */
 	const requireProxies = (): boolean => vault.isUnlocked() && vault.settings().requireProxies;
+	const loginSession = createSystemAwareLoginSessionFactory(
+		createSystemLoginTransportFactory(networking)
+	);
 
 	/**
 	 * Aborts an update check that `Require proxies` has just forbidden.
@@ -551,7 +583,8 @@ function start(): void {
 	// never disagree about what "now" is.
 	const confirmations = new ConfirmationsService(vault, transports, {
 		timeOffsetSeconds: () => codes.timeOffsetSeconds(),
-		requireProxies
+		requireProxies,
+		loginSession
 	});
 	const clock = new SteamClock({ codes, vault, transports });
 
@@ -635,37 +668,122 @@ function start(): void {
 		userDataPath: () => app.getPath('userData'),
 		seal: (plaintext) => vault.sealForBackup(plaintext)
 	});
-
-	const imports = new ImportService(vault, {
-		onRoutingChanged: dropAccountRouting,
-		// An imported account gets the same safety net an enrolled one does. Only
-		// enrollment wrote a recovery file, so importing a maFile and later deleting
-		// it left the account with none — and those are the accounts most likely to
-		// be removed and then wanted back.
-		onAccountStored: recovery.writeRecovery
-	});
-
+	const workflowJournal = fileWorkflowJournal(app.getPath('userData'));
+	const operationJournal = fileOperationJournal(app.getPath('userData'));
+	// Assigned only after TransferService exists; the enrollment callback must fail
+	// closed during the construction gap instead of capturing a permissive default.
+	// eslint-disable-next-line prefer-const
+	let transferForEnrollment: TransferService | undefined;
 	const enrollment = new EnrollmentService(vault, transports, {
 		timeOffsetSeconds: () => codes.timeOffsetSeconds(),
+		loginSession,
 		// Written once, at enrollment, into the app's own data directory. Removal
 		// deliberately does not delete it — recovering from that removal is the
 		// whole reason it exists.
 		// Written once, at enrollment; corrected once, at activation.
 		writeRecovery: recovery.writeRecovery,
-		updateRecovery: recovery.updateRecovery
+		updateRecovery: recovery.updateRecovery,
+		workflowJournal,
+		keyCoordinator,
+		transferCleanupBlocked: () => {
+			if (transferForEnrollment === undefined) {
+				throw new Error('the transfer cleanup state is not available yet');
+			}
+			return transferForEnrollment.hasTransferCleanupDebt();
+		}
 	});
 
 	/*
-	 * Moving an authenticator that already lives on the Steam mobile app.
-	 *
-	 * Its own service rather than a mode of `EnrollmentService`, because the two
-	 * refuse opposite things: enrolment will not touch an account that already
-	 * has an authenticator, which is exactly the account this one is for.
+	 * Constructed before the shared account-mutation guard so that guard can ask
+	 * both services directly. There is no permissive placeholder window: by the
+	 * time ImportService or any IPC handler receives the callback, both sources
+	 * of process-only cleanup debt exist.
 	 */
 	const transfer = new TransferService(vault, transports, () => codes.timeOffsetSeconds(), {
+		loginSession,
 		// The durable copy of a secret bundle Steam issues once. Written before the
 		// vault, so a vault that cannot be written is survivable.
-		writeRecovery: recovery.writeRecovery
+		writeRecovery: recovery.writeRecovery,
+		updateRecovery: recovery.updateRecovery,
+		workflowJournal,
+		keyCoordinator,
+		enrollmentCleanupBlocked: () => enrollment.hasEnrollmentCleanupDebt(),
+		// Recovery may prove that a compatible backup resurrected the obsolete
+		// pre-transfer authenticator. If it removes that row, tear down every
+		// process-local route and session at the commit point, before journal cleanup
+		// can fail and ask for an exact retry.
+		onAccountRemoved: dropAccountRouting,
+		onAccountReplaced: (steamId64) => dropAccountRouting(steamId64)
+	});
+	transferForEnrollment = transfer;
+	const accountMutationBlocked = (steamId64: string): boolean =>
+		accountMutationBlockedByDurableState(
+			vault,
+			workflowJournal,
+			operationJournal,
+			steamId64,
+			(candidate) =>
+				enrollment.hasEnrollmentCleanupDebt(candidate) || transfer.hasTransferCleanupDebt(candidate)
+		);
+
+	/**
+	 * Complete only this installation's encrypted recovery file while the caller
+	 * already owns the account's identity boundary.
+	 *
+	 * Enrollment activation/removal and their resolution handler hold the shared
+	 * coordinator across their whole operation. Taking `beginAccountMutation`
+	 * again here is not extra safety: it is a nested, non-reentrant reservation
+	 * that always refuses, leaving every portable-refusal refresh at stale even on
+	 * a healthy filesystem. Neither recovery hook has a route to Steam.
+	 */
+	const finishRecoveryBackupUnderReservation = async (steamId64: string): Promise<void> => {
+		const result = await completeRecoveryBackup(vault, {
+			steamId64,
+			writeRecovery: recovery.writeRecovery,
+			updateRecovery: recovery.updateRecovery
+		});
+		if (result === 'current') return;
+		if (result === 'ambiguous') {
+			throw new Error(
+				'More than one recovery backup may belong to this account. Nothing was overwritten; repair the application data folder and try again.'
+			);
+		}
+		if (result === 'missing') {
+			throw new Error(
+				'The recovery backup could not be completed. Repair the application data folder and try again.'
+			);
+		}
+		throw new Error(
+			'This account changed while its recovery backup was being completed. Refresh the account list and try again.'
+		);
+	};
+
+	/**
+	 * Standalone form of the same local repair.
+	 *
+	 * Account-row retries and settings handlers enter without a reservation, so
+	 * they take one here. Callers already inside activation, removal, or resolution
+	 * use `finishRecoveryBackupUnderReservation` directly.
+	 */
+	const finishRecoveryBackupLocally = async (steamId64: string): Promise<void> => {
+		const releaseAccountMutation = keyCoordinator.beginAccountMutation(steamId64);
+		try {
+			await finishRecoveryBackupUnderReservation(steamId64);
+		} finally {
+			releaseAccountMutation();
+		}
+	};
+
+	const imports = new ImportService(vault, {
+		onRoutingChanged: dropAccountRouting,
+		accountMutationBlocked,
+		keyCoordinator,
+		// An imported account gets the same safety net an enrolled one does. Only
+		// enrollment wrote a recovery file, so importing a maFile and later deleting
+		// it left the account with none — and those are the accounts most likely to
+		// be removed and then wanted back.
+		onAccountStored: recovery.writeRecovery,
+		updateRecovery: recovery.updateRecovery
 	});
 
 	const activity = new ActivityLog();
@@ -685,13 +803,33 @@ function start(): void {
 
 	const toastClicks = new ToastClickRouter({
 		reveal: () => revealWindow?.(),
-		push: (steamId64) => {
+		push: (click) => {
 			for (const window of BrowserWindow.getAllWindows()) {
-				window.webContents.send(PUSH_CHANNELS.openConfirmations, steamId64);
+				window.webContents.send(PUSH_CHANNELS.openConfirmations, click);
 			}
 		}
 	});
-	registerToastClickHandlers(toastClicks);
+	const activateToast = (steamId64: string): undefined => {
+		activateToastForKnownAccount(
+			toastClicks,
+			steamId64,
+			() => {
+				if (!vault.isUnlocked()) return undefined;
+				try {
+					return vault.read().accounts.some((account) => account.steamId64 === steamId64);
+				} catch {
+					// Lock won the race with the read. Retain it for the next document.
+					return undefined;
+				}
+			},
+			() => vault.touch()
+		);
+		return undefined;
+	};
+	const windowsToastActivations = persistentWindowsToastActivation
+		? new WindowsToastActivationRouter({ cipher: safeStorage, activate: activateToast })
+		: undefined;
+	registerToastClickHandlers(toastClicks, () => vault.isUnlocked());
 
 	/**
 	 * Toasts that have been shown and not yet dismissed.
@@ -728,7 +866,7 @@ function start(): void {
 
 	const notifier = new ConfirmationNotifier({
 		host: {
-			show: ({ title, body, onClick }) =>
+			show: ({ steamId64, title, body, onClick }) =>
 				new Promise<boolean>((resolve) => {
 					/*
 					 * **`show()` returning is not the OS having shown anything.**
@@ -739,7 +877,25 @@ function start(): void {
 					 * that record back when the answer is no — otherwise a toast that
 					 * never appeared silenced its confirmation for the whole session.
 					 */
-					const toast = new Notification({ title, body, icon: notificationImage() });
+					let activation =
+						windowsToastActivations === undefined
+							? undefined
+							: issueWindowsToastActivation(steamId64, safeStorage);
+					const options: NotificationConstructorOptions = {
+						title,
+						body,
+						icon: notificationImage()
+					};
+					if (activation !== undefined) {
+						try {
+							options.toastXml = buildWindowsToastXml({ title, body, activation });
+						} catch {
+							// A malformed/oversized native payload must not suppress the alert.
+							// Fall back to the retained in-process click path for this toast.
+							activation = undefined;
+						}
+					}
+					const toast = new Notification(options);
 					retainToast(toast);
 
 					/*
@@ -790,12 +946,16 @@ function start(): void {
 					 */
 					toast.on('click', () => {
 						liveToasts.delete(toast);
-						onClick?.();
+						if (activation !== undefined && windowsToastActivations !== undefined) {
+							windowsToastActivations.handle(activation.launchArguments);
+						} else {
+							onClick?.();
+						}
 					});
 					toast.show();
 				})
 		},
-		onActivate: (steamId64) => toastClicks.activate(steamId64)
+		onActivate: activateToast
 	});
 	// The engine used to report into callbacks nobody supplied, so a held-back
 	// account-recovery confirmation — the loudest warning this app can raise — was
@@ -856,6 +1016,18 @@ function start(): void {
 	let tray: Tray | undefined;
 
 	void app.whenReady().then(() => {
+		if (windowsToastActivations !== undefined) {
+			/*
+			 * One callback covers a live object, Action Center history and cold start.
+			 * The same encrypted nonce also reaches the instance click listener above,
+			 * so Windows delivering both paths still causes exactly one navigation.
+			 */
+			Notification.handleActivation((details) => {
+				if (details.type === 'click') {
+					windowsToastActivations.handle(details.arguments);
+				}
+			});
+		}
 		applyContentSecurityPolicy(
 			session.defaultSession,
 			isDev,
@@ -988,7 +1160,24 @@ function start(): void {
 				 * begun, and it ends on its own.
 				 */
 			},
-			proxyConsent
+			proxyConsent,
+			// A transfer recovery key is wrapped under this exact vault key/KDF.
+			// Replacing either while the record exists would make one-time Steam
+			// secrets permanently unreadable after restart.
+			() => !transfer.hasDurableWorkflow() && !enrollment.hasDurableWorkflow(),
+			keyCoordinator,
+			(candidate, key) => workflowJournal.vaultKeyCompatible(candidate, key),
+			accountMutationBlocked,
+			// A failed directory flush can leave the exact enrollment cleanup record
+			// only in this process after its journal file was already unlinked. An
+			// older backup must not replace the vault that now holds Steam's issued
+			// secrets until that exact cleanup has been retried successfully.
+			() => enrollment.hasEnrollmentCleanupDebt() || transfer.hasTransferCleanupDebt(),
+			finishRecoveryBackupLocally,
+			// Relaxing strict routing makes stored unproxied accounts eligible again.
+			// Rebuild only the scheduler's eligibility cache; do not tear down browser,
+			// transport, or correctly-routed confirmation work on this direction.
+			() => autoConfirm.policyChanged()
 		);
 		// The same gate the vault, enrolment and transfer handlers use. A maFile
 		// can carry a proxy, and adopting one is adopting a destination the user
@@ -1069,7 +1258,10 @@ function start(): void {
 			// Beside the recovery files, and for the same reason: what has to survive
 			// a crash cannot live in the vault, because the vault being sealed or
 			// unwritable is most of what goes wrong here.
-			fileOperationJournal(app.getPath('userData'))
+			operationJournal,
+			keyCoordinator,
+			accountMutationBlocked,
+			finishRecoveryBackupUnderReservation
 		);
 		registerCodeHandlers(codes, vault, clipboard, clock);
 

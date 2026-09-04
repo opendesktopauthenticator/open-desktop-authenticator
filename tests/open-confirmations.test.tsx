@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { confirmationsTargetFor } from '../src/renderer/App';
+import { confirmationAccountMembership, confirmationsTargetFor } from '../src/renderer/App';
 import type { AccountSummary } from '../src/shared/ipc';
 
 /**
@@ -58,5 +58,25 @@ describe('the account a notification click opens', () => {
 
 	it('does not match an empty id', () => {
 		expect(confirmationsTargetFor([first, second], '')).toBeUndefined();
+	});
+});
+
+describe('the slow notification-recovery account dependency', () => {
+	it('changes when one account replaces another at the same list length', () => {
+		expect(confirmationAccountMembership([first])).not.toBe(
+			confirmationAccountMembership([second])
+		);
+	});
+
+	it('does not change merely because a status poll returns a fresh array or order', () => {
+		expect(confirmationAccountMembership([{ ...first }, { ...second }])).toBe(
+			confirmationAccountMembership([{ ...second }, { ...first }])
+		);
+	});
+
+	it('cannot collide by concatenating decimal Steam IDs', () => {
+		expect(confirmationAccountMembership([first, second])).toBe(
+			`${first.steamId64},${second.steamId64}`
+		);
 	});
 });

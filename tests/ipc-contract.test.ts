@@ -67,6 +67,23 @@ describe('request validation', () => {
 	});
 });
 
+describe('vault adoption authentication', () => {
+	const request = IPC_CONTRACT[CHANNELS.vaultAdopt].request;
+
+	it('requires the existing vault passphrase and rejects extra fields', () => {
+		expect(
+			request.safeParse({ passphrase: 'a sufficiently long existing passphrase' }).success
+		).toBe(true);
+		expect(request.safeParse({}).success).toBe(false);
+		expect(
+			request.safeParse({
+				passphrase: 'a sufficiently long existing passphrase',
+				path: 'C:\\untrusted\\chosen-by-renderer.json'
+			}).success
+		).toBe(false);
+	});
+});
+
 describe('response validation', () => {
 	const valid = {
 		productName: 'Open Desktop Authenticator',
@@ -469,6 +486,12 @@ function sampleResponse(channel: string): Record<string, unknown> {
 		case CHANNELS.enrollBegin:
 		case CHANNELS.enrollEmailCode:
 			return { state: 'needsEmailCode' };
+		case CHANNELS.enrollRetryPersist:
+			return {
+				state: 'enrolled',
+				steamId64: '76561198000000001',
+				accountName: 'trader'
+			};
 		case CHANNELS.enrollActivate:
 			return { state: 'activated' };
 		case CHANNELS.accountExport:

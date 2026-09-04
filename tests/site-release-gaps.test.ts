@@ -60,6 +60,31 @@ const NOTHING: Release = {
 // reached by any body this file renders.
 const site = (release: Release) => ({
 	release,
+	version: '1.0.0',
+	name: 'Open Desktop Authenticator',
+	publication: {
+		sourceVersion: '1.0.0',
+		github: { current: true, latestVersion: '1.0.0' },
+		store: { current: true, latestVersion: '1.0.0' }
+	},
+	features: {
+		browser: {
+			introducedVersion: '1.0.0',
+			inSource: true,
+			github: true,
+			store: true,
+			anyPublic: true,
+			bothPublic: true
+		},
+		transfer: {
+			introducedVersion: '1.0.0',
+			inSource: true,
+			github: true,
+			store: true,
+			anyPublic: true,
+			bothPublic: true
+		}
+	},
 	origin: 'https://example.test',
 	/*
 	 * `reviewAsk` reads these; the rest of SITE is not reached by any body here.

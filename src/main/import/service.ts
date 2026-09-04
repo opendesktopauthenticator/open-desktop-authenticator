@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import { MaFileParseError, parseMaFile, type ParsedMaFile } from './mafile';
 import {
 	decryptSdaMaFile,
@@ -11,6 +12,12 @@ import { isUsableSharedSecret } from '../codes/totp';
 import { VaultLockedError, type VaultService } from '../vault/service';
 import type { Account } from '../../shared/vault-schema';
 import { newAutoConfirm } from '../../shared/vault-schema';
+import { VaultKeyOperationCoordinator } from '../vault/key-operation-coordinator';
+import {
+	finishRecoveryBackup,
+	markRecoveryBackupNeeded,
+	RECOVERY_PUBLICATION_WARNING
+} from '../vault/recovery-state';
 import type {
 	ImportCandidate,
 	ImportOutcome,
@@ -105,8 +112,10 @@ export interface ProxyAdoption {
 }
 
 export interface ImportServiceOptions {
-	/** Injected for testability. Defaults to the wall clock. */
+	/** Wall time used only for timestamps written into imported accounts. */
 	now?: () => number;
+	/** Elapsed time used for the secret-retention deadline. */
+	monotonicNow?: () => number;
 	/** How long staged secrets may sit unimported. */
 	ttlMs?: number;
 	/**
@@ -130,7 +139,17 @@ export interface ImportServiceOptions {
 	 * account, `writeRecoveryFile` refuses to overwrite one, and a second copy per
 	 * re-import would pile up files that make the real one harder to identify.
 	 */
-	onAccountStored?: (account: Account) => void;
+	onAccountStored?: (account: Account) => string;
+	/** Correct an exact owned recovery file after a status-only replacement. */
+	updateRecovery?: (account: Account) => unknown;
+	/**
+	 * Refuses a same-account import while an authenticator workflow can still
+	 * write or reconcile that row. The callback reads the durable journal rather
+	 * than renderer state, so cleanup debt and restart recovery both count.
+	 */
+	accountMutationBlocked?: (steamId64: string) => boolean;
+	/** Shared with Steam workflows and vault account removal to close the pre-journal race. */
+	keyCoordinator?: VaultKeyOperationCoordinator;
 }
 
 /** Ten minutes. Long enough to read every warning; short enough to not be a store. */
@@ -146,9 +165,13 @@ export class ImportError extends Error {
 export class ImportService {
 	private readonly vault: VaultService;
 	private readonly now: () => number;
+	private readonly monotonicNow: () => number;
 	private readonly ttlMs: number;
 	private readonly onRoutingChanged: (steamId64: string) => void;
-	private readonly onAccountStored: (account: Account) => void;
+	private readonly onAccountStored: ((account: Account) => string) | undefined;
+	private readonly updateRecovery: ((account: Account) => unknown) | undefined;
+	private readonly accountMutationBlocked: (steamId64: string) => boolean;
+	private readonly keyCoordinator: VaultKeyOperationCoordinator;
 	private staged: StagedEntry[] = [];
 	private stagedAt = 0;
 
@@ -169,9 +192,13 @@ export class ImportService {
 	constructor(vault: VaultService, options: ImportServiceOptions = {}) {
 		this.vault = vault;
 		this.now = options.now ?? (() => Date.now());
+		this.monotonicNow = options.monotonicNow ?? (() => performance.now());
 		this.ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
 		this.onRoutingChanged = options.onRoutingChanged ?? (() => undefined);
-		this.onAccountStored = options.onAccountStored ?? ((): void => undefined);
+		this.onAccountStored = options.onAccountStored;
+		this.updateRecovery = options.updateRecovery;
+		this.accountMutationBlocked = options.accountMutationBlocked ?? (() => false);
+		this.keyCoordinator = options.keyCoordinator ?? new VaultKeyOperationCoordinator();
 	}
 
 	/**
@@ -217,6 +244,19 @@ export class ImportService {
 			const candidate = parseSdaManifest(file.text);
 			if (!candidate) {
 				continue;
+			}
+			/*
+			 * Unknown top-level maFile fields are deliberately preserved by that
+			 * format. A perfectly valid account can therefore also carry an `entries`
+			 * extension and satisfy the deliberately small manifest schema. Account
+			 * data wins that collision: otherwise the selected account disappears from
+			 * the report as though it were only metadata.
+			 */
+			try {
+				parseMaFile(file.text, file.name, this.now());
+				continue;
+			} catch {
+				// Not a valid account file; the manifest shape remains authoritative.
 			}
 			manifests.add(file.name);
 			for (const entry of candidate.entries) {
@@ -499,7 +539,7 @@ export class ImportService {
 			this.staged.push({ id, sourceName: name, parsed, summary });
 		}
 
-		this.stagedAt = this.now();
+		this.stagedAt = this.monotonicNow();
 		return {
 			cancelled: false,
 			candidates,
@@ -720,7 +760,6 @@ export class ImportService {
 			this.discard();
 			return [];
 		}
-
 		const outcomes: ImportOutcome[] = [];
 		const iso = new Date(this.now()).toISOString();
 		// Snapshot before the write so we can tell which accounts' routing actually
@@ -755,23 +794,9 @@ export class ImportService {
 				)
 		);
 		const touched = new Set<string>();
-		/** Accounts that did not exist before this commit. See `onAccountStored`. */
-		const freshlyStored = new Set<string>();
-		/**
-		 * Replacements whose recovery-critical secrets actually changed.
-		 *
-		 * A replace can bring a different `sharedSecret`, `identitySecret` or
-		 * revocation code — re-enrolling an account and importing the new maFile
-		 * does exactly that. The recovery file written at first import still held
-		 * the *old* ones and nothing rewrote it, so recovery restored secrets Steam
-		 * had already stopped accepting: the mechanism failed at the only moment it
-		 * is ever used.
-		 *
-		 * Tracked separately from `freshlyStored` because most replacements change
-		 * nothing that matters here, and a second backup for a renamed account
-		 * teaches people to ignore the pile.
-		 */
-		const secretsChanged = new Set<string>();
+		const storedOutcomes = new Map<string, ImportOutcome>();
+		/** Recovery generation committed with each row that now needs publication. */
+		const recoveryAttempts = new Map<string, string>();
 
 		/*
 		 * **Which selected file wins, when the selection names one account twice.**
@@ -790,132 +815,169 @@ export class ImportService {
 		 * never name different winners.
 		 */
 		const preferred = this.preferredIds(selections, byId);
+		const releaseAccountMutation = this.keyCoordinator.beginAccountMutation([...preferred.keys()]);
 
 		try {
-			await this.vault.mutate((draft) => {
-				for (const selection of selections) {
-					const entry = byId.get(selection.stagingId);
-					if (!entry) {
-						continue;
-					}
-					const { parsed } = entry;
-					const steamId64 = parsed.steamId64;
-
-					if (!steamId64) {
-						outcomes.push({
-							stagingId: entry.id,
-							accountName: parsed.accountName,
-							result: 'skipped',
-							reason:
-								'no SteamID could be determined for this file, so there is nothing to store it under.'
-						});
-						continue;
-					}
-
-					// Re-checked rather than trusted from the report. `importable` was
-					// computed here, but the selection comes back from the renderer, and
-					// a decision that keeps unusable secrets out of the vault should not
-					// depend on the caller having respected a flag.
-					if (!isUsableSharedSecret(parsed.sharedSecret)) {
-						outcomes.push({
-							stagingId: entry.id,
-							accountName: parsed.accountName,
-							result: 'skipped',
-							reason: 'the shared secret in this file is damaged and cannot generate codes.'
-						});
-						continue;
-					}
-
-					if (preferred.get(steamId64) !== entry.id) {
-						outcomes.push({
-							stagingId: entry.id,
-							accountName: parsed.accountName,
-							result: 'skipped',
-							reason: 'another file in this import is the same account.'
-						});
-						continue;
-					}
-
-					const index = draft.accounts.findIndex((account) => account.steamId64 === steamId64);
-					if (index >= 0 && !selection.replaceExisting) {
-						outcomes.push({
-							stagingId: entry.id,
-							accountName: parsed.accountName,
-							result: 'skipped',
-							reason: 'this account is already in the vault.'
-						});
-						continue;
-					}
-
-					if (index >= 0) {
-						const existing = draft.accounts[index] as Account;
-						const replacement = mergeAccount(existing, parsed, steamId64, selection.adoptProxy);
-						if (recoveryCriticalChange(existing, replacement)) {
-							secretsChanged.add(steamId64);
+			try {
+				await this.vault.mutate((draft) => {
+					for (const selection of selections) {
+						const entry = byId.get(selection.stagingId);
+						if (!entry) {
+							continue;
 						}
-						draft.accounts[index] = replacement;
-						outcomes.push({
-							stagingId: entry.id,
-							accountName: parsed.accountName,
-							result: 'replaced'
-						});
-					} else {
-						draft.accounts.push(newAccount(parsed, steamId64, iso, selection.adoptProxy));
-						outcomes.push({
-							stagingId: entry.id,
-							accountName: parsed.accountName,
-							result: 'imported'
-						});
+						const { parsed } = entry;
+						const steamId64 = parsed.steamId64;
+
+						if (!steamId64) {
+							outcomes.push({
+								stagingId: entry.id,
+								accountName: parsed.accountName,
+								result: 'skipped',
+								reason:
+									'no SteamID could be determined for this file, so there is nothing to store it under.'
+							});
+							continue;
+						}
+
+						// Re-checked rather than trusted from the report. `importable` was
+						// computed here, but the selection comes back from the renderer, and
+						// a decision that keeps unusable secrets out of the vault should not
+						// depend on the caller having respected a flag.
+						if (!isUsableSharedSecret(parsed.sharedSecret)) {
+							outcomes.push({
+								stagingId: entry.id,
+								accountName: parsed.accountName,
+								result: 'skipped',
+								reason: 'the shared secret in this file is damaged and cannot generate codes.'
+							});
+							continue;
+						}
+
+						if (preferred.get(steamId64) !== entry.id) {
+							outcomes.push({
+								stagingId: entry.id,
+								accountName: parsed.accountName,
+								result: 'skipped',
+								reason: 'another file in this import is the same account.'
+							});
+							continue;
+						}
+
+						if (this.accountMutationBlocked(steamId64)) {
+							outcomes.push({
+								stagingId: entry.id,
+								accountName: parsed.accountName,
+								result: 'skipped',
+								reason:
+									'finish or resolve this account’s unfinished authenticator operation before importing or replacing it.'
+							});
+							continue;
+						}
+
+						const index = draft.accounts.findIndex((account) => account.steamId64 === steamId64);
+						if (index >= 0 && !selection.replaceExisting) {
+							outcomes.push({
+								stagingId: entry.id,
+								accountName: parsed.accountName,
+								result: 'skipped',
+								reason: 'this account is already in the vault.'
+							});
+							continue;
+						}
+
+						if (index >= 0) {
+							const existing = draft.accounts[index] as Account;
+							const replacement = mergeAccount(existing, parsed, steamId64, selection.adoptProxy);
+							if (recoveryCriticalChange(existing, replacement)) {
+								if (this.onAccountStored !== undefined) {
+									const marker = markRecoveryBackupNeeded(
+										replacement,
+										existing.recoveryBackup,
+										iso
+									);
+									recoveryAttempts.set(steamId64, marker.id);
+								}
+							}
+							draft.accounts[index] = replacement;
+							const outcome: ImportOutcome = {
+								stagingId: entry.id,
+								accountName: parsed.accountName,
+								result: 'replaced'
+							};
+							outcomes.push(outcome);
+							storedOutcomes.set(steamId64, outcome);
+						} else {
+							const added = newAccount(parsed, steamId64, iso, selection.adoptProxy);
+							if (this.onAccountStored !== undefined) {
+								const marker = markRecoveryBackupNeeded(added, undefined, iso);
+								recoveryAttempts.set(steamId64, marker.id);
+							}
+							draft.accounts.push(added);
+							const outcome: ImportOutcome = {
+								stagingId: entry.id,
+								accountName: parsed.accountName,
+								result: 'imported'
+							};
+							outcomes.push(outcome);
+							storedOutcomes.set(steamId64, outcome);
+						}
+						touched.add(steamId64);
 					}
-					touched.add(steamId64);
-					if (index < 0) {
-						freshlyStored.add(steamId64);
+				});
+			} finally {
+				// The secrets are either in the vault now or were never wanted. Either
+				// way they have no business staying in memory.
+				this.discard();
+			}
+
+			// Only reached when the mutation succeeded: a failure throws through the
+			// `finally` above, so there is nothing here for a flag to guard.
+			for (const steamId64 of touched) {
+				const after = this.vault.read().accounts.find((account) => account.steamId64 === steamId64);
+				if (!after) {
+					continue;
+				}
+				// Either reason, one teardown. What has to be dropped is the same set
+				// in both cases — the session, the nonces, the schedule — and keeping
+				// two callbacks in step would be one more thing to get wrong.
+				const credentialsAfter = `${after.sharedSecret}|${after.identitySecret}|${after.refreshToken ?? ''}`;
+				if (
+					proxyBefore.get(steamId64) !== after.proxyUrl ||
+					credentialsBefore.get(steamId64) !== credentialsAfter
+				) {
+					this.onRoutingChanged(steamId64);
+				}
+
+				// From the stored account rather than the parsed file, so the backup holds
+				// exactly what the vault does. The marker was committed with the account:
+				// a failure here therefore remains visible and locally retryable instead of
+				// turning a successful import into a false failure. Same-authenticator
+				// changes update the exact owned file; replacement secrets publish through
+				// the no-clobber path and preserve every older candidate.
+				const recoveryAttempt = recoveryAttempts.get(steamId64);
+				if (recoveryAttempt !== undefined) {
+					try {
+						const result = await finishRecoveryBackup(this.vault, {
+							steamId64,
+							expectedId: recoveryAttempt,
+							writeRecovery: this.onAccountStored,
+							updateRecovery: this.updateRecovery,
+							now: this.now
+						});
+						if (result !== 'current') throw new Error(`recovery publication is ${result}`);
+					} catch {
+						const outcome = storedOutcomes.get(steamId64);
+						if (outcome !== undefined) {
+							outcome.warning = `${RECOVERY_PUBLICATION_WARNING} Keep the source maFile until this is complete.`;
+						}
 					}
 				}
-			});
+			}
+
+			return outcomes;
 		} finally {
-			// The secrets are either in the vault now or were never wanted. Either
-			// way they have no business staying in memory.
-			this.discard();
+			releaseAccountMutation();
 		}
-
-		// Only reached when the mutation succeeded: a failure throws through the
-		// `finally` above, so there is nothing here for a flag to guard.
-		for (const steamId64 of touched) {
-			const after = this.vault.read().accounts.find((account) => account.steamId64 === steamId64);
-			if (!after) {
-				continue;
-			}
-			// Either reason, one teardown. What has to be dropped is the same set
-			// in both cases — the session, the nonces, the schedule — and keeping
-			// two callbacks in step would be one more thing to get wrong.
-			const credentialsAfter = `${after.sharedSecret}|${after.identitySecret}|${after.refreshToken ?? ''}`;
-			if (
-				proxyBefore.get(steamId64) !== after.proxyUrl ||
-				credentialsBefore.get(steamId64) !== credentialsAfter
-			) {
-				this.onRoutingChanged(steamId64);
-			}
-
-			// From the stored account rather than the parsed file, so the backup holds
-			// exactly what the vault does. Swallowed on failure for the same reason
-			// enrollment swallows it: the account is imported either way, and
-			// reporting a failure for something that worked would send the user round
-			// again.
-			// Also for a replacement that changed the secrets: `writeRecoveryFile`
-			// refuses to overwrite and drops a timestamped sibling instead, so the
-			// previous enrollment's backup survives beside the new one. Two files and
-			// a clear choice beats one file that silently no longer works.
-			if (freshlyStored.has(steamId64) || secretsChanged.has(steamId64)) {
-				try {
-					this.onAccountStored(after);
-				} catch {
-					// A backup that cannot be written is not a reason to fail an import.
-				}
-			}
-		}
-
-		return outcomes;
 	}
 
 	/**
@@ -993,7 +1055,7 @@ export class ImportService {
 	 */
 	private expired(): boolean {
 		const held = this.staged.length + this.locked.length;
-		return held > 0 && this.now() - this.stagedAt > this.ttlMs;
+		return held > 0 && this.monotonicNow() - this.stagedAt > this.ttlMs;
 	}
 }
 
@@ -1170,15 +1232,17 @@ function newAccount(
 /**
  * Whether a replacement invalidates the recovery file written for the old one.
  *
- * Only the three things recovery actually restores. An account renamed, a proxy
- * adopted or a device id filled in leaves the existing backup perfectly usable.
+ * Everything `recoveryContents` restores except the deliberately omitted refresh
+ * token. Status is security-significant: restoring a stale `pendingActivation`
+ * snapshot after activation sends the user into a flow that can no longer work.
  */
 function recoveryCriticalChange(before: Account, after: Account): boolean {
-	return (
-		before.sharedSecret !== after.sharedSecret ||
-		before.identitySecret !== after.identitySecret ||
-		before.revocationCode !== after.revocationCode
-	);
+	const recoveryProjection = (account: Account): Omit<Account, 'refreshToken'> => {
+		const projected = { ...account };
+		delete projected.refreshToken;
+		return projected;
+	};
+	return !isDeepStrictEqual(recoveryProjection(before), recoveryProjection(after));
 }
 
 function mergeAccount(

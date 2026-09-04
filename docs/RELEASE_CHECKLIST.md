@@ -104,6 +104,11 @@ Automation does not catch a broken installer.
       behaviour and confirm `/download` describes it honestly.
 - [ ] Upgrade install over the previous version. Vault survives, settings survive.
 - [ ] App launches, vault unlocks, codes generate.
+- [ ] Force-close the portable launcher once while it is running. Any abandoned
+      Windows Temp stage contains only extracted Electron/Chromium runtime files,
+      never `vault.json`, settings, account secrets or recovery records. Record
+      runtime residue as launcher cleanup, not as leaked account data; the normal
+      exit cleanup is enforced by the packaged-executable workflow fixture.
 
 **Linux**
 
@@ -171,6 +176,15 @@ The trust story is only real if it works for someone who does not trust us.
 - [ ] Release notes include: changes, hashes, verification links, and any
       dependency-advisory justifications.
 - [ ] Draft reviewed by a human, then published.
+- [ ] **GitHub marker, independently:** open the public release page in a logged-out
+      browser, confirm the exact version, date, checksums, signature and artifacts
+      that are actually listed, then add that version under `github` in
+      `site/publication.mjs` and its exact evidence in `site/build.mjs`. A green
+      workflow or draft is not publication.
+- [ ] **Store marker, independently:** open Partner Center and the public Store
+      listing, confirm the exact version has completed publication, then add that
+      version under `store` in `site/publication.mjs`. A GitHub release and a
+      submitted Store package prove neither this transition nor each other.
 - [ ] Website `/download` updated. Official domains registry still accurate.
 - [ ] If this fixes a Valve breakage: pinned status issue updated and closed, with
       a short public post-mortem in the CHANGELOG.

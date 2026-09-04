@@ -1,4 +1,5 @@
 import { queryTimeOffset, SteamTimeError } from './time';
+import { performance } from 'node:perf_hooks';
 import type { CodeService } from '../codes/service';
 import type { SteamTransportFactory } from '../net/transport';
 import type { VaultService } from '../vault/service';
@@ -18,6 +19,8 @@ export interface SteamClockOptions {
 	transports: SteamTransportFactory;
 	/** Injected for testability. Defaults to the wall clock. */
 	now?: () => number;
+	/** Elapsed-time source for retry cooldowns. It must not follow wall-clock corrections. */
+	monotonic?: () => number;
 }
 
 /** Partition name used when the vault has no accounts to borrow a route from. */
@@ -31,6 +34,7 @@ export class SteamClock {
 	private readonly vault: VaultService;
 	private readonly transports: SteamTransportFactory;
 	private readonly now: () => number;
+	private readonly monotonic: () => number;
 	/** Coalesce concurrent callers into one QueryTime. */
 	private inFlight: Promise<void> | undefined;
 
@@ -46,13 +50,14 @@ export class SteamClock {
 	 * minute spent proving the same thing, from an app whose whole posture is
 	 * not drawing attention to its accounts.
 	 */
-	private nextAttemptAtMs = 0;
+	private nextAttemptAtMonotonicMs = 0;
 
 	constructor(options: SteamClockOptions) {
 		this.codes = options.codes;
 		this.vault = options.vault;
 		this.transports = options.transports;
 		this.now = options.now ?? (() => Date.now());
+		this.monotonic = options.monotonic ?? (() => performance.now());
 	}
 
 	/**
@@ -75,7 +80,7 @@ export class SteamClock {
 		}
 		// Resolves without asking, exactly like a failure does: the caller only
 		// learns "we tried recently", and the codes stay marked unverified.
-		if (this.now() < this.nextAttemptAtMs) {
+		if (this.monotonic() < this.nextAttemptAtMonotonicMs) {
 			return Promise.resolve();
 		}
 
@@ -114,9 +119,9 @@ export class SteamClock {
 			// whole round trip and pushed generated codes ahead of Steam's clock.
 			const offset = await queryTimeOffset(transport, this.now);
 			this.codes.setTimeOffset(offset);
-			this.nextAttemptAtMs = 0;
+			this.nextAttemptAtMonotonicMs = 0;
 		} catch (err) {
-			this.nextAttemptAtMs = this.now() + RETRY_COOLDOWN_MS;
+			this.nextAttemptAtMonotonicMs = this.monotonic() + RETRY_COOLDOWN_MS;
 			// The next attempt borrows a different routed account, so one dead
 			// proxy cannot monopolise the sync forever.
 			this.routeRotation += 1;

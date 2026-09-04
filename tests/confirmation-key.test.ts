@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
 	CONFIRMATION_TAGS,
 	ConfirmationKeyError,
@@ -103,6 +103,40 @@ describe('the identity secret', () => {
 	it('never appears in the key it produces', () => {
 		const key = generateConfirmationKey(IDENTITY, TIME, 'accept');
 		expect(key).not.toContain(IDENTITY.slice(0, 8));
+	});
+});
+
+describe('secret-buffer lifetime', () => {
+	it('wipes owned key material after signing', () => {
+		const fill = vi.spyOn(Buffer.prototype, 'fill');
+		try {
+			expect(generateConfirmationKey(IDENTITY, TIME, 'accept')).toBe(
+				'bjIMabnfzbAatLClUSDOxFNe1/I='
+			);
+			const wiped = fill.mock.instances.filter(
+				(buffer): buffer is Buffer => Buffer.isBuffer(buffer) && buffer.every((byte) => byte === 0)
+			);
+			expect(wiped.filter((buffer) => buffer.length === 20)).toHaveLength(2);
+			expect(wiped.some((buffer) => buffer.length === 6)).toBe(true);
+			expect(wiped.some((buffer) => buffer.length === 14)).toBe(true);
+		} finally {
+			fill.mockRestore();
+		}
+	});
+
+	it('wipes the decoded key when validation fails after decoding', () => {
+		const fill = vi.spyOn(Buffer.prototype, 'fill');
+		try {
+			expect(() => generateConfirmationKey(IDENTITY, Number.NaN, 'accept')).toThrow();
+			expect(
+				fill.mock.instances.some(
+					(buffer) =>
+						Buffer.isBuffer(buffer) && buffer.length === 20 && buffer.every((byte) => byte === 0)
+				)
+			).toBe(true);
+		} finally {
+			fill.mockRestore();
+		}
 	});
 });
 

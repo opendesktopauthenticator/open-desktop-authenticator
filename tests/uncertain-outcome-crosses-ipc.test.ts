@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CHANNELS } from '../src/shared/channels';
 import { EnrollmentError } from '../src/main/steam/enroll';
+import { EnrollmentCleanupError, type EnrollmentService } from '../src/main/steam/enrollment';
 
 /**
  * **"Do not try again", and a button that tries again.**
@@ -39,8 +40,8 @@ vi.mock('electron', () => ({
 }));
 
 import { registerEnrollmentHandlers } from '../src/main/steam/enrollment-ipc';
+import { memoryOperationJournal } from '../src/main/steam/operation-journal';
 import { setTrustedSender, __resetRouterForTests } from '../src/main/ipc/router';
-import type { EnrollmentService } from '../src/main/steam/enrollment';
 import type { VaultService } from '../src/main/vault/service';
 
 const EVENT = { senderFrame: { url: 'app://renderer' } };
@@ -48,11 +49,16 @@ const STEAM_ID = '76561198000000001';
 const GUIDANCE =
 	'Steam was asked to remove the authenticator and did not answer, so this application cannot ' +
 	'tell whether it did.';
+const VAULT_ACCOUNT = {
+	steamId64: STEAM_ID,
+	accountName: 'trader',
+	sharedSecret: Buffer.alloc(20, 1).toString('base64')
+};
 
 const vault = {
 	isUnlocked: () => true,
 	touch: () => undefined,
-	read: () => ({ accounts: [] }),
+	read: () => ({ accounts: [VAULT_ACCOUNT] }),
 	// `enrollBegin` reads this before it does anything: an enrolment with no
 	// proxy is refused outright when the vault demands one.
 	settings: () => ({ requireProxies: false })
@@ -66,9 +72,15 @@ beforeEach(() => {
 
 /** Register with an enrollment service that fails in a chosen way. */
 function withEnrollment(overrides: Partial<EnrollmentService>): void {
-	registerEnrollmentHandlers(overrides as EnrollmentService, vault, {
-		show: () => Promise.resolve(undefined)
-	});
+	registerEnrollmentHandlers(
+		overrides as EnrollmentService,
+		vault,
+		{ show: () => Promise.resolve(undefined) },
+		undefined,
+		undefined,
+		undefined,
+		memoryOperationJournal()
+	);
 }
 
 describe('an activation Steam may already have completed', () => {
@@ -256,6 +268,121 @@ describe('an AddAuthenticator that may already have attached one', () => {
 		if (!handler) throw new Error('enrollBegin was not registered');
 
 		await expect(handler(EVENT, CREDENTIALS)).rejects.toThrow(/password is wrong/);
+	});
+
+	it('returns same-session cleanup debt instead of leaving the form at a dead end', async () => {
+		withEnrollment({
+			begin: () => Promise.reject(new EnrollmentCleanupError('clear the local safety record')),
+			unresolvedEnrollment: () =>
+				({
+					attemptId: '11111111-1111-4111-8111-111111111111',
+					steamId64: STEAM_ID,
+					accountName: 'trader',
+					kind: 'enrollment-add',
+					state: 'not-attached',
+					at: '2026-09-02T00:00:00.000Z'
+				}) as never,
+			recoveryState: () => undefined,
+			enrollmentStoredFaithfully: () => false
+		});
+		const handler = handlers.get(CHANNELS.enrollBegin);
+		if (!handler) throw new Error('enrollBegin was not registered');
+
+		await expect(handler(EVENT, CREDENTIALS)).resolves.toMatchObject({
+			state: 'uncertain',
+			guidance: 'clear the local safety record',
+			persisted: true,
+			stored: false,
+			enrollmentState: 'not-attached',
+			attemptId: '11111111-1111-4111-8111-111111111111'
+		});
+	});
+
+	it('returns stored cleanup debt from Save it now instead of claiming enrollment finished', async () => {
+		withEnrollment({
+			retryEnrollmentPersist: () =>
+				Promise.reject(new EnrollmentCleanupError('stored, but cleanup is still owed', true)),
+			unresolvedEnrollment: () =>
+				({
+					attemptId: '11111111-1111-4111-8111-111111111111',
+					steamId64: STEAM_ID,
+					accountName: 'trader',
+					kind: 'enrollment-add',
+					state: 'recoverable',
+					at: '2026-09-02T00:00:00.000Z'
+				}) as never,
+			recoveryState: () => 'durable',
+			enrollmentRecoveryUsable: () => true,
+			enrollmentStoredFaithfully: () => true
+		});
+		const handler = handlers.get(CHANNELS.enrollRetryPersist);
+		if (!handler) throw new Error('enrollRetryPersist was not registered');
+
+		await expect(
+			handler(EVENT, {
+				attemptId: '11111111-1111-4111-8111-111111111111',
+				steamId64: STEAM_ID
+			})
+		).resolves.toMatchObject({
+			state: 'uncertain',
+			guidance: 'stored, but cleanup is still owed',
+			certain: true,
+			persisted: true,
+			stored: true,
+			recovery: 'durable',
+			enrollmentState: 'recoverable'
+		});
+	});
+
+	it('returns stored cleanup debt from the initial save too', async () => {
+		withEnrollment({
+			begin: () =>
+				Promise.reject(new EnrollmentCleanupError('initial save left cleanup debt', true)),
+			unresolvedEnrollment: () =>
+				({
+					attemptId: '22222222-2222-4222-8222-222222222222',
+					steamId64: STEAM_ID,
+					accountName: 'trader',
+					kind: 'enrollment-add',
+					state: 'recoverable',
+					at: '2026-09-02T00:00:00.000Z'
+				}) as never,
+			recoveryState: () => 'durable',
+			enrollmentRecoveryUsable: () => true,
+			enrollmentStoredFaithfully: () => true
+		});
+		const handler = handlers.get(CHANNELS.enrollBegin);
+		if (!handler) throw new Error('enrollBegin was not registered');
+
+		await expect(handler(EVENT, CREDENTIALS)).resolves.toMatchObject({
+			state: 'uncertain',
+			certain: true,
+			stored: true,
+			enrollmentState: 'recoverable'
+		});
+	});
+
+	it('restores same-process certainty through enrollment status after the screen is reopened', async () => {
+		withEnrollment({
+			unresolvedEnrollment: () =>
+				({
+					attemptId: '33333333-3333-4333-8333-333333333333',
+					steamId64: STEAM_ID,
+					accountName: 'trader',
+					kind: 'enrollment-add',
+					state: 'sending',
+					at: '2026-09-02T00:00:00.000Z'
+				}) as never,
+			recoveryState: () => undefined,
+			enrollmentStoredFaithfully: () => false,
+			enrollmentKnownAttached: () => true
+		});
+		const handler = handlers.get(CHANNELS.enrollStatus);
+		if (!handler) throw new Error('enrollStatus was not registered');
+
+		await expect(handler(EVENT, {})).resolves.toMatchObject({
+			pending: { state: 'sending', stored: false, certain: true }
+		});
 	});
 
 	it('still reports an ordinary success', async () => {

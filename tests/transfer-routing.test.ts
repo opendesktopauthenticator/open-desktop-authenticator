@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { TransferService } from '../src/main/steam/transfer';
 import type { SteamTransportFactory } from '../src/main/net/transport';
 import type { VaultService } from '../src/main/vault/service';
+import { memoryWorkflowJournal } from '../src/main/steam/workflow-journal';
+import { successfulRecoveryPath } from './recovery-fixture';
 
 /*
  * Every request a transfer makes has to leave by the account's proxy.
@@ -24,12 +26,39 @@ const PROXY = 'socks5://someone:secret@proxy.example:1080';
 const TOKEN = 'eyJhbGciOiJub25lIn0.eyJhdWQiOlsibW9iaWxlIl0sImV4cCI6MjAwMDAwMDAwMH0.';
 
 const REPLACEMENT = {
-	sharedSecret: 'c2hhcmVk',
-	identitySecret: 'aWRlbnRpdHk=',
+	sharedSecret: Buffer.alloc(20, 1).toString('base64'),
+	identitySecret: Buffer.alloc(20, 2).toString('base64'),
 	revocationCode: 'R55555',
 	serverTime: '1700000000',
 	steamId64: STEAM_ID
 };
+
+function scopedKeyMethods(): {
+	sealScopedKey: (value: Buffer) => object;
+	openScopedEnvelope: () => Buffer;
+} {
+	let key: Buffer | undefined;
+	return {
+		sealScopedKey: (value) => {
+			key = Buffer.from(value);
+			return {
+				version: 1,
+				kdf: { type: 'scrypt', N: 16384, r: 8, p: 1, salt: Buffer.alloc(32).toString('base64') },
+				cipher: {
+					type: 'aes-256-gcm',
+					nonce: Buffer.alloc(12).toString('base64'),
+					tag: Buffer.alloc(16).toString('base64')
+				},
+				ciphertext: '',
+				modifiedAt: new Date(0).toISOString()
+			};
+		},
+		openScopedEnvelope: () => {
+			if (key === undefined) throw new Error('no scoped key');
+			return Buffer.from(key);
+		}
+	};
+}
 
 function harness(): {
 	service: TransferService;
@@ -43,11 +72,13 @@ function harness(): {
 	// reason that has nothing to do with routing — as the first version did.
 	const accounts: unknown[] = [];
 	const vault = {
+		isUnlocked: () => true,
 		read: () => ({ accounts }),
 		mutate: (change: (draft: { accounts: unknown[] }) => void) => {
 			change({ accounts });
 			return Promise.resolve();
-		}
+		},
+		...scopedKeyMethods()
 	} as unknown as VaultService;
 
 	const transports = {
@@ -66,7 +97,8 @@ function harness(): {
 		mintAccessToken: () => Promise.resolve('access'),
 		startChallenge: (() => Promise.resolve({ sent: true, shape: 'protobuf' })) as never,
 		continueChallenge: () => Promise.resolve({ success: true, replacementToken: REPLACEMENT }),
-		writeRecovery: () => undefined
+		writeRecovery: successfulRecoveryPath,
+		workflowJournal: memoryWorkflowJournal()
 	});
 
 	return { service, signInProxies, transportRequests };
@@ -127,11 +159,13 @@ describe('a transfer for a routed account', () => {
 	it('stores the account with the proxy it was transferred over', async () => {
 		const stored: { proxyUrl?: string }[] = [];
 		const vault = {
+			isUnlocked: () => true,
 			read: () => ({ accounts: stored }),
 			mutate: (change: (draft: { accounts: unknown[] }) => void) => {
 				change({ accounts: stored });
 				return Promise.resolve();
-			}
+			},
+			...scopedKeyMethods()
 		} as unknown as VaultService;
 		const transports = {
 			forAccount: () => Promise.resolve(vi.fn())
@@ -141,7 +175,8 @@ describe('a transfer for a routed account', () => {
 			signIn: () => Promise.resolve({ refreshToken: TOKEN, steamId64: STEAM_ID }),
 			mintAccessToken: () => Promise.resolve('access'),
 			continueChallenge: () => Promise.resolve({ success: true, replacementToken: REPLACEMENT }),
-			writeRecovery: () => undefined
+			writeRecovery: successfulRecoveryPath,
+			workflowJournal: memoryWorkflowJournal()
 		});
 
 		await service.authenticate('someone', 'pw', 'QK4TX', PROXY);

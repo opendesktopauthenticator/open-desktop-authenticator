@@ -9,6 +9,7 @@ import {
 } from '../../shared/passphrase-policy';
 import type { AdoptResult } from '../../shared/ipc';
 import { messageOf } from '../ipc-message';
+import { DynamicError } from '../DynamicError';
 import { BackupRestore } from './BackupRestore';
 
 /**
@@ -29,8 +30,8 @@ export function CreateVault({
 	/** True when a `vault.json.bak` is on disk even though the vault itself is gone. */
 	backupAvailable: boolean;
 	onRestoreBackup: (passphrase: string) => Promise<void>;
-	/** Opens a picker for a vault file the user has elsewhere. */
-	onAdopt: () => Promise<AdoptResult>;
+	/** Opens and authenticates a vault file the user has elsewhere. */
+	onAdopt: (passphrase: string) => Promise<AdoptResult>;
 }): React.JSX.Element {
 	const [passphrase, setPassphrase] = useState('');
 	const [confirmation, setConfirmation] = useState('');
@@ -47,6 +48,7 @@ export function CreateVault({
 	 * nothing at all, which is how it was reported.
 	 */
 	const [adoptError, setAdoptError] = useState<string | undefined>();
+	const [adoptPassphrase, setAdoptPassphrase] = useState('');
 
 	const mismatch = confirmation.length > 0 && confirmation !== passphrase;
 	// One shared gate, so the button's disabled state and the submit guard can
@@ -60,16 +62,20 @@ export function CreateVault({
 		}
 		setBusy(true);
 		setError(undefined);
+		let releaseAfterFailure = false;
 		try {
 			await onCreate(passphrase);
-			// Drop both copies as soon as they are no longer needed. This cannot
-			// erase them — JavaScript strings are immutable and live until GC — but
-			// it keeps them out of component state and out of the DOM.
-			setPassphrase('');
-			setConfirmation('');
 		} catch (err) {
 			setError(messageOf(err));
-			setBusy(false);
+			releaseAfterFailure = true;
+		} finally {
+			// Both inputs are frozen while this attempt owns them, so these are the
+			// submitted copies rather than newer user edits. Drop them after either
+			// outcome. JavaScript strings cannot be wiped in place, but they no
+			// longer need to remain in component state or the DOM.
+			setPassphrase('');
+			setConfirmation('');
+			if (releaseAfterFailure) setBusy(false);
 		}
 	}
 
@@ -139,18 +145,41 @@ export function CreateVault({
 					here rather than starting again. It is only offered because this machine has none — it can
 					never replace a vault you already have.
 				</p>
-				{adoptError && <p className="error">{adoptError}</p>}
+				{adoptError && <DynamicError id="adopt-vault-error">{adoptError}</DynamicError>}
 				{adoptNote && <p className="hint">{adoptNote}</p>}
+				<label htmlFor="adopt-passphrase">Existing vault passphrase</label>
+				<input
+					id="adopt-passphrase"
+					aria-invalid={adoptError !== undefined}
+					aria-describedby={adoptError === undefined ? undefined : 'adopt-vault-error'}
+					type="password"
+					autoComplete="current-password"
+					spellCheck={false}
+					value={adoptPassphrase}
+					onChange={(event) => setAdoptPassphrase(event.target.value)}
+					disabled={busy}
+				/>
+				<p className="hint">
+					The file is opened and checked locally before it is installed. The passphrase never leaves
+					this machine.
+				</p>
 				<div className="controls">
 					<button
 						type="button"
 						className="secondary"
-						disabled={busy}
+						disabled={busy || adoptPassphrase.length === 0}
 						onClick={() => {
+							const submittedPassphrase = adoptPassphrase;
 							setAdoptError(undefined);
 							setAdoptNote(undefined);
 							setBusy(true);
-							onAdopt()
+							let attempt: Promise<AdoptResult>;
+							try {
+								attempt = onAdopt(submittedPassphrase);
+							} catch (err) {
+								attempt = Promise.reject(err instanceof Error ? err : new Error(messageOf(err)));
+							}
+							void attempt
 								.then((result) => {
 									// Cancelling the picker is not a failure and must not read as
 									// one; silence is indistinguishable from a dead button.
@@ -159,7 +188,10 @@ export function CreateVault({
 									}
 								})
 								.catch((err: unknown) => setAdoptError(messageOf(err)))
-								.finally(() => setBusy(false));
+								.finally(() => {
+									setAdoptPassphrase('');
+									setBusy(false);
+								});
 						}}
 					>
 						Load a vault file…
@@ -190,6 +222,8 @@ export function CreateVault({
 				<label htmlFor="passphrase">Passphrase</label>
 				<input
 					id="passphrase"
+					aria-invalid={error !== undefined}
+					aria-describedby={error === undefined ? undefined : 'create-vault-error'}
 					type="password"
 					autoComplete="new-password"
 					spellCheck={false}
@@ -206,6 +240,8 @@ export function CreateVault({
 				<label htmlFor="confirmation">Type it again</label>
 				<input
 					id="confirmation"
+					aria-invalid={error !== undefined || mismatch}
+					aria-describedby={error === undefined ? undefined : 'create-vault-error'}
 					type="password"
 					autoComplete="new-password"
 					spellCheck={false}
@@ -225,7 +261,7 @@ export function CreateVault({
 					<span>I have written down my passphrase and understand it cannot be recovered.</span>
 				</label>
 
-				{error && <p className="error">{error}</p>}
+				{error && <DynamicError id="create-vault-error">{error}</DynamicError>}
 
 				<div className="controls">
 					<button type="submit" disabled={!ready || busy}>

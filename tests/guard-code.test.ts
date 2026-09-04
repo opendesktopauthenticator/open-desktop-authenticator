@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
 	decodeSharedSecret,
 	generateGuardCode,
@@ -165,6 +165,37 @@ describe('isUsableSharedSecret', () => {
 	it('rejects what it cannot use, without throwing', () => {
 		for (const bad of ['', '   ', 'not a secret!!', Buffer.alloc(16).toString('base64')]) {
 			expect(isUsableSharedSecret(bad)).toBe(false);
+		}
+	});
+
+	it('wipes the decoded validation key on success', () => {
+		const fill = vi.spyOn(Buffer.prototype, 'fill');
+		try {
+			expect(isUsableSharedSecret(SECRET)).toBe(true);
+			expect(
+				fill.mock.instances.some(
+					(buffer) =>
+						Buffer.isBuffer(buffer) && buffer.length === 20 && buffer.every((byte) => byte === 0)
+				)
+			).toBe(true);
+		} finally {
+			fill.mockRestore();
+		}
+	});
+});
+
+describe('secret-buffer lifetime', () => {
+	it('wipes the decoded key, counter and digest after generating a code', () => {
+		const fill = vi.spyOn(Buffer.prototype, 'fill');
+		try {
+			expect(generateGuardCode(SECRET, 1_700_000_000)).toBe('X45RP');
+			const wipedLengths = fill.mock.instances
+				.filter((buffer): buffer is Buffer => Buffer.isBuffer(buffer))
+				.filter((buffer) => buffer.every((byte) => byte === 0))
+				.map((buffer) => buffer.length);
+			expect(wipedLengths).toEqual(expect.arrayContaining([8, 20, 20]));
+		} finally {
+			fill.mockRestore();
 		}
 	});
 });

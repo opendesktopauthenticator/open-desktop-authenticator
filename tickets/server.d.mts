@@ -121,5 +121,8 @@ export function page(options: { title: string; body: string; noindex?: boolean }
 /** The HTTP server. Not listening when TICKETS_NO_LISTEN is set. */
 export const server: import('node:http').Server;
 
+/** Stop accepting requests, drain or bound active work, then close the database. */
+export function shutdownTicketServer(options?: { forceAfterMs?: number }): Promise<void>;
+
 /** The open SQLite handle. */
 export const db: import('node:sqlite').DatabaseSync;

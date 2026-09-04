@@ -2,6 +2,10 @@ import { deviceIdFor } from '../confirmations/key';
 import type { Account } from '../../shared/vault-schema';
 import { newAutoConfirm } from '../../shared/vault-schema';
 import type { ReplacementToken } from './transfer-proto';
+import {
+	authenticatorSecretProblem,
+	describeAuthenticatorSecretProblem
+} from './authenticator-secrets';
 
 /**
  * Turning Steam's replacement into an account this application can keep.
@@ -76,6 +80,15 @@ export function validateReplacement(
 	if (!token.identitySecret) {
 		throw new ReplacementError(
 			'The replacement has no confirmation secret, so it could not approve trades.'
+		);
+	}
+	const invalidSecret = authenticatorSecretProblem({
+		sharedSecret: token.sharedSecret,
+		identitySecret: token.identitySecret
+	});
+	if (invalidSecret !== undefined) {
+		throw new ReplacementError(
+			`The replacement cannot be used because ${describeAuthenticatorSecretProblem(invalidSecret)}.`
 		);
 	}
 	if (!token.revocationCode) {
@@ -166,11 +179,17 @@ export function accountFromReplacement(
  * probable. Nothing here is logged.
  */
 export function storedFaithfully(stored: Account | undefined, expected: Account): boolean {
+	const issuedFieldSurvived = (field: 'serialNumber' | 'tokenGid' | 'uri' | 'secret1'): boolean =>
+		expected[field] === undefined || stored?.[field] === expected[field];
 	return (
 		stored !== undefined &&
 		stored.steamId64 === expected.steamId64 &&
 		stored.sharedSecret === expected.sharedSecret &&
 		stored.identitySecret === expected.identitySecret &&
-		stored.revocationCode === expected.revocationCode
+		stored.revocationCode === expected.revocationCode &&
+		issuedFieldSurvived('serialNumber') &&
+		issuedFieldSurvived('tokenGid') &&
+		issuedFieldSurvived('uri') &&
+		issuedFieldSurvived('secret1')
 	);
 }

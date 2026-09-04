@@ -1,5 +1,5 @@
 import { createCipheriv, pbkdf2Sync, randomBytes } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
 	decryptSdaMaFile,
 	looksEncrypted,
@@ -162,6 +162,31 @@ describe('decrypting an SDA maFile', () => {
 
 		expect(message).not.toBe('');
 		expect(message).not.toContain(secret);
+	});
+
+	it('wipes the derived key and partial plaintext when bad padding rejects a passphrase', () => {
+		const file = fixture();
+		const wrongPassphrase = 'wrong-and-observed-for-wipe';
+		const fill = vi.spyOn(Buffer.prototype, 'fill');
+		let wiped: Buffer[];
+
+		try {
+			expect(() => decryptSdaMaFile({ ...file, passphrase: wrongPassphrase })).toThrow(
+				SdaDecryptError
+			);
+			wiped = fill.mock.instances.filter((value): value is Buffer => Buffer.isBuffer(value));
+		} finally {
+			fill.mockRestore();
+		}
+
+		expect(
+			wiped.some((bytes) => bytes.length === KEY_BYTES && bytes.every((byte) => byte === 0)),
+			'the derived password key was left for garbage collection'
+		).toBe(true);
+		expect(
+			wiped.some((bytes) => bytes.length > KEY_BYTES && bytes.every((byte) => byte === 0)),
+			'the plaintext produced before the padding failure was not wiped'
+		).toBe(true);
 	});
 });
 

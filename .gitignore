@@ -29,6 +29,11 @@ vault.json.*
 dist/
 out/
 release/
+# Release-candidate staging built before a tag. Same reason as `release/`,
+# and it was missed: 356 MB of build output sat untracked next to it, so a
+# `git add .` would have put it in this repository's permanent history.
+release-rc/
+/release-rc/
 *.tsbuildinfo
 
 # Dependencies

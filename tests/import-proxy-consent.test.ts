@@ -94,7 +94,11 @@ beforeEach(async () => {
 	vault = new VaultService({ file: join(dir, 'vault.json') });
 	await vault.create(PASS);
 	clock = NOW;
-	imports = new ImportService(vault, { now: () => clock, ttlMs: TTL_MS });
+	imports = new ImportService(vault, {
+		now: () => clock,
+		monotonicNow: () => clock,
+		ttlMs: TTL_MS
+	});
 });
 
 afterEach(() => {

@@ -29,8 +29,8 @@ never have to think about.
   in your ordinary browser, so a session opened for one account cannot be
   reused by another.
 - **A routing choice per window.** Each browser window can use the account's
-  proxy, a different one, or go direct, and the choice is shown rather than
-  assumed. Direct is offered honestly: a shared proxy collects rate limits and
+  proxy for everything, use Steam-only through that same proxy, or go Direct,
+  and the choice is shown rather than assumed. Direct is offered honestly: a shared proxy collects rate limits and
   challenges a home connection never sees, so the routed window is sometimes
   the one that will not load.
 - **Require proxies**, a vault-wide rule for people who want the stronger

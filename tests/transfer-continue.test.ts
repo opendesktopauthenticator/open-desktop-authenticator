@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
-import { continueTransfer, TransferApiError } from '../src/main/steam/transfer-api';
+import {
+	continueTransfer,
+	startTransferChallenge,
+	TransferApiError
+} from '../src/main/steam/transfer-api';
 import { encodeContinueRequest } from '../src/main/steam/transfer-proto';
 import type { SteamRequest, SteamResponse } from '../src/main/confirmations/client';
 
@@ -46,7 +50,62 @@ function transportReturning(response: Partial<SteamResponse>): {
 	return { transport, seen };
 }
 
+describe('requesting the texted code', () => {
+	it.each([
+		['an empty protobuf reply', ''],
+		['a JSON reply', JSON.stringify({ response: { success: false } })]
+	])('honours EResult.OK despite an HTTP error and %s', async (_case, text) => {
+		const { transport } = transportReturning({ status: 503, eresult: 1, text });
+
+		await expect(startTransferChallenge(transport, TOKEN)).resolves.toMatchObject({
+			eresult: 1,
+			sent: true
+		});
+	});
+
+	it.each([200, 503])('honours a non-OK EResult despite HTTP %i', async (status) => {
+		const { transport } = transportReturning({
+			status,
+			eresult: 84,
+			text: JSON.stringify({ response: { success: true } })
+		});
+
+		await expect(startTransferChallenge(transport, TOKEN)).resolves.toMatchObject({
+			eresult: 84,
+			sent: false,
+			meaning: expect.stringMatching(/rate-limiting/i)
+		});
+	});
+
+	it('preserves the HTTP failure when Steam supplied no EResult', async () => {
+		const { transport } = transportReturning({ status: 503, eresult: undefined, text: '' });
+
+		await expect(startTransferChallenge(transport, TOKEN)).rejects.toMatchObject({
+			status: 503,
+			provesNoChange: false
+		});
+	});
+});
+
 describe('submitting the texted code', () => {
+	it('wipes its owned request and one-time response buffers after decoding', async () => {
+		const responseBytes = replacementBody();
+		const fill = vi.spyOn(Buffer.prototype, 'fill');
+		try {
+			const { transport } = transportReturning({ text: responseBytes.toString('latin1') });
+			await continueTransfer(transport, TOKEN, '12345');
+
+			const wiped = fill.mock.instances as Buffer[];
+			expect(wiped.some((buffer) => buffer.length === encodeContinueRequest('12345').length)).toBe(
+				true
+			);
+			expect(wiped.some((buffer) => buffer.length === responseBytes.length)).toBe(true);
+			expect(wiped.every((buffer) => buffer.every((byte) => byte === 0))).toBe(true);
+		} finally {
+			fill.mockRestore();
+		}
+	});
+
 	it('sends the encoded request as base64 in the form field', async () => {
 		const { transport, seen } = transportReturning({
 			text: replacementBody().toString('latin1')
@@ -95,11 +154,65 @@ describe('submitting the texted code', () => {
 		await expect(continueTransfer(transport, TOKEN, '12345')).rejects.toThrow(/rate-limiting/);
 	});
 
-	it('carries the status on the error', async () => {
+	it('carries an explicit Steam refusal on the error', async () => {
 		const { transport } = transportReturning({ status: 401, eresult: 15 });
 		const err = await continueTransfer(transport, TOKEN, '12345').catch((e: unknown) => e);
 		expect(err).toBeInstanceOf(TransferApiError);
 		expect((err as TransferApiError).status).toBe(401);
+		expect((err as TransferApiError).provesNoChange).toBe(true);
+	});
+
+	it.each([401, 429, 500, 502, 504])(
+		'does not turn a bare HTTP %i into proof that Steam made no change',
+		async (status) => {
+			const { transport } = transportReturning({ status, eresult: undefined });
+			const err = await continueTransfer(transport, TOKEN, '12345').catch((e: unknown) => e);
+			expect(err).toBeInstanceOf(TransferApiError);
+			expect((err as TransferApiError).status).toBe(status);
+			expect((err as TransferApiError).provesNoChange).toBe(false);
+		}
+	);
+
+	it('preserves an absent protobuf success field as indeterminate', async () => {
+		const { transport } = transportReturning({ status: 200, text: '', eresult: undefined });
+		await expect(continueTransfer(transport, TOKEN, '12345')).resolves.toEqual({});
+	});
+
+	it('does not treat an empty replacement field as proof that Steam rotated', async () => {
+		const { transport } = transportReturning({
+			status: 200,
+			text: Buffer.from([0x12, 0x00]).toString('latin1'),
+			eresult: undefined
+		});
+		await expect(continueTransfer(transport, TOKEN, '12345')).resolves.toEqual({
+			replacementToken: {}
+		});
+	});
+
+	it.each([undefined, 15])(
+		'honours a valid replacement body over conflicting HTTP metadata (EResult %s)',
+		async (eresult) => {
+			const { transport } = transportReturning({
+				status: 500,
+				eresult,
+				text: replacementBody().toString('latin1')
+			});
+			await expect(continueTransfer(transport, TOKEN, '12345')).resolves.toMatchObject({
+				success: true,
+				replacementToken: { revocationCode: 'R98765' }
+			});
+		}
+	);
+
+	it('treats contradictory explicit success and refusal signals as indeterminate', async () => {
+		const { transport } = transportReturning({
+			status: 200,
+			eresult: 1,
+			text: Buffer.from([0x08, 0x00]).toString('latin1')
+		});
+		const err = await continueTransfer(transport, TOKEN, '12345').catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(TransferApiError);
+		expect((err as TransferApiError).provesNoChange).toBe(false);
 	});
 
 	/*
@@ -108,6 +221,8 @@ describe('submitting the texted code', () => {
 	 */
 	it('throws rather than reporting failure when the reply is unreadable', async () => {
 		const { transport } = transportReturning({ text: 'ÿÿÿÿ' });
-		await expect(continueTransfer(transport, TOKEN, '12345')).rejects.toThrow();
+		const err = await continueTransfer(transport, TOKEN, '12345').catch((e: unknown) => e);
+		expect(err).toBeInstanceOf(TransferApiError);
+		expect((err as TransferApiError).provesNoChange).toBe(false);
 	});
 });
