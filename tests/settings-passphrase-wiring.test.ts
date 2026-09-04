@@ -169,11 +169,31 @@ describe('the create screen and an in-flight restore', () => {
 describe('the portable build', () => {
 	it('does not write the Windows identity keys', () => {
 		const main = readFileSync(join(__dirname, '../src/main/index.ts'), 'utf8');
-		// The portable target keeps application data beside the executable and does
-		// not install itself; this writes two values under HKCU, one of them a path
-		// pointing back at the copy the user was only trying out. Windows Temp
-		// runtime extraction is unrelated to this persistent identity record.
-		expect(main).toMatch(/if \(portableDir === undefined\) \{\s*void registerWindowsIdentity\(/);
+		/*
+		 * The portable target keeps application data beside the executable and does
+		 * not install itself; this writes two values under HKCU, one of them a path
+		 * pointing back at the copy the user was only trying out. Windows Temp
+		 * runtime extraction is unrelated to this persistent identity record.
+		 *
+		 * **Asserted as the property, not as the line.** This pinned the guard's
+		 * exact source — `if (portableDir === undefined) {` — and so failed the day
+		 * a second, narrower condition was added beside it, while the thing it
+		 * exists to protect was still true. That is this repository's own recurring
+		 * mistake: a guard that reads the text rather than the rule. What matters is
+		 * that the call is behind a condition, and that the condition still asks
+		 * about portable.
+		 */
+		const guard = main.match(/if \(([^)]*)\)\s*\{\s*void registerWindowsIdentity\(/);
+		expect(
+			guard,
+			'registerWindowsIdentity is no longer directly behind an `if`, so this test can no ' +
+				'longer see what guards it — read the call site and rewrite this assertion'
+		).not.toBeNull();
+		expect(
+			guard?.[1],
+			'the portable build now writes the Windows identity keys: two values under HKCU, one ' +
+				'of them a path pointing back at a copy the user was only trying out'
+		).toContain('portableDir === undefined');
 	});
 });
 

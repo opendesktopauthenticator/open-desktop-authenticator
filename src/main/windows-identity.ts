@@ -8,6 +8,43 @@ import { encodePng } from './png';
 const run = promisify(execFile);
 
 /**
+ * Whether this run may claim the Windows shell identity.
+ *
+ * Claiming it means `setAppUserModelId`, the toast activator, and the two
+ * registry values below. It also decides the **taskbar button's icon**, and that
+ * is why an ordinary development run does not claim it: Windows resolves that
+ * icon through the identity — via a Start Menu shortcut carrying
+ * `System.AppUserModel.ID`, which the installer writes and a source checkout has
+ * no equivalent of — and finding none, falls back to the icon of the running
+ * executable. Unpackaged that is `electron.exe`, so the taskbar showed Electron's
+ * mark whatever `BrowserWindow.icon` was given, and `IconUri` could not help
+ * because the shell will not take a PNG for a taskbar button.
+ *
+ * Measured twice: removing the call puts the product mark on the taskbar, and
+ * moving it after the window is built does not work — the right icon appears
+ * while the window is created and flips back the instant the identity is set.
+ *
+ * The cost falls only on development, where a toast is then attributed to
+ * Electron's default and Action Center cannot route a click. Anyone testing
+ * notifications sets `ODA_WINDOWS_IDENTITY=1` and gets all of it back.
+ *
+ * Portable claims it: it is a real build a real user runs, and its window has the
+ * same right to its own name. What portable skips is the *registry* write, which
+ * is a separate decision made where that write happens.
+ */
+export function claimsWindowsShellIdentity({
+	packaged,
+	portable,
+	override
+}: {
+	packaged: boolean;
+	portable: boolean;
+	override: string | undefined;
+}): boolean {
+	return packaged || portable || override === '1';
+}
+
+/**
  * Telling Windows what this application is called.
  *
  * ## The problem

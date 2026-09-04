@@ -65,7 +65,7 @@ import {
 	WindowsToastActivationRouter
 } from './confirmations/windows-toast-activation';
 import { createTray } from './tray';
-import { registerWindowsIdentity } from './windows-identity';
+import { claimsWindowsShellIdentity, registerWindowsIdentity } from './windows-identity';
 import { registerConfirmationHandlers } from './confirmations/ipc';
 import { SteamClock } from './steam/clock';
 import {
@@ -211,12 +211,41 @@ function start(): void {
 		return;
 	}
 
-	// Windows identifies an application by its AppUserModelID, not by its window
-	// title or executable name. Without this, `branding.appId` exists only as a
-	// string in a config file: taskbar pinning breaks, the app groups under a
-	// generic "Electron" identity, and anything shell-facing points at the wrong
-	// place. It has to be set before any window is created.
-	if (process.platform === 'win32') {
+	/*
+	 * Windows identifies an application by its AppUserModelID, not by its window
+	 * title or executable name. Without this, `branding.appId` exists only as a
+	 * string in a config file: taskbar pinning breaks, the app groups under a
+	 * generic "Electron" identity, and anything shell-facing points at the wrong
+	 * place. It has to be set before any window is created.
+	 *
+	 * ## Why development is excluded
+	 *
+	 * Setting it also decides the taskbar button's icon, and not in our favour.
+	 * Windows resolves that icon through the identity — by way of a Start Menu
+	 * shortcut carrying `System.AppUserModel.ID`, which the installer creates and
+	 * a source checkout has no equivalent of. Finding none, it falls back to the
+	 * icon of the running executable, which unpackaged is `electron.exe`. So an
+	 * unpackaged run showed Electron's mark no matter what `BrowserWindow.icon`
+	 * was given, and `windows-identity.ts`'s `IconUri` cannot help: that is a
+	 * PNG for toast captions, and the shell will not take it for a taskbar button.
+	 *
+	 * Measured, twice. Commenting out this one call puts the product mark on the
+	 * taskbar. Moving it to after `createMainWindow()` does not work either — the
+	 * correct icon appears while the window is built and flips back the moment the
+	 * identity is set, because Windows re-resolves it then.
+	 *
+	 * The cost is real and confined to development: without the identity, a toast
+	 * is attributed to Electron's default rather than to this application, and the
+	 * activator below cannot route an Action Center click. `ODA_WINDOWS_IDENTITY=1`
+	 * restores both for anyone actually testing notifications, which is the only
+	 * work that needs them. A packaged build is unaffected in every respect.
+	 */
+	const windowsShellIdentity = claimsWindowsShellIdentity({
+		packaged: app.isPackaged,
+		portable: portableDir !== undefined,
+		override: process.env.ODA_WINDOWS_IDENTITY
+	});
+	if (process.platform === 'win32' && windowsShellIdentity) {
 		app.setAppUserModelId(branding.appId);
 		// A stable activator is what lets Action Center route a click after the
 		// original Notification object — or the whole process — is gone. Portable
@@ -238,7 +267,12 @@ function start(): void {
 	// pointing back at the copy they were only trying out. The cost of skipping
 	// it is a plainer caption on a toast notification, which is the right trade
 	// against leaving registry state on somebody else's machine.
-	if (portableDir === undefined) {
+	//
+	// **Nor in an ordinary development run**, for the same reason and one more:
+	// these values hang off the AppUserModelID, which is not set there (see
+	// above), so writing them leaves registry state on the machine that nothing
+	// reads. `ODA_WINDOWS_IDENTITY=1` restores the identity and this with it.
+	if (portableDir === undefined && windowsShellIdentity) {
 		void registerWindowsIdentity({
 			appId: branding.appId,
 			displayName: branding.productName,
