@@ -58,6 +58,7 @@ const PROJECTS = [
 
 export default {
 	slug: 'owners',
+	updated: '2026-09-07',
 	navTitle: 'Who we are',
 	title: 'Who builds Open Desktop Authenticator',
 	description:
@@ -169,9 +170,11 @@ ${PROJECTS.map(
 			</p>
 			<p>
 				This is precisely why the application is built the way it is. It has
-				<a href="/security">no server of ours to talk to</a>, no account system, and no
-				telemetry — there is nowhere for a secret to go even if we wanted one. It cannot
-				update itself, so a future version cannot be pushed to you quietly. And every
+				<strong>no ODA backend, no ODA account, no cloud sync, and no telemetry</strong>.
+				Requested Steam operations contact Valve, and direct GitHub builds can optionally
+				check GitHub for updates; neither service is operated by ${s.publisher}. The
+				user-driven browser contacts only the sites you choose.
+				It cannot update itself, so a future version cannot be pushed to you quietly. And every
 				line of it is public, so the claim in this paragraph is checkable rather than
 				merely stated. That is a better answer than a promise.
 			</p>

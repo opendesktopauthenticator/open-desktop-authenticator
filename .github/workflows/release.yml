@@ -413,7 +413,12 @@ jobs:
         id: store_package
         if: runner.os == 'Windows'
         continue-on-error: true
-        run: npx electron-builder --config electron-builder.config.mjs --win appx --publish never
+        # Partner Center accepts one package per architecture in the same
+        # submission. Naming both here is deliberate: a bare `appx` follows the
+        # x64 runner and silently leaves Windows 10 on Arm without a compatible
+        # Store package. electron-builder gives the non-default package an
+        # `arm64` suffix, so the two artifacts cannot overwrite each other.
+        run: npx electron-builder --config electron-builder.config.mjs --win appx:x64 appx:arm64 --publish never
 
       # A toast can be displayed without either activation declaration, so a
       # successful AppX build alone does not prove that clicking its Action

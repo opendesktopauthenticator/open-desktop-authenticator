@@ -1,13 +1,15 @@
 # Founder test plan — what has to be checked by a human
 
-**Status: worked through on Windows, with two gaps named below.** This plan was
+**Status: worked through on Windows, with three gaps named below.** This plan was
 written when the assembled application had never spoken to live Steam. It since
 has, across several rounds against real accounts, and is kept as the record of
 what was covered and as the checklist to repeat before a release.
 
 Reconciled against what was actually done on 25 August 2026, after an audit found
 this file still describing the product as it stood before 1.0. Where a statement
-here disagreed with the shipped application, the application won.
+here disagreed with the shipped application, the application won. Updated on 7
+September 2026 to describe the shipped 1.5 browser interface and record, without
+claiming a pass, the live checks that remain undone.
 
 **Covered against a live account:** vault creation and the recovery ceremony,
 unlock and auto-lock, importing real maFiles, codes matching Steam's own app,
@@ -19,7 +21,7 @@ including the Steam-side detach, auto-confirm including that it pauses when the
 vault locks, routing an account through a proxy, and a broken proxy failing
 closed.
 
-**The two gaps, stated plainly because they are the useful part:**
+**The three gaps, stated plainly because they are the useful part:**
 
 1. **No Linux build has ever been launched.** The AppImage and `.deb` are built
    by CI and published, and nobody has run either. Linux is listed as a supported
@@ -30,6 +32,10 @@ closed.
    never checked for session separation end to end. The isolation is unit-tested
    and the architecture gives each account its own Electron session; it has not
    been watched happening.
+3. **T30 was not run.** The shipped account browser's session isolation, toolbar
+   and routing are covered by automated and Electron smoke tests, but a human has
+   not yet confirmed that live Steam accepts its signed-in cookie and opens the
+   intended account without presenting a login page.
 
 Automated tests prove the code does what it was written to do; they cannot prove
 it was written against Steam's actual behaviour. That is what these are for, and
@@ -341,7 +347,9 @@ Valve's servers. No type and no test here can establish it, and the whole featur
 rests on it.
 
 1. Account list → **Open trading browser** on an account with a live session.
-2. A window titled `<account name> — browser` opens on your trade offers.
+2. A window opens on your trade offers. Its application-owned address bar shows
+   the committed Steam URL, and the native title reads
+   `<account name> — steamcommunity.com` (or the Valve host actually loaded).
 
 **Pass:** the page shows _your_ trade offers, with your account name in Steam's
 own header. Click through to the market and to your inventory; both should stay
@@ -687,6 +695,32 @@ make it useless as an authenticator.
 
 ---
 
+## Stage 6 — Published Linux packages
+
+### T35 · Launch and exercise both Linux packages
+
+This stage is written down and remains **unrun**. Use a supported Linux machine,
+a disposable vault and a non-critical account.
+
+1. Download the AppImage and `.deb` from the public release rather than using a
+   local build. Verify each file against `SHA256SUMS.txt` and the published build
+   provenance.
+2. Launch the AppImage, then install and launch the `.deb`. For each package,
+   create and reopen a vault, import an account, compare a Guard code, list
+   confirmations and lock the vault.
+3. Open the account browser and repeat T30 and T32. Confirm the Linux window has
+   usable native close, minimise and maximise controls, a working tab strip and
+   an address bar that follows the active tab.
+4. Exercise the tray actions and fully quit the application.
+
+**Pass:** both published packages launch and complete the same safe read-only
+flows, the browser chrome remains usable, and locking closes the signed-in
+browser. Record the distribution and desktop environment used. **Fails if:**
+either published package cannot start, core controls are unreachable, or its
+behaviour differs materially from the Windows flow without being documented.
+
+---
+
 ## What you do not need to test
 
 These are genuinely covered, and hand-testing them is a poor use of your time:
@@ -705,14 +739,15 @@ These are genuinely covered, and hand-testing them is a poor use of your time:
 
 ---
 
-## Still blocked on you, outside this document
+## Remaining human sign-off
 
 Most of this list is now done. It is kept rather than deleted because the items
 that closed are the ones a reader would otherwise assume are still open.
 
 **Done:**
 
-- The GitHub organisation and repository exist, and 1.0 is published from them.
+- The GitHub organisation and repository exist, and 1.5.0 is published through
+  GitHub Releases and the Microsoft Store.
 - Tray and application icons are generated from the vector in `tools/make-icons.mjs`;
   the placeholders are gone.
 - The §8 attribution string was rewritten. `steam-session` is a shipped
@@ -723,10 +758,17 @@ that closed are the ones a reader would otherwise assume are still open.
 
 - **T30 — the in-app browser's sign-in.** Whether Steam accepts the cookie this
   application builds is the one load-bearing fact about this feature that nothing
-  in the repository can settle. Worth doing before the feature is announced.
-- **Run a Linux build.** Neither the AppImage nor the `.deb` has been launched by
-  a human. This is the largest untested surface in the project.
-- A Windows code-signing certificate (Q2) — the direct downloads stay unsigned
-  (no certificate is planned), and the Store package is signed by Microsoft instead.
+  in the repository can settle. It was not completed before 1.5 shipped and
+  should be run now.
+- **T19 — two accounts through different proxies.** The isolation is tested in
+  code but has not been watched end to end against two live routed accounts.
+- **Run T35 on Linux.** Neither the published AppImage nor the `.deb` has been
+  launched by a human. This is the largest untested platform surface in the
+  project.
 - Sign-off on the IPC channel table (§24.3).
 - The scrypt work factor benchmarked on your slowest target machine (Q6).
+
+**Accepted distribution limit, not pending work:** the direct Windows downloads
+are not conventionally code-signed, and no certificate is planned. The Store
+package is signed by Microsoft; GitHub downloads instead carry hashes, a
+sigstore signature over the checksum list and build-provenance attestations.

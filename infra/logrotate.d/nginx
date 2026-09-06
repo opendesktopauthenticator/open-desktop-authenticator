@@ -1,0 +1,24 @@
+/var/log/nginx/*.log {
+	daily
+	# The active daily log is one additional interval. Thirteen archives make
+	# the operational target fourteen days in total when rotation runs on time.
+	# `maxage` is only a backstop evaluated during rotation; it is not a hard
+	# deadline if the timer or server is unavailable.
+	rotate 13
+	maxage 13
+	missingok
+	notifempty
+	compress
+	delaycompress
+	dateext
+	create 0640 www-data adm
+	sharedscripts
+	prerotate
+		if [ -d /etc/logrotate.d/httpd-prerotate ]; then
+			run-parts /etc/logrotate.d/httpd-prerotate
+		fi
+	endscript
+	postrotate
+		invoke-rc.d nginx rotate >/dev/null 2>&1
+	endscript
+}

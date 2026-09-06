@@ -19,6 +19,7 @@
 
 export const codeSigningPolicy = {
 	slug: 'code-signing-policy',
+	updated: '2026-09-07',
 	navTitle: 'Code signing policy',
 	title: 'Code signing policy',
 	description:
@@ -60,10 +61,12 @@ export const codeSigningPolicy = {
 
 			<h2>What carries a signature, and what does not</h2>
 			<p>
-				Nothing this project publishes directly is signed by us. If that ever changes,
-				only artifacts built by this project's own public workflow, from a tag in
-				<a href="${s.repo}" rel="noopener">this repository</a>, would be eligible —
-				nothing built on a maintainer's machine, and no third party's binaries.
+				The direct installers and executables are not code-signed. Starting with version
+				1.5, the release workflow signs <code>SHA256SUMS.txt</code> with Sigstore and
+				publishes build provenance for the artifacts. Those records identify this
+				project's public workflow and the exact tag in
+				<a href="${s.repo}" rel="noopener">this repository</a>; they are not a
+				conventional signature on the executable itself.
 			</p>
 			<p>
 				<strong>The Microsoft Store package is separate.</strong> Microsoft re-signs
@@ -76,16 +79,16 @@ export const codeSigningPolicy = {
 			<dl class="defs">
 				<dt>Committers and reviewers</dt>
 				<dd>
-					<a href="https://github.com/orgs/${s.githubOrg}/people" rel="noopener">Members
-					of the ${s.githubOrg} organisation</a>. Every change reaches the default
-					branch through the public repository, and the release workflow builds only
-					from a pushed tag whose commit it verifies against <code>HEAD</code>.
+					People granted write or review access to the repository. The organisation does
+					not publish a member roster, so its public people page is not used as identity
+					evidence. Commits, pull-request reviews and workflow runs that actually happen
+					remain visible in the public repository.
 				</dd>
 				<dt>Approvers</dt>
 				<dd>
-					<a href="https://github.com/orgs/${s.githubOrg}/people?query=role%3Aowner" rel="noopener">Owners
-					of the ${s.githubOrg} organisation</a>. A release is approved by an owner, who
-					is the same person accountable for it under
+					People with permission to create a release tag and run the release workflow.
+					Those GitHub roles are not publicly enumerated. The named publisher accountable
+					for the product and its releases is
 					<a href="/owners">${s.brand.legal}</a>.
 				</dd>
 				<dt>Multi-factor authentication</dt>
@@ -98,11 +101,10 @@ export const codeSigningPolicy = {
 
 			<h2>Privacy</h2>
 			<p>
-				This program will not transfer any information to other networked systems unless
-				specifically requested by the user or the person installing or operating it. It
-				talks to Valve's own endpoints to do the job you asked for, and — if you leave
-				the update check on — asks GitHub's public releases page whether a newer version
-				exists. There is no telemetry, no analytics, and no account.
+				No ODA backend. No ODA account. No cloud sync. No telemetry. User-requested
+				Steam operations contact Valve. In direct GitHub builds, the optional update
+				check contacts GitHub; Microsoft Store builds do not perform that check. The
+				user-driven browser contacts the sites the user chooses.
 				<a href="/privacy">The full privacy policy is here</a>, and
 				<a href="/security">the security page</a> describes what the application stores
 				and where.
@@ -110,12 +112,11 @@ export const codeSigningPolicy = {
 
 			<h2>Verifying a release</h2>
 			<p>
-				A signature tells you who published a file. It does not tell you which source
-				produced it — and since nothing here is signed, the second half is all there
-				is, which is why it is published in full:
-				<code>SHA256SUMS.txt</code> and a build provenance attestation naming the
-				workflow run, commit and tag.
-				<a href="/verify">The verification steps walk through both</a>, and they are
+				A conventional code-signing certificate would identify who signed an executable;
+				it would not identify which source produced it. Version 1.5 instead publishes
+				<code>SHA256SUMS.txt</code>, a Sigstore signature over that list, and build
+				provenance naming the workflow run, commit and tag.
+				<a href="/verify">The verification steps walk through all three</a>, and they are
 				worth running whether or not a file is signed.
 			</p>
 			<p>

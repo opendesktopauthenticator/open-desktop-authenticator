@@ -13,6 +13,7 @@
 
 export const privacy = {
 	slug: 'privacy',
+	updated: '2026-09-07',
 	navTitle: 'Privacy',
 	title: 'What this site stores, and for how long',
 	description:
@@ -30,22 +31,26 @@ export const privacy = {
 		<article>
 			<h1>What this site stores</h1>
 			<p class="lede">
-				Short version: <strong>the application</strong> holds your secrets on your own
-				machine, sends them to nobody but Steam, and contains no analytics or telemetry of any
-				kind. <strong>This website</strong> is a separate thing and does collect a
-				little — server logs kept for 14 days, Cloudflare in front of it, Google
-				Analytics, and Trustpilot on the pages that ask you for a review. All of that
+				Short version: <strong>the application</strong> keeps your secrets in encrypted
+				files on your own machine. It has no ODA backend, ODA account, cloud sync, or
+				telemetry. Steam operations you request contact Valve; direct GitHub builds can
+				optionally check GitHub for a newer release; and the user-driven browser contacts
+				the sites you choose. <strong>This website</strong> is a separate thing and does collect a
+				little — web-server request logs normally removed within 14 days, Cloudflare
+				in front of it, Google Analytics, and Trustpilot on the pages that ask you for
+				a review. A delayed or failed log rotation can delay deletion. All of that
 				is listed below, along with what a report holds, how long it lives, and the one
 				thing the download page keeps in your own browser.
 			</p>
 
 			<div class="callout">
-				<h2>The application is the part that matters, and it is the part that stores nothing</h2>
+				<h2>The application stores secrets locally; the publisher does not receive them</h2>
 				<p>
 					${s.name} keeps your Steam Guard secrets in an encrypted vault on your
-					computer. There is no account, no sync, no server of ours for them to reach,
-					and no telemetry — <a href="/security">the security page explains the design</a>.
-					Nothing on this page describes your secrets, because we never have them.
+					computer. No ODA backend. No ODA account. No cloud sync. No telemetry.
+					The app sends the data required for user-requested Steam operations to Valve,
+					but it does not send vault contents to us —
+					<a href="/security">the security page explains the boundaries</a>.
 				</p>
 			</div>
 
@@ -79,7 +84,8 @@ export const privacy = {
 				<dt>Ordinary server logs</dt>
 				<dd>
 					The web server records requests — address, time, page, user agent — as any web
-					server does. Kept 14 days, then rotated away.
+					server does. The logs are rotated daily and normally removed within 14 days.
+					A delayed or failed rotation can delay deletion.
 				</dd>
 			</dl>
 
@@ -92,7 +98,7 @@ export const privacy = {
 					<tr><td>An upload you never attached to a report</td><td>Eligible for deletion after 2 hours; normally removed within a few hours</td></tr>
 					<tr><td>An open report, and anything attached to it</td><td>Until it is closed</td></tr>
 					<tr><td>A resolved or declined report</td><td>90 days after it was closed, then deleted with its attachments</td></tr>
-					<tr><td>Web server request logs</td><td>14 days</td></tr>
+					<tr><td>Web server request logs</td><td>Normally within 14 days; a delayed or failed rotation can delay deletion</td></tr>
 					<tr><td>Backups of the report database</td><td>Same 90-day cycle; a deleted report leaves the backups as they age out</td></tr>
 				</tbody>
 			</table>
@@ -141,10 +147,10 @@ export const privacy = {
 				</dd>
 				<dt>GitHub</dt>
 				<dd>
-					Hosts the source and the releases. If the application's update check
-					is on, it asks GitHub's public releases page whether a newer version exists;
-					GitHub sees an address and that the application is running, the same as any
-					visitor to that page. Nothing about you or your accounts is sent.
+					Hosts the source and releases. In a direct GitHub build, if the optional
+					update check is on, it asks GitHub's public releases API whether a newer
+					version exists. GitHub receives the request and its source IP, but no Steam
+					account or vault data. Microsoft Store builds do not perform this check.
 				</dd>
 				<dt>Cloudflare Web Analytics</dt>
 				<dd>
@@ -163,8 +169,8 @@ export const privacy = {
 					purpose: a count typed into a sentence is wrong the first time a page is
 					added, and this one is derived from what each page actually renders.) Where it does load, Trustpilot sees the request
 					the same way any embedded widget's host does: your IP address, your browser,
-					and which of our pages you were on. We send it nothing about you, and we
-					receive nothing back about who clicked; what we can see is the public review
+					and which of our pages you were on. We do not send it Steam account, vault,
+					or support-form data, and we receive nothing back about who clicked; what we can see is the public review
 					count on our own profile, the same number you can.
 					<br />
 					<strong>Added 2 September 2026.</strong> It went onto every page for one
@@ -196,9 +202,6 @@ export const privacy = {
 				Use <a href="/support">the report form</a>. For a security issue, the routes are
 				on <a href="/security">the security page</a> and in
 				<a href="/.well-known/security.txt">security.txt</a>.
-			</p>
-			<p class="hint">
-				Published by ${s.publisher}. Last reviewed ${s.updated}.
 			</p>
 		</article>`
 };

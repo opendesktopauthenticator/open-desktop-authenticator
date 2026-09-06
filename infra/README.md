@@ -22,12 +22,45 @@ afterwards. That is a real limitation and worth fixing if the setup grows.
 | `nginx/snippets/tls.conf`                | `/etc/nginx/snippets/tls.conf`                |
 | `nginx/sites-available/oda`              | `/etc/nginx/sites-available/oda`              |
 | `nginx/sites-available/000-default-deny` | `/etc/nginx/sites-available/000-default-deny` |
+| `logrotate.d/nginx`                      | `/etc/logrotate.d/nginx`                      |
 | `sshd_config.d/00-hardening.conf`        | `/etc/ssh/sshd_config.d/00-hardening.conf`    |
 | `fail2ban/jail.local`                    | `/etc/fail2ban/jail.local`                    |
 | `sysctl.d/99-hardening.conf`             | `/etc/sysctl.d/99-hardening.conf`             |
 | `deploy-site.sh`                         | `/usr/local/sbin/deploy-oda-site`             |
 
 Both `sites-available` files need a symlink into `sites-enabled` to take effect.
+
+`logrotate.d/nginx` deliberately replaces the distribution's file at that exact
+path; do not install it beside another rule that also names
+`/var/log/nginx/*.log`, because logrotate rejects duplicate log definitions.
+The distribution's `logrotate.timer` runs it daily. The active daily log plus
+thirteen rotated files gives a fourteen-day operational target; `maxage 13` is a
+second cleanup bound evaluated when rotation runs. Older rotations are
+compressed after their first day, and nginx is asked to reopen the active file
+after rotation.
+
+That is not an unconditional deadline. If the timer, logrotate, or the server is
+down, deletion is delayed until rotation succeeds. After restoring or changing
+the rule, validate its syntax, force the initial rotation so an old active log is
+not merely entered into the state file, and verify the scheduler:
+
+```bash
+logrotate --debug /etc/logrotate.d/nginx
+logrotate --force /etc/logrotate.d/nginx
+systemctl is-enabled logrotate.timer
+systemctl is-active logrotate.timer
+```
+
+Then list the remaining files oldest first:
+
+```bash
+find /var/log/nginx -maxdepth 1 -type f -name '*.log*' -printf '%T@ %TY-%Tm-%TdT%TH:%TM:%TS %p\n' | sort -n
+```
+
+The file timestamp is only a coarse check: one daily file contains records from
+across that whole interval. Inspect the first record inside each remaining plain
+or compressed log when validating the initial deployment. A pre-existing active
+file can contain records older than its most recent write time.
 
 ## Not in here, on purpose
 
@@ -69,8 +102,10 @@ The token is a **form field, never a query parameter**, and that is deliberate.
 A secret in a URL is written to the nginx access log as part of `$request`,
 written again as the `$http_referer` of every subresource the page pulls, kept
 in browser history, and offered by autocomplete afterwards. The access log is
-mode 640 `www-data:adm` and is retained compressed for fourteen days, so a
-token that is still valid would outlive the minute it was needed for. A POST
+mode 640 `www-data:adm`, rotated daily, and normally removed within fourteen
+days; a delayed or failed rotation can delay deletion. Older rotations are
+compressed after their first day. A token that is still valid would outlive the
+minute it was needed for. A POST
 body appears in none of those places. The service refuses a token supplied in
 the query string even when it is the correct one, so the leaky path cannot come
 back by habit.
@@ -90,7 +125,8 @@ an account somebody has to create, so it remains undone rather than faked.
 
 `oda-backup.sh` writes two dated archives to `/var/backups/oda`:
 
-- **`config-*`** — TLS keys, nginx, ufw, fail2ban, sshd. Kept a fortnight.
+- **`config-*`** — TLS keys, nginx, nginx log rotation, ufw, fail2ban, sshd.
+  Kept a fortnight.
 - **`tickets-*`** — the report database and its attachments. Kept 90 days, to
   match the retention `/privacy` states: holding backups of deleted reports for
   longer than the reports themselves would make that promise false.

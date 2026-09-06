@@ -164,7 +164,7 @@ describe('the Microsoft Store identity', () => {
 		// ingestion — so a visitor who downloaded one could not install it. It is
 		// uploaded as a workflow artifact for the maintainer, and the release's
 		// own collection step only ever globs exe/AppImage/deb.
-		expect(workflow).toContain('--win appx --publish never');
+		expect(workflow).toContain('--win appx:x64 appx:arm64 --publish never');
 		expect(workflow).toContain('name: store-package');
 		const start = workflow.indexOf('- name: Collect artifacts');
 		const end = workflow.indexOf('\n\n', start);

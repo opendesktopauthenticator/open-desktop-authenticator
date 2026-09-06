@@ -212,6 +212,7 @@ const SPENDS = [
 
 export const donate = {
 	slug: 'donate',
+	updated: '2026-09-07',
 	navTitle: 'Donate',
 	script: 'support.js',
 	title: 'Donate to Open Desktop Authenticator',
@@ -246,9 +247,10 @@ export const donate = {
 					the parts that handle your secrets, which is the only part that matters.
 				</li>
 				<li>
-					<strong>The application collects nothing.</strong> No telemetry, no accounts, no server
-					of ours that your secrets could be sent to, because
-					<a href="/security">there is no server in the design at all</a>.
+					<strong>No ODA backend. No ODA account. No cloud sync. No telemetry.</strong>
+					Requested Steam operations contact Valve, direct GitHub builds can optionally
+					check GitHub for updates, and the user-driven browser contacts sites you choose.
+					<a href="/security">The security page documents those boundaries</a>.
 				</li>
 				<li>
 					<strong>The scam-clone research stays up</strong>, free to read, with no

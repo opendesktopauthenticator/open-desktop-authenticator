@@ -81,18 +81,19 @@ Platforms: **Windows and Linux** (D11 — macOS built but not published; see
       because "the step passed" and "the asset shipped" are different claims.
 - [ ] SBOM published.
 
-### Not yet gates
+### Non-blocking release limits
 
-Written down so the distinction is deliberate rather than forgotten. Each is a
-real commitment; none of them blocks a release today, and no page may claim any
-of them while it is on this list.
+Written down so the distinction is deliberate rather than forgotten. None blocks
+a release today, and no page may claim that the current release provides one.
 
-- Signed Git tags. The v1.0.0 tag is unsigned.
-- Code-signing for the Windows direct downloads. Not planned: the SignPath Foundation
-  declined, and a bought certificate would not clear the SmartScreen warning on its own.
-  The Store package is signed by Microsoft on ingestion, which is a different
-  channel with a different guarantee.
-- Reproducible builds.
+- Signed Git tags. The current release tag is unsigned.
+- Conventional code-signing for the Windows direct downloads is not planned: the
+  SignPath Foundation declined, and a bought certificate would not clear the
+  SmartScreen warning on its own. The Store package is signed by Microsoft on
+  ingestion, which is a different channel with a different guarantee. GitHub
+  downloads instead carry hashes, a sigstore signature over the checksum list
+  and build-provenance attestations.
+- Reproducible builds are not provided.
 
 ## Manual verification — per platform
 
@@ -162,7 +163,8 @@ The trust story is only real if it works for someone who does not trust us.
       existed.
 - [ ] Provenance verification succeeds on both platforms:
       `gh attestation verify <file> --owner opendesktopauthenticator`.
-      There is no code signature on these files to check — see _Not yet gates_.
+      There is no conventional code signature on these files to check — see
+      _Non-blocking release limits_.
 - [ ] `cosign verify-blob` on the checksum list succeeds, run from the downloaded
       copies rather than from the build directory.
 - [ ] The website's Windows button deep-links the Store listing, and its other

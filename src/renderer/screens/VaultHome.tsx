@@ -908,8 +908,8 @@ export function VaultHome({
 				<button type="button" className="powered-mark" onClick={onAbout}>
 					<CompanyMark size={30} className="powered-logo" />
 					<span className="powered-words">
-						<span className="powered-lead">Powered by</span>
-						<span className="powered-name">{branding.companyShort}</span>
+						<span className="powered-lead">Published by</span>
+						<span className="powered-name">{branding.company}</span>
 					</span>
 				</button>
 			</footer>

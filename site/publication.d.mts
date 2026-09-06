@@ -1,10 +1,12 @@
 export interface PublishedVersion {
 	publishedOn?: string;
+	verifiedOn?: string;
+	architectures?: string[];
 }
 
 export interface PublicationRecords {
 	github: Record<string, PublishedVersion>;
-	store: Record<string, Record<string, never>>;
+	store: Record<string, PublishedVersion>;
 }
 
 export interface ChannelPublication {

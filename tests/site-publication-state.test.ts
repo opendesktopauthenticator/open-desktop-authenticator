@@ -49,8 +49,8 @@ const oldGitHub = { [OLD]: { publishedOn: '2026-08-25' } };
 const oldStore = { [OLD]: {} };
 
 type Publications = {
-	github: Record<string, { publishedOn: string }>;
-	store: Record<string, Record<string, never>>;
+	github: Record<string, { publishedOn?: string; verifiedOn?: string; architectures?: string[] }>;
+	store: Record<string, { publishedOn?: string; verifiedOn?: string; architectures?: string[] }>;
 };
 
 function siteFor(records: Publications, sourceVersion = VERSION) {
@@ -288,14 +288,13 @@ describe('per-channel publication output', () => {
 	 *
 	 * What it protects is unchanged and is the reason the markers exist at all: the
 	 * site describes what a channel *serves*, never what the repository happens to
-	 * have built. So GitHub now carries 1.5.0 and says so, the Store does not and
-	 * says so, and the two are asserted separately — because collapsing them is
-	 * exactly the mistake that would tell a Windows user the Store has a release it
-	 * does not have.
+	 * have built. GitHub and the Store now both carry 1.5.0 and say so, but the two
+	 * markers are still asserted separately — because building an AppX does not
+	 * prove that Partner Center has made it public.
 	 */
-	it('says GitHub carries the checked-in version and the Store does not yet', () => {
+	it('says both public channels carry the checked-in version', () => {
 		const version = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')).version;
-		const site = siteFor(publicationApi.RELEASE_PUBLICATIONS as Publications);
+		const site = siteFor(publicationApi.RELEASE_PUBLICATIONS);
 		expect(version).toBe(VERSION);
 
 		expect(
@@ -304,9 +303,17 @@ describe('per-channel publication output', () => {
 		).toBe(true);
 		expect(
 			site.publication.store.current,
-			'the Store marker moved to the source version. It moves only when Partner Center ' +
-				'actually serves it, and no evidence in this repository says that has happened'
-		).toBe(false);
+			'the Store marker moves only after the public Microsoft catalog serves the version'
+		).toBe(true);
+		expect(site.publication.store.latestVersion).toBe(VERSION);
+		expect(site.publication.store.latest).toMatchObject({
+			verifiedOn: '2026-09-06',
+			architectures: ['x64']
+		});
+		expect(text(download.body(site))).toContain('The current Store 1.5.0 package is x64.');
+		expect(text(download.body(site))).toContain(
+			'the Store does not currently offer a native ARM64 ODA package'
+		);
 
 		const software = softwareFor(site);
 		expect(software.softwareVersion).toBe(VERSION);
@@ -314,6 +321,7 @@ describe('per-channel publication output', () => {
 			software,
 			'a published release should carry its date in the structured data search engines read'
 		).toHaveProperty('datePublished');
+		expect(software.datePublished).toBe('2026-09-06');
 		expect(software).toHaveProperty('downloadUrl');
 	});
 
@@ -322,6 +330,9 @@ describe('per-channel publication output', () => {
 		expect(build).toContain('${browserFeatureCopy(SITE).fact}');
 		expect(build).toContain('${browserFeatureCopy(SITE).security}');
 		expect(build).not.toContain('- An in-app browser, signed in as one account');
+		expect(build).toContain('<span class="powered-by">Published by</span>');
+		expect(build).not.toContain('Powered by');
+		expect(build).toMatch(/separate products with no shared accounts, data, or integration/);
 	});
 
 	it.each([
