@@ -188,6 +188,50 @@ describe('macOS signing readiness', () => {
 	});
 });
 
+/**
+ * **A pinned action is not a pinned toolchain.**
+ *
+ * `cosign-installer` is pinned to a commit SHA like every other action here, and
+ * that says nothing about which cosign it downloads: the version is a separate
+ * input, and unset it follows the action's default. That default moved to v3,
+ * whose `sign-blob` writes a Sigstore bundle instead of a detached signature,
+ * and the release died on `create bundle file: open : no such file or directory`
+ * — in a step that had never run before, because the job it lives in had never
+ * been reached.
+ *
+ * The major version is not a detail to be carried along by a default. `/verify`
+ * and the release notes both publish `verify-blob --signature ... --certificate
+ * ...`, which describes two detached files; a bundle would make that command
+ * wrong for everyone who follows it.
+ */
+describe('the cosign the release actually runs', () => {
+	const installer = WORKFLOW.slice(WORKFLOW.indexOf('- name: Install cosign'));
+	const step = installer.slice(0, installer.indexOf('- name: Sign'));
+
+	it('names the version rather than taking the action default', () => {
+		expect(
+			installer.indexOf('- name: Install cosign'),
+			'the install step is gone, so nothing here describes which cosign signs the release'
+		).toBeGreaterThanOrEqual(0);
+		expect(
+			step,
+			'cosign-release is unset, so the release signs with whatever version the action ' +
+				'currently defaults to — which is how a v3 default broke the signing step'
+		).toContain('cosign-release:');
+	});
+
+	it('pins a v2, which is what the published verify command describes', () => {
+		const pinned = /cosign-release:\s*'?v(\d+)\.\d+\.\d+'?/.exec(step);
+		expect(pinned, 'the pin is not an exact version').not.toBeNull();
+		expect(
+			pinned?.[1],
+			'cosign moved to a major version whose sign-blob emits a bundle, while /verify still ' +
+				'tells readers to pass --signature and --certificate. Change the published ' +
+				'instructions first, or this release hands out a command that does not work.'
+		).toBe('2');
+	});
+});
+
 describe('draft release signing copy', () => {
 	it('calls only the Windows and Linux direct downloads unsigned before macOS publication', () => {
 		const notes = draftNotes(false);
