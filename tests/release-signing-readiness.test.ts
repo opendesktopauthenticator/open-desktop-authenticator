@@ -84,6 +84,34 @@ describe('macOS signing readiness', () => {
 		expect(preflight(false).status).toBe(0);
 		expect(PACKAGE).toContain('- name: Validate macOS signing readiness');
 
+		/*
+		 * **The signing variables are set by their own step now, not by
+		 * `Package`.** They used to be `env:` keys on the step that builds every
+		 * platform, resolving to `''` when the switch was off — which still
+		 * *defined* them everywhere, and an empty `CSC_LINK` is read by
+		 * electron-builder as a path, resolved against the workspace, and fails
+		 * the build with "not a file". That is what broke the macOS leg of the
+		 * v1.5.0 tag.
+		 *
+		 * What must stay true is unchanged and is what this checks: none of them
+		 * is reachable while the switch is off. The step carries the switch in
+		 * its `if:`, and every secret it reads carries the switch again in its
+		 * own expression — the rule the loop below enforces for the whole job.
+		 */
+		const configure = PACKAGE.slice(
+			PACKAGE.indexOf('- name: Configure macOS signing'),
+			PACKAGE.indexOf('- name: Package\n') > 0
+				? PACKAGE.indexOf('- name: Package\n')
+				: PACKAGE.length
+		);
+		expect(
+			configure,
+			'the step that sets the signing variables is gone, so they are set somewhere unchecked'
+		).not.toHaveLength(0);
+		expect(configure, 'the signing step is not gated on the readiness switch').toContain(
+			"vars.MACOS_SIGNING_READY == 'true'"
+		);
+
 		for (const variable of [
 			'CSC_LINK',
 			'CSC_KEY_PASSWORD',
@@ -92,16 +120,26 @@ describe('macOS signing readiness', () => {
 			'APPLE_API_ISSUER',
 			'APPLE_TEAM_ID'
 		]) {
-			const packageStep = PACKAGE.slice(
-				PACKAGE.indexOf('- name: Package'),
-				PACKAGE.indexOf('- name: Remove the notarisation key')
-			);
-			const at = packageStep.indexOf(`${variable}:`);
-			expect(at, `${variable} is absent`).toBeGreaterThanOrEqual(0);
-			const value = packageStep.slice(at, packageStep.indexOf('}}', at));
-			expect(value, `${variable} escapes the readiness switch`).toContain(
-				"vars.MACOS_SIGNING_READY == 'true'"
-			);
+			expect(configure, `${variable} is absent`).toContain(`${variable}=`);
+		}
+
+		/*
+		 * Only these three. electron-builder reads them itself, and reads an empty
+		 * one as a value rather than as absence — `CSC_LINK=""` becomes a
+		 * certificate path, resolved against the workspace, and the build stops
+		 * with "not a file". So they may not be YAML `env:` keys anywhere, because
+		 * a key is defined on every runner its step runs on.
+		 *
+		 * The other three are inputs to the readiness check and are correctly
+		 * declared on `Validate macOS signing readiness`, which is gated. An empty
+		 * `APPLE_TEAM_ID` is inert; an empty `CSC_LINK` is a build failure.
+		 */
+		for (const variable of ['CSC_LINK', 'CSC_KEY_PASSWORD', 'APPLE_API_KEY']) {
+			expect(
+				WORKFLOW,
+				`${variable} is a YAML env key again, so it is defined — empty or not — on every ` +
+					'runner that step runs on. electron-builder reads an empty one as a path.'
+			).not.toContain(`${variable}:`);
 		}
 
 		// Every raw secret reference in the package job, including the preflight

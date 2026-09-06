@@ -165,14 +165,55 @@ describe('the macOS build, before it is signed', () => {
 	 * the Windows job try to sign the `.exe` with it — a build failure on the
 	 * platform that was working, caused by adding a secret for another one.
 	 */
+	/*
+	 * **Asserted as absence, because empty was the bug.**
+	 *
+	 * This used to require each variable to appear in the `Package` step with
+	 * `runner.os == 'macOS'` somewhere in its value — which the old
+	 * `... || ''` form satisfied while still *defining* every one of them as an
+	 * empty string on every runner. electron-builder read the empty `CSC_LINK`
+	 * as a path, resolved it against the workspace, and the v1.5.0 macOS leg
+	 * died on `<workspace> not a file` before it packaged anything.
+	 *
+	 * So the property is no longer "the value mentions macOS". It is that the
+	 * variables are set **only** by a step that does not run anywhere else, and
+	 * that the step which builds every platform never names them at all.
+	 */
 	it('hands the signing certificate to the macOS runner only', () => {
-		const packageStep = PACKAGE.slice(PACKAGE.indexOf('- name: Package'));
+		const configure = PACKAGE.slice(PACKAGE.indexOf('- name: Configure macOS signing'));
+		expect(
+			PACKAGE.indexOf('- name: Configure macOS signing'),
+			'the step that sets the signing variables is gone, so they are set somewhere unchecked'
+		).toBeGreaterThan(-1);
+
+		const gate = configure.slice(0, configure.indexOf('run:'));
+		expect(gate, 'the signing step is not gated on the runner').toContain("runner.os == 'macOS'");
+		expect(gate, 'the signing step runs without the readiness switch').toContain(
+			"vars.MACOS_SIGNING_READY == 'true'"
+		);
+
+		/*
+		 * Checked against the whole workflow rather than by slicing out the
+		 * `Package` step. The first version of this did slice, `indexOf` returned
+		 * -1 for the anchor it expected, and `slice(0, -1)` of the resulting
+		 * one-character string produced an empty haystack — so `not.toContain`
+		 * passed against nothing at all and the reintroduced bug went unnoticed.
+		 *
+		 * `CSC_LINK:` with a colon is a YAML `env:` key, which defines the
+		 * variable on every runner the step runs on. `CSC_LINK=` is a shell
+		 * assignment inside the macOS-only step. The distinction is the entire
+		 * property, and it needs no slicing to check.
+		 */
 		for (const variable of ['CSC_LINK', 'CSC_KEY_PASSWORD', 'APPLE_API_KEY']) {
-			const at = packageStep.indexOf(`${variable}:`);
-			expect(at, `${variable} is not set at all`).toBeGreaterThan(-1);
-			// The value is one `${{ ... }}` expression, so it ends at the first `}}`.
-			const value = packageStep.slice(at, packageStep.indexOf('}}', at));
-			expect(value, `${variable} is not gated on the runner`).toContain("runner.os == 'macOS'");
+			expect(configure, `${variable} is not set for a signed macOS build at all`).toContain(
+				`${variable}=`
+			);
+			expect(
+				WORKFLOW,
+				`${variable} is a YAML env key again, so it is defined — empty or not — on the ` +
+					'Windows and Linux runners too. An empty CSC_LINK is read as a path, resolved ' +
+					'against the workspace, and fails the build with "not a file".'
+			).not.toContain(`${variable}:`);
 		}
 	});
 
@@ -192,10 +233,13 @@ describe('the macOS build, before it is signed', () => {
 	it('hands notarisation a path to the key, not the key', () => {
 		expect(PACKAGE, 'the .p8 is never written to disk').toContain('apple-api-key.p8');
 
-		const at = PACKAGE.indexOf('APPLE_API_KEY:');
-		const value = PACKAGE.slice(at, PACKAGE.indexOf('}}', at));
+		// Set in the signing step now, as `APPLE_API_KEY=<path>`, so the line is
+		// found by the assignment rather than by the YAML key it used to be.
+		const at = PACKAGE.indexOf('APPLE_API_KEY=');
+		expect(at, 'APPLE_API_KEY is not set anywhere').toBeGreaterThan(-1);
+		const value = PACKAGE.slice(at, PACKAGE.indexOf('\n', at));
 		expect(value, 'APPLE_API_KEY is the secret itself, which notarytool cannot open').not.toContain(
-			'secrets.APPLE_API_KEY_P8'
+			'APPLE_API_KEY_P8'
 		);
 		expect(value).toContain('apple-api-key.p8');
 	});

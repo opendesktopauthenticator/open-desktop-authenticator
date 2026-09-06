@@ -200,6 +200,18 @@ jobs:
     name: package (${{ matrix.os }})
     needs: [verify, version]
     runs-on: ${{ matrix.os }}
+    # **macOS may fail without taking the release with it.** It is built to
+    # exercise the target, and its artifact is uploaded under a name the publish
+    # job cannot stage (see below), so nothing it produces is ever released.
+    # `publish` still declares `needs: package`, and a failed matrix leg skips a
+    # dependent job — so before this line one broken macOS build blocked a
+    # Windows and Linux release that had already succeeded. That is what
+    # happened on the v1.5.0 tag: both shipping platforms packaged, macOS did
+    # not, and the draft was never created.
+    #
+    # It still fails visibly. What it no longer does is decide whether anyone
+    # gets a release.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -298,30 +310,69 @@ jobs:
           # Never the contents. A malformed secret shows up as a length of zero.
           echo "wrote $(wc -c < "$RUNNER_TEMP/apple-api-key.p8") bytes"
 
-      # **The signing variables are gated on the runner, not left to resolve
-      # empty.** `CSC_LINK` is not a macOS variable — electron-builder reads it
-      # on Windows too, and a Developer ID certificate handed to a Windows build
-      # makes it try to sign the `.exe` with it and fail. So each one is either
-      # the secret or nothing, decided by which runner this is.
+      # **The signing variables must be ABSENT when there is nothing to sign
+      # with, not empty.**
+      #
+      # This block used to set each one to `... || ''`, under a comment claiming
+      # they were "not left to resolve empty". They were: an `env:` value of the
+      # empty string still *defines* the variable, and there is no expression
+      # that omits a key. electron-builder then found `CSC_LINK` set, treated it
+      # as a path to a certificate, resolved the empty string against the
+      # workspace and stopped with `<workspace> not a file`. That is why the
+      # macOS leg of the v1.5.0 tag failed before it packaged anything.
+      #
+      # Setting them from a conditional step is what actually leaves them unset:
+      # a step that does not run writes nothing to `$GITHUB_ENV`.
+      #
+      # The original reasoning still holds and is why this stays gated on the
+      # runner rather than on the secret alone: `CSC_LINK` is not a macOS
+      # variable — electron-builder reads it on Windows too, and a Developer ID
+      # certificate handed to a Windows build makes it try to sign the `.exe`
+      # with it and fail.
       #
       # Both credentials or neither: the config refuses a half-configured
       # environment rather than producing a signed-but-un-notarised `.dmg`,
       # which Gatekeeper blocks everywhere except the machine that built it.
+      - name: Configure macOS signing
+        if: runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true'
+        shell: bash
+        # **Gated twice, on purpose.** The `if:` above already stops this step
+        # running, but every secret reference in this job also carries the switch
+        # in its own expression — the rule `release-signing-readiness` enforces,
+        # so that no reading of the file has to reason about step ordering to see
+        # that a secret is unreachable while the switch is off. An empty value
+        # here is harmless in a way it was not on the `Package` step: it is read
+        # by a step that only runs when the switch is on.
+        env:
+          CERTIFICATE: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_P12 || '' }}
+          CERTIFICATE_PASSWORD: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
+          KEY_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_KEY_ID || '' }}
+          ISSUER: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_API_ISSUER || '' }}
+          TEAM_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
+            secrets.APPLE_TEAM_ID || '' }}
+        run: |
+          # The API key is the path written by the step above, never the key.
+          {
+            echo "CSC_LINK=$CERTIFICATE"
+            echo "CSC_KEY_PASSWORD=$CERTIFICATE_PASSWORD"
+            echo "APPLE_API_KEY=$RUNNER_TEMP/apple-api-key.p8"
+            echo "APPLE_API_KEY_ID=$KEY_ID"
+            echo "APPLE_API_ISSUER=$ISSUER"
+            echo "APPLE_TEAM_ID=$TEAM_ID"
+          } >> "$GITHUB_ENV"
+
       - name: Package
         env:
-          CSC_LINK: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
-            secrets.MACOS_CERTIFICATE_P12 || '' }}
-          CSC_KEY_PASSWORD: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
-            secrets.MACOS_CERTIFICATE_PASSWORD || '' }}
-          # The path written above, not the key itself. See that step.
-          APPLE_API_KEY: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
-            format('{0}/apple-api-key.p8', runner.temp) || '' }}
-          APPLE_API_KEY_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
-            secrets.APPLE_API_KEY_ID || '' }}
-          APPLE_API_ISSUER: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
-            secrets.APPLE_API_ISSUER || '' }}
-          APPLE_TEAM_ID: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') &&
-            secrets.APPLE_TEAM_ID || '' }}
+          # Always defined, and a plain boolean rather than a path, so it cannot
+          # repeat the failure above. Without a certificate electron-builder
+          # would otherwise go looking for a signing identity in the runner's
+          # keychain; saying so explicitly keeps an unsigned build deterministic
+          # rather than dependent on what the image happens to carry.
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY == 'true') && 'true' || 'false' }}
         run: npm run build && npx electron-builder --config electron-builder.config.mjs ${{ matrix.targets }} --publish never
 
       - name: Verify the packaged portable runtime contract
