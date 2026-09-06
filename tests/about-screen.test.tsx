@@ -39,7 +39,7 @@ const render = (info?: AppInfo, error?: string) =>
 	renderToStaticMarkup(<AboutView info={info} error={error} onClose={() => {}} />);
 
 describe('the application names its publisher on screen', () => {
-	it('says who powers it', () => {
+	it('says who publishes it without implying a technical service relationship', () => {
 		const html = render(INFO);
 		// The whole element, so this can check how it is rendered and not merely
 		// that the words exist somewhere in the document. Asserting on the strings
@@ -48,16 +48,23 @@ describe('the application names its publisher on screen', () => {
 		const line = /<p class="powered-by"([^>]*)>([\s\S]*?)<\/p>/.exec(html);
 		expect(line, 'the publisher line must be on the screen').not.toBeNull();
 		expect(line?.[1] ?? '', 'and it must not be hidden').not.toMatch(/hidden|display:\s*none/);
-		expect(line?.[2]).toContain('Powered by');
-		expect(line?.[2]).toContain(branding.companyShort);
+		expect(line?.[2]).toContain('Published by');
+		expect(line?.[2]).not.toContain('Powered by');
+		expect(line?.[2]).toContain(branding.company);
 		// And the name is a link somebody can follow, not decoration.
 		expect(line?.[2]).toMatch(
-			new RegExp(`<a href="${branding.companyWebsite}"[^>]*>${branding.companyShort}</a>`)
+			new RegExp(`<a href="${branding.companyWebsite}"[^>]*>${branding.company}</a>`)
 		);
 	});
 
 	it('gives the full legal name too', () => {
 		expect(render(INFO)).toContain(branding.company);
+	});
+
+	it('states that Master Panel is a separate product', () => {
+		const html = render(INFO);
+		expect(html).toContain('also operates Master Panel');
+		expect(html).toMatch(/separate product with no shared\s+accounts, data, or integration/);
 	});
 
 	it('shows the product and version', () => {

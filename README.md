@@ -3,23 +3,34 @@
 An open-source desktop authenticator for Steam. Windows and Linux.
 A maintained successor to SDA.
 
-Built and maintained by **MASTERPANEL LLC** · [opendesktopauthenticator.com](https://opendesktopauthenticator.com)
+Developed, owned, and published by [MASTERPANEL LLC](https://masterspanel.com) ·
+Official ODA website: [opendesktopauthenticator.com](https://opendesktopauthenticator.com)
 
-> **1.5.0 is out on GitHub.** Take a build from
-> [the releases page](https://github.com/opendesktopauthenticator/open-desktop-authenticator/releases/latest)
-> and check it against the published checksums. The
-> [Microsoft Store](https://apps.microsoft.com/detail/9NMM2XJ6HZ1D) is still
-> serving 1.0 until that submission clears certification, so it does not yet
-> carry the in-app browser or notifications. **Those two places, and nowhere
-> else** — anything else claiming to be a build of this is not ours.
+MASTERPANEL LLC also operates Master Panel. ODA and Master Panel are separate
+products with no shared accounts, data, or integration.
+
+> **1.5.0 is available from GitHub Releases and the Microsoft Store.** On
+> Windows, install it from the
+> [Microsoft Store](https://apps.microsoft.com/detail/9NMM2XJ6HZ1D), which
+> currently distributes the x64 package. The
+> [releases page](https://github.com/opendesktopauthenticator/open-desktop-authenticator/releases/latest)
+> also provides direct Windows x64, ARM64 and universal installers, a portable
+> x64 build, AppImage and Debian packages; check a direct download against the
+> published checksums. **Those two places, and nowhere else** — anything else
+> claiming to be a build of this is not ours.
 >
 > The Store package is signed, because Microsoft re-signs what it distributes.
-> The direct downloads are not signed and none is planned, so Windows warns on first run; verify
-> them against `SHA256SUMS.txt` and the build provenance attestation.
+> The direct Windows downloads are not conventionally code-signed, and no
+> certificate is planned, so Windows warns on first run. Verify direct downloads
+> against `SHA256SUMS.txt`, its sigstore signature and the build-provenance
+> attestation.
 >
-> It has been **exercised end to end against live Steam accounts** by the
-> maintainer — import from SDA, enrollment, codes, confirmations, backup and
-> recovery — with the defects that surfaced fixed. That is maintainer testing,
+> The core authenticator flows have been **exercised end to end against live
+> Steam accounts** by the maintainer — import from SDA, enrollment, codes,
+> confirmations, backup and recovery — with the defects that surfaced fixed.
+> The v1.5 browser's live signed-in handoff and the published Linux packages
+> still await their recorded human checks; see
+> [the founder test plan](docs/FOUNDER_TEST_PLAN.md). This is maintainer testing,
 > not an independent audit, and passing Store certification does not change
 > that: certification checks policy compliance, not cryptography.
 
@@ -78,9 +89,9 @@ rather check the bytes than be told they are fine.
 - Optional per-account network routing
 - Runs entirely on your machine
 
-**No servers. No sync. No telemetry. No accounts. No paid tiers. Ever.** We
-operate no backend for this product — Steam communication happens directly
-between your machine and Valve.
+**No ODA backend. No ODA account. No cloud sync. No telemetry.** No paid tiers.
+Steam operations go from your machine to Valve, using any route or proxy you
+configure, without passing through an ODA service.
 
 ## What it will not do
 

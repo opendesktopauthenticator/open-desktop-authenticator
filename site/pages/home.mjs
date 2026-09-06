@@ -11,6 +11,7 @@ const downloadForSourceVersion = (site) => {
 
 export default {
 	slug: 'index',
+	updated: '2026-09-07',
 	title: 'Open Desktop Authenticator — Steam Guard on your PC',
 	navTitle: 'Home',
 	description:
@@ -94,8 +95,8 @@ export default {
 					<span>Every line that touches a secret is public and readable.</span>
 				</li>
 				<li>
-					<b>No account</b>
-					<span>Nothing to sign up for. No server of ours, no telemetry.</span>
+					<b>No ODA account</b>
+					<span>No ODA backend. No cloud sync. No telemetry.</span>
 				</li>
 				<li>
 					<b>No self-update</b>
@@ -227,14 +228,13 @@ export default {
 			</p>
 			<ul class="plain">
 				<li>
-					<strong>It does not send your secrets anywhere.</strong> There is no account
-					to create, no server of ours to sync with, and no telemetry. It talks to
-					Steam, and — while the update check is on — asks GitHub's public releases
-					page whether a newer version exists, which is the same question any visitor
-					to that page asks. GitHub sees an IP address and that the application is
-					running. Nothing about you or your accounts is sent to anyone, including us.
-					${browserFeatureCopy(s).security} It carries nothing out of your vault, and
-					<a href="/security">the security model</a> sets out what it is given.
+					<strong>No ODA backend. No ODA account. No cloud sync. No telemetry.</strong>
+					Steam operations you request contact Valve and send the data needed for that
+					operation. In a direct GitHub build, the optional update check asks GitHub's
+					public releases API whether a newer version exists; GitHub receives that
+					request and its source IP, but no Steam account or vault data. Store builds do
+					not perform that GitHub check. ${browserFeatureCopy(s).security}
+					<a href="/security">The security model</a> sets out what each part can access.
 				</li>
 				<li>
 					<strong>It does not update itself.</strong> It will tell you a newer version

@@ -121,6 +121,21 @@ describe('the release publishes only what it attests', () => {
 		expect(missingArchitectures(fixture, 'macos-latest', '	mac: {', '	dmg: {')).toEqual([]);
 	});
 
+	it('builds both Store architectures and verifies the complete set', () => {
+		const packageJob = WORKFLOW.slice(
+			WORKFLOW.indexOf('  package:'),
+			WORKFLOW.indexOf('  publish:')
+		);
+		expect(packageJob).toContain('--win appx:x64 appx:arm64 --publish never');
+		const manifestVerifier = readFileSync(
+			join(__dirname, '..', '.github', 'scripts', 'verify-appx-toast-manifest.ps1'),
+			'utf8'
+		);
+		expect(manifestVerifier).toContain("@('x64', 'arm64')");
+		expect(manifestVerifier).toContain('ProcessorArchitecture');
+		expect(manifestVerifier).toContain('$missingArchitectures');
+	});
+
 	it('still states that the Store package is not a release asset', () => {
 		expect(WORKFLOW).toContain('not published as a release');
 	});

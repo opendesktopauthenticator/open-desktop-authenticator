@@ -105,13 +105,16 @@ Someone compromises a dependency, our build, or our release pipeline.
 **Resolved, and worth stating because an earlier version of this document said
 otherwise:** the production tree used to be planned around `steamcommunity`,
 which reaches eleven unfixable advisories through the deprecated `request`. It is
-not shipped. The application's direct runtime dependencies are **protobufjs,
-react, react-dom, steam-session and zod** — 38 transitive packages, and
-`npm audit --omit=dev` reports zero vulnerabilities. `steam-session` carries none
-of `steamcommunity`'s advisories; every one of those arrives through the
-deprecated `request`, which `steam-session` does not use. Sign-in is the
-library's; confirmations are our own. See Q19 and D14 in
-[PLAN_AMENDMENTS.md](PLAN_AMENDMENTS.md) for the measurements that decided both.
+not shipped. The application's seven direct runtime dependencies are
+**https-proxy-agent, protobufjs, react, react-dom, socks-proxy-agent,
+steam-session and zod**. `npm ls --omit=dev --all` reports 41 production npm
+packages in total, including those seven and their transitive tree. Electron is
+packaged separately as the desktop runtime. `npm audit --omit=dev` reports zero
+vulnerabilities. `steam-session` carries none of `steamcommunity`'s advisories;
+every one of those arrives through the deprecated `request`, which
+`steam-session` does not use. Sign-in is the library's; confirmations are our
+own. See Q19 and D14 in [PLAN_AMENDMENTS.md](PLAN_AMENDMENTS.md) for the
+measurements that decided both.
 
 **Also accepted:** third-party GitHub Actions in CI are pinned to major tags, not
 commit SHAs. That job holds no secrets and has read-only permissions. The release
@@ -348,24 +351,25 @@ same-origin rules apply, so a page on another domain cannot read Steam's
 cookies; what it can do is what any site can do to a logged-in browser, which is
 why this section exists rather than a claim that the window is safe.
 
-**The window says where it is, in its title.** This paragraph used to claim the
-address stayed visible, and it did not: an Electron window has no address bar,
-and the title was pinned to the account name. So somebody who followed a link
-off Steam saw this application's chrome and their own account name above a page
-that was not Steam — which makes a fake page look _better_ than one in an
-ordinary browser, and is the exact deception §2.6 exists to warn people about.
+**The browser has application-owned tabs and an address bar.** Its trusted
+toolbar and each open-web page are separate `WebContents`: the toolbar has the
+browser-control preload and no Steam session, while pages have the account's
+Steam session and no preload. A page therefore cannot read, restyle, cover or
+forge the controls that say where it is.
 
-The title now reads `account — host`, and any host that is not Valve's is
-labelled `NOT STEAM: host` rather than merely named, because "not Steam" is the
-fact worth reading and a hostname alone asks the reader to know Valve's domains
-by heart. The host is Electron's, read off the contents after navigation, so
-nothing a page supplies reaches it; `page-title-updated` stays prevented. It
-follows `history.pushState` as well as real loads, because a title that names
-where the window used to be is worse than no title at all.
+The address field shows Chromium's committed URL for the active tab, not a URL
+supplied by the page. A non-Valve host is marked `NOT STEAM` in both the address
+bar and its tab. Tab labels still come from page titles and are useful labels,
+not evidence. Navigations, in-page history changes and tab switches all refresh
+the trusted address; accepted popups become equally hardened tabs instead of
+chromeless windows.
 
-This is a smaller thing than a real address bar, and it is not claimed to be
-more: it tells a reader who looks whether they are still on Steam. It does not
-stop them going somewhere else, and it is not meant to.
+The native title is a second, independent signal. It reads `account — host`, or
+`account — NOT STEAM: host` outside Valve's domains. The host comes from
+Electron after navigation and `page-title-updated` remains prevented, so a page
+cannot name the native window. These signals do not stop the user navigating
+elsewhere and are not meant to; they make that navigation visible without
+asking the user to trust a page's own presentation.
 
 **Ends with the lock.** `AccountBrowsers.closeAll` closes the windows and wipes
 their sessions when the vault locks. Closing alone would not be enough:
@@ -393,16 +397,16 @@ attached to the account, in the one place the user is actually looking at Steam,
 and for a removed account a signed-in window belonging to nothing. Both now
 close the window and wipe it, and both cancel an open still in flight.
 
-**And the window's views end with it.** This is the one guarantee that changed
-when the browser moved from `BrowserWindow` to `BaseWindow` for the tab strip: a
-`BrowserWindow` destroys the contents it owns, a `BaseWindow` does not — a
-`WebContentsView` outlives the window it was added to. Measured in a real run,
-not reasoned about: after closing, the window reported destroyed and the tab's
-`WebContents` did not, and script in it still ran. That left a live renderer
-holding the account's partition with no window to show it, unreachable by the
-next lock because `AccountBrowsers` had already forgotten the account, and one
-more of them for every open-and-close. Closing a window now destroys its tabs
-and its chrome.
+**And the window's page views end with it.** The current shell is a
+`BrowserWindow`, whose owned contents are the trusted toolbar, while every open
+page is an added `WebContentsView`. Electron destroys the toolbar with its
+window, but an added page view can outlive the window. Measured in a real
+Electron 43 run, not reasoned about: after closing, the window reported
+destroyed and the tab's `WebContents` did not, and script in it still ran. That
+left a live renderer holding the account's partition with no window to show it,
+unreachable by the next lock because `AccountBrowsers` had already forgotten
+the account, and one more of them for every open-and-close. The close handler now
+destroys every tab explicitly; Electron destroys the toolbar it owns.
 
 ### 2.7 An attacker with your unlocked vault, stripping 2FA
 
@@ -683,7 +687,7 @@ one.
 
 | Decision                                                        | Threat it addresses                                                                   |
 | --------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| No server, no sync, no telemetry                                | We cannot leak what we never receive                                                  |
+| No ODA backend, ODA account, cloud sync or telemetry            | We cannot leak what we never receive                                                  |
 | Passphrase is the root of trust on every platform               | OS keystore compromise alone is not enough                                            |
 | Renderer sandboxed, no Node, `connect-src 'none'`               | A renderer compromise cannot open an outbound channel of its own                      |
 | Proxy destinations confirmed in an OS dialog (§2.5)             | …nor ask the main process to open one for it, silently — the hostname was the channel |

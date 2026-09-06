@@ -198,6 +198,7 @@ function backup(
 	for (const dir of [
 		'etc/letsencrypt',
 		'etc/nginx',
+		'etc/logrotate.d',
 		'etc/ufw',
 		'etc/fail2ban',
 		'etc/ssh/sshd_config.d',
@@ -207,6 +208,7 @@ function backup(
 		mkdirSync(join(config, dir), { recursive: true });
 	}
 	writeFileSync(join(config, 'etc/sysctl.d/99-hardening.conf'), 'safe');
+	writeFileSync(join(config, 'etc/logrotate.d/nginx'), 'fourteen-day rotation');
 
 	const databasePath = join(tickets, 'tickets.db');
 	const db = new DatabaseSync(databasePath);
@@ -399,6 +401,7 @@ describe('configuration backup publication', { timeout: BACKUP_TEST_TIMEOUT_MS }
 			);
 			expect(readBack.status, readBack.stderr).toBe(0);
 			expect(readBack.stdout).toContain('etc/nginx/');
+			expect(readBack.stdout).toContain('etc/logrotate.d/nginx');
 		},
 		BACKUP_TEST_TIMEOUT_MS
 	);

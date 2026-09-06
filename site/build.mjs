@@ -881,14 +881,14 @@ ${body}
 				</p>
 				<a class="powered" href="${SITE.brand.url}" rel="noopener">
 					<img src="${SITE.brand.logo}" alt="" width="28" height="28" loading="lazy">
-					<span><span class="powered-by">Powered by</span>
-					<strong>${escape(SITE.brand.name)}</strong></span>
+					<span><span class="powered-by">Published by</span>
+					<strong>${escape(SITE.publisher)}</strong></span>
 				</a>
 			</div>
 
 			<p class="fineprint">
-				Published by
-				<a href="${SITE.brand.url}" rel="noopener">${escape(SITE.publisher)}</a>.
+				${escape(SITE.publisher)} also operates Master Panel. ODA and Master Panel are
+				separate products with no shared accounts, data, or integration.
 				Not affiliated with, endorsed by, or connected to Valve Corporation, Steam, or
 				${escape(SITE.sda.author)} and the authors of
 				<a href="${SITE.sda.repo}" rel="noopener">Steam Desktop Authenticator</a>.
@@ -1171,7 +1171,9 @@ const LLMS_SECTIONS = [
 
 ${SITE.name} is a desktop replacement for Steam Desktop Authenticator (SDA), which its author ${SITE.sda.author} says is ${SITE.sda.unsupported ? SITE.sda.notice : 'still supported'}. Because SDA is abandoned, searching for it returns clone sites that ship malware and steal maFiles — and a maFile is the Steam authenticator itself, so losing one loses the account. Much of this website exists to help someone tell a real download from a fake one, whether or not they choose this application.
 
-It runs entirely on the user's own machine. There is no account to create, no server operated by the publisher, and no synchronisation: Steam communication happens directly between the user's machine and Valve.
+No ODA backend. No ODA account. No cloud sync. No telemetry. Steam operations the user requests contact Valve and send the data required for those operations. In direct GitHub builds, an optional update check contacts GitHub; Microsoft Store builds do not perform that check. The user-driven browser contacts the sites the user chooses.
+
+ODA is developed, owned, and published by MASTERPANEL LLC. The company also operates Master Panel at https://masterspanel.com. ODA and Master Panel are separate products with no shared accounts, data, or integration.
 
 ## Facts
 
@@ -1198,13 +1200,13 @@ It runs entirely on the user's own machine. There is no account to create, no se
 
 ## What it deliberately does not do
 
-Non-goals rather than roadmap items: no trade automation beyond confirmations, no market or inventory tooling, and no analytics of any kind — including "anonymous" or opt-in. No servers, no sync, no accounts, no telemetry.
+Non-goals rather than roadmap items: no trade automation beyond confirmations, no market or inventory tooling, and no analytics of any kind — including "anonymous" or opt-in. No ODA backend. No ODA account. No cloud sync. No telemetry.
 
 **It never downloads or executes its own replacement.** The update check reports that a newer version exists and links to it; nothing is fetched or installed. Self-updating is exactly the mechanism the clone sites depend on, so an authenticator that did it could not argue against them.
 
 ## How secrets are protected
 
-Steam secrets are encrypted at rest with scrypt and AES-256-GCM behind the user's passphrase. The interface runs isolated with no Node integration, the vault locks when idle, and on its own the application opens no network connection beyond Steam and an optional update check. ${browserFeatureCopy(SITE).security} ${SITE.origin}/security sets out the model, including what it cannot protect against.
+Steam secrets are encrypted at rest with scrypt and AES-256-GCM behind the user's passphrase. The interface runs isolated with no Node integration, and the vault locks when idle. User-requested Steam operations contact Valve. In direct GitHub builds, an optional update check contacts GitHub; Store builds do not perform it. ${browserFeatureCopy(SITE).security} ${SITE.origin}/security sets out the model, including what it cannot protect against.
 
 ## How to check a download is genuine
 

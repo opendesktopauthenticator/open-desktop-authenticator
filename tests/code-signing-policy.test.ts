@@ -67,13 +67,23 @@ describe('the code signing policy page', () => {
 		expect(POLICY).toMatch(/Approvers/);
 	});
 
+	it('does not present a private GitHub membership roster as public identity evidence', () => {
+		expect(POLICY).not.toMatch(/github\.com\/orgs\/\$\{s\.githubOrg\}\/people/);
+		expect(POLICY).toMatch(/does\s+not publish a member roster/);
+		expect(POLICY).toMatch(/named publisher accountable/);
+		expect(POLICY).toContain('/owners');
+	});
+
 	it('still states the multi-factor requirement', () => {
 		expect(POLICY).toMatch(/multi-factor authentication/i);
 	});
 
 	it('still covers privacy by link and by statement', () => {
 		expect(POLICY).toContain('/privacy');
-		expect(POLICY).toMatch(/will not transfer any information to other networked systems/);
+		expect(POLICY).toContain('No ODA backend. No ODA account. No cloud sync. No telemetry.');
+		expect(POLICY).toMatch(/Steam operations contact Valve/);
+		expect(POLICY).toMatch(/optional update\s+check contacts GitHub/);
+		expect(POLICY).toMatch(/browser contacts the sites the user chooses/);
 	});
 });
 

@@ -6,13 +6,15 @@
 export const RELEASE_PUBLICATIONS = {
 	github: {
 		'1.0.0': { publishedOn: '2026-08-25' },
-		'1.5.0': { publishedOn: '2026-09-06' }
+		'1.5.0': { publishedOn: '2026-09-06', architectures: ['x64', 'arm64'] }
 	},
-	// The listing is public, but no evidence in this repository says its 1.5.0
-	// submission has completed Partner Center publication. Do not infer it from
-	// the source version or from the GitHub workflow.
+	// Store publication is recorded only after the public Microsoft catalog has
+	// been checked. `verifiedOn` is the date that check succeeded, not a guessed
+	// ingestion or certification date: Partner Center does not expose either one
+	// through this repository.
 	store: {
-		'1.0.0': {}
+		'1.0.0': {},
+		'1.5.0': { verifiedOn: '2026-09-06', architectures: ['x64'] }
 	}
 };
 

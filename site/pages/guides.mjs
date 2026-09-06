@@ -5,6 +5,7 @@ import { publicationSummary } from '../publication.mjs';
 
 export const download = {
 	slug: 'download',
+	updated: '2026-09-07',
 	navTitle: 'Download',
 	script: 'download.js',
 	title: 'Open Desktop Authenticator download and release status',
@@ -32,6 +33,13 @@ export const download = {
 						Microsoft re-signs every package it distributes, so Windows never warns,
 						updates arrive on their own, and there is nothing for you to check by
 						hand. On Windows this is the right answer for almost everybody.
+					</p>
+					<p class="download-why">
+						<strong>The current Store ${s.publication.store.latestVersion} package is
+						x64.</strong> Windows 11 on Arm can run it through Windows' x64 emulation.
+						For a native ARM64 build, use the ARM64 installer on
+						<a href="${s.repo}/releases/tag/v${s.publication.github.latestVersion}" rel="noopener">the GitHub ${s.publication.github.latestVersion} release</a>;
+						the Store does not currently offer a native ARM64 ODA package.
 					</p>
 				</div>
 

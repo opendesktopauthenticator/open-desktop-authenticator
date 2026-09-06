@@ -1,6 +1,7 @@
 param(
 	[string]$PackageDirectory = 'release',
-	[string]$ExpectedClsid = 'FB72EFDC-FEA0-44CD-9DD5-FFCFBEDBF734'
+	[string]$ExpectedClsid = 'FB72EFDC-FEA0-44CD-9DD5-FFCFBEDBF734',
+	[string[]]$ExpectedArchitectures = @('x64', 'arm64')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -8,8 +9,12 @@ $packages = @(Get-ChildItem -LiteralPath $PackageDirectory -Filter '*.appx' -Fil
 if ($packages.Count -eq 0) {
 	throw "No AppX package was found in $PackageDirectory"
 }
+if ($packages.Count -ne $ExpectedArchitectures.Count) {
+	throw "Expected $($ExpectedArchitectures.Count) AppX packages ($($ExpectedArchitectures -join ', ')), found $($packages.Count)."
+}
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+$observedArchitectures = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 
 foreach ($package in $packages) {
 	$extractDirectory = Join-Path ([IO.Path]::GetTempPath()) (
@@ -28,6 +33,15 @@ foreach ($package in $packages) {
 	$namespaces.AddNamespace('f', 'http://schemas.microsoft.com/appx/manifest/foundation/windows10')
 	$namespaces.AddNamespace('desktop', 'http://schemas.microsoft.com/appx/manifest/desktop/windows10')
 	$namespaces.AddNamespace('com', 'http://schemas.microsoft.com/appx/manifest/com/windows10')
+
+	$identity = $manifest.SelectSingleNode('/f:Package/f:Identity', $namespaces)
+	if ($null -eq $identity) {
+		throw "$($package.Name) has no package identity"
+	}
+	$architecture = $identity.GetAttribute('ProcessorArchitecture')
+	if (-not $observedArchitectures.Add($architecture)) {
+		throw "More than one AppX package declares the $architecture architecture"
+	}
 
 	$application = $manifest.SelectSingleNode(
 		'/f:Package/f:Applications/f:Application',
@@ -68,3 +82,15 @@ foreach ($package in $packages) {
 
 	Write-Host "$($package.Name): toast activation manifest verified"
 }
+
+$missingArchitectures = @($ExpectedArchitectures | Where-Object {
+	-not $observedArchitectures.Contains($_)
+})
+$unexpectedArchitectures = @($observedArchitectures | Where-Object {
+	$_ -notin $ExpectedArchitectures
+})
+if ($missingArchitectures.Count -gt 0 -or $unexpectedArchitectures.Count -gt 0) {
+	throw "Store architecture mismatch. Missing: $($missingArchitectures -join ', '); unexpected: $($unexpectedArchitectures -join ', ')."
+}
+
+Write-Host "Store architecture set verified: $($ExpectedArchitectures -join ', ')"

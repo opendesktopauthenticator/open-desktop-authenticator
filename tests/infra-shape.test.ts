@@ -195,6 +195,44 @@ describe('the backup job', () => {
 	});
 });
 
+describe('nginx request-log retention', () => {
+	const rotation = readFileSync(join(INFRA, 'logrotate.d', 'nginx'), 'utf8');
+
+	it('covers every nginx request log with the fourteen-day operational target', () => {
+		expect(rotation).toMatch(/^\/var\/log\/nginx\/\*\.log\s*\{/m);
+		expect(rotation).toMatch(/^\s*daily\s*$/m);
+		// One active daily file plus thirteen archives. `rotate 14` would keep
+		// almost fifteen days while still looking like a fourteen-day policy.
+		expect(rotation).toMatch(/^\s*rotate 13\s*$/m);
+		expect(rotation).toMatch(/^\s*maxage 13\s*$/m);
+		expect(rotation).not.toMatch(/^\s*(?:rotate|maxage) 14\s*$/m);
+		expect(rotation).toMatch(/^\s*compress\s*$/m);
+	});
+
+	it('does not present timer-dependent deletion as an unconditional deadline', () => {
+		const documentation = readFileSync(join(INFRA, 'README.md'), 'utf8');
+		const nginxHardening = readFileSync(
+			join(INFRA, 'nginx', 'conf.d', '00-hardening.conf'),
+			'utf8'
+		);
+		const nginxProse = nginxHardening.replace(/^# ?/gm, '');
+		expect(documentation).toMatch(/normally removed within\s+fourteen\s+days/i);
+		expect(documentation).toMatch(/delayed or failed rotation can delay deletion/i);
+		expect(documentation).not.toMatch(/no more than fourteen days/i);
+		expect(documentation).toContain('logrotate --force /etc/logrotate.d/nginx');
+		expect(documentation).toMatch(/first record inside each remaining/i);
+		expect(nginxProse).toMatch(/normally retained for as long as fourteen days/i);
+		expect(nginxProse).toMatch(/delayed or\s+failed rotation can delay deletion/i);
+		expect(nginxProse).not.toMatch(/(?:kept|retained) for fourteen days/i);
+	});
+
+	it('reopens nginx logs instead of copying a live credential-bearing file', () => {
+		expect(rotation).toMatch(/^\s*create 0640 www-data adm\s*$/m);
+		expect(rotation).toMatch(/invoke-rc\.d nginx rotate/);
+		expect(rotation).not.toMatch(/^\s*copytruncate\s*$/m);
+	});
+});
+
 describe('the health job', () => {
 	const health = readFileSync(join(__dirname, '../infra/site-health.sh'), 'utf8');
 

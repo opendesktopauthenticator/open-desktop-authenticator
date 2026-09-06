@@ -14,6 +14,9 @@ type BuilderModule = {
 };
 
 const root = join(__dirname, '..');
+const packageJson = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+	scripts?: Record<string, string>;
+};
 let builder: BuilderModule['default'];
 let manifestPath: string | undefined;
 let extensionsPath: string | undefined;
@@ -44,6 +47,12 @@ beforeAll(async () => {
 });
 
 describe('the Store package notification activator', () => {
+	it('builds a native package for both supported Windows architectures', () => {
+		expect(packageJson.scripts?.['package:store']).toContain(
+			'--win appx:x64 appx:arm64 --publish never'
+		);
+	});
+
 	it('configures both halves of the AppX manifest override', () => {
 		expect(manifestPath).toBe('signing/appx-manifest.xml');
 		expect(extensionsPath).toBe('signing/appx-extensions.xml');

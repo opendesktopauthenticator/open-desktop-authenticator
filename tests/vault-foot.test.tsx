@@ -80,8 +80,9 @@ describe('the vault screen names its publisher', () => {
 		// somewhere stays true while the element is hidden, which is the state this
 		// is meant to have moved away from.
 		expect(foot?.[1] ?? '').not.toMatch(/hidden|display:\s*none/);
-		expect(foot?.[2]).toContain('Powered by');
-		expect(foot?.[2]).toContain(branding.companyShort);
+		expect(foot?.[2]).toContain('Published by');
+		expect(foot?.[2]).not.toContain('Powered by');
+		expect(foot?.[2]).toContain(branding.company);
 	});
 
 	it('shows it on an empty vault too', () => {
@@ -89,7 +90,7 @@ describe('the vault screen names its publisher', () => {
 		// somebody wonders who wrote the software now holding their Steam Guard.
 		const html = render([]);
 		expect(html).toMatch(/<footer class="app-foot"/);
-		expect(html).toContain(branding.companyShort);
+		expect(html).toContain(branding.company);
 	});
 
 	it('shows the company logo beside the words', () => {

@@ -101,13 +101,14 @@ export function AboutView({
 						external-link allowlist, which did not previously include our own.
 					*/}
 					<p className="powered-by">
-						Powered by{' '}
+						Published by{' '}
 						<a href={info.companyWebsite} target="_blank" rel="noreferrer">
-							{info.companyShort}
+							{info.company}
 						</a>
 					</p>
 					<p className="hint">
-						Published by {info.company}. Everything here is open source — the point of naming a
+						{info.company} also operates Master Panel. It is a separate product with no shared
+						accounts, data, or integration. Everything here is open source — the point of naming a
 						company is that you can check it exists, and the point of publishing the source is that
 						you do not have to take its word for anything.
 					</p>

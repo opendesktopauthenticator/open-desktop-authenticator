@@ -1,6 +1,6 @@
 export default {
 	slug: 'steam-desktop-authenticator',
-	updated: '2026-08-14',
+	updated: '2026-09-07',
 	navTitle: 'About SDA',
 	title: 'Steam Desktop Authenticator (SDA), explained',
 	description:
@@ -15,7 +15,7 @@ export default {
 		publisher: { '@type': 'Organization', name: s.publisher },
 		// The head carried a modified time and the Article object did not, so the
 		// two disagreed about whether this page had ever been revised.
-		dateModified: '2026-08-14',
+		dateModified: '2026-09-07',
 		mainEntityOfPage: `${s.origin}/steam-desktop-authenticator`
 	}),
 	/*
@@ -32,7 +32,7 @@ export default {
 	 * **A JS comment, not an HTML one.** The first version of this note was
 	 * written inside the template and rendered straight into
 	 * site/dist/steam-desktop-authenticator.html — a maintainer's aside shipped to
-	 * every visitor. It also claimed the phrase order "not yet code-signed" made
+	 * every visitor. It also claimed the phrase order in the signing sentence made
 	 * the paragraph fail verify.mjs loudly if a flag were flipped back, which is
 	 * backwards: a qualifier inside UNBUILT_CAPABILITY's window makes that check
 	 * pass, not fail. Nothing here is doing that job, and the phrase order is
@@ -263,10 +263,12 @@ export default {
 					<h3>This project</h3>
 					<p>
 						An independent, open-source alternative, written to be checkable: public
-						source, builds produced in public CI, and no self-updating. Published
-						checksums and a build provenance attestation naming the workflow and
-						the commit that produced the bytes shipped with 1.0. Reproducible
-						builds did not, and the binaries are not yet code-signed —
+						source, builds produced in public CI, and no self-updating. Version
+						${s.release.version} publishes SHA-256 checksums, a Sigstore signature over
+						that checksum list, and build provenance naming the workflow and commit
+						that produced the bytes. Builds are not yet reproducible. Direct GitHub
+						downloads carry no code-signing certificate and none is planned; Microsoft
+						signs the package it distributes through the Store —
 						<a href="/download">the download page tracks where each one stands</a>.
 					</p>
 				</section>

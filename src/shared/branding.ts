@@ -47,7 +47,7 @@ export const branding = {
 	/** The legal owner. Settled from the start (D1/D2). */
 	company: 'MASTERPANEL LLC',
 
-	/** Short form of the publisher, for the "powered by" mark in tight spaces. */
+	/** Short form of the publisher, for compact publisher marks. */
 	companyShort: 'MASTERPANEL',
 
 	/**

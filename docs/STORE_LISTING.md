@@ -1,7 +1,8 @@
 # Microsoft Store listing
 
-The exact text submitted to Partner Center, kept here rather than only in the
-dashboard.
+The canonical Partner Center working copy, kept here rather than only in the
+dashboard. It records the submitted text and explicitly marks any clarification
+prepared after the current submission.
 
 A Store listing is re-entered on every submission and is invisible to CI, so it
 is the one piece of user-facing copy nothing in this repository would catch
@@ -11,25 +12,34 @@ too.
 
 **Product**: Open Desktop Authenticator · **Store ID**: 9NMM2XJ6HZ1D
 **Package identity**: `TheMaster.OpenDesktopAuthenticator`
+**Live package**: `1.5.0.0` · **Architecture**: `x64`
 
 > [!NOTE]
-> **The live listing is one sentence behind this file.** Submission 1 went to
-> certification carrying "our download button only ever links a file published
-> on our GitHub releases page", written when GitHub was the only channel. It
-> stopped being true the moment this listing existed. A submission cannot be
-> edited while it is in certification, so the corrected wording below ships with
-> the next one — there is no user-visible harm in the meantime, since the
-> sentence understates where the app is available rather than overstating it.
+> **Version 1.5.0 is live in the Microsoft Store.** Submission 2 is the current
+> public listing. Submission 3 was submitted on 2026-09-07, marks the 1.5.0
+> package update as mandatory, uses the approved four-sentence no-backend
+> wording shown verbatim below, and is in certification. The
+> proxy-qualified route sentence below was clarified in this repository after
+> submission and is not part of Submission 3; apply it only when the listing is
+> next editable. Changes unique to Submission 3 are not public until Microsoft
+> publishes it.
 
 ---
 
 ## Description
 
 > Open Desktop Authenticator keeps your Steam Guard codes and your trade and
-> market confirmations on your own machine. It is open source, and it is a
-> maintained successor to Steam Desktop Authenticator.
+> market confirmations on your own machine. It is an open-source, maintained
+> successor to Steam Desktop Authenticator.
 >
-> **Why this exists**
+> Open Desktop Authenticator is developed, owned and published by MASTERPANEL
+> LLC. Its official product website is https://opendesktopauthenticator.com.
+> MASTERPANEL LLC also operates Master Panel at https://masterspanel.com, its
+> principal commercial product and company website. Open Desktop Authenticator
+> and Master Panel are separate products within the same MASTERPANEL LLC
+> portfolio.
+>
+> WHY THIS EXISTS
 >
 > The tool much of Steam trading depends on, Steam Desktop Authenticator, is no
 > longer maintained. Search for it and the results are full of clone sites
@@ -44,33 +54,41 @@ too.
 > you downloaded. Installing from the Microsoft Store is the short version of
 > that chain — Microsoft builds the trust link for you.
 >
-> **What it does**
+> WHAT IT DOES
 >
 > - An encrypted vault for as many accounts as you have, unlocked with a
 >   passphrase you choose.
 > - Imports the maFiles you already have from Steam Desktop Authenticator.
 > - Steam Guard codes.
 > - Trade and market confirmations: see what is pending, accept it or deny it.
+> - An isolated signed-in Steam browser for each account, with tabs, an address
+>   bar and a routing choice for every window.
+> - Optional desktop notifications for pending confirmations, off by default and
+>   with selectable detail.
+> - Optional per-account network routing and a vault-wide Require proxies
+>   setting.
 > - Optional auto-confirm, configurable per account and per confirmation type,
 >   and off until you turn it on.
-> - Optional per-account network routing.
 >
-> **What it will never do**
+> WHAT IT WILL NEVER DO
 >
-> No servers. No sync. No accounts with us. No telemetry of any kind, including
-> the opt-in kind. No paid tiers. We run no backend for this product: your
-> machine talks to Valve directly and to nothing of ours.
+> No ODA backend. No ODA account. No cloud sync. No telemetry. No paid tiers.
+> Steam operations go from your machine to Valve, using any route or proxy you
+> configure, without passing through an ODA service.
 >
 > It also does not automate trading beyond confirming what you already started,
 > and has no market or inventory tooling. Those are not features we have not got
 > to yet. They are things we have decided not to build.
 >
-> **Before you install anything else**
+> BEFORE YOU INSTALL ANYTHING ELSE
 >
-> Never download an authenticator from a website, including ours. This listing
-> and our GitHub releases page are the only two places a genuine build comes
-> from, and our own website hosts no installer — every button on it links to one
-> of those two. Anything else claiming to be this application is not ours.
+> Never download an authenticator from a website, including ours. This listing in
+> the Microsoft Store and our GitHub releases page are the only two places a
+> genuine build comes from. The official product website,
+> https://opendesktopauthenticator.com, hosts no installer — its download buttons
+> lead to one of those two channels. MASTERPANEL LLC's main site,
+> https://masterspanel.com, identifies the same publisher and links to the
+> product. Anything else claiming to be this application is not ours.
 >
 > Source, documented threat model and build instructions:
 > https://github.com/opendesktopauthenticator/open-desktop-authenticator
@@ -89,13 +107,51 @@ description.
 - Trade and market confirmations: view, accept, deny
 - Optional auto-confirm, per account and per type, off by default
 - Optional per-account network routing
-- Runs entirely on your machine: no servers, no sync, no telemetry, no accounts
+- No ODA backend. No ODA account. No cloud sync. No telemetry.
 - Open source, built in public CI, MIT licensed
+- Separate signed-in Steam browser session for each account
+- Optional desktop notifications for confirmations, off by default
+
+## What's new in this version
+
+1,486 characters in Partner Center, leaving 14 characters below the Store's
+1,500-character limit.
+
+> Version 1.5 brings an isolated browser, notifications and safer recovery.
+>
+> BROWSER
+> Open trade offers, market listings, account settings and supported trading
+> sites inside the app. Each account has separate cookies and a signed-in
+> session, so one account's sign-in is never reused by another. Locking the vault
+> closes all browser windows and ends every Steam session.
+>
+> ROUTING
+> For each window, choose: use the account proxy for everything; use it for Steam
+> while supported trade sites go Direct; or use Direct throughout. Require
+> proxies removes the Direct choices. Direct is offered honestly: a shared proxy
+> collects rate limits and challenges a home connection never sees, so the
+> routed window is sometimes the one that will not load.
+>
+> NOTIFICATIONS
+> Confirmation notifications are off until you turn them on. Clicking one opens
+> that account's confirmations, even if the vault locked in between. Choose
+> Everything, Type only or Count only. Notifications may appear on your lock
+> screen and remain in Windows notification history, so choose less detail on a
+> shared computer.
+>
+> SAFER STEAM CHANGES
+> Adding, activating, removing or transferring an authenticator can reach Steam
+> before its reply is lost. If the outcome is unknown, the app stops and asks
+> you to check the account instead of offering the action again. Retrying
+> something Steam may already have done can leave you without access. The app
+> remembers the uncertain state across closing the screen, locking the vault and
+> restarting.
 
 ## Short description
 
-> Steam Guard codes and trade confirmations on your own machine. Open source, no
-> servers, no telemetry. A maintained successor to Steam Desktop Authenticator.
+> Steam Guard codes and trade confirmations on your own machine. Open source.
+> No ODA backend. No ODA account. No cloud sync. No telemetry.
+> A maintained successor to Steam Desktop Authenticator.
 
 ## Search terms
 
@@ -107,8 +163,16 @@ Seven maximum, 30 characters each, not shown to users.
 ## Copyright and trademark info
 
 > Copyright © 2026 MASTERPANEL LLC. Licensed MIT. Steam and Steam Guard are
-> trademarks of Valve Corporation. Open Desktop Authenticator is not affiliated
-> with, endorsed by, or sponsored by Valve Corporation.
+> trademarks of Valve Corporation. Not affiliated with, endorsed by, or
+> sponsored by Valve Corporation.
+
+175 characters; Partner Center limits this field to 200.
+
+## Website and support
+
+- Website: `https://opendesktopauthenticator.com`
+- Support contact: `support@opendesktopauthenticator.com`
+- Privacy policy: `https://opendesktopauthenticator.com/privacy`
 
 ## Additional system requirements
 

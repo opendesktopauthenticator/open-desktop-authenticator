@@ -91,7 +91,8 @@ describe('the first-party licence package boundary', () => {
 		expect(workflow).toContain('verify-packaged-license.mjs --tree release');
 		expect(workflow).not.toMatch(/\b(?:mapfile|readarray|coproc)\b|declare\s+-A/);
 		expect(workflow).toContain("steps.store_license.outcome == 'success'");
-		expect(appx).toContain('$packages.Count -ne 1');
+		expect(appx).toContain('$packages.Count -eq 0');
+		expect(appx).toContain('foreach ($package in $packages)');
 		expect(appx).toContain('$asarEntries.Count -ne 1');
 		expect(appx).toContain("'(^|/)app/resources/app\\.asar$'");
 		expect(appx).toContain('verify-packaged-license.mjs $scratch');
