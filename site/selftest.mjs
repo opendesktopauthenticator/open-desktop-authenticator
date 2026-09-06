@@ -34,65 +34,106 @@ const swapVerifier = process.argv[2];
 
 const ANCHOR_FILE = 'pages/home.mjs';
 /*
- * The homepage's own unsigned-branch sentence — the branch that renders while
- * `signed` is false, and where the real overclaim was written.
+ * **This has to follow a claim that is still false, and `signed` no longer is.**
+ *
+ * It used to substitute into the homepage's *unsigned* branch and test the
+ * `signed` claim, which was right for as long as no signed release existed. The
+ * v1.5.0 release publishes `SHA256SUMS.txt.sig` and `.pem`, so `signed` is now
+ * true — and that broke this file twice over. The unsigned branch stopped
+ * rendering, so a sentence substituted into it never reached the built page; and
+ * `verify.mjs` skips a claim entirely once its flag is true (`if
+ * (SITE.release[claim.flag]) continue`), so the patterns were never consulted
+ * either. Eleven of seventeen cases went quietly wrong, which is precisely the
+ * regression this file exists to make visible — about itself, this time.
+ *
+ * So it anchors on the branch that renders *now*, and tests `reproducible`,
+ * which is still false and has its own entry in `verify.mjs`'s CLAIMS table.
+ * The mechanism under test is unchanged: substitute one sentence, build, and see
+ * whether the verifier's exit code is what the table says it should be.
+ *
+ * **When `reproducible` becomes true this file must move again**, to whichever
+ * claim is false then — `codeSigned`, `gpgSignature` and `audited` are all still
+ * available. A tripwire that covers nothing passes silently, so the day no false
+ * claim is left is the day this file needs a different design, not deletion.
  */
 const ANCHOR =
-	"'Public source, public CI, published checksums, and build provenance naming the workflow and commit that built it. The checksum list is not signed yet, and the binaries are not code-signed.'";
+	"'Published checksums, a signature over that list, and provenance naming the workflow and commit that built it.'";
 
 const CASES = [
 	// [name, sentence, must the build FAIL?]
-	['plain overclaim', 'The checksum list is signed.', true],
-	['overclaim, our', 'Our checksum list is signed.', true],
-	['overclaim, this', 'This checksum list is signed.', true],
-	['the wording that shipped', 'We publish checksums with a signature over them.', true],
+	//
+	// The four `reproducible` patterns in verify.mjs's CLAIMS table, one case
+	// each, plus the variations that caught real defects in the `signed` entry
+	// when this file was written: a determiner in front, and a trailing clause
+	// after. Both are how an overclaim actually gets written by someone who
+	// believes it.
+	['plain overclaim', 'Builds are reproducible.', true],
+	['overclaim, our', 'Our builds are reproducible.', true],
+	['overclaim, singular', 'The build is reproducible.', true],
+	[
+		'the phrasing a reader would write',
+		'Every release is built reproducible from that source.',
+		true
+	],
 	[
 		'the same, with a trailing clause',
-		'We publish checksums with a signature over them, so you do not have to trust us.',
+		'Builds are reproducible, so you do not have to trust us.',
 		true
 	],
 	[
 		'beside an unrelated denial',
-		'The checksum list is signed, and the binaries are not code-signed yet.',
+		'Builds are reproducible, and the binaries are not code-signed yet.',
 		true
 	],
 	[
-		'beside another unrelated denial',
-		'The checksum list is signed, and code signing has not landed yet.',
+		'the invitation to compare',
+		'Compare your build against ours byte for byte and they will match.',
 		true
 	],
-	['the sig file', 'Every release carries SHA256SUMS.txt.sig and a certificate.', true],
 
 	[
-		'honest: no signature yet',
-		'There is no signature over the checksum list yet, and the binaries are not code-signed.',
+		'honest: not yet',
+		'Builds are not yet reproducible, and the binaries are not code-signed.',
 		false
 	],
+	/*
+	 * **"reproducible builds are still to come" is a wording the site cannot
+	 * use, and that is a finding rather than a case.**
+	 *
+	 * It is honest — reproducible builds genuinely are still to come — but it
+	 * contains "builds are still to come", which STALE_ABSENCE reads as the page
+	 * claiming no release exists at all, and `published` is now true. So the
+	 * build fails on a true sentence.
+	 *
+	 * Left as a note instead of a passing case, because writing it as `true`
+	 * would assert that the false positive is correct, and loosening
+	 * STALE_ABSENCE to allow it would weaken the guard that catches a page still
+	 * saying nothing has shipped. The three honest phrasings below do not
+	 * collide, and the site uses one of them.
+	 */
 	[
-		'honest: still to come',
-		'We publish checksums, and a signature over that list is still to come.',
+		'honest: the real current copy',
+		'Builds are not yet reproducible: you cannot compile the tag yourself and get byte-for-byte identical output.',
 		false
 	],
-	[
-		'honest: nothing signs it',
-		'Nothing signs the checksum list, so take it from the release page itself.',
-		false
-	],
-	['honest: unsigned', 'The checksum list is unsigned.', false],
+	['honest: cannot rebuild', 'You cannot rebuild this tag and get the same bytes.', false],
 	// STALE_ABSENCE, the other direction: published is true, so prose that says
 	// there is no release yet must fail whatever its subject is called.
 	['stale: 1.0 packages', 'The 1.0 packages are still to come.', true],
 	['stale: something to install', 'Something you can actually install is still to come.', true],
 	['stale: installers', 'Installers are still to come.', true],
+	/*
+	 * Two cases were removed here rather than rewritten, and it is worth saying
+	 * why: both asserted that prose denying a signature must PASS. That was true
+	 * while none existed. v1.5.0 publishes one, so "ours does not have one yet"
+	 * is now a stale absence — the failure the STALE_ABSENCE table above exists
+	 * to catch — and keeping them would have pinned the site's right to say
+	 * something false about itself.
+	 */
 	[
-		'honest: ideally',
-		'Ideally a signature over that list too, but ours does not have one yet.',
-		false
-	],
-	[
-		'honest: the real current copy',
-		'Public source, public CI, published checksums, and build provenance naming the workflow and commit that built it. The checksum list is not signed yet, and the binaries are not code-signed.',
-		false
+		'stale: denying the signature we now publish',
+		'A signature over that list is still to come.',
+		true
 	]
 ];
 

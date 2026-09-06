@@ -483,7 +483,10 @@ const CLAIMS = [
 		patterns: [
 			/builds are reproducible/i,
 			/the build is reproducible/i,
-			/builds? reproducible from that source/i,
+			// `buil[dt]`, because "built reproducible from that source" is the more
+			// natural sentence and `builds?` missed it. Found by `site/selftest.mjs`
+			// substituting exactly that phrasing and watching the build stay green.
+			/buil[dt]s? reproducible from that source/i,
 			/compare (?:your|the) (?:build|result)[^.]{0,40}byte for byte/i
 		]
 	},
