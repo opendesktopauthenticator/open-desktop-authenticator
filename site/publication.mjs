@@ -5,7 +5,8 @@
  */
 export const RELEASE_PUBLICATIONS = {
 	github: {
-		'1.0.0': { publishedOn: '2026-08-25' }
+		'1.0.0': { publishedOn: '2026-08-25' },
+		'1.5.0': { publishedOn: '2026-09-06' }
 	},
 	// The listing is public, but no evidence in this repository says its 1.5.0
 	// submission has completed Partner Center publication. Do not infer it from

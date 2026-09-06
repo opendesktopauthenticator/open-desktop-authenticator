@@ -5,10 +5,12 @@ A maintained successor to SDA.
 
 Built and maintained by **MASTERPANEL LLC** · [opendesktopauthenticator.com](https://opendesktopauthenticator.com)
 
-> **1.0 is out.** Install it from the
-> [Microsoft Store](https://apps.microsoft.com/detail/9NMM2XJ6HZ1D), or take a
-> build from [the releases page](https://github.com/opendesktopauthenticator/open-desktop-authenticator/releases/latest)
-> and check it against the published checksums. **Those two places, and nowhere
+> **1.5.0 is out on GitHub.** Take a build from
+> [the releases page](https://github.com/opendesktopauthenticator/open-desktop-authenticator/releases/latest)
+> and check it against the published checksums. The
+> [Microsoft Store](https://apps.microsoft.com/detail/9NMM2XJ6HZ1D) is still
+> serving 1.0 until that submission clears certification, so it does not yet
+> carry the in-app browser or notifications. **Those two places, and nowhere
 > else** — anything else claiming to be a build of this is not ours.
 >
 > The Store package is signed, because Microsoft re-signs what it distributes.
@@ -97,6 +99,7 @@ items; they are deliberate non-goals.
 | 0.1 — vault, import, codes, confirmations          | **done** |
 | 0.1 — sign-in, tray, settings, auto-confirm        | **done** |
 | 1.0 — packaged public releases, Windows + Linux    | **done** |
+| 1.5 — in-app browser, notifications, arm64         | **done** |
 
 **macOS is not supported.** Signing it requires Apple Developer enrollment as an
 organization, which we have not completed. We will not ship an unsigned macOS

@@ -277,17 +277,44 @@ describe('per-channel publication output', () => {
 		expect(storeOnly).not.toContain('1.5.0 is published on GitHub');
 	});
 
-	it('does not call the checked-in package version published before either marker exists', () => {
+	/*
+	 * **This pinned the state before 1.5.0 was published, and that state is over.**
+	 *
+	 * It asserted that neither channel carried the checked-in version, that the
+	 * summary called it an "upcoming source version", and that the structured data
+	 * offered no `datePublished` and no `downloadUrl`. All of that was right while
+	 * `RELEASE_PUBLICATIONS` held only 1.0.0 — and updating it was the whole point
+	 * of the marker, so the test had to move with it rather than be deleted.
+	 *
+	 * What it protects is unchanged and is the reason the markers exist at all: the
+	 * site describes what a channel *serves*, never what the repository happens to
+	 * have built. So GitHub now carries 1.5.0 and says so, the Store does not and
+	 * says so, and the two are asserted separately — because collapsing them is
+	 * exactly the mistake that would tell a Windows user the Store has a release it
+	 * does not have.
+	 */
+	it('says GitHub carries the checked-in version and the Store does not yet', () => {
 		const version = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')).version;
 		const site = siteFor(publicationApi.RELEASE_PUBLICATIONS as Publications);
 		expect(version).toBe(VERSION);
-		expect(site.publication.github.current).toBe(false);
-		expect(site.publication.store.current).toBe(false);
-		expect(publicationApi.publicationSummary(site)).toContain('upcoming source version');
+
+		expect(
+			site.publication.github.current,
+			'the GitHub release of the checked-in version is recorded, so the site should say so'
+		).toBe(true);
+		expect(
+			site.publication.store.current,
+			'the Store marker moved to the source version. It moves only when Partner Center ' +
+				'actually serves it, and no evidence in this repository says that has happened'
+		).toBe(false);
+
 		const software = softwareFor(site);
 		expect(software.softwareVersion).toBe(VERSION);
-		expect(software).not.toHaveProperty('datePublished');
-		expect(software).not.toHaveProperty('downloadUrl');
+		expect(
+			software,
+			'a published release should carry its date in the structured data search engines read'
+		).toHaveProperty('datePublished');
+		expect(software).toHaveProperty('downloadUrl');
 	});
 
 	it('wires the same browser availability into generated llms.txt facts and security copy', () => {

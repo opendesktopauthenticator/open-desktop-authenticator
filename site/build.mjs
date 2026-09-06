@@ -413,6 +413,36 @@ export const SITE = {
 			 * silently the day one happened.
 			 */
 			audited: false
+		},
+		/*
+		 * **1.5.0, and every flag here was checked against the release page rather
+		 * than against the workflow.**
+		 *
+		 * The note on 1.0.0's `signed` above is the reason this entry has to exist
+		 * at all, and the reason it exists *in the same change* that records 1.5.0
+		 * in `publication.mjs`. `release` above reads `releaseByVersion[version]`
+		 * and falls back to `false` for every field when the key is missing — so
+		 * moving the publication marker on its own would have made every page say
+		 * the checksum list is not signed, about the first release that actually
+		 * carries a signature. The gap between those two edits is measured in
+		 * whichever of them somebody forgot.
+		 *
+		 * Verified on the v1.5.0 release before this was written: all seven entries
+		 * in `SHA256SUMS.txt` recomputed and matched, `SHA256SUMS.txt.sig` (96 B)
+		 * and `SHA256SUMS.txt.pem` (3772 B) both present, and the certificate binds
+		 * `.../release.yml@refs/tags/v1.5.0` — the identity /verify prints.
+		 */
+		'1.5.0': {
+			published: true,
+			checksums: true,
+			/** `.sig` and `.pem` are on the release page, not merely produced by CI. */
+			signed: true,
+			/** Unchanged, and not for want of trying: the SignPath application was declined. */
+			codeSigned: false,
+			/** Still sigstore rather than GPG. No `.asc` exists. */
+			gpgSignature: false,
+			reproducible: false,
+			audited: false
 		}
 	},
 

@@ -463,15 +463,46 @@ describe('the verify page and the signature that may not exist yet', () => {
 	 * `SHA256SUMS.txt.sig` and `SHA256SUMS.txt.pem` listed on it.
 	 * `docs/RELEASE_CHECKLIST.md` carries that step.
 	 */
-	it('is a deliberate claim: no published release is signed yet', () => {
+	/*
+	 * **This used to say no published release was signed, and that stopped being
+	 * true with 1.5.0.**
+	 *
+	 * The old form asserted `build.mjs` contained `signed: false,` and never
+	 * `signed: true,` — a whole-file check, which was right while one release
+	 * existed and wrong the moment a second one differed from the first. What it
+	 * was protecting is unchanged: no version may claim a signature that is not
+	 * on its release page. So it is now asserted per version.
+	 *
+	 * 1.0.0 stays `false` and that is not an oversight. Its `SHA256SUMS.txt` has
+	 * no `.sig` and no `.pem` beside it — the signing step was written three days
+	 * after that tag — and /verify spent that window telling visitors to fetch two
+	 * files that were not there. 1.5.0 is `true` because both were checked on the
+	 * release itself, not because the workflow contains a signing step.
+	 */
+	it('claims a signature only for the releases that carry one', () => {
 		// Read rather than imported: `build.mjs` writes the site when it runs, and
 		// a test must not. The claim being pinned is what is checked in.
 		const source = readFileSync(join(__dirname, '..', 'site', 'build.mjs'), 'utf8');
+		const entry = (version: string): string => {
+			const at = source.indexOf(`'${version}': {`);
+			expect(at, `no evidence entry for ${version}`).toBeGreaterThan(-1);
+			const end = source.indexOf('\n\t\t}', at);
+			expect(end, `the ${version} entry is not closed where expected`).toBeGreaterThan(at);
+			return source.slice(at, end);
+		};
+
 		expect(
-			source,
-			'flip this only in the change that publishes a signed release, and update this test with it'
+			entry('1.0.0'),
+			'v1.0.0 now claims a signed checksum list. No `SHA256SUMS.txt.sig` was ever published ' +
+				'on that release, so /verify would hand every visitor a cosign command that cannot ' +
+				'succeed — and a missing signature file is what tampering looks like'
 		).toContain('signed: false,');
-		expect(source).not.toContain('signed: true,');
+
+		expect(
+			entry('1.5.0'),
+			'v1.5.0 stops claiming a signed checksum list. Its release carries SHA256SUMS.txt.sig ' +
+				'and SHA256SUMS.txt.pem, so saying otherwise hides a check a reader could make'
+		).toContain('signed: true,');
 	});
 
 	it('prints the command once a signed release exists', () => {
