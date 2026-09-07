@@ -1,3 +1,5 @@
+import { escape } from './markup.mjs';
+
 /*
  * Guide furniture, generated rather than hand-maintained.
  *
@@ -62,22 +64,23 @@ export function readingMinutes(html) {
  * knowing the age of — so it moves to the top, next to how long the page takes
  * and what it is sourced from.
  *
- * `sourced` is per-page and deliberately not defaulted away. The first version
- * printed "Checked against Valve's own documentation" on all eight guides,
- * which was false on two of them: Valve does not document SDA's file format or
- * its encryption, and those pages are checked against SDA's own source. A
- * sourcing claim that is wrong is worse than no sourcing claim, because it is
- * the line a careful reader uses to decide whether to trust the rest.
+ * `sourced` is per-page and deliberately has no default. The first version
+ * printed "Checked against Valve's own documentation" on every guide, which
+ * was false on the maFile-format pages and too vague everywhere else. A missing
+ * note now fails verification; a sourcing claim that is wrong is worse than no
+ * sourcing claim, because it is the line a careful reader uses to decide
+ * whether to trust the rest.
+ *
+ * The responsible publisher is visible here as well as in structured data. A
+ * machine-only author is not accountability a reader can inspect.
  */
-export const SOURCED_DEFAULT = "Checked against Valve's own documentation";
-
-export function guideMeta(iso, formatted, minutes, sourced = SOURCED_DEFAULT) {
+export function guideMeta(iso, formatted, minutes, sourced, publisher) {
+	if (!sourced) throw new Error('guideMeta requires a page-specific sourcing note');
 	return `		<div class="guide-meta">
-			<span>Reviewed <time datetime="${iso}">${formatted}</time></span>
+			<span>Reviewed <time datetime="${iso}">${formatted}</time> by <a href="/owners">${escape(publisher)}</a></span>
 			<span class="dot" aria-hidden="true"></span>
 			<span>${minutes} min read</span>
-			<span class="dot" aria-hidden="true"></span>
-			<span class="sourced">${sourced}</span>
+			<span class="sourced"><strong>Sources and testing:</strong> ${sourced} <a class="method" href="/owners#how-these-guides-are-written">Editorial method</a></span>
 		</div>`;
 }
 

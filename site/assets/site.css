@@ -789,6 +789,12 @@ button.button.button-quiet:hover {
 	font-size: 0.82rem;
 	color: var(--faint);
 }
+.reviewed a {
+	color: var(--muted);
+}
+.reviewed a:hover {
+	color: var(--mint);
+}
 
 .fineprint {
 	margin-top: 40px;
@@ -1967,7 +1973,25 @@ article > .signals {
 }
 /* A claim about sourcing, so it is written as one rather than styled as a badge. */
 .guide-meta .sourced {
+	display: block;
+	flex: 1 0 100%;
+	line-height: 1.65;
 	color: var(--mint-pale);
+}
+.guide-meta .sourced strong {
+	color: var(--faint);
+	font-weight: 650;
+}
+.guide-meta a {
+	color: inherit;
+}
+.guide-meta a:hover {
+	color: var(--mint);
+}
+.guide-meta .method {
+	display: inline-block;
+	margin-left: 7px;
+	white-space: nowrap;
 }
 
 /*

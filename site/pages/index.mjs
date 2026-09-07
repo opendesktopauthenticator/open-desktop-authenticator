@@ -19,8 +19,9 @@ import { credits, donate } from './support-us.mjs';
 import { privacy } from './privacy.mjs';
 import { official } from './official.mjs';
 import { codeSigningPolicy } from './code-signing.mjs';
+import { attachEditorial } from '../editorial.mjs';
 
-export const PAGES = [
+export const PAGES = attachEditorial([
 	home,
 	sda,
 	scamClones,
@@ -53,4 +54,4 @@ export const PAGES = [
 	donate,
 	privacy,
 	notFound
-];
+]);

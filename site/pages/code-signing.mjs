@@ -2,12 +2,12 @@
  * Code signing policy.
  *
  * **This page was originally written to a sponsor's requirements.** An
- * application to the SignPath Foundation was declined — their programme is for
- * projects with established public visibility, which is a threshold a new
- * project cannot clear by writing better code — so every claim that a
- * certificate was coming, and the attribution line that named them as the
- * sponsor, have been removed. Naming a sponsor who is not sponsoring you is the
- * one thing a page about trust cannot do.
+ * application to use the SignPath Foundation's managed signing service was
+ * declined — their programme is for projects with established public
+ * visibility, which is a threshold a new project cannot clear by writing better
+ * code — so every claim that signed builds were coming, and the attribution line
+ * that named them as the sponsor, have been removed. Naming a sponsor who is not
+ * sponsoring you is the one thing a page about trust cannot do.
  *
  * The page stays, because most of it never depended on that. "Who is allowed to
  * approve a release" is exactly the question the verification chain leaves open,
@@ -19,7 +19,7 @@
 
 export const codeSigningPolicy = {
 	slug: 'code-signing-policy',
-	updated: '2026-09-07',
+	updated: '2026-09-08',
 	navTitle: 'Code signing policy',
 	title: 'Code signing policy',
 	description:
@@ -43,19 +43,30 @@ export const codeSigningPolicy = {
 					a code-signing certificate, so Windows warns on first run.
 				</p>
 				<p>
-					We applied to the SignPath Foundation, which gives free certificates to
-					open-source projects, and were declined: their programme asks for
-					established public visibility — stars, forks, articles, independent
-					discussion — which a project this young does not have yet. That is written
-					here rather than quietly dropped, because a page about who you can trust is
-					the wrong place to be vague about what did not happen.
+					We applied for the SignPath Foundation's free open-source signing service and
+					were declined. Under that programme, a qualifying project may use a certificate
+					issued to SignPath Foundation through its managed signing service. The certificate
+					is not issued to the project; SignPath Foundation is the displayed publisher. Its
+					<a href="https://signpath.org/terms.html" rel="noopener">published conditions</a>
+					require an executable project to have verifiable reputation and leave the
+					acceptance decision to the foundation. The rejection said this project did
+					not yet have enough public visibility — stars, forks, articles, or independent
+					discussion. That outcome is our application record, not something a reader can
+					verify on SignPath's public site, so it is labelled here as our report of what
+					happened.
 				</p>
 				<p>
-					Paying for one would not change what you see today either. Since March 2024
-					no certificate — not even Extended Validation — removes the Windows
-					SmartScreen warning on its own; reputation accrues with downloads over
-					time. So the honest answer is the one below: use the Store build if you want
-					a signature, and verify the direct downloads by checksum and attestation.
+					A valid code-signing certificate would change one important detail: Windows
+					could display a verified publisher name instead of an unknown publisher. It
+					would not guarantee that SmartScreen stops warning.
+					<a href="https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation" rel="noopener">Microsoft now documents</a>
+					that SmartScreen evaluates both the publisher identity and the individual file's
+					hash. Even a newly signed binary may be flagged as unrecognised until its file hash
+					or publisher certificate has accumulated sufficient positive reputation through
+					download history and clean behaviour; Extended Validation certificates no longer
+					bypass that process.
+					So the honest answer is the one below: use the Store build if you want Microsoft's
+					signature, and verify the direct downloads by checksum and attestation.
 				</p>
 			</div>
 

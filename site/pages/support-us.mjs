@@ -67,6 +67,8 @@ const LIBRARIES = [
 
 export const credits = {
 	slug: 'credits',
+	updated: '2026-08-27',
+	reviewed: '2026-09-08',
 	navTitle: 'Credits',
 	title: 'The work this is built on, and how to pay for it',
 	description:

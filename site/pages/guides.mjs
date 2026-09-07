@@ -312,7 +312,11 @@ ${reviewAsk(s, { got: 'Did this page stop you downloading the wrong thing?' })}
 export const importFromSda = {
 	slug: 'import-from-sda',
 	parent: 'docs',
-	updated: '2026-08-14',
+	guide: true,
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
+	sourced: (s) =>
+		`Version covered: ODA ${s.version}. Import behavior checked against <a href="${s.repo}/tree/v${s.version}/src/main/import" rel="noopener">the tagged implementation</a>, <a href="${s.repo}/blob/v${s.version}/tests/import-service.test.ts" rel="noopener">its service tests</a>, and <a href="${s.sda.repo}" rel="noopener">SDA's published format</a>`,
 	navTitle: 'Import',
 	title: 'Import maFiles from SDA',
 	description:
@@ -330,7 +334,7 @@ export const importFromSda = {
 		]
 	}),
 	body: () => `
-		<article>
+		<article class="guide">
 			<h1>Importing maFiles from Steam Desktop Authenticator</h1>
 			<p class="lede">
 				Your accounts are yours. Import reads the same <code>.maFile</code> format SDA
@@ -377,15 +381,19 @@ export const importFromSda = {
 			<ul>
 				<li>Accounts already in your vault, so you do not import a duplicate.</li>
 				<li>
-					A maFile with no <code>identity_secret</code> — it will generate login codes
-					but cannot confirm trades, and it is better to know now.
+					An <code>identity_secret</code> that is present but unusable — the account
+					remains selectable with a warning. Login codes may still work when the
+					<code>shared_secret</code> is usable, but confirmations will not.
 				</li>
 				<li>
 					A maFile with no revocation code, which means detaching that authenticator
 					later will need Steam Support.
 				</li>
 				<li>A proxy setting found inside the file, which you can adopt or discard.</li>
-				<li>Files that could not be read at all, and why.</li>
+				<li>
+					Files that could not be read at all, and why. A missing or empty
+					<code>identity_secret</code> is rejected here rather than imported.
+				</li>
 			</ul>
 			<p>Tick what you want. Everything else is discarded when you close the screen.</p>
 
@@ -416,7 +424,11 @@ export const importFromSda = {
 
 export const uninstall = {
 	slug: 'uninstall',
-	updated: '2026-08-27',
+	guide: true,
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
+	sourced: (s) =>
+		`Version covered: ODA ${s.version}. Installed and portable data roots checked against <a href="${s.repo}/blob/v${s.version}/src/main/index.ts" rel="noopener">the tagged application path setup</a>; vault and backup names against <a href="${s.repo}/blob/v${s.version}/src/main/vault/storage.ts" rel="noopener">storage</a>; recovery paths against <a href="${s.repo}/blob/v${s.version}/src/main/vault/recovery.ts" rel="noopener">recovery</a>; package behavior against <a href="${s.repo}/blob/v${s.version}/electron-builder.config.mjs" rel="noopener">the release configuration</a>`,
 	navTitle: 'Uninstall',
 	parent: 'download',
 	title: 'Uninstall Open Desktop Authenticator, and remove its data',
@@ -446,7 +458,7 @@ export const uninstall = {
 		]
 	}),
 	body: (s) => `
-		<article>
+		<article class="guide">
 			<h1>Uninstall ${s.name}, and remove its data</h1>
 			<p class="lede">
 				Removing the application is the easy half. The half worth reading first is what
@@ -598,7 +610,8 @@ ${reviewAsk(s, { got: 'Did this cover what you needed to remove?' })}
 
 export const docs = {
 	slug: 'docs',
-	updated: '2026-08-27',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	navTitle: 'Docs',
 	title: 'Documentation: setup, codes, confirmations and backups',
 	description:
@@ -696,8 +709,10 @@ export const docs = {
 				</dd>
 				<dt>An imported account cannot confirm trades</dt>
 				<dd>
-					Its maFile had no identity secret. Login codes work; confirmations cannot.
-					The account has to be re-enrolled to fix it.
+					Its maFile may have an <code>identity_secret</code> whose value is present
+					but unusable; current imports flag this with a warning. Login codes may still
+					work when the <code>shared_secret</code> is usable, but confirmations cannot.
+					Re-import from a good copy, or re-enrol the account if none exists.
 				</dd>
 				<dt>Sign-in wants approval on another device</dt>
 				<dd>
@@ -887,6 +902,8 @@ const FAQ_ITEMS = [
 
 export const support = {
 	slug: 'support',
+	updated: '2026-08-27',
+	reviewed: '2026-09-08',
 	navTitle: 'Support',
 	// Reveals the attachment field and uploads the files. The form works without it.
 	script: 'support.js',

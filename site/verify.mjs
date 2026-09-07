@@ -18,6 +18,17 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
+import { editorialStatementProblem } from './editorial.mjs';
+import {
+	calendarDateProblem,
+	formatPublicationDate,
+	sourceNoteProblem,
+	editorialBodyOf,
+	shingles,
+	overlapScores,
+	JACCARD_LIMIT,
+	CONTAINMENT_LIMIT
+} from './quality.mjs';
 // The same object the pages render from, so the check compares against the
 // single source of truth rather than a second copy of it.
 import { SITE } from './build.mjs';
@@ -51,6 +62,20 @@ const ROOT_FILES = new Set([
 const problems = [];
 const fail = (page, message) => problems.push(`${page}: ${message}`);
 const count = (text, re) => (text.match(re) ?? []).length;
+const hasDatedTime = (html, date) =>
+	html.includes(`<time datetime="${date}">${formatPublicationDate(date)}</time>`);
+
+const valuesNamed = (value, key, found = []) => {
+	if (Array.isArray(value)) {
+		for (const item of value) valuesNamed(item, key, found);
+	} else if (value !== null && typeof value === 'object') {
+		for (const [name, item] of Object.entries(value)) {
+			if (name === key) found.push(item);
+			valuesNamed(item, key, found);
+		}
+	}
+	return found;
+};
 
 /* --------------------------------------------------------------- pass one -- */
 
@@ -64,9 +89,106 @@ for (const page of PAGES) {
 	built.set(page.slug, readFileSync(file, 'utf8'));
 }
 
+const siteUpdatedProblem = calendarDateProblem(SITE.updated);
+if (siteUpdatedProblem) fail('SITE', `fallback updated date ${siteUpdatedProblem}`);
+
+/*
+ * Every indexable URL needs an editorial case before it can be published.
+ *
+ * This is intentionally not rendered as a "not spam" badge. A page cannot
+ * prove its value by saying that it has value. These records make the editor
+ * name a distinct reader outcome and the evidence that should be visible in
+ * the body; the checks below catch missing, copied, and placeholder cases.
+ */
+for (const field of ['value', 'evidence']) {
+	const seen = new Map();
+	for (const page of PAGES) {
+		if (page.noindex) continue;
+		const statement = page.editorial?.[field];
+		const problem = editorialStatementProblem(statement);
+		if (problem) {
+			fail(page.slug, `editorial ${field} ${problem}`);
+			continue;
+		}
+		const normalized = statement.replace(/\s+/g, ' ').trim().toLocaleLowerCase('en');
+		const first = seen.get(normalized);
+		if (first) {
+			fail(page.slug, `editorial ${field} duplicates ${first}`);
+		} else {
+			seen.set(normalized, page.slug);
+		}
+	}
+}
+
+/*
+ * A ledger promise must remain connected to the article it describes.
+ *
+ * These exact markers cannot prove that the explanation is correct or useful;
+ * they can prove that an edit did not leave the internal justification pointing
+ * at evidence that is no longer on the page. Semantic review remains human.
+ */
+for (const page of PAGES) {
+	if (page.noindex) continue;
+	const proofs = page.editorial?.proofs;
+	if (!Array.isArray(proofs) || proofs.length < 2 || proofs.length > 3) {
+		fail(page.slug, 'editorial record must name two or three concrete proof markers');
+		continue;
+	}
+	if (new Set(proofs).size !== proofs.length) {
+		fail(page.slug, 'editorial proof markers contain a duplicate');
+	}
+	const article = editorialBodyOf(built.get(page.slug) ?? '');
+	for (const proof of proofs) {
+		if (typeof proof !== 'string' || proof.trim().length < 6 || /<[^>]*>/.test(proof)) {
+			fail(page.slug, 'has an invalid editorial proof marker');
+			continue;
+		}
+		if (!article.includes(proof)) {
+			fail(page.slug, `editorial proof is absent from the authored article: "${proof}"`);
+		}
+	}
+}
+
+const guideSources = new Map();
+for (const page of PAGES) {
+	if (page.noindex) continue;
+	const updatedProblem = calendarDateProblem(page.updated);
+	if (!Object.hasOwn(page, 'updated') || updatedProblem) {
+		fail(page.slug, `updated date ${updatedProblem ?? 'must be explicit'}`);
+	}
+	if (Object.hasOwn(page, 'reviewed')) {
+		const reviewedProblem = calendarDateProblem(page.reviewed);
+		if (reviewedProblem) fail(page.slug, `reviewed date ${reviewedProblem}`);
+		if (!updatedProblem && !reviewedProblem && page.reviewed < page.updated) {
+			fail(page.slug, 'reviewed date is earlier than its last material update');
+		}
+	}
+	if (page.guide) {
+		const source = typeof page.sourced === 'function' ? page.sourced(SITE) : page.sourced;
+		const sourceProblem = sourceNoteProblem(source);
+		if (sourceProblem) {
+			fail(page.slug, `guide source/testing note ${sourceProblem}`);
+			continue;
+		}
+		const normalized = source
+			.replace(/<[^>]+>/g, ' ')
+			.replace(/\s+/g, ' ')
+			.trim()
+			.toLocaleLowerCase('en');
+		const first = guideSources.get(normalized);
+		if (first) {
+			fail(page.slug, `guide source/testing note duplicates ${first}`);
+		} else {
+			guideSources.set(normalized, page.slug);
+		}
+	}
+}
+
 for (const [slug, html] of built) {
 	const page = PAGES.find((p) => p.slug === slug);
 	const path = slug === 'index' ? '' : slug;
+	const modified = page.updated ?? SITE.updated;
+	const reviewed = page.reviewed ?? modified;
 
 	// Structure. One H1 per page is not a style preference: it is what tells a
 	// crawler what the page is about, and two of them means neither is trusted.
@@ -109,16 +231,95 @@ for (const [slug, html] of built) {
 		}
 	}
 
+	// Modification and review are different claims. Search metadata gets the last
+	// material change; the visible row gets the latest genuine fact-check.
+	const modifiedMeta = /<meta property="article:modified_time" content="([^"]*)">/.exec(html);
+	if (!modifiedMeta || count(html, /property="article:modified_time"/g) !== 1) {
+		fail(slug, 'does not render exactly one article:modified_time value');
+	} else if (modifiedMeta[1] !== modified) {
+		fail(slug, `renders modified date ${modifiedMeta[1]}, expected ${modified}`);
+	}
+
+	const guideMetaCount = count(html, /<div class="guide-meta">/g);
+	const reviewedRowCount = count(html, /<p class="reviewed">/g);
+	if (page.guide) {
+		if (guideMetaCount !== 1) {
+			fail(slug, `renders ${guideMetaCount} guide metadata rows, expected exactly 1`);
+		}
+		if (reviewedRowCount !== 0) {
+			fail(slug, 'renders the non-guide review row as well as guide metadata');
+		}
+		const guideMeta = /<div class="guide-meta">([\s\S]*?)<\/div>/.exec(html)?.[1] ?? '';
+		const source = typeof page.sourced === 'function' ? page.sourced(SITE) : page.sourced;
+		if (!hasDatedTime(guideMeta, reviewed)) {
+			fail(slug, `guide metadata does not render reviewed date ${reviewed}`);
+		}
+		if (!guideMeta.includes(`<a href="/owners">${SITE.publisher}</a>`)) {
+			fail(slug, 'guide metadata does not name and link the responsible publisher');
+		}
+		if (
+			!guideMeta.includes('<strong>Sources and testing:</strong>') ||
+			!guideMeta.includes(source)
+		) {
+			fail(slug, 'guide metadata does not render its declared source/testing evidence');
+		}
+		if (
+			!guideMeta.includes(
+				'<a class="method" href="/owners#how-these-guides-are-written">Editorial method</a>'
+			)
+		) {
+			fail(slug, 'guide metadata does not link the editorial method');
+		}
+	} else if (page.noindex) {
+		if (guideMetaCount !== 0 || reviewedRowCount !== 0) {
+			fail(slug, 'noindex utility page renders publication metadata');
+		}
+	} else {
+		if (guideMetaCount !== 0) fail(slug, 'non-guide page renders guide metadata');
+		if (reviewedRowCount !== 1) {
+			fail(slug, `renders ${reviewedRowCount} review rows, expected exactly 1`);
+		}
+		const reviewRow = /<p class="reviewed">([\s\S]*?)<\/p>/.exec(html)?.[1] ?? '';
+		if (!hasDatedTime(reviewRow, reviewed)) {
+			fail(slug, `review row does not render reviewed date ${reviewed}`);
+		}
+		if (!reviewRow.includes(`<a href="/owners">${SITE.publisher}</a>`)) {
+			fail(slug, 'review row does not name and link the responsible publisher');
+		}
+		if (
+			!reviewRow.includes('<a href="/owners#how-these-guides-are-written">Editorial method</a>')
+		) {
+			fail(slug, 'review row does not link the editorial method');
+		}
+	}
+
 	// Structured data has to parse, or it is worse than absent.
+	const expectedStructuredModified = page.structuredData
+		? valuesNamed(page.structuredData(SITE), 'dateModified').length
+		: 0;
+	let renderedStructuredModified = 0;
 	for (const [, json] of html.matchAll(
 		/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g
 	)) {
 		try {
 			const parsed = JSON.parse(json);
 			if (!parsed['@context']) fail(slug, 'structured data has no @context');
+			const declaredModified = valuesNamed(parsed, 'dateModified');
+			renderedStructuredModified += declaredModified.length;
+			for (const declared of declaredModified) {
+				if (declared !== modified) {
+					fail(slug, `structured data renders dateModified ${declared}, expected ${modified}`);
+				}
+			}
 		} catch (error) {
 			fail(slug, `structured data is not valid JSON: ${error.message}`);
 		}
+	}
+	if (renderedStructuredModified !== expectedStructuredModified) {
+		fail(
+			slug,
+			`renders ${renderedStructuredModified} structured dateModified values, expected ${expectedStructuredModified}`
+		);
 	}
 
 	// Every internal link must go somewhere that exists — a page, a hashed asset,
@@ -147,8 +348,9 @@ for (const [slug, html] of built) {
 		}
 	}
 
-	// Thin pages were the thing to avoid, so measure it rather than assume it.
-	const words = html
+	// Thin pages were the thing to avoid, so measure the page's answer rather
+	// than shared navigation, the footer, a review solicitation, or byline copy.
+	const words = editorialBodyOf(html)
 		.replace(/<script[\s\S]*?<\/script>/g, '')
 		.replace(/<[^>]+>/g, ' ')
 		.split(/\s+/)
@@ -215,7 +417,7 @@ for (const [field, read] of uniqueFields) {
  * collections. Guide pages are required to live under a deliberate hub.
  */
 /*
- * **Two pages that say the same thing in different words.**
+ * **Two pages that reuse the same exact wording.**
  *
  * The duplicate title, description and H1 checks above are exact-match: they
  * catch a copied field, not a copied page. Google's scaled content abuse policy
@@ -223,30 +425,20 @@ for (const [field, read] of uniqueFields) {
  * rankings and not helping users", and the shape that produces is a family of
  * pages whose bodies are substantially the same with the query swapped.
  *
- * Measured as the overlap of six-word runs, over `<main>` only — the shared
- * header, nav and footer are identical on all 32 pages by design and would
- * drown the signal. When this was written the highest overlap between any two
- * pages was 5.1%, and the median page ran to 817 words, so 30% is far above
- * anything the site does today and far below two pages worth merging.
+ * Measured as the overlap of six-word runs in the authored article only. The
+ * Jaccard score catches two similarly sized copies; containment also catches a
+ * short page pasted substantially intact into a longer one, which Jaccard can
+ * dilute below its threshold.
  *
- * This is deliberately a floor rather than a style guide: it cannot tell a
- * useful sibling page from a spun one, only that two pages have stopped being
- * distinguishable. Editorial judgement still belongs in review.
+ * This is deliberately a mechanical floor rather than AI or semantic-content
+ * detection. It does not catch a paraphrase and cannot decide whether two
+ * related pages are genuinely useful. Those judgements still belong in review.
  */
-const SIMILARITY_LIMIT = 0.3;
-
-function shingles(text) {
-	const words = text.toLowerCase().match(/[a-z']+/g) ?? [];
-	const out = new Set();
-	for (let i = 0; i + 6 <= words.length; i++) out.add(words.slice(i, i + 6).join(' '));
-	return out;
-}
-
 {
 	const bodies = new Map();
 	for (const page of PAGES) {
 		if (page.noindex) continue;
-		const text = mainOf(built.get(page.slug) ?? '')
+		const text = editorialBodyOf(built.get(page.slug) ?? '')
 			.replace(/<script[\s\S]*?<\/script>/g, ' ')
 			.replace(/<style[\s\S]*?<\/style>/g, ' ')
 			.replace(/<[^>]+>/g, ' ')
@@ -260,13 +452,15 @@ function shingles(text) {
 		for (let j = i + 1; j < slugs.length; j++) {
 			const a = bodies.get(slugs[i]);
 			const b = bodies.get(slugs[j]);
-			let shared = 0;
-			for (const run of a) if (b.has(run)) shared++;
-			const overlap = shared / (a.size + b.size - shared);
-			if (overlap >= SIMILARITY_LIMIT) {
+			const scores = overlapScores(a, b);
+			if (scores.jaccard >= JACCARD_LIMIT || scores.containment >= CONTAINMENT_LIMIT) {
+				const measure =
+					scores.containment >= CONTAINMENT_LIMIT
+						? `${Math.round(scores.containment * 100)}% of the shorter page's wording`
+						: `${Math.round(scores.jaccard * 100)}% Jaccard wording overlap`;
 				fail(
 					slugs[i],
-					`shares ${Math.round(overlap * 100)}% of its wording with ${slugs[j]} — ` +
+					`shares ${measure} with ${slugs[j]} — ` +
 						'two pages this alike need merging, or one needs a reason to exist'
 				);
 			}
@@ -349,11 +543,31 @@ for (const page of PAGES) {
 const sitemap = existsSync(join(dist, 'sitemap.xml'))
 	? readFileSync(join(dist, 'sitemap.xml'), 'utf8')
 	: '';
+const sitemapEntries = [
+	...sitemap.matchAll(/<url><loc>([^<]+)<\/loc><lastmod>([^<]+)<\/lastmod><\/url>/g)
+].map(([, url, lastmod]) => ({ url, lastmod }));
+if (count(sitemap, /<url>/g) !== sitemapEntries.length) {
+	fail('sitemap', 'contains a malformed URL entry');
+}
+
 for (const page of PAGES) {
 	const url = `https://opendesktopauthenticator.com/${page.slug === 'index' ? '' : page.slug}`;
-	const listed = sitemap.includes(`<loc>${url}</loc>`);
-	if (page.noindex && listed) fail('sitemap', `lists ${url}, which is noindex`);
-	if (!page.noindex && !listed) fail('sitemap', `is missing ${url}`);
+	const entries = sitemapEntries.filter((entry) => entry.url === url);
+	if (page.noindex && entries.length > 0) fail('sitemap', `lists ${url}, which is noindex`);
+	if (!page.noindex && entries.length === 0) fail('sitemap', `is missing ${url}`);
+	if (!page.noindex && entries.length > 1) fail('sitemap', `lists ${url} more than once`);
+	if (!page.noindex && entries[0]?.lastmod !== (page.updated ?? SITE.updated)) {
+		fail(
+			'sitemap',
+			`has lastmod ${entries[0]?.lastmod ?? '(missing)'} for ${url}, expected ${page.updated ?? SITE.updated}`
+		);
+	}
+}
+for (const { url } of sitemapEntries) {
+	const known = PAGES.some(
+		(page) => `${SITE.origin}/${page.slug === 'index' ? '' : page.slug}` === url && !page.noindex
+	);
+	if (!known) fail('sitemap', `lists unknown or non-indexable URL ${url}`);
 }
 
 /*

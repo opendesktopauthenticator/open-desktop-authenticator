@@ -86,6 +86,7 @@ const site = (release: Release) => ({
 		}
 	},
 	origin: 'https://example.test',
+	repo: 'https://github.com/opendesktopauthenticator/open-desktop-authenticator',
 	/*
 	 * `reviewAsk` reads these; the rest of SITE is not reached by any body here.
 	 * The widget block is read too — the ask embeds Trustpilot's collector — and
@@ -521,5 +522,18 @@ describe('the verify page and the signature that may not exist yet', () => {
 		expect(body).toContain('--certificate-identity ');
 		expect(body).not.toContain('--certificate-identity-regexp');
 		expect(body).toContain('/.github/workflows/release.yml@refs/tags/');
+	});
+
+	it('constrains GitHub attestation verification to this repository, workflow and tag', () => {
+		const body = verifyBody({ ...NOTHING, signed: true });
+		expect(body).toContain(
+			'gh attestation verify &lt;file&gt; --repo opendesktopauthenticator/open-desktop-authenticator'
+		);
+		expect(body).toContain(
+			'--signer-workflow opendesktopauthenticator/open-desktop-authenticator/.github/workflows/release.yml'
+		);
+		expect(body).toContain('--source-ref refs/tags/vX.Y.Z');
+		expect(body).toContain('--deny-self-hosted-runners');
+		expect(body).not.toContain('--owner opendesktopauthenticator');
 	});
 });
