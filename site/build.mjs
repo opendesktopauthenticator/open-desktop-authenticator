@@ -27,12 +27,13 @@
 
 import { mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
 import { rootIcons, hashedIcons, manifest } from './icons.mjs';
 import { checkAddresses } from './addresses.mjs';
 import { escape, releaseGaps, reviewAsk, sentenceList } from './markup.mjs';
+import { formatPublicationDate } from './quality.mjs';
 import { anchorHeadings, readingMinutes, guideMeta, jumpList } from './guide-kit.mjs';
 import {
 	browserFeatureCopy,
@@ -80,11 +81,14 @@ export const SITE = {
 	tagline: 'An open-source Steam authenticator for the desktop.',
 	publisher: 'MASTERPANEL LLC',
 	/*
-	 * When the content was last reviewed. A real date, set by hand.
+	 * The fallback date of the last material content change. A real date, set by
+	 * hand.
 	 *
 	 * Not `new Date()`: stamping every page with the build date claims a review
 	 * that did not happen, and a site whose every page updates whenever CSS
 	 * changes is telling search engines something false about its freshness.
+	 * Pages may separately carry `reviewed` for a newer fact-check that did not
+	 * materially change the article.
 	 */
 	updated: '2026-08-27',
 
@@ -144,7 +148,7 @@ export const SITE = {
 	 * release and does not move when a later one goes out.
 	 */
 	get releasedOn() {
-		return formatDate(Object.values(this.publishedOn).sort()[0]);
+		return formatPublicationDate(Object.values(this.publishedOn).sort()[0]);
 	},
 	/** GA4 measurement ID. Referenced by head() and by the CSP host allowlist. */
 	analyticsId: 'G-G0GE9H5VR7',
@@ -673,23 +677,36 @@ function head(page, collectsReviews) {
  * another, in a field only a machine reads and only an audit would catch. Two
  * pages had it exactly backwards: each was publishing the other's date.
  *
- * The page's own `updated` is the truth here, and the visible "Last reviewed"
- * line already uses it. Overwriting rather than defaulting is deliberate: a
- * default still lets a page state a date, and a page stating its own date is
- * the thing that went wrong.
+ * The page's own `updated` is the truth here. A later review-only date belongs
+ * in `reviewed` and is intentionally not emitted as `dateModified`.
+ * Overwriting rather than defaulting is deliberate: a default still lets a
+ * page state a date, and a page stating its own date is the thing that went
+ * wrong.
  */
 function datedFor(page) {
 	const data = page.structuredData(SITE);
 	const on = page.updated ?? SITE.updated;
-	for (const key of ['datePublished', 'dateModified']) {
-		if (key in data) data[key] = on;
-	}
-	// `mainEntity` carries its own dates on the FAQ page.
+	// A top-level publication date describes this page. A nested
+	// SoftwareApplication datePublished describes a release and must remain the
+	// real release date, so datePublished is not rewritten recursively.
+	if ('datePublished' in data) data.datePublished = on;
+
+	// Article objects can live inside @graph. Walk the whole structure so a page
+	// update cannot leave a hard-coded nested dateModified behind.
+	const synchronizeModified = (value) => {
+		if (Array.isArray(value)) {
+			for (const item of value) synchronizeModified(item);
+		} else if (value !== null && typeof value === 'object') {
+			if ('dateModified' in value) value.dateModified = on;
+			for (const item of Object.values(value)) synchronizeModified(item);
+		}
+	};
+	synchronizeModified(data);
+
+	// `mainEntity` may carry its own page-publication date on an FAQ.
 	if (Array.isArray(data.mainEntity)) {
 		for (const entry of data.mainEntity) {
-			for (const key of ['datePublished', 'dateModified']) {
-				if (key in entry) entry[key] = on;
-			}
+			if ('datePublished' in entry) entry.datePublished = on;
 		}
 	}
 	return data;
@@ -732,14 +749,6 @@ function breadcrumbs(page) {
 	};
 }
 
-const formatDate = (iso) =>
-	new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', {
-		day: 'numeric',
-		month: 'long',
-		year: 'numeric',
-		timeZone: 'UTC'
-	});
-
 /**
  * The breadcrumb the reader sees.
  *
@@ -777,18 +786,20 @@ function layout(page) {
 	 * this point means it applies to every existing page and to the next one
 	 * without anybody remembering to add it.
 	 */
-	const iso = page.updated ?? SITE.updated;
+	const modified = page.updated ?? SITE.updated;
+	const reviewed = page.reviewed ?? modified;
 	let body = anchorHeadings(page.body(SITE));
 	if (page.guide) {
 		body = jumpList(
 			body.replace(
 				'</h1>',
 				`</h1>\n${guideMeta(
-					iso,
-					formatDate(iso),
+					reviewed,
+					formatPublicationDate(reviewed),
 					readingMinutes(body),
 					// A page whose sourcing line carries a link needs SITE to build it.
-					typeof page.sourced === 'function' ? page.sourced(SITE) : page.sourced
+					typeof page.sourced === 'function' ? page.sourced(SITE) : page.sourced,
+					SITE.publisher
 				)}`
 			)
 		);
@@ -818,7 +829,11 @@ function layout(page) {
 ${page.hero ? page.hero(SITE) : ''}
 ${trail(page)}
 ${body}
-		<p class="reviewed">Last reviewed <time datetime="${iso}">${formatDate(iso)}</time>.</p>
+		${
+			page.noindex || page.guide
+				? ''
+				: `<p class="reviewed">Published and reviewed by <a href="/owners">${escape(SITE.publisher)}</a>. Last checked <time datetime="${reviewed}">${formatPublicationDate(reviewed)}</time>. <a href="/owners#how-these-guides-are-written">Editorial method</a>.</p>`
+		}
 	</main>
 
 	<footer class="site-foot">
@@ -838,6 +853,7 @@ ${body}
 				<a href="/docs">Documentation</a>
 				<a href="/faq">FAQ</a>
 				<a href="/owners">Who we are</a>
+				<a href="/owners#how-these-guides-are-written">Editorial method</a>
 				<a href="/support">Report a problem</a>
 				<a href="/credits">Credits</a>
 				<a href="/donate">Donate</a>
@@ -903,8 +919,20 @@ ${body}
 
 /* ------------------------------------------------------------------ build -- */
 
-rmSync(out, { recursive: true, force: true });
-mkdirSync(out, { recursive: true });
+/*
+ * Importing SITE is a read-only operation.
+ *
+ * The verifier imports this module for the shared facts. Before this guard,
+ * that import silently deleted and rebuilt site/dist, so a missing or tampered
+ * generated file could repair itself immediately before it was checked.
+ */
+const shouldBuild =
+	process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (shouldBuild) {
+	rmSync(out, { recursive: true, force: true });
+	mkdirSync(out, { recursive: true });
+}
 
 /**
  * Assets, with a content hash in the filename.
@@ -956,7 +984,7 @@ function publishAssets() {
 	return map;
 }
 
-const ASSETS = publishAssets();
+const ASSETS = shouldBuild ? publishAssets() : new Map();
 
 /** The published path of an asset, hash included. */
 const asset = (name) => ASSETS.get(`/assets/${name}`) ?? `/assets/${name}`;
@@ -971,10 +999,12 @@ function fingerprint(html) {
 	return out;
 }
 
-for (const page of PAGES) {
-	const file = join(out, `${page.slug}.html`);
-	mkdirSync(dirname(file), { recursive: true });
-	writeFileSync(file, fingerprint(layout(page)));
+if (shouldBuild) {
+	for (const page of PAGES) {
+		const file = join(out, `${page.slug}.html`);
+		mkdirSync(dirname(file), { recursive: true });
+		writeFileSync(file, fingerprint(layout(page)));
+	}
 }
 
 /**
@@ -993,10 +1023,12 @@ for (const page of PAGES) {
  * relies on revalidation rather than an immutable URL. nginx serves them with a
  * short max-age for exactly that reason.
  */
-for (const [name, bytes] of rootIcons()) {
-	writeFileSync(join(out, name), bytes);
+if (shouldBuild) {
+	for (const [name, bytes] of rootIcons()) {
+		writeFileSync(join(out, name), bytes);
+	}
+	writeFileSync(join(out, 'site.webmanifest'), manifest(SITE, asset));
 }
-writeFileSync(join(out, 'site.webmanifest'), manifest(SITE, asset));
 
 /*
  * RFC 9116.
@@ -1020,13 +1052,16 @@ expires.setUTCFullYear(expires.getUTCFullYear() + 1);
  * meta tag and a file naming different keys is the one failure mode of
  * publishing both, and it verifies nothing while looking like it should.
  */
-for (const v of SITE.verifications.filter((entry) => entry.file)) {
-	writeFileSync(join(out, `gridinsoft-${v.token}.txt`), v.token);
+if (shouldBuild) {
+	for (const v of SITE.verifications.filter((entry) => entry.file)) {
+		writeFileSync(join(out, `gridinsoft-${v.token}.txt`), v.token);
+	}
 }
 
-writeFileSync(
-	join(out, 'security.txt'),
-	`# ${SITE.name} — how to report a security problem.
+if (shouldBuild)
+	writeFileSync(
+		join(out, 'security.txt'),
+		`# ${SITE.name} — how to report a security problem.
 #
 # Listed in preference order. GitHub's private reporting threads and does not
 # depend on a mailbox staying monitored; the address is read as well.
@@ -1038,11 +1073,12 @@ Preferred-Languages: en
 Canonical: ${SITE.origin}/.well-known/security.txt
 Policy: ${SITE.repo}/blob/main/SECURITY.md
 `
-);
+	);
 
-writeFileSync(
-	join(out, 'sitemap.xml'),
-	`<?xml version="1.0" encoding="UTF-8"?>
+if (shouldBuild)
+	writeFileSync(
+		join(out, 'sitemap.xml'),
+		`<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
 ${PAGES.filter((p) => !p.noindex)
 	.map(
@@ -1057,7 +1093,7 @@ ${PAGES.filter((p) => !p.noindex)
 	.join('\n')}
 </urlset>
 `
-);
+	);
 
 /*
  * `llms.txt` — a map of this site for language models (llmstxt.org).
@@ -1161,9 +1197,10 @@ const LLMS_SECTIONS = [
 		return `- [${page.title}](${url(slug)}): ${descriptionOf(page)}`;
 	};
 
-	writeFileSync(
-		join(out, 'llms.txt'),
-		`# ${SITE.name}
+	if (shouldBuild)
+		writeFileSync(
+			join(out, 'llms.txt'),
+			`# ${SITE.name}
 
 > A free, open-source Steam Guard authenticator for the desktop. It generates Steam Guard codes, approves Steam trade and market confirmations, and imports maFiles from Steam Desktop Authenticator (SDA). Published by ${SITE.publisher} under the MIT licence. Commonly abbreviated ${SITE.short}.
 
@@ -1229,12 +1266,13 @@ ${section.slugs.map(link).join(`
 
 `)}
 `
-	);
+		);
 }
 
-writeFileSync(
-	join(out, 'robots.txt'),
-	`# ${SITE.name}
+if (shouldBuild)
+	writeFileSync(
+		join(out, 'robots.txt'),
+		`# ${SITE.name}
 # Everything here is meant to be found. The only disallowed paths are the ones
 # that would waste a crawler's time or index a one-off token.
 User-agent: *
@@ -1244,10 +1282,12 @@ Disallow: /admin
 
 Sitemap: ${SITE.origin}/sitemap.xml
 `
-);
+	);
 
-process.stdout.write(
-	`${PAGES.length} pages + sitemap + robots → site/dist\n` +
-		PAGES.map((p) => `  /${p.slug === 'index' ? '' : p.slug}`).join('\n') +
-		'\n'
-);
+if (shouldBuild) {
+	process.stdout.write(
+		`${PAGES.length} pages + sitemap + robots → site/dist\n` +
+			PAGES.map((p) => `  /${p.slug === 'index' ? '' : p.slug}`).join('\n') +
+			'\n'
+	);
+}

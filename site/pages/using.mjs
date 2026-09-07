@@ -29,10 +29,11 @@ export const confirmationsOnDesktop = {
 	parent: 'docs',
 	guide: true,
 	// Valve documents the feature; the wire protocol is from open implementations.
-	sourced: 'Checked against Valve documentation and current Steam protocol implementations',
+	sourced: `Feature status checked against <a href="${VALVE.confirmations}" rel="noopener">Valve's confirmation guidance</a>; request tags and session requirements against <a href="https://github.com/DoctorMcKay/node-steamcommunity/blob/master/components/confirmations.js" rel="noopener">node-steamcommunity's public implementation</a>`,
 	navTitle: 'Confirmations on PC',
 	title: 'How Steam trade confirmations work on desktop',
-	updated: '2026-08-14',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		'What actually signs a Steam trade confirmation, why desktop tools can do it, and the two questions to ask any software you let approve trades.',
 	structuredData: (s) => ({
@@ -41,7 +42,7 @@ export const confirmationsOnDesktop = {
 		headline: 'How Steam trade confirmations work on desktop',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
-		dateModified: '2026-08-14',
+		dateModified: '2026-09-08',
 		mainEntityOfPage: `${s.origin}/approve-steam-confirmations-desktop`
 	}),
 	body: (s) => `
@@ -229,9 +230,12 @@ export const mobileVsDesktop = {
 	slug: 'steam-mobile-vs-desktop-authenticator',
 	parent: 'docs',
 	guide: true,
+	sourced: (s) =>
+		`Official-app features and the one-authenticator rule checked against <a href="${VALVE.guard}" rel="noopener">Valve's guidance</a>; desktop claims against <a href="${s.repo}" rel="noopener">this project's source</a>`,
 	navTitle: 'Mobile or desktop',
 	title: 'Steam mobile app or a desktop authenticator?',
-	updated: '2026-08-25',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		'An honest comparison of Steam Guard on the official mobile app versus a desktop authenticator, including who should ignore the desktop option entirely.',
 	structuredData: (s) => ({
@@ -240,7 +244,7 @@ export const mobileVsDesktop = {
 		headline: 'Steam mobile app or a desktop authenticator?',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
-		dateModified: '2026-08-14',
+		dateModified: '2026-09-08',
 		mainEntityOfPage: `${s.origin}/steam-mobile-vs-desktop-authenticator`
 	}),
 	body: (s) => `
@@ -495,9 +499,11 @@ export const withoutPhone = {
 	slug: 'steam-guard-without-phone',
 	parent: 'docs',
 	guide: true,
+	sourced: `No-number setup checked against <a href="${VALVE.setup}" rel="noopener">Valve's enrolment guidance</a>; the email-code path includes one labelled no-number account observation`,
 	navTitle: 'Without a phone',
 	title: 'Steam Guard without a smartphone',
-	updated: '2026-08-14',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		'Steam’s official authenticator needs Android or iOS, but a phone number is optional. What desktop tools change, and what you lose without SMS recovery.',
 	structuredData: (s) => ({
@@ -506,7 +512,7 @@ export const withoutPhone = {
 		headline: 'Steam Guard without a smartphone',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
-		dateModified: '2026-08-14',
+		dateModified: '2026-09-08',
 		mainEntityOfPage: `${s.origin}/steam-guard-without-phone`
 	}),
 	body: (s) => `
@@ -690,10 +696,11 @@ export const openMafile = {
 	parent: 'docs',
 	guide: true,
 	sourced: (s) =>
-		`Checked against <a href="${s.sda.repo}" rel="noopener">SDA's source code</a> and on-disk file format`,
+		`File identification and opening branches checked against <a href="${s.sda.repo}" rel="noopener">SDA's published source and maFile layout</a>`,
 	navTitle: 'Opening a maFile',
 	title: 'How to open a Steam maFile safely',
-	updated: '2026-08-14',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		'An unencrypted maFile is JSON you can read in Notepad; encrypted ones need the SDA passphrase and manifest.json. How to inspect one safely.',
 	structuredData: (s) => ({

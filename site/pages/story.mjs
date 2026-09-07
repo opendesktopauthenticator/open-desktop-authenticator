@@ -19,7 +19,7 @@
 
 export default {
 	slug: 'steam-inventory-stolen',
-	updated: '2026-08-25',
+	updated: '2026-09-08',
 	navTitle: 'Our story',
 	title: 'A fake SDA download emptied my Steam inventory',
 	description:
@@ -44,6 +44,17 @@ export default {
 				exists, and the reason the rest of this site is written the way it is. Nothing
 				here is hypothetical.
 			</p>
+
+			<div class="callout">
+				<p>
+					<strong>First-hand basis.</strong> A member of the MASTERPANEL LLC team
+					wrote this from their own experience. The person is deliberately unnamed, but
+					the publisher is accountable for the page. It is a personal account, not a
+					forensic analysis of the counterfeit binary: only details the person could
+					state plainly are included, and an unclear figure from the original telling was
+					left out rather than reconstructed.
+				</p>
+			</div>
 
 			<h2>I had already done it right once</h2>
 			<p>

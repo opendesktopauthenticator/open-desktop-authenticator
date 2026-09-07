@@ -157,9 +157,12 @@ export const mafile = {
 export const lostAuthenticator = {
 	slug: 'lost-authenticator',
 	parent: 'docs',
+	guide: true,
+	sourced:
+		'Recovery routes checked against <a href="https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31" rel="noopener">Valve\'s current Steam Guard guidance</a>; no undocumented bypass or support duration is asserted',
 	// Edited 14 Aug (UTC) to drop the unsupported Support durations. Without
 	// this the page inherits SITE.updated and advertises a stale lastmod.
-	updated: '2026-08-14',
+	updated: '2026-09-08',
 	navTitle: 'Lost access',
 	title: 'Lost your Steam authenticator?',
 	description:
@@ -185,7 +188,7 @@ export const lostAuthenticator = {
 		]
 	}),
 	body: () => `
-		<article>
+		<article class="guide">
 			<h1>Lost your Steam authenticator?</h1>
 			<p class="lede">
 				A dead phone, a wiped machine, a deleted folder. This page is the order to try

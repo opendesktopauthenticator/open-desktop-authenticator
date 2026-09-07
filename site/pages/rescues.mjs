@@ -22,20 +22,25 @@ import { timeWindowDiagram, tradeHoldDiagram, manifestDiagram } from '../diagram
 const VALVE = {
 	guard: 'https://help.steampowered.com/en/faqs/view/7EFD-3CAE-64D3-1C31',
 	restrictions: 'https://help.steampowered.com/en/faqs/view/451E-96B3-D194-50FC',
-	transfer: 'https://help.steampowered.com/en/faqs/view/29A9-9EEE-09F0-75F9'
+	transfer: 'https://help.steampowered.com/en/faqs/view/29A9-9EEE-09F0-75F9',
+	emailCode: 'https://help.steampowered.com/en/wizard/HelpWithSteamGuardCode'
 };
 
 /** SDA's own encryption implementation — these are source-level claims. */
 const SDA_ENCRYPTOR =
 	'https://github.com/Jessecar96/SteamDesktopAuthenticator/blob/master/Steam%20Desktop%20Authenticator/FileEncryptor.cs';
+const SDA_MANIFEST =
+	'https://github.com/Jessecar96/SteamDesktopAuthenticator/blob/master/Steam%20Desktop%20Authenticator/Manifest.cs';
 
 export const codeNotWorking = {
 	slug: 'steam-guard-code-not-working',
 	parent: 'docs',
 	guide: true,
+	sourced: `Clock and account checks from <a href="${VALVE.guard}" rel="noopener">Valve's Steam Guard troubleshooting</a>; email delivery from <a href="${VALVE.emailCode}" rel="noopener">Valve's code-help page</a>; durations from <a href="${VALVE.restrictions}" rel="noopener">Valve's restriction guidance</a>`,
 	navTitle: 'Codes not working',
 	title: 'Steam Guard code not working? Check the clock',
-	updated: '2026-08-14',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		'Steam Guard codes come from the clock, so a device set wrong makes every code wrong. How to fix time sync on Windows and phone, and what to check next.',
 	/*
@@ -61,7 +66,7 @@ export const codeNotWorking = {
 				headline: 'Steam Guard code not working? Check the clock',
 				author: { '@type': 'Organization', name: s.publisher },
 				publisher: { '@type': 'Organization', name: s.publisher },
-				dateModified: '2026-08-14',
+				dateModified: '2026-09-08',
 				mainEntityOfPage: `${s.origin}/steam-guard-code-not-working`
 			},
 			{
@@ -243,8 +248,9 @@ ${timeWindowDiagram()}
 			<p>
 				That is a different problem from a code being refused: nothing was generated
 				to reject. Check the address on the account and the spam folder first. For an
-				<strong>emailed</strong> code, Valve's guidance is to allow up to thirty
-				minutes and then sign in again to request another. For an
+				<strong>emailed</strong> code,
+				<a href="${VALVE.emailCode}" rel="noopener">Valve's guidance is to allow up
+				to thirty minutes and then sign in again to request another</a>. For an
 				<strong>SMS</strong> code the advice is the opposite — Steam stops sending
 				after too many requests in a row, so asking repeatedly delays it further.
 			</p>
@@ -299,9 +305,11 @@ export const moveAuthenticator = {
 	slug: 'move-steam-authenticator-new-phone',
 	parent: 'docs',
 	guide: true,
+	sourced: `Steps checked against <a href="${VALVE.transfer}" rel="noopener">Valve's transfer walkthrough</a>; durations against its <a href="${VALVE.guard}" rel="noopener">Guard</a> and <a href="${VALVE.restrictions}" rel="noopener">restriction</a> guidance`,
 	navTitle: 'New phone',
 	title: 'Move your Steam authenticator to a new phone: 2 days, not 15',
-	updated: '2026-08-14',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		"How to move Steam Guard to a new phone using Steam's own transfer route — a 2-day trade hold, instead of the 15 days that removing and re-adding costs.",
 	structuredData: (s) => ({
@@ -496,9 +504,11 @@ export const revocationCode = {
 	slug: 'steam-revocation-code',
 	parent: 'docs',
 	guide: true,
+	sourced: `Recovery steps checked against <a href="${VALVE.guard}" rel="noopener">Valve's guidance</a>; removal requirements against <a href="https://github.com/DoctorMcKay/node-steamcommunity/blob/master/components/twofactor.js" rel="noopener">node-steamcommunity's public implementation</a>`,
 	navTitle: 'Recovery code',
 	title: 'Steam revocation code: what it is, and how to get it back',
-	updated: '2026-08-14',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		'The R-code that detaches a Steam authenticator when the device is gone — what it does, and how to retrieve yours while the authenticator still works.',
 	structuredData: (s) => ({
@@ -507,7 +517,7 @@ export const revocationCode = {
 		headline: 'Steam revocation code: what it is, and how to get it back',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
-		dateModified: '2026-08-14',
+		dateModified: '2026-09-08',
 		mainEntityOfPage: `${s.origin}/steam-revocation-code`
 	}),
 	body: (s) => `
@@ -706,10 +716,11 @@ export const encryptedMafile = {
 	parent: 'docs',
 	guide: true,
 	// Valve documents none of this. The format and the crypto are SDA's.
-	sourced: `Checked against <a href="${SDA_ENCRYPTOR}" rel="noopener">SDA's published source code</a>`,
+	sourced: `Encryption, salt and IV handling checked against <a href="${SDA_ENCRYPTOR}" rel="noopener">SDA's FileEncryptor source</a>; manifest entries and file mapping against <a href="${SDA_MANIFEST}" rel="noopener">SDA's Manifest source</a>`,
 	navTitle: 'Encrypted maFiles',
 	title: 'Encrypted maFiles: the password, and the manifest',
-	updated: '2026-08-14',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		'An encrypted SDA maFile needs the passphrase set in SDA plus the manifest.json beside it. Why copying the file alone fails, and what to try next.',
 	structuredData: (s) => ({
@@ -718,7 +729,7 @@ export const encryptedMafile = {
 		headline: 'Encrypted maFiles: the password, and the manifest',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
-		dateModified: '2026-08-14',
+		dateModified: '2026-09-08',
 		mainEntityOfPage: `${s.origin}/encrypted-mafile`
 	}),
 	body: (s) => `

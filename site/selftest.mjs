@@ -22,14 +22,23 @@
  *   node site/selftest.mjs                 # the working tree's verify.mjs
  *   node site/selftest.mjs <verify.mjs>    # some other one, same table
  */
-import { cpSync, readFileSync, writeFileSync, existsSync, symlinkSync, rmSync } from 'node:fs';
+import {
+	cpSync,
+	readFileSync,
+	writeFileSync,
+	existsSync,
+	symlinkSync,
+	rmSync,
+	mkdtempSync
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const REPO = join(fileURLToPath(new URL('.', import.meta.url)), '..');
-const DIR = join(tmpdir(), 'oda-site-selftest');
+// Unique per run: CI and a local audit may execute this harness concurrently.
+const DIR = mkdtempSync(join(tmpdir(), 'oda-site-selftest-'));
 const swapVerifier = process.argv[2];
 
 const ANCHOR_FILE = 'pages/home.mjs';
@@ -209,6 +218,133 @@ for (const [name, sentence, mustFail] of CASES) {
 			(result.note ? `\n            ${result.note}` : '')
 	);
 }
+
+/*
+ * The newer publication gates get end-to-end mutations as well as unit tests.
+ * These build a real site, damage one source or rendered artifact, and require
+ * the verifier to name that damage. The rendered-file case also guards a subtle
+ * regression: importing SITE must never rebuild and silently repair site/dist.
+ */
+const replaceOnce = (relative, from, to) => {
+	const file = join(DIR, relative);
+	const before = readFileSync(file, 'utf8');
+	if (!before.includes(from)) throw new Error(`${relative}: mutation anchor is gone`);
+	writeFileSync(file, before.replace(from, to));
+};
+
+const QUALITY_CASES = [
+	{
+		name: 'future site fallback date',
+		beforeBuild: () =>
+			replaceOnce('site/build.mjs', "updated: '2026-08-27'", "updated: '2099-01-01'"),
+		expected: /SITE: fallback updated date is in the future/
+	},
+	{
+		name: 'impossible material-update date',
+		beforeBuild: () =>
+			replaceOnce('site/pages/owners.mjs', "updated: '2026-09-08'", "updated: '2026-02-30'"),
+		expected: /owners: updated date is not a real calendar date/
+	},
+	{
+		name: 'placeholder guide evidence link',
+		beforeBuild: () =>
+			replaceOnce(
+				'site/pages/safety.mjs',
+				'https://cli.github.com/manual/gh_attestation_verify',
+				'#'
+			),
+		expected: /verify: guide source\/testing note must use a public HTTPS evidence link/
+	},
+	{
+		name: 'ledger proof left only in a hidden comment',
+		beforeBuild: () => {
+			replaceOnce('site/pages/owners.mjs', 'site/editorial.mjs', 'site/editorial-ledger.mjs');
+			replaceOnce('site/pages/owners.mjs', '</article>`', '<!-- site/editorial.mjs --></article>`');
+		},
+		expected: /owners: editorial proof is absent from the authored article/
+	},
+	{
+		name: 'rendered guide metadata removed without a hidden rebuild',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/verify.html',
+				'<div class="guide-meta">',
+				'<div class="guide-meta-removed">'
+			),
+		expected: /verify: renders 0 guide metadata rows, expected exactly 1/,
+		stillDamaged: () =>
+			readFileSync(join(DIR, 'site', 'dist', 'verify.html'), 'utf8').includes(
+				'class="guide-meta-removed"'
+			)
+	},
+	{
+		name: 'publisher name moved outside its accountability link',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/verify.html',
+				'<a href="/owners">MASTERPANEL LLC</a>',
+				'<a href="/owners"></a>MASTERPANEL LLC'
+			),
+		expected: /verify: guide metadata does not name and link the responsible publisher/
+	},
+	{
+		name: 'visible review date contradicts its machine date',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/owners.html',
+				'<time datetime="2026-09-08">8 September 2026</time>',
+				'<time datetime="2026-09-08">31 February 1900</time>'
+			),
+		expected: /owners: review row does not render reviewed date 2026-09-08/
+	},
+	{
+		name: 'stale nested structured-data modification date',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/steam-inventory-stolen.html',
+				'"dateModified":"2026-09-08"',
+				'"dateModified":"2020-01-01"'
+			),
+		expected: /steam-inventory-stolen: structured data renders dateModified 2020-01-01/
+	},
+	{
+		name: 'declared structured-data modification date removed',
+		afterBuild: () =>
+			replaceOnce('site/dist/steam-inventory-stolen.html', ',"dateModified":"2026-09-08"', ''),
+		expected: /steam-inventory-stolen: renders 0 structured dateModified values, expected 1/
+	}
+];
+
+for (const qualityCase of QUALITY_CASES) {
+	setup();
+	let ok = false;
+	let note;
+	try {
+		qualityCase.beforeBuild?.();
+		execFileSync('node', ['site/build.mjs'], { cwd: DIR, stdio: 'pipe' });
+		qualityCase.afterBuild?.();
+		try {
+			execFileSync('node', ['site/verify.mjs'], { cwd: DIR, stdio: 'pipe' });
+			note = 'verifier exited 0';
+		} catch (err) {
+			const output = String(err.stdout || '') + String(err.stderr || '');
+			ok = qualityCase.expected.test(output) && (qualityCase.stillDamaged?.() ?? true);
+			note = output
+				.split('\n')
+				.map((line) => line.trim())
+				.find((line) => line.startsWith('-'));
+			if (qualityCase.stillDamaged && !qualityCase.stillDamaged()) {
+				note = 'verify.mjs silently rebuilt the damaged output';
+			}
+		}
+	} catch (err) {
+		note = String(err.stderr || err.stdout || err).slice(-300);
+	}
+	if (!ok) wrong += 1;
+	console.log(
+		`  ${ok ? 'ok   ' : 'WRONG'} must FAIL  ${qualityCase.name}${note ? `\n            ${note}` : ''}`
+	);
+}
 rmSync(DIR, { recursive: true, force: true });
 
 /*
@@ -219,7 +355,9 @@ rmSync(DIR, { recursive: true, force: true });
  * the thing catching it.
  */
 if (wrong > 0) {
-	console.error(`\n${wrong} of ${CASES.length} wrong — the tripwire does not do what it says`);
+	console.error(
+		`\n${wrong} of ${CASES.length + QUALITY_CASES.length} wrong — the tripwire does not do what it says`
+	);
 	process.exit(1);
 }
-console.log(`\nall ${CASES.length} correct`);
+console.log(`\nall ${CASES.length + QUALITY_CASES.length} correct`);

@@ -27,9 +27,11 @@ export const tradeHolds = {
 	slug: 'steam-guard-trade-holds',
 	parent: 'docs',
 	guide: true,
+	sourced: `Every duration checked against Valve's <a href="${VALVE.restrictions}" rel="noopener">restriction</a>, <a href="${VALVE.holds}" rel="noopener">hold</a> and <a href="${VALVE.guard}" rel="noopener">transfer</a> guidance`,
 	navTitle: 'Trade holds',
 	title: 'Steam trade holds: every restriction, and how long each lasts',
-	updated: '2026-08-14',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		'What triggers a Steam trade hold or restriction, how long each one lasts, and which are avoidable. Every duration quoted from Valve and linked.',
 	structuredData: (s) => ({
@@ -38,7 +40,7 @@ export const tradeHolds = {
 		headline: 'Steam trade holds and restrictions, by cause and duration',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
-		dateModified: '2026-08-14',
+		dateModified: '2026-09-08',
 		mainEntityOfPage: `${s.origin}/steam-guard-trade-holds`
 	}),
 	// No `s` parameter: this page quotes Valve throughout and never interpolates
@@ -241,17 +243,18 @@ export const moveToPc = {
 	guide: true,
 	navTitle: 'Move to a PC',
 	title: 'Move your Steam authenticator from your phone to a PC',
-	updated: '2026-08-14',
+	updated: '2026-09-08',
+	reviewed: '2026-09-08',
 	description:
 		'Steam can move an authenticator to another device for a 2-day restriction. What the flow actually does, what it costs, and what it requires.',
-	sourced: 'Checked against Valve documentation and a transfer performed on a real account',
+	sourced: `Transfer rules checked against <a href="${VALVE.guard}" rel="noopener">Valve's Steam Guard guidance</a>; device replacement was observed in one real-account transfer`,
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'TechArticle',
 		headline: 'Moving a Steam authenticator from a phone to a desktop',
 		author: { '@type': 'Organization', name: s.publisher },
 		publisher: { '@type': 'Organization', name: s.publisher },
-		dateModified: '2026-08-14',
+		dateModified: '2026-09-08',
 		mainEntityOfPage: `${s.origin}/move-steam-authenticator-to-pc`
 	}),
 	body: (s) => `

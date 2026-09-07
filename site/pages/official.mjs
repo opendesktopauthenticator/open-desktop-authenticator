@@ -54,6 +54,8 @@ const OURS = [
 
 export const official = {
 	slug: 'official',
+	updated: '2026-08-27',
+	reviewed: '2026-09-08',
 	navTitle: 'Official domains',
 	title: 'Official domains for Open Desktop Authenticator',
 	description:

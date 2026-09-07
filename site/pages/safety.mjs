@@ -5,6 +5,7 @@ import { browserFeatureCopy } from '../publication.mjs';
 
 export const scamClones = {
 	slug: 'scam-clones',
+	updated: '2026-09-08',
 	navTitle: 'Scam clones',
 	title: 'Fake Steam authenticator downloads',
 	description:
@@ -26,6 +27,17 @@ export const scamClones = {
 				builds actually do, the signs that separate a real release from a trap, and
 				what to do if you think you have already run one.
 			</p>
+
+			<div class="callout">
+				<p>
+					<strong>Evidence and scope.</strong> The attack path below is grounded in
+					<a href="/steam-inventory-stolen">a first-hand incident from this team</a>:
+					a working counterfeit copied a maFile, then the account was liquidated later.
+					The release checks and recovery steps are independently inspectable. This is
+					a defensive model and response checklist, not a claim that every counterfeit
+					uses identical code or timing.
+				</p>
+			</div>
 
 			<h2>What the malicious build actually does</h2>
 			<p>
@@ -220,7 +232,11 @@ ${reviewAsk(s, { got: 'Did this help you spot a fake before you ran it?' })}
 
 export const verify = {
 	slug: 'verify',
-	updated: '2026-08-25',
+	parent: 'download',
+	guide: true,
+	updated: '2026-09-08',
+	sourced: (s) =>
+		`Version covered: GitHub release ${s.publication.github.latestVersion}. Provenance command checked against <a href="https://cli.github.com/manual/gh_attestation_verify" rel="noopener">GitHub CLI's attestation verification reference</a>; checksum-list verification against <a href="https://docs.sigstore.dev/cosign/verifying/verify/" rel="noopener">Sigstore's Cosign documentation</a>`,
 	navTitle: 'Verify',
 	title: 'How to verify a download is genuine',
 	description:
@@ -240,7 +256,7 @@ export const verify = {
 		]
 	}),
 	body: (s) => `
-		<article>
+		<article class="guide">
 			<h1>How to verify a download is genuine</h1>
 			<p class="lede">
 				Verification is the difference between trusting a file and knowing what it is.
@@ -347,12 +363,14 @@ export const verify = {
 				Every release is built by a public workflow on GitHub's runners, from a tag
 				anyone can read, and GitHub signs a record of that. You can check it:
 			</p>
-			<pre><code>gh attestation verify &lt;file&gt; --owner ${s.githubOrg}</code></pre>
+			<pre><code>gh attestation verify &lt;file&gt; --repo ${new URL(s.repo).pathname.slice(1)} --signer-workflow ${new URL(s.repo).pathname.slice(1)}/.github/workflows/release.yml --source-ref refs/tags/vX.Y.Z --deny-self-hosted-runners</code></pre>
 			<p>
-				A pass tells you the file was produced by this project's release workflow, from
-				a specific commit, and not assembled on somebody's laptop. That is a stronger
-				statement than a signature alone, because it names the source the binary came
-				from rather than only the person who signed it. It needs the
+				Replace <code>vX.Y.Z</code> with the version you downloaded. A pass confirms that
+				the file's digest is covered by GitHub-signed provenance for this repository,
+				this release workflow and that exact tag, running on a GitHub-hosted runner. It
+				does not prove the program is safe or reproducible; it narrows the claim to the
+				producer and source you intended to trust instead of accepting any repository or
+				workflow under the same organisation. The command needs the
 				<a href="https://cli.github.com/" rel="noopener">GitHub CLI</a>, which is the
 				only tool here you may not already have.
 			</p>
@@ -467,7 +485,7 @@ ${reviewAsk(s, { got: 'Did these steps help you check a download?' })}
 
 export const security = {
 	slug: 'security',
-	updated: '2026-09-07',
+	updated: '2026-09-08',
 	navTitle: 'Security',
 	title: 'Security model: how your Steam secrets are stored',
 	description: (s) =>
@@ -614,6 +632,40 @@ export const security = {
 					shipped alongside them.
 				</li>
 			</ul>
+
+			<h2>Check these claims against the release</h2>
+			<p>
+				A security page is only useful when its claims lead back to something a reader
+				can inspect. These links are pinned to the <strong>v${s.version}</strong> release
+				rather than the moving main branch, so they show the implementation described
+				on this page and the tests that shipped with it.
+			</p>
+			<dl class="defs">
+				<dt>Vault format and encryption</dt>
+				<dd>
+					<a href="${s.repo}/blob/v${s.version}/src/shared/vault-format.ts" rel="noopener">Parameters and authenticated metadata</a>,
+					<a href="${s.repo}/blob/v${s.version}/src/main/vault/crypto.ts" rel="noopener">encryption and decryption</a>, and
+					<a href="${s.repo}/blob/v${s.version}/tests/vault-crypto.test.ts" rel="noopener">the regression tests</a>.
+				</dd>
+				<dt>Renderer and message boundary</dt>
+				<dd>
+					<a href="${s.repo}/blob/v${s.version}/src/main/security.ts" rel="noopener">Window isolation and navigation policy</a>,
+					<a href="${s.repo}/blob/v${s.version}/src/preload/index.ts" rel="noopener">the deliberately narrow preload bridge</a>, and
+					<a href="${s.repo}/blob/v${s.version}/tests/security-posture.test.ts" rel="noopener">the posture tests</a>.
+				</dd>
+				<dt>Network destinations</dt>
+				<dd>
+					<a href="${s.repo}/blob/v${s.version}/src/shared/security-policy.ts" rel="noopener">The shared egress policy</a>,
+					<a href="${s.repo}/blob/v${s.version}/src/main/net/egress.ts" rel="noopener">its enforcement</a>, and
+					<a href="${s.repo}/blob/v${s.version}/tests/egress.test.ts" rel="noopener">tests for allowed and refused routes</a>.
+				</dd>
+				<dt>Deliberate refusals</dt>
+				<dd>
+					<a href="${s.repo}/blob/v${s.version}/src/main/update/checker.ts" rel="noopener">The notification-only update check</a>,
+					<a href="${s.repo}/blob/v${s.version}/src/main/confirmations/policy.ts" rel="noopener">the fixed confirmation allowlist</a>, and
+					<a href="${s.repo}/blob/v${s.version}/tests/confirmation-policy.test.ts" rel="noopener">the policy tests</a>.
+				</dd>
+			</dl>
 
 			<h2>Deliberate refusals</h2>
 			<ul>

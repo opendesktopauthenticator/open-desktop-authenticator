@@ -12,8 +12,25 @@ export interface SitePage {
 	slug: string;
 	/** Optional reader-facing hub used by navigation and breadcrumbs. */
 	parent?: string;
+	/** Exclude utility/error pages from indexing and editorial publication gates. */
+	noindex?: boolean;
 	/** Long-form guides receive review metadata and an on-page contents list. */
 	guide?: boolean;
+	/** Date of the last material content change; required for indexed pages. */
+	updated?: string;
+	/** Optional later fact-check date when the article did not materially change. */
+	reviewed?: string;
+	/**
+	 * The internal publication case for this URL. It is deliberately review data,
+	 * not a search-facing disclaimer: the rendered page must earn both claims.
+	 */
+	editorial?: {
+		value: string;
+		evidence: string;
+		proofs: readonly string[];
+	};
+	/** Page-specific source/testing disclosure shown on long-form guides. */
+	sourced?: string | ((site: unknown) => string);
 	title: string;
 	description: string | ((site: unknown) => string);
 	/**

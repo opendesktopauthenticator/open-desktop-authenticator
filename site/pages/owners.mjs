@@ -58,7 +58,7 @@ const PROJECTS = [
 
 export default {
 	slug: 'owners',
-	updated: '2026-09-07',
+	updated: '2026-09-08',
 	navTitle: 'Who we are',
 	title: 'Who builds Open Desktop Authenticator',
 	description:
@@ -159,6 +159,29 @@ ${PROJECTS.map(
 				recovering one, understanding a maFile, or choosing between tools. They are not
 				generated variants of the same answer. Every page carries its review date, and
 				<a href="/support">documentation corrections</a> are accepted as product bugs.
+			</p>
+			<p>
+				<strong>Drafting and structural editing may use generative AI.</strong> AI is not
+				treated as a source, reviewer, or author. We use it to organise drafts, compare
+				related guides for contradictions, and surface gaps for a human to investigate.
+				A factual claim still has to trace to primary documentation, the application or
+				SDA source, a reproducible check, or a clearly labelled first-hand observation.
+				${s.publisher} remains responsible for what is published, and a review date moves
+				only when the page has actually been rechecked.
+			</p>
+			<p>
+				Before an indexable URL can be built, it must state the reader task it solves and
+				the evidence that makes it worth keeping separate. The
+				<a href="${s.repo}/blob/main/site/editorial.mjs" rel="noopener">editorial ledger</a>
+				is public, and the
+				<a href="${s.repo}/blob/main/site/verify.mjs" rel="noopener">site verifier</a>
+				rejects missing records, absent named evidence, thin pages, duplicated titles or
+				promises, high exact-wording overlap, orphan pages, and guide hierarchies that
+				exist only in markup. It also catches a shorter article copied substantially into
+				a longer one. Those checks do not recognise semantic paraphrases, identify whether
+				prose came from AI, or prove that prose is useful; they prevent the easiest ways a
+				useful site turns into a scaled collection of query variants. The final decision
+				to publish, merge, or remove a page is still editorial.
 			</p>
 
 			<h2>The obvious question</h2>
