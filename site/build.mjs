@@ -72,6 +72,22 @@ const here = dirname(fileURLToPath(import.meta.url));
  * nothing else's: the same token on another site verifies neither.
  */
 const GRIDINSOFT_KEY = 'nxu0pl5j85cxvlp60subwgz6bicyp3qv4zd1j7mr0b2jm3f9d1cunqqwqupqls81';
+/*
+ * Naver issues a fresh token per verification attempt, and both are published.
+ *
+ * The first was live and verified; on 2026-09-08 their console handed out a
+ * second for the same domain. Which one it will actually fetch is not
+ * something this side can know, and removing the old file to "tidy up" would
+ * un-verify the domain if it is still the one on record. Two inert files cost
+ * nothing — the same reasoning as publishing Gridinsoft's meta and file
+ * together above.
+ *
+ * The token INCLUDES its `naver` prefix, because the filename Naver issues
+ * does: `${NAVER_KEY}.html` must come out as naver<hex>.html, not
+ * navernaver<hex>.html.
+ */
+const NAVER_KEY = 'naver015043b353457e37f101398183fc0f66';
+const NAVER_KEY_2026_09 = 'naver3a262f5d49c869bcadbeb2a27813c638';
 const out = join(here, 'dist');
 
 export const SITE = {
@@ -180,7 +196,45 @@ export const SITE = {
 		 * would verify; together, neither a rewritten head nor a missing file can
 		 * quietly un-verify the domain.
 		 */
-		{ service: 'Gridinsoft', token: GRIDINSOFT_KEY, meta: 'gridinsoft-key', file: true }
+		{
+			service: 'Gridinsoft',
+			token: GRIDINSOFT_KEY,
+			meta: 'gridinsoft-key',
+			file: `gridinsoft-${GRIDINSOFT_KEY}.txt`,
+			body: GRIDINSOFT_KEY
+		},
+		/*
+		 * Naver, 2026-09-08. A file and nothing else: their console fetches the
+		 * exact path it issued and reads the body, so there is no meta form to
+		 * publish alongside it and no token to repeat in the head.
+		 *
+		 * **The body names the file.** That is Naver's format rather than a
+		 * mistake — the file is called `<token>.html` and contains
+		 * `naver-site-verification: <token>.html`, so the two must be edited
+		 * together or the check fails while both halves look plausible. Written
+		 * from one constant below for that reason.
+		 *
+		 * It is `.html` and it is not a page: `verify.mjs` walks the declared page
+		 * list rather than the directory, so nothing tries to parse it, and
+		 * `sitemap.xml` does not list it.
+		 */
+		{
+			service: 'Naver',
+			token: NAVER_KEY,
+			file: `${NAVER_KEY}.html`,
+			body: `naver-site-verification: ${NAVER_KEY}.html`
+		},
+		/*
+		 * The second Naver token, issued 2026-09-08 for the same domain. See the
+		 * note on NAVER_KEY_2026_09: both stay until their console confirms which
+		 * one it reads, because deleting the wrong one un-verifies the site.
+		 */
+		{
+			service: 'Naver',
+			token: NAVER_KEY_2026_09,
+			file: `${NAVER_KEY_2026_09}.html`,
+			body: `naver-site-verification: ${NAVER_KEY_2026_09}.html`
+		}
 	],
 
 	/*
@@ -1053,8 +1107,13 @@ expires.setUTCFullYear(expires.getUTCFullYear() + 1);
  * publishing both, and it verifies nothing while looking like it should.
  */
 if (shouldBuild) {
+	// The name and the body both come from the entry now. They used to be built
+	// here from one service's shape — `gridinsoft-${token}.txt` holding the token
+	// — which quietly meant a second service could only be added by changing this
+	// line. Naver's file is named after its token and its body names the file, a
+	// shape that expression cannot produce at all.
 	for (const v of SITE.verifications.filter((entry) => entry.file)) {
-		writeFileSync(join(out, `gridinsoft-${v.token}.txt`), v.token);
+		writeFileSync(join(out, v.file), v.body);
 	}
 }
 
