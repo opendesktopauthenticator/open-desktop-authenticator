@@ -21,7 +21,7 @@
     "steam-session": "^1.9.4",
     "steam-totp": "^2.1.2",
     "steamcommunity": "^3.50.3",
-    "zod": "^4.4.3"
+    "zod": "^4.5.4"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
