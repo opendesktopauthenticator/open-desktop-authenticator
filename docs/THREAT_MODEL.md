@@ -570,6 +570,16 @@ Therefore:
 2. **Unknown types are never auto-actioned.** Type 6 exists today; Valve can add
    type 7 tomorrow without telling anyone. Treating "unrecognised" as "probably
    fine" is broken by construction.
+
+   The set of types this build can _name_ grows as they are observed — 11 (a Steam
+   Families invite) was seen live — and naming one changes nothing about whether it
+   may be actioned: 2 and 3 remain the only automatic pair. That is also why the
+   **display** fields of an unfamiliar entry (`icon`, `summary`, `headline`,
+   `type_name`, `multi`) are read tolerantly, `null` included: a type we do not
+   recognise must end up visible and approvable by hand, never dropped from the
+   list because Valve spelled one of its captions differently. `id`, `nonce` and
+   `type` stay strict — they are what an operation is built from.
+
 3. `steamcommunity.acceptAllConfirmations()` must not appear anywhere in this
    codebase. It accepts everything the list returns, by design.
 4. Account-security confirmations are surfaced as an **alert**, never as an

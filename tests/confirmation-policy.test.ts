@@ -41,6 +41,18 @@ describe('the closed rule', () => {
 		expect(mayAutoConfirm({ id: '1', type: 5 }, BOTH_ON).act).toBe(false);
 	});
 
+	it('names a Steam Families invite without ever approving one automatically', () => {
+		// Observed live: a family invite arrives as **type 11**, and Steam's own
+		// label for it is "Join Steam family". It is named for the same reason every
+		// other entry is — a name is what makes a type refusable — and it stays a
+		// human decision: approving it changes who shares this library.
+		expect(describeType(11)).toBe('Steam family invite');
+		expect(isAutoConfirmable(11)).toBe(false);
+		expect(mayAutoConfirm({ id: '1', type: 11 }, BOTH_ON).act).toBe(false);
+		// Not account takeover, so not one of the two urgent types.
+		expect(isSecurityCritical(11)).toBe(false);
+	});
+
 	it('never auto-confirms a type nobody has seen yet', () => {
 		// Valve adding a type must make this app more cautious, not less. A default
 		// of "allow" here is how an unknown becomes an approval.

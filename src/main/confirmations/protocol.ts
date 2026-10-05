@@ -34,6 +34,38 @@ const cappedText = z
 	.transform((value) => (value.length > MAX_TEXT ? `${value.slice(0, MAX_TEXT)}…` : value));
 
 /**
+ * `null` and "there is nothing to show" are the same statement for a display
+ * field, so both collapse to the absent value. `.optional()` is what keeps that
+ * absent — without it zod infers a required key holding `undefined`, which every
+ * place that builds a `Confirmation` by hand would then have to spell out.
+ */
+const shown = <T>(value: T | null | undefined): T | undefined => value ?? undefined;
+
+/**
+ * A display-only field, in whatever shape Valve sends it.
+ *
+ * **`null` is a shape Steam uses, and this schema refused it.** An entry whose
+ * `icon` arrived as `null` — the ordinary JSON way to say "no image", and what a
+ * confirmation type with no artwork produces — failed `z.string().optional()`,
+ * and one such entry took its own row out of the list while the screen reported
+ * "one confirmation could not be read". `summary`, `headline`, `type_name` and
+ * `multi` were the same hole, and a Steam Families join request is an observed
+ * case: it arrives with those fields `null`, and the whole confirmation became
+ * unreadable rather than visible-but-unfamiliar — so it could not be approved.
+ *
+ * `.catch(undefined)` is the treatment `creator_id` already had, applied to the
+ * rest of the decoration for the same reason: **none of these fields is what a
+ * decision is built from.** `id`, `nonce` and `type` still refuse anything
+ * unexpected — they are what an operation is constructed out of and what S16
+ * reasons about — while a display field Valve spells differently costs the user
+ * a caption, never the ability to see the confirmation and act on it.
+ *
+ * This is tolerance for ornament. It is deliberately not extended to the
+ * load-bearing three, and the distinction is the point of naming it here.
+ */
+const displayText = cappedText.nullish().transform(shown).catch(undefined).optional();
+
+/**
  * One pending confirmation.
  *
  * `id` and `nonce` are strings on the wire and stay strings: `id` is a 64-bit
@@ -55,15 +87,21 @@ export const confirmationSchema = z
 		/** Numeric type. S16 in `policy.ts` decides what may be done with it. */
 		type: z.number().int(),
 		/** Steam's own label. Displayed alongside ours, never trusted in place of `type`. */
-		type_name: cappedText.optional(),
+		type_name: displayText,
 		/**
 		 * Display only, and a SteamID64 — comfortably past the safe-integer range.
 		 * A numeric one is dropped rather than shown, because a counterparty id
 		 * that is quietly wrong is worse than none at all.
 		 */
 		creator_id: z.string().optional().catch(undefined),
-		headline: cappedText.optional(),
-		summary: z.array(cappedText).max(20).optional(),
+		headline: displayText,
+		summary: z
+			.array(cappedText.catch(''))
+			.max(20)
+			.nullish()
+			.transform(shown)
+			.catch(undefined)
+			.optional(),
 		/**
 		 * Item or avatar image, on Steam's CDN.
 		 *
@@ -75,9 +113,9 @@ export const confirmationSchema = z
 		 * would defeat the routing guarantee at the one moment the user is
 		 * definitely looking at the screen.
 		 */
-		icon: z.string().max(2048).optional(),
+		icon: z.string().max(2048).nullish().transform(shown).catch(undefined).optional(),
 		/** Whether this confirmation covers several items rather than one. */
-		multi: z.boolean().optional(),
+		multi: z.boolean().nullish().transform(shown).catch(undefined).optional(),
 		/**
 		 * Unix seconds, as Steam sends it. Some responses send it as a string.
 		 *
