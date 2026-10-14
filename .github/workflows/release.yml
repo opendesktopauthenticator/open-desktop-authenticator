@@ -432,7 +432,7 @@ jobs:
       # Developer ID certificate and the notarisation key are in place. One
       # deliberate switch, visible in the repository settings — rather than the
       # release quietly changing shape the moment a secret is added.
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name:
             ${{ (runner.os == 'macOS' && vars.MACOS_SIGNING_READY != 'true') && 'macos-unsigned-check'
