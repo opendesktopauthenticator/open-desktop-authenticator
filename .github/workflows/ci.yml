@@ -36,7 +36,7 @@ jobs:
       # MUST pin actions to full commit SHAs instead.
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version-file: '.nvmrc'
           cache: npm
@@ -92,7 +92,7 @@ jobs:
       # app's own Steam Guard code generator against `steam-totp`, which lives
       # here and nowhere else. Deleting the spike would delete that proof.
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version-file: '.nvmrc'
           cache: npm
@@ -109,7 +109,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version-file: '.nvmrc'
           cache: npm
@@ -152,7 +152,7 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v7.1.0
         with:
           node-version-file: '.nvmrc'
           cache: npm
