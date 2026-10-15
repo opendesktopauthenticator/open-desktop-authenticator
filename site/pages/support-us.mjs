@@ -212,8 +212,8 @@ const SPENDS = [
 
 export const donate = {
 	slug: 'donate',
-	updated: '2026-10-01',
-	reviewed: '2026-10-01',
+	updated: '2026-10-15',
+	reviewed: '2026-10-15',
 	navTitle: 'Donate',
 	script: 'support.js',
 	title: 'Donate to Open Desktop Authenticator',
@@ -248,7 +248,7 @@ export const donate = {
 				</li>
 				<li>
 					<strong>The application has no ODA backend, ODA account, cloud sync or telemetry.</strong>
-					Requested Steam operations contact Valve, direct builds from GitHub or Softonic can optionally
+					Requested Steam operations contact Valve, direct builds from GitHub, Softonic or Uptodown can optionally
 					check GitHub for updates, and its browser loads the pages you open and their
 					embedded resources. The website has separate analytics and report storage.
 					<a href="/security">The security page documents those boundaries</a>.

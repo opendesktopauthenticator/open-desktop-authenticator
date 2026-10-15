@@ -338,14 +338,59 @@ describe('per-channel publication output', () => {
 		expect(softwareFor(store).datePublished).toBeUndefined();
 	});
 
-	it('only includes Softonic in the current-version claim after its version is verified', () => {
+	it('names four current sources only when both catalog versions match the published version', () => {
 		const site = siteFor({ github: { [VERSION]: {} }, store: { [VERSION]: {} } });
-		expect(
-			publicationApi.publicationSummary({ ...site, softonic: { version: VERSION } })
-		).toContain(`${VERSION} is available from three official download sources`);
-		const olderListing = publicationApi.publicationSummary({ ...site, softonic: { version: OLD } });
-		expect(olderListing).not.toContain('available from three official download sources');
-		expect(olderListing).toContain(`Softonic offers the Windows x64 installer for ${OLD}`);
+		const summary = publicationApi.publicationSummary({
+			...site,
+			softonic: { version: VERSION },
+			uptodown: { version: VERSION }
+		});
+		expect(summary).toContain(`${VERSION} is published in the Microsoft Store and on GitHub`);
+		expect(summary).toContain('listed for Windows x64 by Softonic and Uptodown');
+		expect(summary).toContain('four official download sources');
+	});
+
+	it.each([
+		{ softonicVersion: OLD, uptodownVersion: VERSION },
+		{ softonicVersion: VERSION, uptodownVersion: OLD },
+		{ softonicVersion: undefined, uptodownVersion: VERSION },
+		{ softonicVersion: VERSION, uptodownVersion: undefined }
+	])(
+		'keeps catalog versions independent: Softonic $softonicVersion, Uptodown $uptodownVersion',
+		({ softonicVersion, uptodownVersion }) => {
+			const site = siteFor({ github: { [VERSION]: {} }, store: { [VERSION]: {} } });
+			const summary = publicationApi.publicationSummary({
+				...site,
+				...(softonicVersion ? { softonic: { version: softonicVersion } } : {}),
+				...(uptodownVersion ? { uptodown: { version: uptodownVersion } } : {})
+			});
+			expect(summary).not.toContain('four official download sources');
+			for (const [name, version] of [
+				['Softonic', softonicVersion],
+				['Uptodown', uptodownVersion]
+			]) {
+				if (version) {
+					expect(summary).toContain(`${name} lists the Windows x64 installer for ${version}`);
+				} else {
+					expect(summary).not.toContain(name);
+				}
+			}
+		}
+	);
+
+	it.each(
+		CASES.filter(({ downloadChannel, github }) => downloadChannel !== 'store' || github !== VERSION)
+	)('does not let matching catalog listings imply publication when $name', ({ records }) => {
+		const site = siteFor(records);
+		const summary = publicationApi.publicationSummary({
+			...site,
+			softonic: { version: VERSION },
+			uptodown: { version: VERSION }
+		});
+		expect(summary).not.toContain('four official download sources');
+		expect(summary).toContain(publicationApi.publicationSummary(site));
+		expect(summary).toContain(`Softonic lists the Windows x64 installer for ${VERSION}`);
+		expect(summary).toContain(`Uptodown lists the Windows x64 installer for ${VERSION}`);
 	});
 
 	it('compares published versions numerically and preserves a newer upcoming source version', () => {
