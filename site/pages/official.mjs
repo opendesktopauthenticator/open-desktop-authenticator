@@ -47,7 +47,13 @@ const OURS = [
 	{
 		address: 'open-desktop-authenticator.en.softonic.com',
 		href: 'https://open-desktop-authenticator.en.softonic.com/',
-		what: 'Softonic, an authorized distributor of the Windows x64 installer. The listing names MASTERPANEL LLC as developer and displays Softonic’s “Trusted Program” and “Official distributor” labels.',
+		what: 'Softonic’s authorized Windows x64 listing, naming MASTERPANEL LLC. Its “Trusted Program” and “Official distributor” labels were checked on 1 October 2026. A tested route returned a separate downloader; read the notice below.',
+		downloads: true
+	},
+	{
+		address: 'open-desktop-authenticator.en.uptodown.com/windows',
+		href: 'https://open-desktop-authenticator.en.uptodown.com/windows',
+		what: 'Uptodown’s Windows x64 listing, naming MASTERPANEL LLC as developer. Version 1.5.1 and its displayed checksum were checked against the GitHub release on 15 October 2026.',
 		downloads: true
 	},
 	{
@@ -60,12 +66,12 @@ const OURS = [
 
 export const official = {
 	slug: 'official',
-	updated: '2026-10-01',
-	reviewed: '2026-10-01',
+	updated: '2026-10-15',
+	reviewed: '2026-10-15',
 	navTitle: 'Official domains',
 	title: 'Official domains for Open Desktop Authenticator',
 	description:
-		'Check ODA publisher websites and its three official download sources: Microsoft Store, GitHub and Softonic.',
+		'Check ODA publisher websites and its four official download sources: Microsoft Store, GitHub, Softonic and Uptodown.',
 	structuredData: (s) => ({
 		'@context': 'https://schema.org',
 		'@type': 'WebPage',
@@ -79,7 +85,7 @@ export const official = {
 
 			<div class="callout">
 				<p>
-					Use the exact addresses on this page to find our three official download
+					Use the exact addresses on this page to find our four official download
 					sources. <strong>A similar name or high search ranking is not
 					proof of origin.</strong> The MIT licence allows others to redistribute or
 					modify the source; that does not make independently built or modified copies ours.
@@ -104,7 +110,7 @@ export const official = {
 			</table>
 
 			<p>
-				Our three official download sources are <strong>Microsoft Store, GitHub and Softonic</strong>.
+				Our four official download sources are <strong>Microsoft Store, GitHub, Softonic and Uptodown</strong>.
 				<a href="/download">The download page</a> explains
 				which to take, and <a href="/verify">how to check what you got</a>.
 			</p>
@@ -119,7 +125,7 @@ export const official = {
 				They are distribution and file-scan information, not an independent security audit of ODA.
 			</p>
 			<p>
-				Softonic operates that site and offers the Windows x64 installer.
+				A public Softonic download tested on 1 October 2026 returned a separate Softonic downloader instead of the original ODA installer. Resolution is not verified; use Microsoft Store, GitHub or Uptodown. <a href="/download#softonic-download-route">Read the download notice</a>.
 				For an ODA installer obtained there, <a href="/verify">check the publisher signature and compare the file
 				with the matching GitHub release checksum</a>. ARM64, portable Windows and Linux packages are available on GitHub.
 			</p>`
@@ -152,7 +158,7 @@ export const official = {
 				<a href="/security">the security page</a> has the private channels for that.
 			</p>
 			<p>
-				GitHub, Microsoft and Softonic can serve files through their own delivery
+				GitHub, Microsoft, Softonic and Uptodown can serve files through their own delivery
 				domains after you follow the links above. A delivery redirect alone is
 				not proof of a fake; a lookalike page offering its own build needs independent
 				verification. If you ran an untrusted authenticator and gave it Steam

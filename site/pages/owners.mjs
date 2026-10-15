@@ -57,7 +57,7 @@ const PROJECTS = [
 
 export default {
 	slug: 'owners',
-	updated: '2026-10-01',
+	updated: '2026-10-15',
 	navTitle: 'Who we are',
 	title: 'Who builds Open Desktop Authenticator',
 	description:
@@ -101,7 +101,7 @@ export default {
 			</p>
 			<ul class="plain next">
 				<li><a href="${s.repo}" rel="noopener">Source code and development history</a></li>
-				<li><a href="/official">Publisher websites and three official download sources</a></li>
+				<li><a href="/official">Publisher websites and four official download sources</a></li>
 				<li><a href="/verify">Release-origin and publisher-signature checks</a></li>
 				<li><a href="/support">Report a bug or documentation correction</a></li>
 			</ul>
@@ -170,12 +170,12 @@ ${PROJECTS.map(
 				The products listed above share a publisher. They do not share an ODA login or
 				cloud account: the application has
 				<strong>no ODA backend, no ODA account, no cloud sync, and no telemetry</strong>.
-				Requested Steam operations contact Valve, and direct builds from GitHub or Softonic can optionally
+				Requested Steam operations contact Valve, and direct builds from GitHub, Softonic or Uptodown can optionally
 				check GitHub for updates; neither service is operated by ${s.publisher}. The
 				in-app browser contacts the sites you open and resources those sites load;
 				those services can collect their own data. The app has no built-in update installer.
 				<strong>Microsoft Store installations can update through the Store</strong>, subject
-				to your Store settings. Direct builds from GitHub or Softonic require a manual download and install.
+				to your Store settings. Direct builds from GitHub, Softonic or Uptodown require a manual download and install.
 				The <a href="/security">security model</a> and <a href="/privacy">privacy page</a>
 				describe these boundaries and their limits.
 			</p>

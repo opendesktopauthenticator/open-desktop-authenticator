@@ -50,7 +50,7 @@ const EDITORIAL_NOTES_BY_SLUG = Object.freeze({
 		'It separates the unnamed team member’s recollection from unverified conclusions about exfiltration and recipient accounts, avoids an unsupported monetary estimate, and links current Valve rules independently of the story.'
 	),
 	verify: record(
-		'A copyable procedure for verifying ODA downloads from Microsoft Store, GitHub or Softonic.',
+		'A copyable procedure for verifying ODA downloads from Microsoft Store, GitHub, Softonic or Uptodown.',
 		'It walks through SHA-256 calculation, checksum comparison, GitHub attestation/Sigstore identity, Windows publisher checks and source builds, while only showing commands supported by the current release state.'
 	),
 	security: record(
@@ -59,7 +59,7 @@ const EDITORIAL_NOTES_BY_SLUG = Object.freeze({
 	),
 	official: record(
 		'A complete allowlist of the domains and storefronts ODA actually publishes from, with the role of each address.',
-		'It links the three official download sources directly, distinguishes the publisher websites from distributors, and explains how to investigate an unfamiliar address.'
+		'It links the four official download sources directly, distinguishes the publisher websites from distributors, and explains how to investigate an unfamiliar address.'
 	),
 	'code-signing-policy': record(
 		'A precise distinction between Windows publisher signatures through Azure Artifact Signing, Store package signing, checksum-list signing and build provenance.',
@@ -118,7 +118,7 @@ const EDITORIAL_NOTES_BY_SLUG = Object.freeze({
 		'It checks the options against Valve guidance and SDA’s official repository, applies the same practical questions to all three, and states ODA’s youth and unfinished assurances.'
 	),
 	download: record(
-		'A live release-status page covering the Store, the project’s GitHub release and the Softonic Windows listing, with package and update details.',
+		'A live release-status page covering the Store, the project’s GitHub release and the Softonic and Uptodown Windows listings, with package and update details.',
 		'Its versions, architectures, signatures and open gaps are derived from the verified publication/release state; it also links the license, source, build route and verification procedure.'
 	),
 	'import-from-sda': record(
@@ -253,7 +253,7 @@ const PROOFS_BY_SLUG = {
 	download: [
 		'https://apps.microsoft.com/detail/9NMM2XJ6HZ1D',
 		'SHA256SUMS.txt.sig',
-		'Three official download sources'
+		'Four official download sources'
 	],
 	'import-from-sda': ['manifest.json', 'identity_secret', 'Confirm the codes match'],
 	uninstall: ['%APPDATA%\\open-desktop-authenticator', 'vault.json.bak', 'recovery/'],

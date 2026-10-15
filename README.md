@@ -9,8 +9,8 @@ Official ODA website: [opendesktopauthenticator.com](https://opendesktopauthenti
 MASTERPANEL LLC also operates Master Panel. ODA and Master Panel are separate
 products with no shared accounts, data, or integration.
 
-> **1.5.1 is available from three official download sources: the Microsoft Store,
-> GitHub Releases and Softonic.**
+> **Current release: 1.5.1. Four official download sources: the Microsoft Store,
+> GitHub Releases, Softonic and Uptodown.**
 > On Windows, you can install the Store version from the
 > [Microsoft Store](https://apps.microsoft.com/detail/9NMM2XJ6HZ1D), which
 > currently distributes the x64 package. The
@@ -18,13 +18,19 @@ products with no shared accounts, data, or integration.
 > also provides direct Windows x64, ARM64 and universal installers, a portable
 > x64 build, AppImage and Debian packages; check a direct download against the
 > published checksums. [Softonic](https://open-desktop-authenticator.en.softonic.com/)
-> offers the Windows x64 download.
+> and [Uptodown](https://open-desktop-authenticator.en.uptodown.com/windows)
+> list Windows x64 downloads. Uptodown's 1.5.1 listing was checked on
+> 15 October 2026.
 >
 > Softonic displays **Official distributor** and **Trusted Program** labels for
-> ODA. The distributor label indicates authorization from the developer or its
-> designated representative; Trusted Program reflects the VirusTotal scan reported
-> by Softonic.
+> ODA, as checked on 1 October 2026. The distributor label indicates authorization
+> from the developer or its designated representative; Trusted Program reflects the VirusTotal scan reported
+> by Softonic for the listed ODA file.
 > These are Softonic's labels, not an independent audit or a guarantee of safety.
+>
+> A public Softonic download tested on 1 October 2026 returned a separate Softonic
+> downloader instead of the original ODA installer. Resolution is not verified;
+> use the Microsoft Store, GitHub or Uptodown route and verify the actual ODA file.
 >
 > The Store package is signed, because Microsoft re-signs what it distributes.
 > The [v1.5.1 direct Windows downloads](https://github.com/opendesktopauthenticator/open-desktop-authenticator/releases/tag/v1.5.1)
@@ -63,14 +69,14 @@ Users can inspect the connection between the publisher, source and distributed f
 
 Direct releases are built in public CI from a tag and published with hashes and
 provenance. These checks establish release origin, not that the software is free
-of vulnerabilities. ODA's three official download sources are the Microsoft Store,
-GitHub Releases and Softonic.
+of vulnerabilities. ODA's four official download sources are the Microsoft Store,
+GitHub Releases, Softonic and Uptodown.
 
 **Verification depends on the package.** A GitHub download can be traced all the
 way back: its hash is published, and a sigstore attestation
 names the workflow run, the commit and the tag that
-produced it. Windows downloads from Softonic should be checked against that same
-GitHub release evidence. The Store package is built by that same workflow run, but it is then
+produced it. Windows downloads from Softonic or Uptodown should be checked against
+that same GitHub release evidence. The Store package is built by that same workflow run, but it is then
 submitted to Partner Center by hand and re-signed by Microsoft — so what you can
 verify there is that Microsoft distributed it, not which commit it came from.
 That is a real limit, it is Microsoft's design rather than ours, and it is the
@@ -81,8 +87,8 @@ policy will permit the application.
 
 **Check the source and the file before installing an authenticator.** Our product
 website hosts no installer. Its download links lead to the Microsoft Store,
-GitHub Releases or Softonic. Softonic offers its own
-download route; check the actual Windows file against the matching GitHub release's
+GitHub Releases, Softonic or Uptodown. For a Windows download through either
+distributor, check the actual file against the matching GitHub release's
 checksums, provenance and publisher-signature instructions. A listing alone does
 not verify a file. Treat other download sources as unverified.
 

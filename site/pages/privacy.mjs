@@ -13,7 +13,7 @@
 
 export const privacy = {
 	slug: 'privacy',
-	updated: '2026-10-01',
+	updated: '2026-10-15',
 	navTitle: 'Privacy',
 	title: 'What this site stores, and for how long',
 	description:
@@ -33,7 +33,7 @@ export const privacy = {
 			<p class="lede">
 				Short version: <strong>the application</strong> keeps your secrets in encrypted
 				files on your own machine. It has no ODA backend, ODA account, cloud sync, or
-				telemetry. Steam operations you request contact Valve; direct builds from GitHub or Softonic can
+				telemetry. Steam operations you request contact Valve; direct builds from GitHub, Softonic or Uptodown can
 				optionally check GitHub for a newer release; and the in-app browser contacts
 				the sites you open and resources those sites load. Those sites can set cookies
 				and collect their own data. <strong>This website</strong> separately uses
@@ -181,7 +181,7 @@ export const privacy = {
 				</dd>
 				<dt>GitHub</dt>
 				<dd>
-					Hosts the source and releases. In a direct build from GitHub or Softonic, if the optional
+					Hosts the source and releases. In a direct build from GitHub, Softonic or Uptodown, if the optional
 					update check is on, it asks GitHub's public releases API whether a newer
 					version exists. GitHub receives the request and its source IP, but no Steam
 					account or vault data. Microsoft Store builds do not perform this check.

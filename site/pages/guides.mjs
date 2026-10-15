@@ -5,12 +5,12 @@ import { publicationSummary } from '../publication.mjs';
 
 export const download = {
 	slug: 'download',
-	updated: '2026-10-01',
-	reviewed: '2026-10-01',
+	updated: '2026-10-15',
+	reviewed: '2026-10-15',
 	navTitle: 'Download',
 	title: 'Download Open Desktop Authenticator for Windows and Linux',
 	description:
-		'Download ODA from three official sources: Microsoft Store, GitHub or Softonic. Compare Windows and Linux packages, updates and verification steps.',
+		'Download ODA from four official sources: Microsoft Store, GitHub, Softonic or Uptodown. Compare Windows and Linux packages, updates and verification steps.',
 	body: (s) => `
 		<article>
 			<h1>Download Open Desktop Authenticator</h1>
@@ -19,13 +19,14 @@ export const download = {
 				<a href="/steam-desktop-authenticator">the original Steam Desktop Authenticator</a>.</p>
 
 			<div class="callout" data-download>
-				<h2>Choose from three official sources</h2>
+				<h2>Choose from four official sources</h2>
 				<div class="download-actions">
 					<a class="button" href="${s.store.url}" rel="noopener">Microsoft Store ${s.publication.store.latestVersion}</a>
 					<a class="button button-quiet" href="${s.repo}/releases/tag/v${s.publication.github.latestVersion}" rel="noopener">GitHub ${s.publication.github.latestVersion}: all packages</a>
-					${s.softonic ? `<a class="button button-quiet" href="${s.softonic.url}" rel="noopener">Softonic ${s.softonic.version}: Windows x64</a>` : ''}
+					${s.uptodown ? `<a class="button button-quiet" href="${s.uptodown.url}" rel="noopener">Uptodown ${s.uptodown.version}: Windows x64</a>` : ''}
+					${s.softonic ? `<a class="button button-quiet" href="${s.softonic.url}" rel="noopener">Softonic ${s.softonic.version}: read notice below</a>` : ''}
 				</div>
-				<p>The Store package and Softonic installer are x64. GitHub offers native x64 and ARM64 Windows installers,
+				<p>The Store package is x64, and Uptodown lists the original x64 installer. <a href="#softonic-download-route">Read the Softonic download notice</a> before using its listing. GitHub offers native x64 and ARM64 Windows installers,
 					portable x64, and x64 Linux packages. Check your computer's system type before
 					choosing an installer.</p>
 			</div>
@@ -35,7 +36,8 @@ export const download = {
 					<thead><tr><th scope="col">Your device or workflow</th><th scope="col">Package</th><th scope="col">Updates and limits</th></tr></thead>
 					<tbody>
 						<tr><th scope="row">Windows, with Microsoft Store</th><td><a href="${s.store.url}" rel="noopener">Store ${s.publication.store.latestVersion}</a> (x64)</td><td>Store-managed updates, subject to your settings. The recorded Store package is x64; use GitHub for native ARM64.</td></tr>
-						${s.softonic ? `<tr><th scope="row">Windows, through Softonic</th><td><a href="${s.softonic.url}" rel="noopener">Windows x64 installer</a></td><td>Download later updates manually. Softonic is an authorized distributor; check the ODA installer's publisher signature and release checksum.</td></tr>` : ''}
+						${s.uptodown ? `<tr><th scope="row">Windows, through Uptodown</th><td><a href="${s.uptodown.url}" rel="noopener">Windows x64 listing</a></td><td>Download later updates manually. Verify the actual ODA installer's publisher signature and release checksum.</td></tr>` : ''}
+						${s.softonic ? `<tr><th scope="row">Windows, through Softonic</th><td><a href="${s.softonic.url}" rel="noopener">Windows x64 listing</a></td><td>A tested public route returned a separate Softonic downloader. <a href="#softonic-download-route">Read the unresolved download notice</a>; use another source for now.</td></tr>` : ''}
 						<tr><th scope="row">Intel/AMD Windows PC</th><td><code>open-desktop-authenticator-${s.publication.github.latestVersion}-x64-setup.exe</code></td><td>Direct installer; download later updates manually.</td></tr>
 						<tr><th scope="row">Windows on Arm</th><td><code>open-desktop-authenticator-${s.publication.github.latestVersion}-arm64-setup.exe</code></td><td>Native ARM64 installer. Native ARM64 execution is not claimed in the release's manual test record.</td></tr>
 						<tr><th scope="row">One installer for x64 and ARM64 Windows</th><td><code>open-desktop-authenticator-${s.publication.github.latestVersion}-setup.exe</code></td><td>Combined installer from the same GitHub release.</td></tr>
@@ -49,8 +51,8 @@ export const download = {
 				Windows builds target Windows 10 version 1809 or later and Windows 11; that minimum
 				is not a recommendation to use an operating system without security updates.</p>
 
-			<h2>Three official download sources</h2>
-			<p>Get ODA from the <strong>Microsoft Store, GitHub or Softonic</strong>.
+			<h2>Four official download sources</h2>
+			<p>Get ODA from the <strong>Microsoft Store, GitHub, Softonic or Uptodown</strong>.
 				This website links to downloads and does not serve an installer itself.
 				Check <strong>MASTERPANEL LLC</strong> as publisher and use the
 				<a href="/official">official-address reference</a> if a link looks unfamiliar.</p>
@@ -62,9 +64,22 @@ export const download = {
 					and <strong>“Trusted Program”</strong>, with a clean VirusTotal scan reported for the listed file.
 					These labels were checked on 1 October 2026. They describe distribution authorization and a file scan;
 					they are not an independent security audit of ODA.
-					Softonic offers the x64 installer. Use GitHub for native ARM64, portable Windows
-					or Linux packages. For a downloaded ODA installer, check its MASTERPANEL LLC signature
+					The listing is for Windows x64; the labels do not establish what the public download route delivers.
+					Use GitHub for native ARM64, portable Windows or Linux packages. For a downloaded ODA installer, check its MASTERPANEL LLC signature
 					and compare its checksum with the matching GitHub release using <a href="/verify">our verification steps</a>.</p>`
+					: ''
+			}
+			<aside class="callout" id="softonic-download-route" aria-labelledby="softonic-route-title">
+				<h2 id="softonic-route-title">Softonic download notice</h2>
+				<p>A public Softonic download tested on 1 October 2026 returned a separate Softonic downloader
+					instead of the original ODA installer. Resolution is not verified. Use Microsoft Store, GitHub
+					or Uptodown, and <a href="/verify">verify the actual ODA file</a>.</p>
+			</aside>
+			${
+				s.uptodown
+					? `<p><strong>Uptodown:</strong> <a href="${s.uptodown.url}" rel="noopener">ODA ${s.uptodown.version} for Windows x64</a>
+				is listed under MASTERPANEL LLC. On 15 October 2026, its displayed SHA-256 matched the original GitHub x64 installer's
+				published checksum. This verifies the listing information; check the signature and checksum of the file you actually download.</p>`
 					: ''
 			}
 			<p>Microsoft signs the Store AppX package and checks its integrity during installation.
@@ -87,7 +102,7 @@ export const download = {
 					vault backup, its passphrase and recovery information. Updating the app and replacing
 					an account's Steam authenticator are different operations.</li>
 				<li><strong>Choose one distribution route.</strong> The Store manages its edition's updates.
-					Direct builds obtained from GitHub or Softonic can report a newer GitHub release but do not download or install it.
+					Direct builds obtained from GitHub, Softonic or Uptodown can report a newer GitHub release but do not download or install it.
 					The portable build has no Store equivalent.</li>
 				<li><strong>For a new setup, create your vault.</strong> Then use
 					<a href="/import-from-sda">Import maFiles</a> for existing SDA files, or follow
@@ -368,8 +383,8 @@ export const importFromSda = {
 export const uninstall = {
 	slug: 'uninstall',
 	guide: true,
-	updated: '2026-10-01',
-	reviewed: '2026-10-01',
+	updated: '2026-10-15',
+	reviewed: '2026-10-15',
 	sourced: (s) =>
 		`Version covered: ODA ${s.version}. Installed and portable data roots checked against <a href="${s.repo}/blob/v${s.version}/src/main/index.ts" rel="noopener">the tagged application path setup</a>; vault and backup names against <a href="${s.repo}/blob/v${s.version}/src/main/vault/storage.ts" rel="noopener">storage</a>; recovery paths against <a href="${s.repo}/blob/v${s.version}/src/main/vault/recovery.ts" rel="noopener">recovery</a>; package behavior against <a href="${s.repo}/blob/v${s.version}/electron-builder.config.mjs" rel="noopener">the release configuration</a>`,
 	navTitle: 'Uninstall',
@@ -454,7 +469,7 @@ export const uninstall = {
 					apps. Back up your data first: package removal may also remove
 					Windows-managed package data.
 				</dd>
-				<dt>Windows installer (the <code>.exe</code> from GitHub or Softonic)</dt>
+				<dt>Windows installer (the <code>.exe</code> from GitHub, Softonic or Uptodown)</dt>
 				<dd>
 					Settings, Apps, Installed apps, ${s.name}, Uninstall. The uninstaller
 					deliberately leaves your data behind so that removing the program does not
@@ -490,7 +505,7 @@ export const uninstall = {
 				what they receive.</a>
 			</p>
 			<dl class="facts">
-				<dt>Windows, installed from GitHub or Softonic</dt>
+				<dt>Windows, installed from GitHub, Softonic or Uptodown</dt>
 				<dd><code>%APPDATA%\\open-desktop-authenticator</code></dd>
 				<dt>Microsoft Store</dt>
 				<dd>Windows may redirect the application's data into the package's private

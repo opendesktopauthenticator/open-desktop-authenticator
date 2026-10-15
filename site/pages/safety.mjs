@@ -262,7 +262,7 @@ export const verify = {
 	slug: 'verify',
 	parent: 'download',
 	guide: true,
-	updated: '2026-10-01',
+	updated: '2026-10-15',
 	sourced: (s) =>
 		`Version covered: GitHub release ${s.publication.github.latestVersion}. Provenance command checked against <a href="https://cli.github.com/manual/gh_attestation_verify" rel="noopener">GitHub CLI's attestation verification reference</a>; checksum-list verification against <a href="https://docs.sigstore.dev/cosign/verifying/verify/" rel="noopener">Sigstore's Cosign documentation</a>`,
 	navTitle: 'Verify',
@@ -323,7 +323,7 @@ export const verify = {
 					<a href="https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/app-package-requirements" rel="noopener">re-signs the MSIX/AppX package it distributes</a>.
 					That package signature does not mean each executable inside is individually signed.
 				</dd>
-				<dt>A direct ODA installer, from GitHub or Softonic</dt>
+				<dt>A direct ODA installer, from GitHub, Softonic or Uptodown</dt>
 				<dd>
 					Use the following checks before running it. Browser or antivirus scans,
 					if present, do not establish that it came from the intended release workflow.
@@ -331,7 +331,7 @@ export const verify = {
 			</dl>
 			<p>
 				Use <a href="/download">our download page</a> and
-				<a href="/official">the address reference</a> to find all three official download sources: Microsoft Store, GitHub and Softonic.
+				<a href="/official">the address reference</a> to find all four official download sources: Microsoft Store, GitHub, Softonic and Uptodown.
 				These checks apply to the ODA installer itself. If a file's signature, publisher or
 				checksum does not match the intended release, stop and obtain that release from GitHub
 				instead. A listing or scan label does not replace these checks.

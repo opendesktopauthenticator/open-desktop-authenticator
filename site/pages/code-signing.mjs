@@ -8,7 +8,7 @@
 
 export const codeSigningPolicy = {
 	slug: 'code-signing-policy',
-	updated: '2026-10-01',
+	updated: '2026-10-15',
 	navTitle: 'Code signing policy',
 	title: 'Code signing policy',
 	description:
@@ -74,7 +74,7 @@ export const codeSigningPolicy = {
 				<a href="https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/app-package-requirements" rel="noopener">re-signs the MSIX/AppX package it distributes</a>.
 				Windows verifies that package during installation. This does not individually
 				code-sign every executable inside it. <a href="/download">The download page</a>
-				explains the three official download sources: Microsoft Store, GitHub and Softonic.
+				explains the four official download sources: Microsoft Store, GitHub, Softonic and Uptodown.
 			</p>
 
 			<h2>Team roles</h2>
@@ -106,7 +106,7 @@ export const codeSigningPolicy = {
 			<h2>Privacy</h2>
 			<p>
 				No ODA backend. No ODA account. No cloud sync. No telemetry. User-requested
-				Steam operations contact Valve. In direct builds from GitHub or Softonic, the optional update
+				Steam operations contact Valve. In direct builds from GitHub, Softonic or Uptodown, the optional update
 				check contacts GitHub; Microsoft Store builds do not perform that check. The
 				user-driven browser contacts the sites the user chooses and the third-party
 				resources those pages load. Visiting our site through that browser is also
@@ -126,7 +126,7 @@ export const codeSigningPolicy = {
 				worth running whether or not a file is signed.
 			</p>
 			<p>
-				All three official download sources are linked from
+				All four official download sources are linked from
 				<a href="/official">our official domains page</a>.
 			</p>
 		</article>`
