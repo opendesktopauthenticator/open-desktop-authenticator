@@ -1,0 +1,10 @@
+Official Uptodown "Get it on Uptodown" badge, accessed 2026-10-17.
+Asset: https://stc.utdstc.com/img/mediakit/download-gio-big.png
+Open Desktop Authenticator media kit: https://www.uptodown.dev/apps/1000885424/media-kit
+
+The media kit instructs publishers to download the images and manually link them
+to the app's download URL. This is the unmodified 172 x 61 PNG, linked to:
+https://open-desktop-authenticator.en.uptodown.com/windows
+
+The Uptodown name and badge remain the property of their owner. The badge links
+to the app's listing; it does not represent a rating or a security audit.

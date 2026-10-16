@@ -11,8 +11,8 @@ const downloadForSourceVersion = (site) => {
 
 export default {
 	slug: 'index',
-	updated: '2026-10-15',
-	reviewed: '2026-10-15',
+	updated: '2026-10-17',
+	reviewed: '2026-10-17',
 	title: 'Open Desktop Authenticator — Steam Guard on your PC',
 	navTitle: 'Home',
 	description:
@@ -255,7 +255,10 @@ export default {
 					<p>Its displayed installer checksum matches our GitHub release. <a href="/download">Compare all four download sources</a>
 						and <a href="/verify">verify the file you download</a>.</p>
 				</div>
-				<a class="button button-quiet" href="${s.uptodown.url}" rel="noopener">View ODA on Uptodown</a>
+				<a class="uptodown-badge" href="${s.uptodown.url}" rel="noopener">
+					<img src="${s.uptodown.badge}" alt="Get Open Desktop Authenticator for Windows on Uptodown"
+						width="172" height="61" loading="lazy">
+				</a>
 			</section>`
 					: ''
 			}

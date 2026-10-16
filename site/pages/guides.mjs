@@ -5,8 +5,8 @@ import { publicationSummary } from '../publication.mjs';
 
 export const download = {
 	slug: 'download',
-	updated: '2026-10-15',
-	reviewed: '2026-10-15',
+	updated: '2026-10-17',
+	reviewed: '2026-10-17',
 	navTitle: 'Download',
 	title: 'Download Open Desktop Authenticator for Windows and Linux',
 	description:
@@ -23,7 +23,7 @@ export const download = {
 				<div class="download-actions">
 					<a class="button" href="${s.store.url}" rel="noopener">Microsoft Store ${s.publication.store.latestVersion}</a>
 					<a class="button button-quiet" href="${s.repo}/releases/tag/v${s.publication.github.latestVersion}" rel="noopener">GitHub ${s.publication.github.latestVersion}: all packages</a>
-					${s.uptodown ? `<a class="button button-quiet" href="${s.uptodown.url}" rel="noopener">Uptodown ${s.uptodown.version}: Windows x64</a>` : ''}
+					${s.uptodown ? `<a class="uptodown-badge" href="${s.uptodown.url}" rel="noopener"><img src="${s.uptodown.badge}" alt="Get Open Desktop Authenticator for Windows on Uptodown" width="172" height="61"></a>` : ''}
 					${s.softonic ? `<a class="button button-quiet" href="${s.softonic.url}" rel="noopener">Softonic ${s.softonic.version}: read notice below</a>` : ''}
 				</div>
 				<p>The Store package is x64, and Uptodown lists the original x64 installer. <a href="#softonic-download-route">Read the Softonic download notice</a> before using its listing. GitHub offers native x64 and ARM64 Windows installers,

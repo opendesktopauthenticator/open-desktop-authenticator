@@ -428,6 +428,17 @@ li {
 	max-width: 100%;
 	height: auto;
 }
+.uptodown-badge {
+	display: inline-flex;
+	align-self: center;
+	max-width: 100%;
+}
+.uptodown-badge img {
+	display: block;
+	width: 172px;
+	max-width: 100%;
+	height: auto;
+}
 .download-actions {
 	display: flex;
 	flex-wrap: wrap;
