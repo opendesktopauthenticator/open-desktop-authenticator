@@ -418,6 +418,7 @@ export const SITE = {
 	// Listing and displayed x64 checksum verified against GitHub on 2026-10-15.
 	uptodown: {
 		url: 'https://open-desktop-authenticator.en.uptodown.com/windows',
+		badge: '/assets/uptodown.png',
 		version: '1.5.1',
 		verifiedOn: '2026-10-15'
 	},
