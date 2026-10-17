@@ -31,10 +31,15 @@
 /**
  * Confirmation types, as observed rather than as documented.
  *
- * Valve publishes no list. 2 and 3 are long-established; 6 was seen directly in
- * Phase 0 (F-12) on an account-recovery flow. The others are named because
- * naming them is how they become refusable — an entry here is a type we can
- * *describe*, never a type we may act on.
+ * Valve publishes no list, and the ecosystem's own enum stops at 2 and 3
+ * (`EConfirmationType` in `node-steamcommunity` knows nothing else), so every
+ * entry here came from watching what Steam actually sent. 2 and 3 are
+ * long-established; 6 was seen directly in Phase 0 (F-12) on an account-recovery
+ * flow; **11 was seen on a live Steam Families invite**, whose label Steam sends
+ * itself as "Join Steam family".
+ *
+ * The others are named because naming them is how they become refusable — an
+ * entry here is a type we can *describe*, never a type we may act on.
  */
 export const CONFIRMATION_TYPES = {
 	1: 'Unknown',
@@ -42,7 +47,16 @@ export const CONFIRMATION_TYPES = {
 	3: 'Market listing',
 	4: 'Feature opt-out',
 	5: 'Phone number change',
-	6: 'Account recovery'
+	6: 'Account recovery',
+	/**
+	 * Steam Families.
+	 *
+	 * Approving one gives this account a place in a family's shared library, so it
+	 * is the user's decision in the way a trade is — and, unlike 5 and 6, it is
+	 * not somebody taking the account over, so it is deliberately **not**
+	 * `isSecurityCritical`.
+	 */
+	11: 'Steam family invite'
 } as const satisfies Record<number, string>;
 
 export type ConfirmationTypeId = keyof typeof CONFIRMATION_TYPES;
@@ -58,7 +72,7 @@ export type ConfirmationTypeId = keyof typeof CONFIRMATION_TYPES;
 export const AUTO_CONFIRMABLE = [2, 3] as const;
 
 /** Types that must always be a deliberate human act. */
-export const NEVER_AUTO_CONFIRMABLE = [1, 4, 5, 6] as const;
+export const NEVER_AUTO_CONFIRMABLE = [1, 4, 5, 6, 11] as const;
 
 /** What the user has switched on for one account. Mirrors `autoConfirm` in the vault. */
 export interface AutoConfirmSettings {

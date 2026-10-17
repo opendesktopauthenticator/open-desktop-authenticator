@@ -121,6 +121,61 @@ describe('reading a list response', () => {
 		expect(conf[0]?.summary).toEqual(['You give: a knife', 'You get: nothing']);
 	});
 
+	it('reads an entry whose display fields arrived as null', () => {
+		// The observed shape of a Steam Families join request, and the defect that
+		// made it invisible: `z.string().optional()` refuses `null`, so one such
+		// entry dropped its own row and the screen said only "one confirmation could
+		// not be read" — a confirmation the user could have approved, gone.
+		const { confirmations: conf, unreadable } = parseListResponse(
+			JSON.stringify({
+				success: true,
+				conf: [
+					{
+						id: '22224093828',
+						nonce: 'n',
+						type: 11,
+						type_name: 'Join Steam family',
+						headline: null,
+						summary: null,
+						icon: null,
+						multi: null,
+						creation_time: null
+					}
+				]
+			})
+		);
+
+		expect(unreadable).toBe(0);
+		expect(conf).toHaveLength(1);
+		expect(conf[0]?.type).toBe(11);
+		expect(conf[0]?.type_name).toBe('Join Steam family');
+		expect(conf[0]?.headline).toBeUndefined();
+		expect(conf[0]?.summary).toBeUndefined();
+	});
+
+	it('drops a summary line that is not text rather than the whole confirmation', () => {
+		const { confirmations: conf } = parseListResponse(
+			JSON.stringify({
+				success: true,
+				conf: [{ id: '1', nonce: 'n', type: 11, summary: ['shown', 42, null, 'also shown'] }]
+			})
+		);
+
+		expect(conf[0]?.summary).toEqual(['shown', '', '', 'also shown']);
+	});
+
+	it('still refuses an entry whose id, nonce or type is unusable', () => {
+		// The tolerance above is for ornament and stops at the three fields an
+		// operation is built from: an id read wrong acts on the wrong confirmation,
+		// so an entry with one is refused rather than repaired.
+		const rejected = (entry: object): number =>
+			parseListResponse(JSON.stringify({ success: true, conf: [entry] })).unreadable;
+
+		expect(rejected({ id: 12, nonce: 'n', type: 11 })).toBe(1);
+		expect(rejected({ id: '1', nonce: 12345, type: 11 })).toBe(1);
+		expect(rejected({ id: '1', nonce: 'n', type: '11' })).toBe(1);
+	});
+
 	it('REFUSES a numeric id rather than coercing one that is already mangled', () => {
 		// The previous version accepted numbers and called String() on them, which
 		// reads as tolerant and is F-01 in disguise: JSON.parse has already rounded
