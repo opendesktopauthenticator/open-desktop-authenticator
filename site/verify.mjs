@@ -19,6 +19,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
 import { editorialStatementProblem } from './editorial.mjs';
+import { GOOGLE_SEARCH_POLICY, googlebotMeta } from './google-indexing.mjs';
 import {
 	calendarDateProblem,
 	formatPublicationDate,
@@ -91,6 +92,9 @@ for (const page of PAGES) {
 
 const siteUpdatedProblem = calendarDateProblem(SITE.updated);
 if (siteUpdatedProblem) fail('SITE', `fallback updated date ${siteUpdatedProblem}`);
+const googlePolicyDateProblem = calendarDateProblem(GOOGLE_SEARCH_POLICY.reviewed);
+if (googlePolicyDateProblem)
+	fail('Google Search policy', `reviewed date ${googlePolicyDateProblem}`);
 
 /*
  * Every indexable URL needs an editorial case before it can be published.
@@ -224,11 +228,31 @@ for (const [slug, html] of built) {
 	const expected = `https://opendesktopauthenticator.com/${path}`;
 	if (canonical !== expected) fail(slug, `canonical is ${canonical}, expected ${expected}`);
 
-	if (page.noindex) {
-		if (!/name="robots" content="[^"]*noindex/.test(html)) {
-			// The 404 must not be indexed, and the generator has to say so.
-			fail(slug, 'is marked noindex in the page list but does not say so in the HTML');
+	const metadataHtml = (/<head\b[^>]*>([\s\S]*?)<\/head>/i.exec(html)?.[1] ?? '')
+		.replace(/<!--[\s\S]*?-->/g, '')
+		.replace(/<template\b[^>]*>[\s\S]*?<\/template\s*>/gi, '');
+	const robots = [...metadataHtml.matchAll(/<meta\b[^>]*\bname\s*=\s*(['"])robots\1[^>]*>/gi)];
+	const expectedRobots = page.noindex
+		? 'noindex, follow'
+		: 'index, follow, max-image-preview:large, max-snippet:-1';
+	if (
+		robots.length !== 1 ||
+		/\bcontent\s*=\s*(['"])(.*?)\1/i.exec(robots[0]?.[0] ?? '')?.[2] !== expectedRobots
+	) {
+		fail(slug, 'generic robots directive differs from the global indexing policy');
+	}
+	const googlebot = [
+		...metadataHtml.matchAll(/<meta\b[^>]*\bname\s*=\s*(['"])googlebot\1[^>]*>/gi)
+	];
+	if (googlebotMeta(slug)) {
+		if (
+			googlebot.length !== 1 ||
+			/\bcontent\s*=\s*(['"])(.*?)\1/i.exec(googlebot[0]?.[0] ?? '')?.[2] !== 'noindex, follow'
+		) {
+			fail(slug, 'must render exactly one Google-only noindex, follow directive');
 		}
+	} else if (googlebot.length !== 0) {
+		fail(slug, 'has a Google-specific directive outside the reviewed policy');
 	}
 
 	// Modification and review are different claims. Search metadata gets the last
@@ -539,7 +563,26 @@ for (const page of PAGES) {
 	}
 }
 
-// The sitemap must agree with the pages, in both directions.
+// Google-only exclusions retain crawl access and remain listed for other engines.
+const robotsFile = existsSync(join(dist, 'robots.txt'))
+	? readFileSync(join(dist, 'robots.txt'), 'utf8')
+	: '';
+const crawlerRules = robotsFile
+	.split(/\r?\n/)
+	.map((line) => line.split('#')[0].trim())
+	.filter(Boolean);
+const expectedCrawlerRules = [
+	'User-agent: *',
+	'Allow: /',
+	'Disallow: /support/ticket/',
+	'Disallow: /admin',
+	`Sitemap: ${SITE.origin}/sitemap.xml`
+];
+if (JSON.stringify(crawlerRules) !== JSON.stringify(expectedCrawlerRules)) {
+	fail('robots', 'crawler rules differ from the reviewed allow/disallow policy');
+}
+
+// The sitemap must agree with the globally indexable pages, in both directions.
 const sitemap = existsSync(join(dist, 'sitemap.xml'))
 	? readFileSync(join(dist, 'sitemap.xml'), 'utf8')
 	: '';
