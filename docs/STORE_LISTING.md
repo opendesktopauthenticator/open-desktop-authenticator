@@ -27,9 +27,9 @@ full SKU `0010`, package `TheMaster.OpenDesktopAuthenticator_1.5.1.0_x64__hrp1nj
 > record does not establish today's Partner Center submission status or which
 > submission is public; verify both before preparing the next listing update.
 
-> **Distribution clarification prepared on 2026-10-01:** the description below
-> names the Microsoft Store, GitHub Releases and Softonic as the three official
-> download sources, with Softonic offering Windows x64. This
+> **Distribution clarification prepared on 2026-10-15:** the description below
+> names the Microsoft Store, GitHub Releases, Softonic and Uptodown as the four
+> official download sources, with Softonic and Uptodown listing Windows x64 downloads. This
 > wording is prepared for the next submission; it has not been confirmed in the
 > live Store description.
 
@@ -91,21 +91,28 @@ full SKU `0010`, package `TheMaster.OpenDesktopAuthenticator_1.5.1.0_x64__hrp1nj
 >
 > BEFORE YOU INSTALL ANYTHING ELSE
 >
-> Check the source and the file before installing an authenticator. Our three
+> Check the source and the file before installing an authenticator. Our four
 > official download sources are this Microsoft Store listing, our GitHub releases
-> page and Softonic. Softonic offers Windows x64 at
+> page, Softonic and Uptodown. Softonic lists a Windows x64 download at
 > https://open-desktop-authenticator.en.softonic.com/.
+> Uptodown offers Windows x64 at
+> https://open-desktop-authenticator.en.uptodown.com/windows.
+> Uptodown's 1.5.1 listing was checked on 15 October 2026.
 > Softonic displays Official distributor and Trusted Program labels for ODA.
+> These labels were checked on 1 October 2026.
 > Official distributor indicates authorization from the developer or its
 > designated representative; Trusted Program reflects the VirusTotal scan reported
-> by Softonic.
+> by Softonic for the listed ODA file.
 > These are Softonic's labels, not an independent audit or a guarantee of safety.
-> Verify a Windows file obtained there against the matching GitHub release's
-> checksums, build provenance and publisher-signature instructions. A listing
+> A public Softonic download tested on 1 October 2026 returned a separate Softonic
+> downloader instead of the original ODA installer. Resolution is not verified;
+> use the Microsoft Store, GitHub or Uptodown route and verify the actual ODA file.
+> Verify a Windows file obtained through either distributor against the matching
+> GitHub release's checksums, build provenance and publisher-signature instructions. A listing
 > alone does not verify a file.
 >
 > The official product website, https://opendesktopauthenticator.com, hosts no
-> installer — its download links lead to those three official sources.
+> installer — its download links lead to those four official sources.
 > MASTERPANEL LLC's main site, https://masterspanel.com,
 > identifies the same publisher and links to the product. Treat other download
 > sources as unverified.
@@ -213,7 +220,7 @@ deciding whether to install.
 - **Screenshots must never show a real account.** Run the application against an
   empty data directory and screenshot that. A listing image is public
   permanently, and a SteamID or persona name in one is not retractable.
-- Keep the three official download sources consistent with the website and
+- Keep the four official download sources consistent with the website and
   README. Attribute Softonic's labels to Softonic; they do not replace checking
   the file against the publisher's release evidence.
 - Do not describe the product as audited. It is tested, by the maintainer,

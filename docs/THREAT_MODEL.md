@@ -40,10 +40,11 @@ exfiltrates maFiles.
 Open source alone does not fix this — attackers compile open source with malware
 added. What actually helps:
 
-- Our three official download sources are the Microsoft Store, GitHub Releases
-  (§11 S11) and [Softonic](https://open-desktop-authenticator.en.softonic.com/).
-  Softonic offers Windows x64. Our product website hosts no binaries — its
-  download links lead outward.
+- Our four official download sources are the Microsoft Store, GitHub Releases
+  (§11 S11), [Softonic](https://open-desktop-authenticator.en.softonic.com/) and
+  [Uptodown](https://open-desktop-authenticator.en.uptodown.com/windows).
+  Softonic and Uptodown list Windows x64 downloads. Our product website hosts no
+  binaries — its download links lead outward.
 - **Verification depends on the package.** Windows verifies a
   Store package during installation. GitHub v1.5.1
   Windows downloads also carry an Authenticode publisher signature that Windows
@@ -54,13 +55,16 @@ added. What actually helps:
   or whether the application is harmless.
 - Every release publishes `SHA256SUMS.txt` and build provenance attestations.
 - Softonic displays **Official distributor** and **Trusted Program** labels for
-  ODA. The distributor label indicates authorization from the developer or its
-  designated representative; Trusted Program reflects the VirusTotal scan reported
-  by Softonic.
+  ODA, as checked on 1 October 2026. The distributor label indicates authorization
+  from the developer or its designated representative; Trusted Program reflects the VirusTotal scan reported
+  by Softonic for the listed ODA file.
   These are Softonic's labels, not an independent audit or a guarantee of safety.
+- A public Softonic download tested on 1 October 2026 returned a separate Softonic
+  downloader instead of the original ODA installer. Resolution is not verified;
+  use the Microsoft Store, GitHub or Uptodown route and verify the actual ODA file.
 - A listing does not verify a downloaded file. For a Windows download
-  obtained through Softonic, check its publisher signature, checksum and build
-  provenance against the corresponding GitHub release. Treat other download
+  obtained through Softonic or Uptodown, check its publisher signature, checksum
+  and build provenance against the corresponding GitHub release. Treat other download
   sources as unverified.
 
 **Residual risk:** a user who never verifies anything. We reduce it by making

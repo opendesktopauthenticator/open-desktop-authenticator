@@ -24,14 +24,18 @@ describe('download destinations work without a review prompt or platform detecti
 		build.SITE as {
 			repo: string;
 			store: { url: string };
+			softonic: { url: string };
+			uptodown: { url: string };
 			publication: { github: { latestVersion: string } };
 		};
 
-	it('offers the published Store and GitHub destinations as ordinary links', () => {
+	it('offers all four official destinations as ordinary links', () => {
 		const anchors = [...html().matchAll(/<a\b([^>]*)href="([^"]+)"([^>]*)>/g)];
 		for (const destination of [
 			facts().store.url,
-			`${facts().repo}/releases/tag/v${facts().publication.github.latestVersion}`
+			`${facts().repo}/releases/tag/v${facts().publication.github.latestVersion}`,
+			facts().softonic.url,
+			facts().uptodown.url
 		]) {
 			const matches = anchors.filter((anchor) => anchor[2] === destination);
 			expect(matches.length, destination).toBeGreaterThan(0);

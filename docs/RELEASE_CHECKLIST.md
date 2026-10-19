@@ -176,13 +176,20 @@ The trust story is only real if it works for someone who does not trust us.
       guarantee about SmartScreen reputation or application behaviour.
 - [ ] `cosign verify-blob` on the checksum list succeeds, run from the downloaded
       copies rather than from the build directory.
-- [ ] The website's download buttons link to all three official sources: the
-      Microsoft Store listing, the GitHub release page and Softonic's Windows x64
-      listing. Check the version available at each source separately.
+- [ ] The website's download buttons link to all four official sources: the
+      Microsoft Store listing, the GitHub release page, and the Softonic and
+      Uptodown Windows x64 listings. Check the version and delivered file at each
+      source separately.
       **The website hosts no binary.**
-- [ ] `/download` on a Windows browser leads with the Store, and on Linux leads
-      with the release page. Both are still reachable with JavaScript off —
-      the page must never offer nothing because a script failed.
+- [ ] Keep the unresolved Softonic download-route note until a fresh check establishes
+      resolution. A public download tested on 1 October 2026 returned a separate
+      Softonic downloader instead of the original ODA installer. Verify the actual
+      delivered file against the matching GitHub release's hash and publisher
+      signature before marking that route resolved; a listing or scan label
+      is insufficient.
+- [ ] All four `/download` destinations remain reachable with JavaScript off.
+      The Softonic download notice remains visible too; the page must not depend
+      on a script or platform detection to offer the appropriate source links.
 
 ## Publish
 

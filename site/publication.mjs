@@ -1,7 +1,7 @@
 /**
  * Human-verified publication state for the GitHub and Microsoft Store builds.
- * Softonic distributes the direct Windows installer; it is a third download
- * source, not a separately built edition tracked by this module.
+ * Softonic and Uptodown listing versions are checked independently and supplied
+ * as optional site metadata; neither listing proves which file is delivered.
  * A package version, workflow run, or GitHub release cannot prove what Partner
  * Center currently serves, and a Store submission cannot prove GitHub assets.
  */
@@ -115,13 +115,17 @@ export function browserFeatureCopy(site) {
 export function publicationSummary(site) {
 	const { github, store } = site.publication;
 	const softonicText = site.softonic?.version
-		? ` Softonic offers the Windows x64 installer for ${site.softonic.version}.`
+		? ` Softonic lists the Windows x64 installer for ${site.softonic.version}.`
 		: '';
+	const uptodownText = site.uptodown?.version
+		? ` Uptodown lists the Windows x64 installer for ${site.uptodown.version}.`
+		: '';
+	const listingText = softonicText + uptodownText;
 	if (github.current && store.current) {
-		if (site.softonic?.version === site.version) {
-			return `${site.name} ${site.version} is available from three official download sources: Microsoft Store, GitHub and Softonic.`;
+		if (site.softonic?.version === site.version && site.uptodown?.version === site.version) {
+			return `${site.name} ${site.version} is published in the Microsoft Store and on GitHub, and listed for Windows x64 by Softonic and Uptodown: four official download sources.`;
 		}
-		return `${site.name} ${site.version} is published in the Microsoft Store and on this project's GitHub releases page.${softonicText}`;
+		return `${site.name} ${site.version} is published in the Microsoft Store and on this project's GitHub releases page.${listingText}`;
 	}
 
 	const githubText = github.latestVersion
@@ -131,10 +135,10 @@ export function publicationSummary(site) {
 		? `The Microsoft Store currently offers ${store.latestVersion}.`
 		: 'The Microsoft Store does not currently offer a public build.';
 	if (github.current) {
-		return `${site.name} ${site.version} is published on GitHub but is not yet published in the Microsoft Store. ${storeText}${softonicText}`;
+		return `${site.name} ${site.version} is published on GitHub but is not yet published in the Microsoft Store. ${storeText}${listingText}`;
 	}
 	if (store.current) {
-		return `${site.name} ${site.version} is published in the Microsoft Store but is not yet published on GitHub. ${githubText}${softonicText}`;
+		return `${site.name} ${site.version} is published in the Microsoft Store but is not yet published on GitHub. ${githubText}${listingText}`;
 	}
-	return `${site.name} ${site.version} is the upcoming source version; it is not yet published in either release channel. ${githubText} ${storeText}${softonicText}`;
+	return `${site.name} ${site.version} is the upcoming source version; it is not yet published in either release channel. ${githubText} ${storeText}${listingText}`;
 }

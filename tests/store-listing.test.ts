@@ -36,11 +36,12 @@ const warning = (() => {
 })();
 
 describe('the Store listing copy', () => {
-	it('names all three official download sources', () => {
-		expect(warning).toMatch(/three official download sources/i);
+	it('names all four official download sources', () => {
+		expect(warning).toMatch(/four official download sources/i);
 		expect(warning).toMatch(/Microsoft Store|This listing/i);
 		expect(warning).toMatch(/GitHub releases page/);
 		expect(warning).toContain('Softonic');
+		expect(warning).toContain('Uptodown');
 	});
 
 	/**
@@ -65,21 +66,26 @@ describe('the Store listing copy', () => {
 	});
 
 	it('agrees with the site, which tells the same people the same thing', () => {
-		// All three sources must be described as official, while downloaded files
+		// All four sources must be described as official, while downloaded files
 		// still need the verification appropriate to their package.
-		expect(GUIDES).toMatch(/three official download sources/i);
+		expect(GUIDES).toMatch(/four official download sources/i);
 		expect(warning).toMatch(
-			/three official download sources are this Microsoft Store listing, our GitHub releases page and Softonic/i
+			/four official download sources are this Microsoft Store listing, our GitHub releases page, Softonic and Uptodown/i
 		);
 		expect(GUIDES).toContain('Softonic');
+		expect(GUIDES).toContain('Uptodown');
 		expect(warning).toContain('https://open-desktop-authenticator.en.softonic.com/');
-		expect(warning).toMatch(/Softonic offers Windows x64/);
+		expect(warning).toMatch(/Softonic lists a Windows x64 download/);
+		expect(warning).toContain('https://open-desktop-authenticator.en.uptodown.com/windows');
+		expect(warning).toMatch(/Uptodown offers Windows x64/);
 		expect(warning).toMatch(/Softonic displays Official distributor and Trusted Program labels/);
 		expect(warning).toMatch(/authorization from the developer or its designated representative/);
 		expect(warning).toMatch(/Trusted Program reflects the VirusTotal scan reported by Softonic/);
+		expect(warning).toMatch(/separate Softonic downloader instead of the original ODA installer/);
+		expect(warning).toMatch(/Resolution is not verified/);
 		expect(warning).toMatch(/checksums, build provenance and publisher-signature/);
 		expect(warning).not.toMatch(
-			/only two places|primary release channels|recognized external|anything else claiming to be this application is not ours/i
+			/three official download sources|only two places|primary release channels|recognized external|anything else claiming to be this application is not ours/i
 		);
 	});
 

@@ -11,8 +11,8 @@ const downloadForSourceVersion = (site) => {
 
 export default {
 	slug: 'index',
-	updated: '2026-10-01',
-	reviewed: '2026-10-01',
+	updated: '2026-10-17',
+	reviewed: '2026-10-17',
 	title: 'Open Desktop Authenticator — Steam Guard on your PC',
 	navTitle: 'Home',
 	description:
@@ -47,7 +47,8 @@ export default {
 					s.repo,
 					s.store.url,
 					...(s.alternativeTo ? [s.alternativeTo.url] : []),
-					...(s.softonic ? [s.softonic.url] : [])
+					...(s.softonic ? [s.softonic.url] : []),
+					...(s.uptodown ? [s.uptodown.url] : [])
 				],
 				applicationCategory: 'SecurityApplication',
 				operatingSystem: 'Windows 10 version 1809 or later, Windows 11, x64 Linux',
@@ -94,7 +95,7 @@ export default {
 				<a class="button" href="/download">Download ODA ${s.publication.github.latestVersion}</a>
 				<a class="button button-quiet" href="/import-from-sda">Import from SDA</a>
 			</div>
-			${s.softonic ? `<p class="hint">Three official download sources: <a href="${s.store.url}" rel="noopener">Microsoft Store</a>, <a href="${s.repo}/releases" rel="noopener">GitHub</a> and <a href="${s.softonic.url}" rel="noopener">Softonic</a>.</p>` : ''}
+			${s.softonic && s.uptodown ? `<p class="hint">Four official download sources: <a href="${s.store.url}" rel="noopener">Microsoft Store</a>, <a href="${s.repo}/releases" rel="noopener">GitHub</a>, <a href="${s.softonic.url}" rel="noopener">Softonic</a> and <a href="${s.uptodown.url}" rel="noopener">Uptodown</a>. <a href="/download#softonic-download-route">Read the Softonic download notice</a>.</p>` : ''}
 			<p class="hint">
 				Published by MASTERPANEL LLC. ODA is independent of Valve and the original
 				SDA project. <a href="/steam-desktop-authenticator">Looking for Steam Desktop Authenticator?</a>
@@ -147,8 +148,8 @@ export default {
 			<div class="callout">
 				<h2>Status: ${
 					s.publication.github.current && s.publication.store.current
-						? s.softonic?.version === s.version
-							? `${s.version}, available from all three sources`
+						? s.softonic?.version === s.version && s.uptodown?.version === s.version
+							? `${s.version} — four official download sources`
 							: `${s.version}, in the Microsoft Store and on GitHub`
 						: s.publication.github.current
 							? `${s.version} is on GitHub; the Store offers ${s.publication.store.latestVersion}`
@@ -246,14 +247,31 @@ export default {
 			}
 
 			${
+				s.uptodown
+					? `<section class="community-listing" aria-labelledby="uptodown-listing-title">
+				<div>
+					<h2 id="uptodown-listing-title">Now available on Uptodown</h2>
+					<p>Find ODA ${s.uptodown.version} for Windows x64 on Uptodown, listed under MASTERPANEL LLC.</p>
+					<p>Its displayed installer checksum matches our GitHub release. <a href="/download">Compare all four download sources</a>
+						and <a href="/verify">verify the file you download</a>.</p>
+				</div>
+				<a class="uptodown-badge" href="${s.uptodown.url}" rel="noopener">
+					<img src="${s.uptodown.badge}" alt="Get Open Desktop Authenticator for Windows on Uptodown"
+						width="172" height="61" loading="lazy">
+				</a>
+			</section>`
+					: ''
+			}
+
+			${
 				s.softonic
 					? `<section class="community-listing" aria-labelledby="softonic-listing-title">
 				<div>
-					<h2 id="softonic-listing-title">Available on Softonic</h2>
+					<h2 id="softonic-listing-title">Listed on Softonic</h2>
 					<p>Find Open Desktop Authenticator for Windows on Softonic, published by MASTERPANEL LLC.
-						Softonic displays <strong>“Trusted Program”</strong> and <strong>“Official distributor”</strong> on our listing.</p>
-					<p>Softonic reports a clean VirusTotal scan and confirms authorization to distribute ODA.
-						Its download is the Windows x64 installer. <a href="/download">Compare all three sources and read what the labels mean</a>.</p>
+						On 1 October 2026, Softonic displayed <strong>“Trusted Program”</strong> and <strong>“Official distributor”</strong> on our listing.</p>
+					<p>A public download tested on 1 October 2026 returned a separate Softonic downloader instead of the original ODA installer.
+						Resolution is not verified; use Microsoft Store, GitHub or Uptodown. <a href="/download#softonic-download-route">Read the download notice and what the labels mean</a>.</p>
 				</div>
 				<a class="button button-quiet" href="${s.softonic.url}" rel="noopener">View ODA on Softonic</a>
 			</section>`
@@ -283,7 +301,7 @@ export default {
 				<li>
 					<strong>No ODA backend. No ODA account. No cloud sync. No telemetry.</strong>
 					Steam operations you request contact Valve and send the data needed for that
-					operation. In a direct build from GitHub or Softonic, the optional update check asks GitHub's
+					operation. In a direct build from GitHub, Softonic or Uptodown, the optional update check asks GitHub's
 					public releases API whether a newer version exists; GitHub receives that
 					request and its source IP, but no Steam account or vault data. Store builds do
 					not perform that GitHub check. ${browserFeatureCopy(s).security}
