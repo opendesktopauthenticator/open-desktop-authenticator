@@ -45,6 +45,7 @@ const swapVerifier = process.argv[2];
 const ownersPage = PAGES.find((page) => page.slug === 'owners');
 const ownersReviewed = ownersPage.reviewed ?? ownersPage.updated;
 const storyUpdated = PAGES.find((page) => page.slug === 'steam-inventory-stolen').updated;
+const sdaUpdated = PAGES.find((page) => page.slug === 'steam-desktop-authenticator').updated;
 
 const ANCHOR_FILE = 'pages/home.mjs';
 /*
@@ -325,6 +326,81 @@ const QUALITY_CASES = [
 		afterBuild: () =>
 			replaceOnce('site/dist/steam-inventory-stolen.html', `,"dateModified":"${storyUpdated}"`, ''),
 		expected: /steam-inventory-stolen: renders 0 structured dateModified values, expected 1/
+	},
+	{
+		name: 'selected page loses its Google-only exclusion',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/steam-desktop-authenticator.html',
+				'<meta name="googlebot" content="noindex, follow">',
+				''
+			),
+		expected:
+			/steam-desktop-authenticator: must render exactly one Google-only noindex, follow directive/
+	},
+	{
+		name: 'selected page Google-only exclusion hidden in a comment',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/steam-desktop-authenticator.html',
+				'<meta name="googlebot" content="noindex, follow">',
+				'<!-- <meta name="googlebot" content="noindex, follow"> -->'
+			),
+		expected:
+			/steam-desktop-authenticator: must render exactly one Google-only noindex, follow directive/
+	},
+	{
+		name: 'selected page Google-only exclusion hidden in a template',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/steam-desktop-authenticator.html',
+				'<meta name="googlebot" content="noindex, follow">',
+				'<template><meta name="googlebot" content="noindex, follow"></template>'
+			),
+		expected:
+			/steam-desktop-authenticator: must render exactly one Google-only noindex, follow directive/
+	},
+	{
+		name: 'homepage gains an unreviewed Google-only exclusion',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/index.html',
+				'</head>',
+				"<meta NAME='Googlebot' CONTENT='noindex, follow'></head>"
+			),
+		expected: /index: has a Google-specific directive outside the reviewed policy/
+	},
+	{
+		name: 'selected page exclusion is widened to every search engine',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/steam-desktop-authenticator.html',
+				'<meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1">',
+				'<meta name="robots" content="noindex, follow">'
+			),
+		expected:
+			/steam-desktop-authenticator: generic robots directive differs from the global indexing policy/
+	},
+	{
+		name: 'Google crawler blocked from seeing the noindex directive',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/robots.txt',
+				'User-agent: *',
+				'User-agent: Googlebot\nDisallow: /steam-desktop-authenticator\n\nUser-agent: *'
+			),
+		expected: /robots: crawler rules differ from the reviewed allow\/disallow policy/
+	},
+	{
+		name: 'Google-excluded page incorrectly removed from the shared sitemap',
+		afterBuild: () =>
+			replaceOnce(
+				'site/dist/sitemap.xml',
+				`<url><loc>https://opendesktopauthenticator.com/steam-desktop-authenticator</loc><lastmod>${sdaUpdated}</lastmod></url>`,
+				''
+			),
+		expected:
+			/sitemap: is missing https:\/\/opendesktopauthenticator\.com\/steam-desktop-authenticator/
 	}
 ];
 

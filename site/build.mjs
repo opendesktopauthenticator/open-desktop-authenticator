@@ -30,6 +30,7 @@ import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PAGES } from './pages/index.mjs';
+import { googlebotMeta, validateGoogleSearchPolicy } from './google-indexing.mjs';
 import basicMetrica from './metrica/basic-metrica.cjs';
 import { rootIcons, hashedIcons, manifest } from './icons.mjs';
 import { checkAddresses } from './addresses.mjs';
@@ -47,6 +48,8 @@ import {
 
 // Re-exported so pages may take it from either module without a second import.
 export { reviewAsk };
+
+validateGoogleSearchPolicy(PAGES);
 
 /*
  * Refuse to build a site with a bad payment address on it.
@@ -670,7 +673,7 @@ function head(page, collectsReviews) {
 	<title>${escape(title)}</title>
 	<meta name="description" content="${escape(description)}">
 	<link rel="canonical" href="${escape(url)}">
-	<meta name="robots" content="${page.noindex ? 'noindex, follow' : 'index, follow, max-image-preview:large, max-snippet:-1'}">
+	<meta name="robots" content="${page.noindex ? 'noindex, follow' : 'index, follow, max-image-preview:large, max-snippet:-1'}">${googlebotMeta(page.slug) ? `\n\t${googlebotMeta(page.slug)}` : ''}
 	<meta name="theme-color" content="#070a0e">
 	<meta property="og:type" content="website">
 	<meta property="og:site_name" content="${escape(SITE.name)}">
